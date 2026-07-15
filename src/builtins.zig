@@ -19,6 +19,7 @@ const znumber = @import("znumber");
 const zmath = @import("zmath");
 const zjson = @import("zjson");
 const zstring = @import("zstring");
+const zdate = @import("zdate");
 const JSValue = zvalue.JSValue;
 
 const interpreter_mod = @import("interpreter.zig");
@@ -56,6 +57,18 @@ pub const array_methods = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "find", arrayFind },
     .{ "some", arraySome },
     .{ "every", arrayEvery },
+});
+
+pub const date_methods = std.StaticStringMap(NativeFn).initComptime(.{
+    .{ "getTime", dateGetTime },
+    .{ "getFullYear", dateGetter("getFullYear") },
+    .{ "getMonth", dateGetter("getMonth") },
+    .{ "getDate", dateGetter("getDate") },
+    .{ "getDay", dateGetter("getDay") },
+    .{ "getHours", dateGetter("getHours") },
+    .{ "getMinutes", dateGetter("getMinutes") },
+    .{ "getSeconds", dateGetter("getSeconds") },
+    .{ "toISOString", dateToISOString },
 });
 
 pub const string_methods = std.StaticStringMap(NativeFn).initComptime(.{
@@ -122,6 +135,18 @@ pub fn setupGlobals(self: *Interpreter) !void {
     var array_obj = try JSValue.newObject(arena);
     try array_obj.object.value.set("isArray", try native(self, "isArray", arrayIsArray));
     try g.define(arena, "Array", array_obj);
+
+    // A real constructable native: `new Date(...)` works through evalNew's
+    // object-like-return-overrides rule (a .date return replaces the plain
+    // instance). `Date.now()` is NOT available -- functions here have no
+    // property bag; `new Date().getTime()` is the equivalent.
+    const date_ctor = try JSValue.newFunction(arena, .{
+        .ctx = self,
+        .name = "Date",
+        .call = dateConstructor,
+        .constructable = true,
+    });
+    try g.define(arena, "Date", date_ctor);
 
     try g.define(arena, "parseInt", try native(self, "parseInt", globalParseInt));
     try g.define(arena, "parseFloat", try native(self, "parseFloat", globalParseFloat));
@@ -466,6 +491,68 @@ fn stringTrim(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     const out = try zstring.trimming.trim(allocator, data);
     defer allocator.free(out);
     return JSValue.newString(allocator, out);
+}
+
+// ===== Date =====
+
+/// Milliseconds since the Unix epoch via the raw Linux syscall -- this
+/// Zig version's portable clock API needs an std.Io instance, which the
+/// interpreter doesn't thread (Linux-only for now, like the dev setup).
+fn nowMs() i64 {
+    var ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(.REALTIME, &ts);
+    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
+}
+
+/// `new Date()` -> now; `new Date(ms)` -> from timestamp; `new Date(str)`
+/// -> parsed. Also returns a .date when called WITHOUT `new` (real JS
+/// returns a string there -- documented divergence).
+fn dateConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = ctx;
+    _ = this_value;
+    if (args.len == 0) return JSValue.newDate(allocator, nowMs());
+    const first = args[0];
+    if (first == .string) {
+        const d = zvalue.ZDate.fromString(first.string.value.data);
+        return JSValue.newDate(allocator, d.timestamp);
+    }
+    return JSValue.newDate(allocator, @intFromFloat(try coercion.toNumber(first)));
+}
+
+fn requireDate(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {
+    if (this_value != .date) {
+        return interp(ctx).throwError(.type_error, "Date.prototype.{s} called on a non-date", .{method});
+    }
+    return this_value;
+}
+
+fn dateGetTime(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = args;
+    const d = try requireDate(ctx, this_value, "getTime");
+    return JSValue.fromNumber(@floatFromInt(d.date.value.getTime()));
+}
+
+/// ?i32-returning ZDate getters (null = Invalid Date -> NaN, real JS).
+fn dateGetter(comptime method: []const u8) NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+            _ = allocator;
+            _ = args;
+            const d = try requireDate(ctx, this_value, method);
+            const v = @field(zvalue.ZDate, method)(d.date.value) orelse return JSValue.fromNumber(std.math.nan(f64));
+            return JSValue.fromNumber(@floatFromInt(v));
+        }
+    }.call;
+}
+
+fn dateToISOString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const d = try requireDate(ctx, this_value, "toISOString");
+    const iso = d.date.value.toISOString(allocator) catch
+        return interp(ctx).throwError(.range_error, "Invalid time value", .{});
+    defer allocator.free(iso);
+    return JSValue.newString(allocator, iso);
 }
 
 // ===== Math =====

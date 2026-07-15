@@ -19,5 +19,6 @@
         .zmath = .{ .path = "../z-math" },
         .zjson = .{ .path = "../z-json" },
         .zstring = .{ .path = "../z-string" },
+        .zdate = .{ .path = "../z-date" },
     },
 }

@@ -13,7 +13,7 @@ pub fn isTruthy(v: JSValue) bool {
         .boolean => |b| b,
         .number => |n| n != 0 and !std.math.isNan(n),
         .string => |box| box.value.data.len != 0,
-        .array, .object, .regex, .symbol, .map, .set, .@"error", .function => true,
+        .array, .object, .regex, .symbol, .map, .set, .@"error", .function, .date => true,
     };
 }
 
@@ -31,6 +31,9 @@ pub fn toNumber(v: JSValue) !f64 {
         // permissive (stops at trailing garbage). Narrowed/simplified for
         // this phase; not spec-exact.
         .string => |box| znumber.ParsingMethods.parseFloat(box.value.data),
+        // Number(date) is its millisecond timestamp (real ToPrimitive
+        // "number" hint behavior for Dates).
+        .date => |box| @floatFromInt(box.value.getTime()),
         .array, .object, .regex, .symbol, .map, .set, .@"error", .function => error.NotImplemented,
     };
 }
@@ -78,6 +81,7 @@ pub fn toDisplayString(allocator: Allocator, v: JSValue) ![]u8 {
             }
             return buf.toOwnedSlice(allocator);
         },
+        .date => |box| box.value.toISOString(allocator) catch try allocator.dupe(u8, "Invalid Date"),
         .object, .regex, .symbol, .map, .set, .@"error", .function => error.NotImplemented,
     };
 }

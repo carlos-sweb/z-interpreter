@@ -732,6 +732,10 @@ pub const Interpreter = struct {
                 if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.arity));
                 break :blk JSValue.UNDEFINED;
             },
+            .date => blk: {
+                if (builtins.date_methods.get(key)) |f| break :blk try self.nativeMethod("date", key, f);
+                break :blk JSValue.UNDEFINED;
+            },
             // Spec says TypeError here (not ReferenceError). The optional
             // chaining guards short-circuit BEFORE getProperty, so `a?.b`
             // on null still yields undefined without ever reaching this.
@@ -774,7 +778,7 @@ pub const Interpreter = struct {
                 break :blk JSValue.fromBool(idx < box.value.length());
             },
             .@"undefined", .@"null", .boolean, .number, .string => self.throwError(.type_error, "Cannot use 'in' operator to search for '{s}'", .{key}),
-            .function, .regex, .symbol, .map, .set, .@"error" => error.NotImplemented,
+            .function, .regex, .symbol, .map, .set, .@"error", .date => error.NotImplemented,
         };
     }
 
@@ -957,7 +961,7 @@ pub const Interpreter = struct {
         const args = try self.evalArgs(env, n.args orelse &.{});
         const result = try callee.function.value.call(callee.function.value.ctx, arena, instance, args);
         return switch (result) {
-            .object, .array, .function, .regex, .map, .set, .@"error" => result,
+            .object, .array, .function, .regex, .map, .set, .@"error", .date => result,
             else => instance,
         };
     }

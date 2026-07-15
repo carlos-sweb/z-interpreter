@@ -50,6 +50,14 @@ pub fn inspect(allocator: Allocator, buf: *std.ArrayList(u8), v: JSValue) !void 
             }
             try buf.append(allocator, ']');
         },
+        .date => |box| {
+            const iso = box.value.toISOString(allocator) catch {
+                try buf.appendSlice(allocator, "Invalid Date");
+                return;
+            };
+            defer allocator.free(iso);
+            try buf.appendSlice(allocator, iso);
+        },
         .symbol => try buf.appendSlice(allocator, "[Symbol]"),
         .regex => try buf.appendSlice(allocator, "[RegExp]"),
         .map => try buf.appendSlice(allocator, "[Map]"),
