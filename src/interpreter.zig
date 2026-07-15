@@ -186,55 +186,44 @@ pub const Interpreter = struct {
                 if (s.alternate) |alt| return self.evalStatement(env, alt);
                 return .{};
             },
-            .while_stmt => |s| {
-                while (coercion.isTruthy(try self.evalExpression(env, s.test_expr))) {
-                    const c = try self.evalStatement(env, s.body);
-                    switch (c.type) {
-                        .break_completion => {
-                            if (c.target == null) break;
-                            return c;
-                        },
-                        .continue_completion => {
-                            if (c.target != null) return c;
-                        },
-                        .return_completion => return c,
-                        .normal => {},
-                    }
-                }
-                return .{};
-            },
-            .do_while => |s| {
-                while (true) {
-                    const c = try self.evalStatement(env, s.body);
-                    switch (c.type) {
-                        .break_completion => {
-                            if (c.target == null) break;
-                            return c;
-                        },
-                        .continue_completion => {
-                            if (c.target != null) return c;
-                        },
-                        .return_completion => return c,
-                        .normal => {},
-                    }
-                    if (!coercion.isTruthy(try self.evalExpression(env, s.test_expr))) break;
-                }
-                return .{};
-            },
-            .for_stmt => |s| return self.evalForStatement(env, s),
+            .while_stmt => |s| return self.evalWhile(env, s, &.{}),
+            .do_while => |s| return self.evalDoWhile(env, s, &.{}),
+            .for_stmt => |s| return self.evalForStatement(env, s, &.{}),
             .return_stmt => |arg| {
                 const v = if (arg) |e| try self.evalExpression(env, e) else JSValue.UNDEFINED;
                 return .{ .type = .return_completion, .value = v };
             },
-            .break_stmt => |label| {
-                if (label != null) return error.NotImplemented;
-                return .{ .type = .break_completion };
+            // Label validity (label exists, continue targets a loop) was
+            // already guaranteed at parse time by z-statements
+            // (UndefinedLabel/IllegalContinue), so the runtime can trust
+            // every target resolves to some enclosing labelled statement.
+            .break_stmt => |label| return .{ .type = .break_completion, .target = label },
+            .continue_stmt => |label| return .{ .type = .continue_completion, .target = label },
+            // ECMA-262 14.13.4 LabelledEvaluation: collect the whole label
+            // chain (`a: b: for (...)` attaches BOTH labels to the loop)
+            // and hand it to the loop as its label set; for non-loop
+            // bodies, a matching labelled break converts to normal here.
+            .labelled => |s| {
+                var labels: std.ArrayList([]const u8) = .empty;
+                try labels.append(arena, s.label);
+                var inner = s.body;
+                while (inner.data == .labelled) {
+                    try labels.append(arena, inner.data.labelled.label);
+                    inner = inner.data.labelled.body;
+                }
+                const c = switch (inner.data) {
+                    .while_stmt => |w| try self.evalWhile(env, w, labels.items),
+                    .do_while => |d| try self.evalDoWhile(env, d, labels.items),
+                    .for_stmt => |f| try self.evalForStatement(env, f, labels.items),
+                    else => try self.evalStatement(env, inner),
+                };
+                if (c.type == .break_completion) {
+                    if (c.target) |t| {
+                        if (labelIn(t, labels.items)) return .{ .type = .normal, .value = c.value };
+                    }
+                }
+                return c;
             },
-            .continue_stmt => |label| {
-                if (label != null) return error.NotImplemented;
-                return .{ .type = .continue_completion };
-            },
-            .labelled => |s| return self.evalStatement(env, s.body),
             .function_declaration => |ptr| {
                 const fnode = zfunctions.asFunctionNode(ptr);
                 const value = try self.makeClosure(env, fnode);
@@ -289,11 +278,108 @@ pub const Interpreter = struct {
 
                 return try self.deliver(result);
             },
-            .switch_stmt, .with_stmt => return error.NotImplemented,
+            // ECMA-262 14.12 CaseBlockEvaluation. The AST's flat case order
+            // is already "A clauses, default, B clauses", so one selector
+            // scan (skipping default) equals the spec's A-then-B search
+            // order, and executing from the chosen index to the end gives
+            // natural fallthrough -- INCLUDING the default's statements
+            // when the match came before it (real JS semantics).
+            .switch_stmt => |s| {
+                const disc = try self.evalExpression(env, s.discriminant); // evaluated ONCE
+                // The whole CaseBlock is ONE lexical scope (a let in one
+                // case is visible in later ones -- real JS quirk).
+                const switch_env = try env.child(arena);
+
+                var start_index: ?usize = null;
+                for (s.cases, 0..) |case, i| {
+                    const t = case.test_expr orelse continue;
+                    const v = try self.evalExpression(switch_env, t);
+                    if (zvalue.equality.strictEquals(disc, v)) {
+                        start_index = i;
+                        break;
+                    }
+                }
+                if (start_index == null) {
+                    for (s.cases, 0..) |case, i| {
+                        if (case.test_expr == null) {
+                            start_index = i;
+                            break;
+                        }
+                    }
+                }
+
+                var last_value: JSValue = JSValue.UNDEFINED;
+                if (start_index) |start| {
+                    for (s.cases[start..]) |case| {
+                        for (case.consequent) |case_stmt| {
+                            const c = try self.evalStatement(switch_env, case_stmt);
+                            switch (c.type) {
+                                .normal => last_value = c.value,
+                                .break_completion => {
+                                    if (c.target == null) return .{ .type = .normal, .value = last_value };
+                                    return c; // labelled break: handled by the labelled wrapper/loop
+                                },
+                                .return_completion, .continue_completion => return c,
+                            }
+                        }
+                    }
+                }
+                return .{ .type = .normal, .value = last_value };
+            },
+            .with_stmt => return error.NotImplemented,
         }
     }
 
-    fn evalForStatement(self: *Interpreter, env: *Environment, s: anytype) anyerror!Completion {
+    // ===== Loops (each takes the labelSet attached by any enclosing
+    // labelled statement -- ECMA-262's labelSet parameter; empty for a
+    // plain unlabelled loop) =====
+
+    /// Decides whether this loop owns an abrupt break/continue: unlabelled
+    /// ones always belong to the nearest enclosing loop; labelled ones only
+    /// if the target is in this loop's label set.
+    fn loopOwns(target: ?[]const u8, labels: []const []const u8) bool {
+        const t = target orelse return true;
+        return labelIn(t, labels);
+    }
+
+    fn evalWhile(self: *Interpreter, env: *Environment, s: anytype, labels: []const []const u8) anyerror!Completion {
+        while (coercion.isTruthy(try self.evalExpression(env, s.test_expr))) {
+            const c = try self.evalStatement(env, s.body);
+            switch (c.type) {
+                .break_completion => {
+                    if (loopOwns(c.target, labels)) break;
+                    return c;
+                },
+                .continue_completion => {
+                    if (!loopOwns(c.target, labels)) return c;
+                },
+                .return_completion => return c,
+                .normal => {},
+            }
+        }
+        return .{};
+    }
+
+    fn evalDoWhile(self: *Interpreter, env: *Environment, s: anytype, labels: []const []const u8) anyerror!Completion {
+        while (true) {
+            const c = try self.evalStatement(env, s.body);
+            switch (c.type) {
+                .break_completion => {
+                    if (loopOwns(c.target, labels)) break;
+                    return c;
+                },
+                .continue_completion => {
+                    if (!loopOwns(c.target, labels)) return c;
+                },
+                .return_completion => return c,
+                .normal => {},
+            }
+            if (!coercion.isTruthy(try self.evalExpression(env, s.test_expr))) break;
+        }
+        return .{};
+    }
+
+    fn evalForStatement(self: *Interpreter, env: *Environment, s: anytype, labels: []const []const u8) anyerror!Completion {
         const arena = self.arena_state.allocator();
         switch (s.head) {
             .c_style => |head| {
@@ -316,11 +402,11 @@ pub const Interpreter = struct {
                     const c = try self.evalStatement(loop_env, s.body);
                     switch (c.type) {
                         .break_completion => {
-                            if (c.target == null) break;
+                            if (loopOwns(c.target, labels)) break;
                             return c;
                         },
                         .continue_completion => {
-                            if (c.target != null) return c;
+                            if (!loopOwns(c.target, labels)) return c;
                         },
                         .return_completion => return c,
                         .normal => {},
@@ -650,6 +736,13 @@ pub const Interpreter = struct {
         return fn_value;
     }
 };
+
+fn labelIn(target: []const u8, labels: []const []const u8) bool {
+    for (labels) |l| {
+        if (std.mem.eql(u8, l, target)) return true;
+    }
+    return false;
+}
 
 fn compoundToBinary(op: zparser.AssignOp) zparser.BinaryOp {
     return switch (op) {

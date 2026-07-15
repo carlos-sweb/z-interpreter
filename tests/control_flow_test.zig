@@ -40,7 +40,3 @@ test "continue skips the rest of the current iteration" {
     );
 }
 
-test "labelled break/continue are not implemented yet" {
-    try helpers.expectNotImplemented("outer: for (;;) { break outer; }");
-    try helpers.expectNotImplemented("outer: for (;;) { continue outer; }");
-}

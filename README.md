@@ -23,12 +23,14 @@ Not spec completeness — validating the whole pipeline end-to-end for the first
 
 `throw`/`try`/`catch`/`finally` are fully implemented per ECMA-262 §14.15.3, including the classic finally-override semantics (`try { return 1 } finally { return 2 }` → 2; a finally-throw drops the original exception) — each gotcha cross-checked against real Node.js. Exceptions travel as a module-private Zig error signal (`error.JsThrow`) plus a `pending_exception: ?JSValue` side channel on `Interpreter`, **not** as a `Completion` variant — they must unwind through *expression* evaluation too (any call can throw), and `evalExpression` returns `JSValue`, not `Completion`; the Zig error channel crosses every frame including the `Callable.call` vtable boundary. Engine errors (`ReferenceError`/`TypeError`) are real catchable JS values with Node-matching messages, and `e.name`/`e.message` work in catch bodies. Interpreter feature gaps (`error.NotImplemented`) are deliberately **not** catchable from JS — a `catch` swallowing "the interpreter doesn't support this yet" would produce silently-wrong programs. Uncaught exceptions surface as `error.UncaughtException` with the thrown value inspectable via `pending_exception`.
 
+## Switch and labels
+
+`switch` implements ECMA-262 §14.12 CaseBlockEvaluation faithfully: the discriminant is evaluated once, selectors are evaluated in order only until the first strict-equality match, fallthrough is natural (including *through* a mid-list `default`'s statements when the match came before it), and the whole CaseBlock is one lexical scope. Labelled `break`/`continue` implement §14.13 via label sets passed as a parameter to each loop evaluator (the spec's own labelSet, not mutable interpreter state) — chains (`a: b: for(...)`) attach every label in the chain, labelled breaks travel correctly through intervening `switch`/`try-finally` frames, and non-loop labelled statements (`a: { break a; }`, `a: if (...) break a;`) convert a matching break to normal at the labelled wrapper. All cross-checked against real Node.js.
+
 ## Known gaps (deferred to future phases)
 
-- **`switch`**: next phase (its `break` semantics already exist).
 - **`with`**.
 - **`for-in`/`for-of`**: needs the iteration protocol (`Symbol.iterator`), a real follow-on piece even though `.function` (needed for a `next()` method) now technically exists.
-- **Labelled `break`/`continue`**: unlabelled works (the nearest-enclosing-loop case falls out of recursive Completion propagation for free); labelled needs a label-stack threaded through statement recursion (mirroring `z-statements`' own parse-time `is_loop`/label-chain walk) — real, self-contained work, not a one-liner. `Completion.target` is already in place for when this lands.
 - **`new`** (constructor/prototype-for-instances semantics), **`instanceof`**, **`in`**.
 - **Classes, generators, `async`/`await`, destructuring**: not even parseable yet anywhere in this ecosystem.
 - **Regex literals**: parse fine (`z-parser`), but evaluating one to a real `.regex` `JSValue` needs `zregexp`, which this repo deliberately doesn't depend on for this narrow phase — `error.NotImplemented`.

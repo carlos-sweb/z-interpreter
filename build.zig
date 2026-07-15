@@ -40,6 +40,8 @@ pub fn build(b: *std.Build) void {
         "tests/not_implemented_test.zig",
         "tests/integration_test.zig",
         "tests/exceptions_test.zig",
+        "tests/switch_test.zig",
+        "tests/labels_test.zig",
     };
 
     inline for (test_files) |test_file| {
