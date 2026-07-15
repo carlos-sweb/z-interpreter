@@ -611,7 +611,11 @@ pub const Interpreter = struct {
                 try self.assignTo(env, u.operand, new_val);
                 return JSValue.fromNumber(old);
             },
-            .bitnot, .delete => return error.NotImplemented,
+            .bitnot => {
+                const n = try coercion.toInt32(try self.evalExpression(env, u.operand));
+                return JSValue.fromNumber(@floatFromInt(~n));
+            },
+            .delete => return error.NotImplemented,
         }
     }
 

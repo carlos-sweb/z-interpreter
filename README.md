@@ -35,7 +35,6 @@ Not spec completeness — validating the whole pipeline end-to-end for the first
 - **Classes, generators, `async`/`await`, destructuring**: not even parseable yet anywhere in this ecosystem.
 - **Regex literals**: parse fine (`z-parser`), but evaluating one to a real `.regex` `JSValue` needs `zregexp`, which this repo deliberately doesn't depend on for this narrow phase — `error.NotImplemented`.
 - **No hoisting, no TDZ**: `var`/`let`/`const`/function declarations are all evaluated strictly in source order, defining directly into the current environment. A real, known divergence from spec (e.g. `console.log(x); var x = 1;` is `undefined` in real JS via hoisting; here it's a `ReferenceError`).
-- **Bitwise operators** (`&`/`|`/`^`/`<<`/`>>`/`>>>`): need ToInt32, not implemented this phase.
 - **`this` for constructors**: only the member-call case (`obj.method()`) is wired; no `new`-based `this` binding.
 
 ## Usage

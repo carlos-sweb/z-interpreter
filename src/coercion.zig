@@ -35,6 +35,22 @@ pub fn toNumber(v: JSValue) !f64 {
     };
 }
 
+/// ECMA-262 7.1.6 ToInt32: NaN/±0/±Inf map to +0; otherwise truncate
+/// toward zero and wrap modulo 2^32 into the signed 32-bit range.
+pub fn toInt32(v: JSValue) !i32 {
+    return @bitCast(try toUint32(v));
+}
+
+/// ECMA-262 7.1.7 ToUint32 -- same as ToInt32 but reinterpreted unsigned.
+pub fn toUint32(v: JSValue) !u32 {
+    const n = try toNumber(v);
+    if (std.math.isNan(n) or std.math.isInf(n) or n == 0) return 0;
+    // Truncate toward zero, then wrap modulo 2^32 (float @mod's result
+    // takes the divisor's sign, so it already lands in [0, 2^32)).
+    const wrapped = @mod(@trunc(n), 4294967296.0);
+    return @intFromFloat(wrapped);
+}
+
 /// ECMA-262 ToString, narrowed to what template literals and `+`'s
 /// string-concat branch need. Caller owns the returned slice.
 pub fn toDisplayString(allocator: Allocator, v: JSValue) ![]u8 {
@@ -114,6 +130,29 @@ pub fn binaryOp(allocator: Allocator, op: zparser.BinaryOp, left: JSValue, right
         .noteqeq => JSValue.fromBool(!zvalue.equality.strictEquals(left, right)),
         .eq => JSValue.fromBool(try looseEquals(left, right)),
         .ne => JSValue.fromBool(!try looseEquals(left, right)),
-        .bitand, .bitor, .bitxor, .shl, .shr, .ushr, .instanceof, .in => error.NotImplemented,
+        .bitand => JSValue.fromNumber(@floatFromInt((try toInt32(left)) & (try toInt32(right)))),
+        .bitor => JSValue.fromNumber(@floatFromInt((try toInt32(left)) | (try toInt32(right)))),
+        .bitxor => JSValue.fromNumber(@floatFromInt((try toInt32(left)) ^ (try toInt32(right)))),
+        // Shift counts are ToUint32(rhs) mod 32 per spec -- @truncate to u5
+        // IS that mod. Left shifts run on the u32 bit pattern (Zig's `<<`
+        // on a signed operand would be checked arithmetic, but JS wants
+        // plain bit movement with silent wrap); `>>` on i32 is Zig's
+        // arithmetic shift, exactly JS's `>>`.
+        .shl => blk: {
+            const l: u32 = @bitCast(try toInt32(left));
+            const shift: u5 = @truncate(try toUint32(right));
+            break :blk JSValue.fromNumber(@floatFromInt(@as(i32, @bitCast(l << shift))));
+        },
+        .shr => blk: {
+            const l = try toInt32(left);
+            const shift: u5 = @truncate(try toUint32(right));
+            break :blk JSValue.fromNumber(@floatFromInt(l >> shift));
+        },
+        .ushr => blk: {
+            const l = try toUint32(left);
+            const shift: u5 = @truncate(try toUint32(right));
+            break :blk JSValue.fromNumber(@floatFromInt(l >> shift));
+        },
+        .instanceof, .in => error.NotImplemented,
     };
 }
