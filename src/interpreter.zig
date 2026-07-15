@@ -494,7 +494,14 @@ pub const Interpreter = struct {
             .binary => |b| {
                 const l = try self.evalExpression(env, b.left);
                 const r = try self.evalExpression(env, b.right);
-                return try coercion.binaryOp(arena, b.op, l, r);
+                // instanceof/in need the throw machinery and the prototype
+                // chain, which coercion.zig doesn't have -- intercepted
+                // here, never delegated.
+                switch (b.op) {
+                    .instanceof => return self.evalInstanceof(l, r),
+                    .in => return self.evalIn(l, r),
+                    else => return try coercion.binaryOp(arena, b.op, l, r),
+                }
             },
             .logical => |l| {
                 const left = try self.evalExpression(env, l.left);
@@ -517,7 +524,8 @@ pub const Interpreter = struct {
                 return try self.getProperty(obj, key);
             },
             .function_like => |ptr| return try self.makeClosure(env, zfunctions.asFunctionNode(ptr)),
-            .new_expr, .regex_literal, .bigint_literal => return error.NotImplemented,
+            .new_expr => |n| return self.evalNew(env, n),
+            .regex_literal, .bigint_literal => return error.NotImplemented,
             // Only ever nested inside array/object-literal/call-argument
             // constructs, which unwrap `.data.spread` themselves before
             // recursing -- never reached as a standalone expression.
@@ -571,12 +579,68 @@ pub const Interpreter = struct {
                 if (std.mem.eql(u8, key, "message")) break :blk try JSValue.newString(arena, box.value.message);
                 break :blk JSValue.UNDEFINED;
             },
+            .function => |box| blk: {
+                if (std.mem.eql(u8, key, "prototype")) break :blk try self.functionPrototype(obj);
+                if (std.mem.eql(u8, key, "name")) break :blk try JSValue.newString(self.arena_state.allocator(), box.value.name);
+                if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.arity));
+                break :blk JSValue.UNDEFINED;
+            },
             // Spec says TypeError here (not ReferenceError). The optional
             // chaining guards short-circuit BEFORE getProperty, so `a?.b`
             // on null still yields undefined without ever reaching this.
             .@"undefined", .@"null" => self.throwError(.type_error, "Cannot read properties of {s} (reading '{s}')", .{ if (obj == .@"null") "null" else "undefined", key }),
             else => error.NotImplemented,
         };
+    }
+
+    /// ECMA-262 13.10.2 InstanceofOperator, narrowed (no
+    /// Symbol.hasInstance): walk the LHS object's prototype chain looking
+    /// for the RHS function's prototype object, by pointer identity.
+    fn evalInstanceof(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
+        if (r != .function) {
+            return self.throwError(.type_error, "Right-hand side of 'instanceof' is not callable", .{});
+        }
+        // A never-touched prototype slot means this function never
+        // constructed anything -- nothing can be an instance of it.
+        const proto = r.function.value.prototype orelse return JSValue.fromBool(false);
+        if (proto != .object) return JSValue.fromBool(false);
+        if (l != .object) return JSValue.fromBool(false); // primitives are never instances
+        var current = l.object.value.getPrototype();
+        while (current) |p| : (current = p.getPrototype()) {
+            if (p == &proto.object.value) return JSValue.fromBool(true);
+        }
+        return JSValue.fromBool(false);
+    }
+
+    /// The `in` operator: property existence including the prototype chain
+    /// (ZObject.has already walks it). Arrays support numeric indices and
+    /// "length"; primitives are a real spec TypeError; map/set/etc are
+    /// objects in real JS but have no property model here yet.
+    fn evalIn(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
+        const arena = self.arena_state.allocator();
+        const key = try coercion.toDisplayString(arena, l);
+        return switch (r) {
+            .object => |box| JSValue.fromBool(box.value.has(key)),
+            .array => |box| blk: {
+                if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromBool(true);
+                const idx = std.fmt.parseInt(usize, key, 10) catch break :blk JSValue.fromBool(false);
+                break :blk JSValue.fromBool(idx < box.value.length());
+            },
+            .@"undefined", .@"null", .boolean, .number, .string => self.throwError(.type_error, "Cannot use 'in' operator to search for '{s}'", .{key}),
+            .function, .regex, .symbol, .map, .set, .@"error" => error.NotImplemented,
+        };
+    }
+
+    /// F.prototype, created lazily on first touch: a fresh `{}` whose
+    /// `constructor` points back at the function (real
+    /// `F.prototype.constructor === F` behavior).
+    fn functionPrototype(self: *Interpreter, fn_val: JSValue) anyerror!JSValue {
+        if (fn_val.function.value.prototype) |p| return p;
+        const arena = self.arena_state.allocator();
+        var proto = try JSValue.newObject(arena);
+        try proto.object.value.set("constructor", fn_val.retain());
+        fn_val.function.value.prototype = proto;
+        return proto;
     }
 
     fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSValue {
@@ -665,6 +729,14 @@ pub const Interpreter = struct {
                 if (obj == .@"undefined" or obj == .@"null") {
                     return self.throwError(.type_error, "Cannot set properties of {s} (setting '{s}')", .{ if (obj == .@"null") "null" else "undefined", key });
                 }
+                // `F.prototype = {...}` overwrites the callable's slot.
+                // Arbitrary properties on functions stay out of scope
+                // (functions here have no general property bag).
+                if (obj == .function and std.mem.eql(u8, key, "prototype")) {
+                    if (value != .object) return error.NotImplemented;
+                    obj.function.value.prototype = value.retain();
+                    return;
+                }
                 if (obj != .object) return error.NotImplemented;
                 try obj.object.value.set(key, value.retain());
             },
@@ -698,8 +770,14 @@ pub const Interpreter = struct {
             return self.throwError(.type_error, "{s} is not a function", .{callee_name});
         }
 
+        const args = try self.evalArgs(env, c.args);
+        return try callee_val.function.value.call(callee_val.function.value.ctx, arena, this_value, args);
+    }
+
+    fn evalArgs(self: *Interpreter, env: *Environment, arg_nodes: []const *zparser.Node) anyerror![]const JSValue {
+        const arena = self.arena_state.allocator();
         var args: std.ArrayList(JSValue) = .empty;
-        for (c.args) |arg_node| {
+        for (arg_nodes) |arg_node| {
             if (arg_node.data == .spread) {
                 const spread_val = try self.evalExpression(env, arg_node.data.spread);
                 if (spread_val != .array) return error.NotImplemented;
@@ -708,7 +786,33 @@ pub const Interpreter = struct {
                 try args.append(arena, try self.evalExpression(env, arg_node));
             }
         }
-        return try callee_val.function.value.call(callee_val.function.value.ctx, arena, this_value, args.items);
+        return args.toOwnedSlice(arena);
+    }
+
+    /// ECMA-262 10.2.2 [[Construct]], narrowed: fresh object wired to
+    /// F.prototype, constructor called with it as `this`, and an
+    /// object-like return value overrides the instance (a primitive
+    /// return is ignored -- the real rule).
+    fn evalNew(self: *Interpreter, env: *Environment, n: anytype) anyerror!JSValue {
+        const arena = self.arena_state.allocator();
+        const callee = try self.evalExpression(env, n.callee);
+        const callee_name: []const u8 = switch (n.callee.data) {
+            .identifier => |name| name,
+            else => "expression",
+        };
+        if (callee != .function or !callee.function.value.constructable) {
+            return self.throwError(.type_error, "{s} is not a constructor", .{callee_name});
+        }
+        const proto = try self.functionPrototype(callee);
+        var instance = try JSValue.newObject(arena);
+        try instance.object.value.setPrototype(&proto.object.value);
+        // `new Foo` with no parens at all (args == null) is `new Foo()`.
+        const args = try self.evalArgs(env, n.args orelse &.{});
+        const result = try callee.function.value.call(callee.function.value.ctx, arena, instance, args);
+        return switch (result) {
+            .object, .array, .function, .regex, .map, .set, .@"error" => result,
+            else => instance,
+        };
     }
 
     fn makeClosure(self: *Interpreter, env: *Environment, fnode: *zfunctions.FunctionNode) anyerror!JSValue {
@@ -735,6 +839,9 @@ pub const Interpreter = struct {
             .name = name,
             .arity = fnode.params.items.len,
             .call = closureCall,
+            // Arrows are not constructors (spec); natives keep the
+            // default false via their own newFunction call sites.
+            .constructable = fnode.kind != .arrow,
         });
         if (self_name) |n| try closure_env.define(arena, n, fn_value.retain());
         return fn_value;

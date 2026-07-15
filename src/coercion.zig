@@ -153,6 +153,9 @@ pub fn binaryOp(allocator: Allocator, op: zparser.BinaryOp, left: JSValue, right
             const shift: u5 = @truncate(try toUint32(right));
             break :blk JSValue.fromNumber(@floatFromInt(l >> shift));
         },
-        .instanceof, .in => error.NotImplemented,
+        // Always intercepted by the interpreter's own .binary arm (they
+        // need the throw machinery and the prototype chain, which this
+        // module doesn't have) -- never delegated here.
+        .instanceof, .in => unreachable,
     };
 }
