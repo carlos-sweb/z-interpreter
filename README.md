@@ -31,10 +31,15 @@ Not spec completeness — validating the whole pipeline end-to-end for the first
 
 `switch` implements ECMA-262 §14.12 CaseBlockEvaluation faithfully: the discriminant is evaluated once, selectors are evaluated in order only until the first strict-equality match, fallthrough is natural (including *through* a mid-list `default`'s statements when the match came before it), and the whole CaseBlock is one lexical scope. Labelled `break`/`continue` implement §14.13 via label sets passed as a parameter to each loop evaluator (the spec's own labelSet, not mutable interpreter state) — chains (`a: b: for(...)`) attach every label in the chain, labelled breaks travel correctly through intervening `switch`/`try-finally` frames, and non-loop labelled statements (`a: { break a; }`, `a: if (...) break a;`) convert a matching break to normal at the labelled wrapper. All cross-checked against real Node.js.
 
+## Iteration
+
+`for-of` iterates the built-in iterables natively: arrays (elements), strings (**Unicode code points**, surrogate pairs together — the real spec behavior), maps (`[key, value]` pair arrays), and sets (values); everything else — plain objects included — is a real TypeError, exactly like Node. `for-in` yields enumerable string keys, own **and inherited** (walking the prototype chain, shadowed keys seen once), array/string indices as strings, and — per spec — zero iterations without error over `null`/`undefined`. Declared bindings (`let`/`const`) get a fresh environment per iteration, so closures created in the body capture that iteration's value. All Node-verified.
+
 ## Known gaps (deferred to future phases)
 
 - **`with`**.
-- **`for-in`/`for-of`**: needs the iteration protocol (`Symbol.iterator`), a real follow-on piece even though `.function` (needed for a `next()` method) now technically exists.
+- **User-defined iterables (`Symbol.iterator` protocol)**: requires symbol-keyed properties, and `ZObject` is string-keyed only — for-of covers the built-in iterables natively instead.
+- **`constructor` shows up in `for-in`**: our narrowed model stores it as an ordinary (enumerable) property; real JS marks it non-enumerable.
 - **Arbitrary properties on function values**: only `prototype` (writable), `name`, and `length` exist — functions here have no general property bag (`F.myProp = 1` is NotImplemented).
 - **Classes, generators, `async`/`await`, destructuring**: not even parseable yet anywhere in this ecosystem.
 - **Regex literals**: parse fine (`z-parser`), but evaluating one to a real `.regex` `JSValue` needs `zregexp`, which this repo deliberately doesn't depend on for this narrow phase — `error.NotImplemented`.

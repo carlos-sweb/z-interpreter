@@ -415,8 +415,146 @@ pub const Interpreter = struct {
                 }
                 return .{};
             },
-            .for_in, .for_of => return error.NotImplemented,
+            .for_in => |head| return self.evalForIn(env, head, s.body, labels),
+            .for_of => |head| return self.evalForOf(env, head, s.body, labels),
         }
+    }
+
+    /// Binds the loop variable for one for-in/for-of iteration. Declared
+    /// bindings (var/let/const) get a FRESH child env per iteration, so
+    /// closures created in the body capture that iteration's value (real
+    /// let/const semantics; `var`'s shared-binding nuance falls under the
+    /// already-documented no-hoisting gap). Existing bindings assign into
+    /// the enclosing scope chain.
+    fn bindForIteration(self: *Interpreter, env: *Environment, binding: zstatements.ForBinding, value: JSValue) anyerror!*Environment {
+        const arena = self.arena_state.allocator();
+        switch (binding) {
+            .declared => |d| {
+                const iter_env = try env.child(arena);
+                try iter_env.define(arena, d.name.name, value.retain());
+                return iter_env;
+            },
+            .existing => |name| {
+                env.assign(name.name, value) catch
+                    return self.throwError(.reference_error, "{s} is not defined", .{name.name});
+                return env;
+            },
+        }
+    }
+
+    /// Runs one for-in/for-of iteration with the loop variable bound to
+    /// `value`. Returns null to proceed to the next iteration, or a
+    /// Completion the whole loop must deliver (an owned break converts to
+    /// normal-and-stop; everything else abrupt propagates).
+    fn forIterationStep(self: *Interpreter, env: *Environment, binding: zstatements.ForBinding, value: JSValue, body: *zstatements.Statement, labels: []const []const u8) anyerror!?Completion {
+        const iter_env = try self.bindForIteration(env, binding, value);
+        const c = try self.evalStatement(iter_env, body);
+        switch (c.type) {
+            .break_completion => {
+                if (loopOwns(c.target, labels)) return Completion{};
+                return c;
+            },
+            .continue_completion => {
+                if (!loopOwns(c.target, labels)) return c;
+                return null;
+            },
+            .return_completion => return c,
+            .normal => return null,
+        }
+    }
+
+    /// for-of over the built-in iterables, natively: arrays (elements),
+    /// strings (Unicode code points -- the spec iterates by code point,
+    /// surrogate pairs together), maps ([key, value] pair arrays), sets
+    /// (values). Everything else -- plain objects included -- is a real
+    /// TypeError, exactly like Node (plain objects aren't iterable there
+    /// either). The one genuine gap vs. spec: user-defined iterables via
+    /// Symbol.iterator, impossible until ZObject supports symbol keys.
+    fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zstatements.Statement, labels: []const []const u8) anyerror!Completion {
+        const arena = self.arena_state.allocator();
+        const iterable = try self.evalExpression(env, head.iterable);
+        switch (iterable) {
+            .array => |box| {
+                for (box.value.toSlice()) |item| {
+                    if (try self.forIterationStep(env, head.binding, item, body, labels)) |c| return c;
+                }
+            },
+            .string => |box| {
+                var it = std.unicode.Utf8Iterator{ .bytes = box.value.data, .i = 0 };
+                while (it.nextCodepointSlice()) |cp| {
+                    const ch = try JSValue.newString(arena, cp);
+                    if (try self.forIterationStep(env, head.binding, ch, body, labels)) |c| return c;
+                }
+            },
+            .map => |box| {
+                const pairs = try box.value.entries(arena);
+                defer arena.free(pairs);
+                for (pairs) |pair| {
+                    var entry = try JSValue.newArray(arena);
+                    _ = try entry.array.value.push(pair.key.retain());
+                    _ = try entry.array.value.push(pair.value.retain());
+                    if (try self.forIterationStep(env, head.binding, entry, body, labels)) |c| return c;
+                }
+            },
+            .set => |box| {
+                for (box.value.values()) |v| {
+                    if (try self.forIterationStep(env, head.binding, v, body, labels)) |c| return c;
+                }
+            },
+            else => return self.throwError(.type_error, "{s} is not iterable", .{iterable.typeOf()}),
+        }
+        return .{};
+    }
+
+    /// for-in over enumerable string keys: own + inherited (walking the
+    /// prototype chain, shadowed keys seen once), array/string indices as
+    /// STRINGS (for-in keys are always strings in real JS), and -- per
+    /// spec -- zero iterations without error over null/undefined. Types
+    /// with no string-keyed property model here (number, boolean, map,
+    /// set, ...) iterate zero times.
+    fn evalForIn(self: *Interpreter, env: *Environment, head: anytype, body: *zstatements.Statement, labels: []const []const u8) anyerror!Completion {
+        const arena = self.arena_state.allocator();
+        const target = try self.evalExpression(env, head.object);
+        switch (target) {
+            .object => |box| {
+                var seen: std.StringHashMapUnmanaged(void) = .empty;
+                var keys_list: std.ArrayList([]const u8) = .empty;
+                var current: ?*const @TypeOf(box.value) = &box.value;
+                while (current) |o| : (current = o.getPrototype()) {
+                    const ks = try o.keys(arena);
+                    defer arena.free(ks);
+                    for (ks) |k| {
+                        if (!seen.contains(k)) {
+                            try seen.put(arena, k, {});
+                            try keys_list.append(arena, k);
+                        }
+                    }
+                }
+                for (keys_list.items) |k| {
+                    const kv = try JSValue.newString(arena, k);
+                    if (try self.forIterationStep(env, head.binding, kv, body, labels)) |c| return c;
+                }
+            },
+            .array => |box| {
+                const len = box.value.length();
+                var i: usize = 0;
+                while (i < len) : (i += 1) {
+                    const key_str = try std.fmt.allocPrint(arena, "{d}", .{i});
+                    const kv = try JSValue.newString(arena, key_str);
+                    if (try self.forIterationStep(env, head.binding, kv, body, labels)) |c| return c;
+                }
+            },
+            .string => |box| {
+                var i: usize = 0;
+                while (i < box.value.data.len) : (i += 1) {
+                    const key_str = try std.fmt.allocPrint(arena, "{d}", .{i});
+                    const kv = try JSValue.newString(arena, key_str);
+                    if (try self.forIterationStep(env, head.binding, kv, body, labels)) |c| return c;
+                }
+            },
+            else => {}, // incl. null/undefined: zero iterations, no error (spec)
+        }
+        return .{};
     }
 
     // ===== Expressions =====
