@@ -19,9 +19,13 @@ Not spec completeness — validating the whole pipeline end-to-end for the first
 - **Named function expressions can reference themselves recursively by name** (`const f = function fact(n) { return fact(n-1); }`) via a thin wrapper environment binding the name to the closure itself — the name is visible only inside the function's own body, not in the enclosing scope.
 - **`console_writer: *std.Io.Writer` is injected**, never hardcoded to real stdout — tests point it at `std.Io.Writer.Allocating` instead of touching the process's actual stdout.
 
+## Exceptions
+
+`throw`/`try`/`catch`/`finally` are fully implemented per ECMA-262 §14.15.3, including the classic finally-override semantics (`try { return 1 } finally { return 2 }` → 2; a finally-throw drops the original exception) — each gotcha cross-checked against real Node.js. Exceptions travel as a module-private Zig error signal (`error.JsThrow`) plus a `pending_exception: ?JSValue` side channel on `Interpreter`, **not** as a `Completion` variant — they must unwind through *expression* evaluation too (any call can throw), and `evalExpression` returns `JSValue`, not `Completion`; the Zig error channel crosses every frame including the `Callable.call` vtable boundary. Engine errors (`ReferenceError`/`TypeError`) are real catchable JS values with Node-matching messages, and `e.name`/`e.message` work in catch bodies. Interpreter feature gaps (`error.NotImplemented`) are deliberately **not** catchable from JS — a `catch` swallowing "the interpreter doesn't support this yet" would produce silently-wrong programs. Uncaught exceptions surface as `error.UncaughtException` with the thrown value inspectable via `pending_exception`.
+
 ## Known gaps (deferred to future phases)
 
-- **`switch`, `try`/`catch`/`finally`/`throw`**: no JS-level exception model yet (`Completion`'s `type` enum has room for a future `throw_completion` without reshaping anything).
+- **`switch`**: next phase (its `break` semantics already exist).
 - **`with`**.
 - **`for-in`/`for-of`**: needs the iteration protocol (`Symbol.iterator`), a real follow-on piece even though `.function` (needed for a `next()` method) now technically exists.
 - **Labelled `break`/`continue`**: unlabelled works (the nearest-enclosing-loop case falls out of recursive Completion propagation for free); labelled needs a label-stack threaded through statement recursion (mirroring `z-statements`' own parse-time `is_loop`/label-chain walk) — real, self-contained work, not a one-liner. `Completion.target` is already in place for when this lands.

@@ -47,3 +47,29 @@ pub fn expectNotImplemented(source: []const u8) !void {
     defer interp.deinit();
     try testing.expectError(error.NotImplemented, interp.run(source));
 }
+
+/// Asserts the script dies with an uncaught engine error of the given
+/// kind/message (readable via `pending_exception` after run() returns
+/// error.UncaughtException).
+pub fn expectUncaught(source: []const u8, kind: zvalue.ErrorKind, message: []const u8) !void {
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try zinterpreter.Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+    try testing.expectError(error.UncaughtException, interp.run(source));
+    const ex = interp.pending_exception.?;
+    try testing.expect(ex == .@"error");
+    try testing.expectEqual(kind, ex.@"error".value.kind);
+    try testing.expectEqualStrings(message, ex.@"error".value.message);
+}
+
+/// Like expectUncaught but for `throw <non-error value>` -- hands the raw
+/// thrown JSValue to `check`.
+pub fn expectUncaughtValue(source: []const u8, context: anytype, comptime check: fn (@TypeOf(context), JSValue) anyerror!void) !void {
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try zinterpreter.Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+    try testing.expectError(error.UncaughtException, interp.run(source));
+    try check(context, interp.pending_exception.?);
+}

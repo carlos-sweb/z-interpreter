@@ -6,8 +6,14 @@ pub const CompletionType = enum {
     return_completion,
     break_completion,
     continue_completion,
-    // A throw_completion slots in here without reshaping anything, whenever
-    // a future phase adds try/catch/throw.
+    // There is deliberately NO throw_completion variant: exceptions must
+    // unwind through *expression* evaluation too (any call can throw), and
+    // evalExpression returns JSValue, not Completion -- a Completion-only
+    // channel can't cross expression frames or the Callable.call vtable
+    // boundary (a published z-value interface). Throws travel as the
+    // module-private `error.JsThrow` Zig error plus the Interpreter's
+    // `pending_exception` side channel instead; see interpreter.zig's
+    // Outcome/runCapturing for where the two channels merge (try/finally).
 };
 
 /// ECMA-262's real Completion Record shape ({ type, value, target }), not a

@@ -34,6 +34,17 @@ pub const Interpreter = struct {
     /// an in-memory buffer instead of touching the process's actual
     /// stdout.
     console_writer: *std.Io.Writer,
+    /// The JS exception currently in flight. INVARIANT: meaningful only
+    /// while `error.JsThrow` is unwinding; every raiser (throwValue/
+    /// throwError) sets it unconditionally immediately before returning
+    /// `error.JsThrow`, and every catcher takes it (reads + nulls)
+    /// immediately. Never `catch` around evalExpression/evalStatement/
+    /// Callable.call except in the two sanctioned places (`runCapturing`
+    /// and `run()`), and those filter to exactly `error.JsThrow` --
+    /// OutOfMemory/NotImplemented always propagate untouched. After an
+    /// `error.UncaughtException` from run(), this field holds the
+    /// uncaught value for the caller to inspect.
+    pending_exception: ?JSValue = null,
 
     pub fn init(backing_allocator: Allocator, console_writer: *std.Io.Writer) !Interpreter {
         var self: Interpreter = .{
@@ -75,13 +86,67 @@ pub const Interpreter = struct {
 
     /// Parses + evaluates a whole script; returns the completion value of
     /// the last top-level statement (UNDEFINED if the program is empty or
-    /// ends on a non-value-producing statement).
+    /// ends on a non-value-producing statement). An uncaught JS exception
+    /// surfaces as `error.UncaughtException` with the thrown value left in
+    /// `pending_exception` for inspection -- `error.JsThrow` is a private
+    /// signal that never escapes this module's public API.
     pub fn run(self: *Interpreter, source: []const u8) anyerror!JSValue {
+        self.pending_exception = null; // stale state from a previous run()
         const arena = self.arena_state.allocator();
         const parser = try zfunctions.Parser.init(arena, source);
         const program = try parser.parseProgram();
-        const c = try self.evalProgram(self.global_env, program);
+        const c = self.evalProgram(self.global_env, program) catch |err| {
+            if (err != error.JsThrow) return err;
+            return error.UncaughtException;
+        };
         return c.value;
+    }
+
+    // ===== Exception machinery =====
+
+    /// Raise an arbitrary JSValue as a JS exception (throw statement,
+    /// rethrow). See the invariant on `pending_exception`.
+    fn throwValue(self: *Interpreter, value: JSValue) anyerror {
+        self.pending_exception = value;
+        return error.JsThrow;
+    }
+
+    /// Build an engine error (ReferenceError/TypeError/...) and raise it.
+    /// allocPrint's OOM propagates as OOM, never as JsThrow.
+    fn throwError(self: *Interpreter, kind: zvalue.ErrorKind, comptime fmt: []const u8, args: anytype) anyerror {
+        const arena = self.arena_state.allocator();
+        const msg = try std.fmt.allocPrint(arena, fmt, args);
+        return self.throwValue(try JSValue.newError(arena, kind, msg));
+    }
+
+    /// Everything a statement can do, flattened into one value: the
+    /// Completion channel (normal/return/break/continue) and the JsThrow
+    /// channel. This is the merge point try/finally hangs on.
+    const Outcome = union(enum) {
+        completion: Completion,
+        thrown: JSValue,
+    };
+
+    /// Runs a statement, capturing BOTH abrupt channels. Catches ONLY
+    /// error.JsThrow; OutOfMemory, NotImplemented, etc. propagate
+    /// untouched (a JS `catch` must never swallow an interpreter feature
+    /// gap).
+    fn runCapturing(self: *Interpreter, env: *Environment, stmt: *zstatements.Statement) anyerror!Outcome {
+        const c = self.evalStatement(env, stmt) catch |err| {
+            if (err != error.JsThrow) return err;
+            const ex = self.pending_exception orelse unreachable; // raiser invariant
+            self.pending_exception = null; // take
+            return Outcome{ .thrown = ex };
+        };
+        return Outcome{ .completion = c };
+    }
+
+    /// Re-delivers an Outcome on its original channel.
+    fn deliver(self: *Interpreter, outcome: Outcome) anyerror!Completion {
+        return switch (outcome) {
+            .completion => |c| c,
+            .thrown => |ex| self.throwValue(ex),
+        };
     }
 
     pub fn evalProgram(self: *Interpreter, env: *Environment, program: []const *zstatements.Statement) anyerror!Completion {
@@ -180,7 +245,51 @@ pub const Interpreter = struct {
                 try env.define(arena, name, value);
                 return .{};
             },
-            .throw_stmt, .try_stmt, .switch_stmt, .with_stmt => return error.NotImplemented,
+            .throw_stmt => |arg| {
+                // The `try` on the argument is load-bearing: `throw f()`
+                // where f itself throws must propagate f's exception.
+                const v = try self.evalExpression(env, arg);
+                return self.throwValue(v);
+            },
+            // ECMA-262 14.15.3 TryStatement evaluation. h.body/s.block/
+            // s.finalizer are always `.block` statements, so the existing
+            // `.block` arm supplies each fresh scope (the catch_env holding
+            // the param becomes its parent -- spec-correct nesting for
+            // free). Completion.target rides along inside
+            // Outcome.completion untouched, so future labelled-break
+            // support changes nothing here.
+            .try_stmt => |s| {
+                var result = try self.runCapturing(env, s.block);
+
+                if (result == .thrown and s.handler != null) {
+                    const h = s.handler.?;
+                    const catch_env = try env.child(arena);
+                    if (h.param) |p| try catch_env.define(arena, p.name, result.thrown.retain());
+                    // A throw from the catch body becomes the new .thrown
+                    // result; the original exception is dropped
+                    // (spec-correct).
+                    result = try self.runCapturing(catch_env, h.body);
+                }
+
+                // The finalizer runs on EVERY path (normal, caught,
+                // uncaught-throw, return/break/continue). Its result
+                // overrides iff it is abrupt: `try { return 1 } finally
+                // { return 2 }` is 2, and a finally-throw drops the
+                // original exception. A *normal* finally keeps `result`
+                // INCLUDING its value: `try { 1 } finally { 2 }` is 1.
+                if (s.finalizer) |fin| {
+                    const fin_outcome = try self.runCapturing(env, fin);
+                    switch (fin_outcome) {
+                        .completion => |fc| if (fc.type != .normal) {
+                            result = fin_outcome;
+                        },
+                        .thrown => result = fin_outcome,
+                    }
+                }
+
+                return try self.deliver(result);
+            },
+            .switch_stmt, .with_stmt => return error.NotImplemented,
         }
     }
 
@@ -233,7 +342,7 @@ pub const Interpreter = struct {
             .string_literal => |s| return try JSValue.newString(arena, s),
             .boolean_literal => |b| return JSValue.fromBool(b),
             .null_literal => return JSValue.NULL,
-            .identifier => |name| return env.get(name) orelse error.ReferenceError,
+            .identifier => |name| return env.get(name) orelse self.throwError(.reference_error, "{s} is not defined", .{name}),
             .this_expr => return env.resolveThis(),
             .paren => |inner| return self.evalExpression(env, inner),
             .sequence => |items| {
@@ -355,7 +464,6 @@ pub const Interpreter = struct {
     }
 
     fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!JSValue {
-        _ = self;
         return switch (obj) {
             .object => |box| (box.value.get(key) orelse JSValue.UNDEFINED).retain(),
             .array => |box| blk: {
@@ -368,7 +476,19 @@ pub const Interpreter = struct {
                 if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.data.len));
                 break :blk error.NotImplemented;
             },
-            .@"undefined", .@"null" => error.ReferenceError,
+            // `catch (e) { console.log(e.message) }` is the most common
+            // catch body in existence -- name/message are read-only views
+            // over ZError's existing fields.
+            .@"error" => |box| blk: {
+                const arena = self.arena_state.allocator();
+                if (std.mem.eql(u8, key, "name")) break :blk try JSValue.newString(arena, box.value.kind.name());
+                if (std.mem.eql(u8, key, "message")) break :blk try JSValue.newString(arena, box.value.message);
+                break :blk JSValue.UNDEFINED;
+            },
+            // Spec says TypeError here (not ReferenceError). The optional
+            // chaining guards short-circuit BEFORE getProperty, so `a?.b`
+            // on null still yields undefined without ever reaching this.
+            .@"undefined", .@"null" => self.throwError(.type_error, "Cannot read properties of {s} (reading '{s}')", .{ if (obj == .@"null") "null" else "undefined", key }),
             else => error.NotImplemented,
         };
     }
@@ -441,11 +561,20 @@ pub const Interpreter = struct {
 
     fn assignTo(self: *Interpreter, env: *Environment, target: *zparser.Node, value: JSValue) anyerror!void {
         switch (target.data) {
-            .identifier => |name| try env.assign(name, value),
+            .identifier => |name| env.assign(name, value) catch
+                return self.throwError(.reference_error, "{s} is not defined", .{name}),
             .paren => |inner| try self.assignTo(env, inner, value),
             .member => |m| {
                 const obj = try self.evalExpression(env, m.object);
                 const key = try self.memberKeyString(env, m);
+                // Split, not a blanket conversion: null/undefined is a real
+                // spec TypeError, but every other non-object receiver
+                // (arrays, strings, numbers) is a genuine feature gap --
+                // NotImplemented is the honest answer, and a JS `catch`
+                // must never swallow it.
+                if (obj == .@"undefined" or obj == .@"null") {
+                    return self.throwError(.type_error, "Cannot set properties of {s} (setting '{s}')", .{ if (obj == .@"null") "null" else "undefined", key });
+                }
                 if (obj != .object) return error.NotImplemented;
                 try obj.object.value.set(key, value.retain());
             },
@@ -468,7 +597,16 @@ pub const Interpreter = struct {
             callee_val = try self.evalExpression(env, c.callee);
         }
         if (c.optional and (callee_val == .@"undefined" or callee_val == .@"null")) return JSValue.UNDEFINED;
-        if (callee_val != .function) return error.NotImplemented;
+        if (callee_val != .function) {
+            // Best-effort callee name for the message -- no expression
+            // printer, just the two cheap cases.
+            const callee_name: []const u8 = switch (c.callee.data) {
+                .identifier => |name| name,
+                .member => |m| if (!m.computed and m.property.data == .identifier) m.property.data.identifier else "expression",
+                else => "expression",
+            };
+            return self.throwError(.type_error, "{s} is not a function", .{callee_name});
+        }
 
         var args: std.ArrayList(JSValue) = .empty;
         for (c.args) |arg_node| {

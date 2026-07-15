@@ -54,7 +54,13 @@ pub fn inspect(allocator: Allocator, buf: *std.ArrayList(u8), v: JSValue) !void 
         .regex => try buf.appendSlice(allocator, "[RegExp]"),
         .map => try buf.appendSlice(allocator, "[Map]"),
         .set => try buf.appendSlice(allocator, "[Set]"),
-        .@"error" => try buf.appendSlice(allocator, "[Error]"),
+        .@"error" => |box| {
+            // "TypeError: message" (or bare "TypeError" for an empty
+            // message) -- exactly Node's console.log(err) minus the stack.
+            const s = try box.value.toString(allocator);
+            defer allocator.free(s);
+            try buf.appendSlice(allocator, s);
+        },
     }
 }
 
