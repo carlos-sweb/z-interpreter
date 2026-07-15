@@ -19,6 +19,15 @@ pub fn build(b: *std.Build) void {
     const znumber_dep = b.dependency("znumber", .{ .target = target, .optimize = optimize });
     const znumber_module = znumber_dep.module("znumber");
 
+    const zmath_dep = b.dependency("zmath", .{ .target = target, .optimize = optimize });
+    const zmath_module = zmath_dep.module("zmath");
+
+    const zjson_dep = b.dependency("zjson", .{ .target = target, .optimize = optimize });
+    const zjson_module = zjson_dep.module("zjson");
+
+    const zstring_dep = b.dependency("zstring", .{ .target = target, .optimize = optimize });
+    const zstring_module = zstring_dep.module("zstring");
+
     const zinterpreter_module = b.addModule("zinterpreter", .{
         .root_source_file = b.path("src/zinterpreter.zig"),
     });
@@ -27,6 +36,9 @@ pub fn build(b: *std.Build) void {
     zinterpreter_module.addImport("zfunctions", zfunctions_module);
     zinterpreter_module.addImport("zvalue", zvalue_module);
     zinterpreter_module.addImport("znumber", znumber_module);
+    zinterpreter_module.addImport("zmath", zmath_module);
+    zinterpreter_module.addImport("zjson", zjson_module);
+    zinterpreter_module.addImport("zstring", zstring_module);
 
     const test_step = b.step("test", "Run all tests");
 
@@ -45,6 +57,7 @@ pub fn build(b: *std.Build) void {
         "tests/bitwise_test.zig",
         "tests/new_prototype_test.zig",
         "tests/iteration_test.zig",
+        "tests/builtins_test.zig",
     };
 
     inline for (test_files) |test_file| {
@@ -62,6 +75,9 @@ pub fn build(b: *std.Build) void {
         unit_tests.root_module.addImport("zfunctions", zfunctions_module);
         unit_tests.root_module.addImport("zvalue", zvalue_module);
         unit_tests.root_module.addImport("znumber", znumber_module);
+        unit_tests.root_module.addImport("zmath", zmath_module);
+        unit_tests.root_module.addImport("zjson", zjson_module);
+        unit_tests.root_module.addImport("zstring", zstring_module);
 
         const run_unit_tests = b.addRunArtifact(unit_tests);
         test_step.dependOn(&run_unit_tests.step);
@@ -79,6 +95,9 @@ pub fn build(b: *std.Build) void {
     src_tests.root_module.addImport("zfunctions", zfunctions_module);
     src_tests.root_module.addImport("zvalue", zvalue_module);
     src_tests.root_module.addImport("znumber", znumber_module);
+    src_tests.root_module.addImport("zmath", zmath_module);
+    src_tests.root_module.addImport("zjson", zjson_module);
+    src_tests.root_module.addImport("zstring", zstring_module);
     const run_src_tests = b.addRunArtifact(src_tests);
     test_step.dependOn(&run_src_tests.step);
 

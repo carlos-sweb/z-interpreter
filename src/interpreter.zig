@@ -13,6 +13,7 @@ const completion_mod = @import("completion.zig");
 pub const Completion = completion_mod.Completion;
 const coercion = @import("coercion.zig");
 const inspect = @import("inspect.zig");
+const builtins = @import("builtins.zig");
 
 /// A user-defined closure's opaque Callable context: the parsed function's
 /// AST node, the environment it closed over at definition time, and a back
@@ -45,6 +46,14 @@ pub const Interpreter = struct {
     /// `error.UncaughtException` from run(), this field holds the
     /// uncaught value for the caller to inspect.
     pending_exception: ?JSValue = null,
+    /// Globals (console/Math/JSON/Object/...) are installed lazily on the
+    /// first run() -- native functions carry `ctx = *Interpreter`, and
+    /// init() returns by value, so `&self` is only stable once run() is
+    /// called on the caller's storage.
+    globals_ready: bool = false,
+    /// Shared native-method values, keyed "type.name" (e.g. "array.push"),
+    /// so `a.push === b.push` holds like real JS prototype methods.
+    method_cache: std.StringHashMapUnmanaged(JSValue) = .empty,
 
     pub fn init(backing_allocator: Allocator, console_writer: *std.Io.Writer) !Interpreter {
         var self: Interpreter = .{
@@ -56,7 +65,6 @@ pub const Interpreter = struct {
         const global_env = try arena.create(Environment);
         global_env.* = .{ .parent = null };
         self.global_env = global_env;
-        try self.setupGlobals();
         return self;
     }
 
@@ -67,23 +75,6 @@ pub const Interpreter = struct {
         self.arena_state.deinit();
     }
 
-    fn setupGlobals(self: *Interpreter) !void {
-        const arena = self.arena_state.allocator();
-        var console_obj = try JSValue.newObject(arena);
-        const log_fn = try JSValue.newFunction(arena, .{
-            .ctx = self.console_writer,
-            .name = "log",
-            .call = consoleLogCall,
-        });
-        try console_obj.object.value.set("log", log_fn);
-        try self.global_env.define(arena, "console", console_obj);
-        // `undefined` is not a keyword in JS -- it's an ordinary
-        // (writable-in-sloppy-mode-but-we-don't-care) global binding.
-        try self.global_env.define(arena, "undefined", JSValue.UNDEFINED);
-        try self.global_env.define(arena, "NaN", JSValue.fromNumber(std.math.nan(f64)));
-        try self.global_env.define(arena, "Infinity", JSValue.fromNumber(std.math.inf(f64)));
-    }
-
     /// Parses + evaluates a whole script; returns the completion value of
     /// the last top-level statement (UNDEFINED if the program is empty or
     /// ends on a non-value-producing statement). An uncaught JS exception
@@ -92,6 +83,10 @@ pub const Interpreter = struct {
     /// signal that never escapes this module's public API.
     pub fn run(self: *Interpreter, source: []const u8) anyerror!JSValue {
         self.pending_exception = null; // stale state from a previous run()
+        if (!self.globals_ready) {
+            try builtins.setupGlobals(self);
+            self.globals_ready = true;
+        }
         const arena = self.arena_state.allocator();
         const parser = try zfunctions.Parser.init(arena, source);
         const program = try parser.parseProgram();
@@ -105,15 +100,16 @@ pub const Interpreter = struct {
     // ===== Exception machinery =====
 
     /// Raise an arbitrary JSValue as a JS exception (throw statement,
-    /// rethrow). See the invariant on `pending_exception`.
-    fn throwValue(self: *Interpreter, value: JSValue) anyerror {
+    /// rethrow). See the invariant on `pending_exception`. Public so
+    /// builtins.zig's natives can raise catchable errors too.
+    pub fn throwValue(self: *Interpreter, value: JSValue) anyerror {
         self.pending_exception = value;
         return error.JsThrow;
     }
 
     /// Build an engine error (ReferenceError/TypeError/...) and raise it.
     /// allocPrint's OOM propagates as OOM, never as JsThrow.
-    fn throwError(self: *Interpreter, kind: zvalue.ErrorKind, comptime fmt: []const u8, args: anytype) anyerror {
+    pub fn throwError(self: *Interpreter, kind: zvalue.ErrorKind, comptime fmt: []const u8, args: anytype) anyerror {
         const arena = self.arena_state.allocator();
         const msg = try std.fmt.allocPrint(arena, fmt, args);
         return self.throwValue(try JSValue.newError(arena, kind, msg));
@@ -695,17 +691,30 @@ pub const Interpreter = struct {
         };
     }
 
+    /// A shared native-method JSValue for a (type, name) pair, cached so
+    /// `a.push === b.push` holds like real JS prototype methods.
+    fn nativeMethod(self: *Interpreter, comptime type_prefix: []const u8, name: []const u8, call_fn: builtins.NativeFn) anyerror!JSValue {
+        const arena = self.arena_state.allocator();
+        const cache_key = try std.fmt.allocPrint(arena, type_prefix ++ ".{s}", .{name});
+        if (self.method_cache.get(cache_key)) |cached| return cached;
+        const fn_value = try JSValue.newFunction(arena, .{ .ctx = self, .name = name, .call = call_fn });
+        try self.method_cache.put(arena, cache_key, fn_value);
+        return fn_value;
+    }
+
     fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!JSValue {
         return switch (obj) {
             .object => |box| (box.value.get(key) orelse JSValue.UNDEFINED).retain(),
             .array => |box| blk: {
                 if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.length()));
+                if (builtins.array_methods.get(key)) |f| break :blk try self.nativeMethod("array", key, f);
                 const idx = std.fmt.parseInt(usize, key, 10) catch return error.NotImplemented;
                 if (idx >= box.value.length()) break :blk JSValue.UNDEFINED;
                 break :blk box.value.get(idx).retain();
             },
             .string => |box| blk: {
                 if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.data.len));
+                if (builtins.string_methods.get(key)) |f| break :blk try self.nativeMethod("string", key, f);
                 break :blk error.NotImplemented;
             },
             // `catch (e) { console.log(e.message) }` is the most common
@@ -1050,9 +1059,3 @@ fn closureCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     }
 }
 
-fn consoleLogCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = this_value;
-    const writer: *std.Io.Writer = @ptrCast(@alignCast(ctx));
-    try inspect.writeConsoleLog(allocator, writer, args);
-    return JSValue.UNDEFINED;
-}
