@@ -416,6 +416,26 @@ pub const Interpreter = struct {
         }
     }
 
+    /// The source side of array destructuring, shared by binding patterns
+    /// and destructuring assignment: the same narrowed iterables as for-of
+    /// (arrays by element, strings by code point); anything else is the
+    /// real TypeError Node raises.
+    fn iterableItems(self: *Interpreter, value: JSValue) anyerror![]const JSValue {
+        const arena = self.arena_state.allocator();
+        return switch (value) {
+            .array => |box| box.value.toSlice(),
+            .string => |box| blk: {
+                var cps: std.ArrayList(JSValue) = .empty;
+                var it = std.unicode.Utf8Iterator{ .bytes = box.value.data, .i = 0 };
+                while (it.nextCodepointSlice()) |cp| {
+                    try cps.append(arena, try JSValue.newString(arena, cp));
+                }
+                break :blk try cps.toOwnedSlice(arena);
+            },
+            else => self.throwError(.type_error, "{s} is not iterable", .{value.typeOf()}),
+        };
+    }
+
     /// Recursive BindingInitialization (ECMA-262 8.6.2) in *define* mode --
     /// every binding position (declarators, params, catch, for-in/of
     /// declared bindings) funnels here. Destructuring as an assignment
@@ -429,21 +449,7 @@ pub const Interpreter = struct {
         switch (pattern.*) {
             .identifier => |id| try env.define(arena, id.name, value.retain()),
             .array => |arr_pat| {
-                // Same narrowed iterables as for-of: arrays by element,
-                // strings by code point. Anything else is the real
-                // TypeError Node raises.
-                const items: []const JSValue = switch (value) {
-                    .array => |box| box.value.toSlice(),
-                    .string => |box| blk: {
-                        var cps: std.ArrayList(JSValue) = .empty;
-                        var it = std.unicode.Utf8Iterator{ .bytes = box.value.data, .i = 0 };
-                        while (it.nextCodepointSlice()) |cp| {
-                            try cps.append(arena, try JSValue.newString(arena, cp));
-                        }
-                        break :blk try cps.toOwnedSlice(arena);
-                    },
-                    else => return self.throwError(.type_error, "{s} is not iterable", .{value.typeOf()}),
-                };
+                const items = try self.iterableItems(value);
                 for (arr_pat.elements, 0..) |maybe_el, i| {
                     const el = maybe_el orelse continue; // elision hole
                     var v = if (i < items.len) items[i] else JSValue.UNDEFINED;
@@ -502,6 +508,105 @@ pub const Interpreter = struct {
         }
     }
 
+    /// Destructuring *assignment* (ECMA-262 13.15.5
+    /// DestructuringAssignmentEvaluation): the target is an array/object
+    /// *literal* node reinterpreted as a pattern -- already validated at
+    /// parse time by z-parser's isValidAssignmentPattern, so the shapes
+    /// seen here are exactly the valid ones. Mirrors bindPattern's source
+    /// semantics (iterableItems, getProperty lookups, defaults only on
+    /// undefined), but every leaf goes through assignTo -- which is what
+    /// makes member-expression targets (`[o.x] = [1]`) work, something
+    /// BindingPattern can't even represent.
+    fn destructuringAssign(self: *Interpreter, env: *Environment, target: *zparser.Node, value: JSValue) anyerror!void {
+        const arena = self.arena_state.allocator();
+        switch (target.data) {
+            .array_literal => |elements| {
+                const items = try self.iterableItems(value);
+                for (elements, 0..) |maybe_el, i| {
+                    const el = maybe_el orelse continue; // hole still consumes its index
+                    if (el.data == .spread) {
+                        // Parse-time validation guarantees this is last.
+                        var rest_arr = try JSValue.newArray(arena);
+                        if (i < items.len) {
+                            for (items[i..]) |item| _ = try rest_arr.array.value.push(item.retain());
+                        }
+                        try self.destructuringAssignTarget(env, el.data.spread, rest_arr);
+                        break;
+                    }
+                    var v = if (i < items.len) items[i] else JSValue.UNDEFINED;
+                    var el_target = el;
+                    if (el.data == .assignment and el.data.assignment.op == .assign) {
+                        if (v == .@"undefined") v = try self.evalExpression(env, el.data.assignment.value);
+                        el_target = el.data.assignment.target;
+                    }
+                    try self.destructuringAssignTarget(env, el_target, v);
+                }
+            },
+            .object_literal => |elements| {
+                if (value == .@"undefined" or value == .@"null") {
+                    const what: []const u8 = if (value == .@"null") "null" else "undefined";
+                    const first_key: ?[]const u8 = for (elements) |el| {
+                        switch (el) {
+                            .property => |p| if (!p.computed and p.key.data == .identifier) break p.key.data.identifier,
+                            .spread => {},
+                        }
+                    } else null;
+                    if (first_key) |k| {
+                        return self.throwError(.type_error, "Cannot destructure property '{s}' of '{s}' as it is {s}.", .{ k, what, what });
+                    }
+                    return self.throwError(.type_error, "Cannot destructure '{s}' as it is {s}.", .{ what, what });
+                }
+                var consumed: std.ArrayList([]const u8) = .empty;
+                for (elements) |el| {
+                    switch (el) {
+                        .property => |prop| {
+                            const key = try self.propertyKeyString(env, prop.computed, prop.key);
+                            try consumed.append(arena, key);
+                            var v = try self.getProperty(value, key);
+                            var el_target = prop.value;
+                            if (el_target.data == .assignment and el_target.data.assignment.op == .assign) {
+                                if (v == .@"undefined") v = try self.evalExpression(env, el_target.data.assignment.value);
+                                el_target = el_target.data.assignment.target;
+                            }
+                            try self.destructuringAssignTarget(env, el_target, v);
+                        },
+                        .spread => |sp| {
+                            // Object rest: own keys not already consumed;
+                            // non-object sources rest to an empty object
+                            // (same narrowing as bindPattern's rest). The
+                            // element holds a `.spread` node wrapping the
+                            // actual target.
+                            const arg = sp.data.spread;
+                            var rest_obj = try JSValue.newObject(arena);
+                            if (value == .object) {
+                                const keys = try value.object.value.keys(arena);
+                                defer arena.free(keys);
+                                outer: for (keys) |k| {
+                                    for (consumed.items) |c| {
+                                        if (std.mem.eql(u8, c, k)) continue :outer;
+                                    }
+                                    try rest_obj.object.value.set(k, value.object.value.get(k).?.retain());
+                                }
+                            }
+                            try self.destructuringAssignTarget(env, arg, rest_obj);
+                        },
+                    }
+                }
+            },
+            else => unreachable, // only ever called with array/object literal targets
+        }
+    }
+
+    /// One target position inside a destructuring assignment: nested
+    /// literals recurse as patterns; everything else (identifier, member,
+    /// paren-wrapped) is an ordinary assignment leaf.
+    fn destructuringAssignTarget(self: *Interpreter, env: *Environment, node: *zparser.Node, value: JSValue) anyerror!void {
+        switch (node.data) {
+            .array_literal, .object_literal => try self.destructuringAssign(env, node, value),
+            else => try self.assignTo(env, node, value),
+        }
+    }
+
     /// Binds the loop variable for one for-in/for-of iteration. Declared
     /// bindings (var/let/const) get a FRESH child env per iteration, so
     /// closures created in the body capture that iteration's value (real
@@ -519,6 +624,12 @@ pub const Interpreter = struct {
             .existing => |name| {
                 env.assign(name.name, value) catch
                     return self.throwError(.reference_error, "{s} is not defined", .{name.name});
+                return env;
+            },
+            // `for ([a, b] of x)` over existing bindings -- a destructuring
+            // assignment per iteration, no fresh env.
+            .existing_pattern => |node| {
+                try self.destructuringAssign(env, node, value);
                 return env;
             },
         }
@@ -923,7 +1034,13 @@ pub const Interpreter = struct {
     fn evalAssignment(self: *Interpreter, env: *Environment, a: anytype) anyerror!JSValue {
         if (a.op == .assign) {
             const value = try self.evalExpression(env, a.value);
-            try self.assignTo(env, a.target, value);
+            switch (a.target.data) {
+                // Cover-grammar reinterpretation: the literal IS the
+                // pattern. The expression's own value stays the RHS
+                // (`([a] = [7])[0]` is 7), per spec.
+                .array_literal, .object_literal => try self.destructuringAssign(env, a.target, value),
+                else => try self.assignTo(env, a.target, value),
+            }
             return value;
         }
         switch (a.op) {

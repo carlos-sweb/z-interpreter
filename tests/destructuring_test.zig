@@ -79,3 +79,43 @@ test "destructuring null/undefined with an object pattern is a catchable TypeErr
     try helpers.expectUncaught("const {m1} = null;", .type_error, "Cannot destructure property 'm1' of 'null' as it is null.");
     try helpers.expectUncaught("const {m1} = undefined;", .type_error, "Cannot destructure property 'm1' of 'undefined' as it is undefined.");
 }
+
+// ===== Destructuring assignment (phase 8b: existing bindings, no declaration) =====
+
+test "assignment: basics, swap, and the expression's value is the RHS" {
+    try helpers.expectNumber("let a, b; [a, b] = [1, 2]; a * 10 + b;", 12);
+    try helpers.expectNumber("let a = 1, b = 2; [a, b] = [b, a]; a * 10 + b;", 21);
+    try helpers.expectNumber("let a; ([a] = [7])[0];", 7);
+}
+
+test "assignment: member-expression targets (impossible in binding positions)" {
+    try helpers.expectNumber("const o = {}; [o.x, o.y] = [1, 2]; o.x + o.y;", 3);
+    try helpers.expectNumber("const o = {}; ({x: o.z} = {x: 5}); o.z;", 5);
+}
+
+test "assignment: holes, defaults, rest, nesting" {
+    try helpers.expectNumber("let w; [, w] = [1, 2]; w;", 2);
+    try helpers.expectNumber("let d; [d = 5] = []; d;", 5);
+    try helpers.expectNumber("let h, t; [h, ...t] = [1, 2, 3]; t.length * 10 + t[0];", 22);
+    try helpers.expectNumber("let a, b; [[a], {b}] = [[7], {b: 8}]; a + b;", 15);
+}
+
+test "assignment: object patterns need parens at statement level" {
+    try helpers.expectNumber("let a; ({a} = {a: 9}); a;", 9);
+    try helpers.expectStdout("let a, r; ({a, ...r} = {a: 1, b: 2, c: 3}); console.log(Object.keys(r).join(','));", "b,c\n");
+}
+
+test "for-of/for-in over existing bindings with a pattern" {
+    try helpers.expectStdout("let k, v; for ([k, v] of [[1, 2], [3, 4]]) console.log(k * v);", "2\n12\n");
+    // for-in keys are strings; the array pattern destructures the key by
+    // code point ('xy' -> 'x', 'y') -- exactly what Node does.
+    try helpers.expectStdout("let p, q; for ([p, q] in {xy: 1}) console.log(p, q);", "x y\n");
+}
+
+test "assignment errors: non-iterable, null source, undeclared target" {
+    try helpers.expectStdout("let a; try { [a] = 5; } catch (e) { console.log(e.name); }", "TypeError\n");
+    try helpers.expectStdout("let a; try { ({a} = null); } catch (e) { console.log(e.message); }", "Cannot destructure property 'a' of 'null' as it is null.\n");
+    // No implicit globals: assigning into an undeclared identifier inside
+    // a pattern is the same ReferenceError a plain assignment raises.
+    try helpers.expectUncaught("[zzz] = [1];", .reference_error, "zzz is not defined");
+}
