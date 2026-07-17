@@ -172,7 +172,7 @@ pub const Interpreter = struct {
             .variable => |v| {
                 for (v.declarators) |decl| {
                     const value = if (decl.init) |init_expr| try self.evalExpression(env, init_expr) else JSValue.UNDEFINED;
-                    try env.define(arena, decl.name.name, value.retain());
+                    try self.bindPattern(env, decl.pattern, value);
                 }
                 return .{};
             },
@@ -249,7 +249,7 @@ pub const Interpreter = struct {
                 if (result == .thrown and s.handler != null) {
                     const h = s.handler.?;
                     const catch_env = try env.child(arena);
-                    if (h.param) |p| try catch_env.define(arena, p.name, result.thrown.retain());
+                    if (h.param) |p| try self.bindPattern(catch_env, p, result.thrown);
                     // A throw from the catch body becomes the new .thrown
                     // result; the original exception is dropped
                     // (spec-correct).
@@ -385,7 +385,7 @@ pub const Interpreter = struct {
                         .decl => |d| {
                             for (d.declarators) |decl| {
                                 const value = if (decl.init) |e| try self.evalExpression(loop_env, e) else JSValue.UNDEFINED;
-                                try loop_env.define(arena, decl.name.name, value.retain());
+                                try self.bindPattern(loop_env, decl.pattern, value);
                             }
                         },
                         .expr => |e| _ = try self.evalExpression(loop_env, e),
@@ -416,6 +416,92 @@ pub const Interpreter = struct {
         }
     }
 
+    /// Recursive BindingInitialization (ECMA-262 8.6.2) in *define* mode --
+    /// every binding position (declarators, params, catch, for-in/of
+    /// declared bindings) funnels here. Destructuring as an assignment
+    /// target (`[a, b] = arr` without a declaration) is separate machinery
+    /// (phase 8b), not this. Defaults are evaluated in `env` itself, so a
+    /// later element's default can reference an earlier binding
+    /// (`[a, b = a]` -- real spec order). Ownership: the caller keeps its
+    /// reference to `value`; identifier bindings retain.
+    fn bindPattern(self: *Interpreter, env: *Environment, pattern: *const zstatements.BindingPattern, value: JSValue) anyerror!void {
+        const arena = self.arena_state.allocator();
+        switch (pattern.*) {
+            .identifier => |id| try env.define(arena, id.name, value.retain()),
+            .array => |arr_pat| {
+                // Same narrowed iterables as for-of: arrays by element,
+                // strings by code point. Anything else is the real
+                // TypeError Node raises.
+                const items: []const JSValue = switch (value) {
+                    .array => |box| box.value.toSlice(),
+                    .string => |box| blk: {
+                        var cps: std.ArrayList(JSValue) = .empty;
+                        var it = std.unicode.Utf8Iterator{ .bytes = box.value.data, .i = 0 };
+                        while (it.nextCodepointSlice()) |cp| {
+                            try cps.append(arena, try JSValue.newString(arena, cp));
+                        }
+                        break :blk try cps.toOwnedSlice(arena);
+                    },
+                    else => return self.throwError(.type_error, "{s} is not iterable", .{value.typeOf()}),
+                };
+                for (arr_pat.elements, 0..) |maybe_el, i| {
+                    const el = maybe_el orelse continue; // elision hole
+                    var v = if (i < items.len) items[i] else JSValue.UNDEFINED;
+                    if (v == .@"undefined") {
+                        if (el.default) |def| v = try self.evalExpression(env, def);
+                    }
+                    try self.bindPattern(env, el.pattern, v);
+                }
+                if (arr_pat.rest) |rest_pat| {
+                    var rest_arr = try JSValue.newArray(arena);
+                    if (arr_pat.elements.len < items.len) {
+                        for (items[arr_pat.elements.len..]) |item| {
+                            _ = try rest_arr.array.value.push(item.retain());
+                        }
+                    }
+                    try self.bindPattern(env, rest_pat, rest_arr);
+                }
+            },
+            .object => |obj_pat| {
+                if (value == .@"undefined" or value == .@"null") {
+                    const what: []const u8 = if (value == .@"null") "null" else "undefined";
+                    if (obj_pat.properties.len > 0) {
+                        return self.throwError(.type_error, "Cannot destructure property '{s}' of '{s}' as it is {s}.", .{ obj_pat.properties[0].key, what, what });
+                    }
+                    return self.throwError(.type_error, "Cannot destructure '{s}' as it is {s}.", .{ what, what });
+                }
+                // getProperty is the whole point of the reuse: string
+                // `.length`, error `.message`, prototype-chain lookups on
+                // objects -- all already live there.
+                for (obj_pat.properties) |prop| {
+                    var v = try self.getProperty(value, prop.key);
+                    if (v == .@"undefined") {
+                        if (prop.default) |def| v = try self.evalExpression(env, def);
+                    }
+                    try self.bindPattern(env, prop.value, v);
+                }
+                if (obj_pat.rest) |rest_name| {
+                    // Own keys of an object source, minus the ones already
+                    // destructured; non-object sources rest to an empty
+                    // object (narrowed -- real JS copies own enumerable
+                    // props of the coerced object).
+                    var rest_obj = try JSValue.newObject(arena);
+                    if (value == .object) {
+                        const keys = try value.object.value.keys(arena);
+                        defer arena.free(keys);
+                        outer: for (keys) |k| {
+                            for (obj_pat.properties) |prop| {
+                                if (std.mem.eql(u8, prop.key, k)) continue :outer;
+                            }
+                            try rest_obj.object.value.set(k, value.object.value.get(k).?.retain());
+                        }
+                    }
+                    try env.define(arena, rest_name.name, rest_obj);
+                }
+            },
+        }
+    }
+
     /// Binds the loop variable for one for-in/for-of iteration. Declared
     /// bindings (var/let/const) get a FRESH child env per iteration, so
     /// closures created in the body capture that iteration's value (real
@@ -427,7 +513,7 @@ pub const Interpreter = struct {
         switch (binding) {
             .declared => |d| {
                 const iter_env = try env.child(arena);
-                try iter_env.define(arena, d.name.name, value.retain());
+                try self.bindPattern(iter_env, d.pattern, value);
                 return iter_env;
             },
             .existing => |name| {
@@ -1042,7 +1128,7 @@ fn closureCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
         if (value == .@"undefined") {
             if (param.default) |def| value = try self.evalExpression(call_env, def);
         }
-        try call_env.define(allocator, param.binding.name, value.retain());
+        try self.bindPattern(call_env, param.pattern, value);
     }
     if (fnode.params.rest) |rest| {
         var rest_arr = try JSValue.newArray(allocator);

@@ -63,6 +63,7 @@ pub fn build(b: *std.Build) void {
         "tests/iteration_test.zig",
         "tests/builtins_test.zig",
         "tests/date_test.zig",
+        "tests/destructuring_test.zig",
     };
 
     inline for (test_files) |test_file| {

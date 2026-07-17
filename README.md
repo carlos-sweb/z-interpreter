@@ -43,13 +43,18 @@ The z-* ecosystem's already-implemented methods are exposed to JS as native func
 
 `for-of` iterates the built-in iterables natively: arrays (elements), strings (**Unicode code points**, surrogate pairs together — the real spec behavior), maps (`[key, value]` pair arrays), and sets (values); everything else — plain objects included — is a real TypeError, exactly like Node. `for-in` yields enumerable string keys, own **and inherited** (walking the prototype chain, shadowed keys seen once), array/string indices as strings, and — per spec — zero iterations without error over `null`/`undefined`. Declared bindings (`let`/`const`) get a fresh environment per iteration, so closures created in the body capture that iteration's value. All Node-verified.
 
+## Destructuring (binding positions)
+
+One recursive `bindPattern` (ECMA-262 8.6.2 BindingInitialization, define mode) serves every binding position: `var`/`let`/`const` declarators, function/arrow parameters, `catch` bindings, and `for-in`/`for-of` declared bindings — `for (const [k, v] of Object.entries(o))` works. Array patterns destructure arrays and strings (by code point, same as for-of); anything else is the real catchable `TypeError`. Object patterns look properties up through `getProperty`, so `const {length} = 'abc'` and `catch ({message})` work for free; destructuring `null`/`undefined` throws Node's exact `Cannot destructure property 'x' of 'null' as it is null.` Defaults fire only on `undefined` (not `null`), are evaluated left-to-right in the binding environment (`[a, b = a]` sees `a`), holes skip, and rests collect the remainder (array rest recursively, object rest as a fresh object of the un-destructured own keys). All Node-verified.
+
 ## Known gaps (deferred to future phases)
 
 - **`with`**.
 - **User-defined iterables (`Symbol.iterator` protocol)**: requires symbol-keyed properties, and `ZObject` is string-keyed only — for-of covers the built-in iterables natively instead.
 - **`constructor` shows up in `for-in`**: our narrowed model stores it as an ordinary (enumerable) property; real JS marks it non-enumerable.
 - **Arbitrary properties on function values**: only `prototype` (writable), `name`, and `length` exist — functions here have no general property bag (`F.myProp = 1` is NotImplemented).
-- **Classes, generators, `async`/`await`, destructuring**: not even parseable yet anywhere in this ecosystem.
+- **Classes, generators, `async`/`await`**: not even parseable yet anywhere in this ecosystem.
+- **Destructuring as an assignment target** (`[a, b] = arr;` without a declaration, `for ([a, b] of x)` over existing bindings): needs z-parser-side reinterpretation of array/object literals as patterns — a separate phase. Destructuring in *binding* positions is fully implemented (see below).
 - **Regex literals**: parse fine (`z-parser`), but evaluating one to a real `.regex` `JSValue` needs `zregexp`, which this repo deliberately doesn't depend on for this narrow phase — `error.NotImplemented`.
 - **No hoisting, no TDZ**: `var`/`let`/`const`/function declarations are all evaluated strictly in source order, defining directly into the current environment. A real, known divergence from spec (e.g. `console.log(x); var x = 1;` is `undefined` in real JS via hoisting; here it's a `ReferenceError`).
 - **`this` for constructors**: only the member-call case (`obj.method()`) is wired; no `new`-based `this` binding.
