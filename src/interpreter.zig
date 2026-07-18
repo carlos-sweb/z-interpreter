@@ -79,6 +79,12 @@ pub const Interpreter = struct {
     /// body don't inherit construct-ness). This is how `C()` without
     /// `new` becomes the real TypeError.
     construct_target: ?*anyopaque = null,
+    /// User code runs in this child of global_env (created on first
+    /// run(), persistent across runs). The separation makes the lexical
+    /// redeclaration check ("already declared in THIS env") correct:
+    /// `let console = 5` must be legal -- builtins aren't lexical
+    /// bindings of the script scope, just reachable through the chain.
+    script_env: ?*Environment = null,
 
     pub fn init(backing_allocator: Allocator, console_writer: *std.Io.Writer) !Interpreter {
         var self: Interpreter = .{
@@ -113,9 +119,10 @@ pub const Interpreter = struct {
             self.globals_ready = true;
         }
         const arena = self.arena_state.allocator();
+        if (self.script_env == null) self.script_env = try self.global_env.child(arena);
         const parser = try zfunctions.Parser.init(arena, source);
         const program = try parser.parseProgram();
-        const c = self.evalProgram(self.global_env, program) catch |err| {
+        const c = self.evalBody(self.script_env.?, program) catch |err| {
             if (err != error.JsThrow) return err;
             return error.UncaughtException;
         };
@@ -170,6 +177,9 @@ pub const Interpreter = struct {
         };
     }
 
+    /// The raw statement loop -- no hoisting. Callers go through
+    /// `evalBody` (function/script bodies: var + lexical pre-passes) or
+    /// `evalStatementList` (blocks: lexical pre-pass only).
     pub fn evalProgram(self: *Interpreter, env: *Environment, program: []const *zstatements.Statement) anyerror!Completion {
         var last_value: JSValue = JSValue.UNDEFINED;
         for (program) |stmt| {
@@ -178,6 +188,198 @@ pub const Interpreter = struct {
             last_value = c.value;
         }
         return .{ .type = .normal, .value = last_value };
+    }
+
+    /// Function-body / script entry: `var` names hoist here (defined as
+    /// undefined unless already present -- parameters win), then the
+    /// ordinary per-StatementList lexical hoisting runs.
+    fn evalBody(self: *Interpreter, env: *Environment, stmts: []const *zstatements.Statement) anyerror!Completion {
+        try self.hoistVarScope(env, stmts);
+        return self.evalStatementList(env, stmts);
+    }
+
+    /// Every StatementList entry: function declarations become callable
+    /// immediately, let/const/class names enter their TDZ, then the
+    /// statements run.
+    fn evalStatementList(self: *Interpreter, env: *Environment, stmts: []const *zstatements.Statement) anyerror!Completion {
+        try self.hoistLexical(env, stmts);
+        return self.evalProgram(env, stmts);
+    }
+
+    // ===== Hoisting pre-passes =====
+
+    /// Collects every `var`-declared name in a function/script body,
+    /// recursing through blocks, if arms, loop bodies AND loop heads,
+    /// switch cases, try/catch/finally, and labelled statements -- but
+    /// never into nested function or class bodies (their vars are their
+    /// own). Annex B's sloppy-mode escape of block-level function
+    /// declarations to function scope is deliberately NOT implemented
+    /// (this engine is always-strict; see README).
+    fn hoistVarScope(self: *Interpreter, env: *Environment, stmts: []const *zstatements.Statement) anyerror!void {
+        for (stmts) |stmt| try self.hoistVarsInStatement(env, stmt);
+    }
+
+    fn hoistVarsInStatement(self: *Interpreter, env: *Environment, stmt: *zstatements.Statement) anyerror!void {
+        switch (stmt.data) {
+            .variable => |v| if (v.kind == .@"var") {
+                for (v.declarators) |decl| try self.hoistVarPattern(env, decl.pattern);
+            },
+            .block => |stmts| try self.hoistVarScope(env, stmts),
+            .if_stmt => |s| {
+                try self.hoistVarsInStatement(env, s.consequent);
+                if (s.alternate) |alt| try self.hoistVarsInStatement(env, alt);
+            },
+            .while_stmt => |s| try self.hoistVarsInStatement(env, s.body),
+            .do_while => |s| try self.hoistVarsInStatement(env, s.body),
+            .for_stmt => |s| {
+                switch (s.head) {
+                    .c_style => |head| if (head.init) |init_clause| {
+                        switch (init_clause) {
+                            .decl => |d| if (d.kind == .@"var") {
+                                for (d.declarators) |decl| try self.hoistVarPattern(env, decl.pattern);
+                            },
+                            .expr => {},
+                        }
+                    },
+                    .for_in => |head| try self.hoistVarForBinding(env, head.binding),
+                    .for_of => |head| try self.hoistVarForBinding(env, head.binding),
+                }
+                try self.hoistVarsInStatement(env, s.body);
+            },
+            .labelled => |s| try self.hoistVarsInStatement(env, s.body),
+            .try_stmt => |s| {
+                try self.hoistVarsInStatement(env, s.block);
+                if (s.handler) |h| try self.hoistVarsInStatement(env, h.body);
+                if (s.finalizer) |fin| try self.hoistVarsInStatement(env, fin);
+            },
+            .switch_stmt => |s| for (s.cases) |case| {
+                for (case.consequent) |cs| try self.hoistVarsInStatement(env, cs);
+            },
+            .with_stmt => |s| try self.hoistVarsInStatement(env, s.body),
+            else => {},
+        }
+    }
+
+    fn hoistVarForBinding(self: *Interpreter, env: *Environment, binding: zstatements.ForBinding) anyerror!void {
+        switch (binding) {
+            .declared => |d| if (d.kind == .@"var") try self.hoistVarPattern(env, d.pattern),
+            .existing, .existing_pattern => {},
+        }
+    }
+
+    /// Defines every name a var declarator's pattern binds as undefined,
+    /// unless this env already has it (parameters, earlier vars).
+    fn hoistVarPattern(self: *Interpreter, env: *Environment, pattern: *const zstatements.BindingPattern) anyerror!void {
+        const arena = self.arena_state.allocator();
+        switch (pattern.*) {
+            .identifier => |id| if (!env.bindings.contains(id.name)) {
+                try env.define(arena, id.name, JSValue.UNDEFINED);
+            },
+            .array => |arr| {
+                for (arr.elements) |maybe_el| {
+                    if (maybe_el) |el| try self.hoistVarPattern(env, el.pattern);
+                }
+                if (arr.rest) |r| try self.hoistVarPattern(env, r);
+            },
+            .object => |obj| {
+                for (obj.properties) |p| try self.hoistVarPattern(env, p.value);
+                if (obj.rest) |r| if (!env.bindings.contains(r.name)) {
+                    try env.define(arena, r.name, JSValue.UNDEFINED);
+                };
+            },
+        }
+    }
+
+    /// The per-StatementList lexical pre-pass, over DIRECT statements
+    /// only (nested blocks get their own on entry). Function declarations
+    /// hoist fully (mutual recursion, call-before-declaration);
+    /// let/const/class names enter the TDZ; duplicate declarations in the
+    /// same scope are the real "already been declared" SyntaxError
+    /// (catchable here since this engine has no parse-time scope
+    /// analysis).
+    fn hoistLexical(self: *Interpreter, env: *Environment, stmts: []const *zstatements.Statement) anyerror!void {
+        const arena = self.arena_state.allocator();
+        for (stmts) |stmt| {
+            switch (stmt.data) {
+                .function_declaration => |ptr| {
+                    const fnode = zfunctions.asFunctionNode(ptr);
+                    const name = fnode.kind.function_decl.name;
+                    // `let f; function f() {}` is the real SyntaxError;
+                    // f-over-f or f-over-var stays legal (later wins).
+                    if (env.tdz.contains(name)) {
+                        return self.throwError(.syntax_error, "Identifier '{s}' has already been declared", .{name});
+                    }
+                    const value = try self.makeClosure(env, fnode);
+                    try env.define(arena, name, value);
+                },
+                .variable => |v| {
+                    if (v.kind == .@"var") {
+                        // Bindings come from the var pre-pass; here vars
+                        // only participate in the redeclaration check
+                        // (`let x; var x;` is the real SyntaxError).
+                        for (v.declarators) |decl| try self.checkVarNotShadowingLexical(env, decl.pattern);
+                        continue;
+                    }
+                    for (v.declarators) |decl| try self.markPatternTDZ(env, decl.pattern);
+                },
+                .class_declaration => |ptr| {
+                    const cnode = zfunctions.asClassNode(ptr);
+                    const name = cnode.name.?;
+                    if (env.declaresLocally(name)) {
+                        return self.throwError(.syntax_error, "Identifier '{s}' has already been declared", .{name});
+                    }
+                    try env.markTDZ(arena, name);
+                },
+                else => {},
+            }
+        }
+    }
+
+    fn markPatternTDZ(self: *Interpreter, env: *Environment, pattern: *const zstatements.BindingPattern) anyerror!void {
+        const arena = self.arena_state.allocator();
+        switch (pattern.*) {
+            .identifier => |id| {
+                if (env.declaresLocally(id.name)) {
+                    return self.throwError(.syntax_error, "Identifier '{s}' has already been declared", .{id.name});
+                }
+                try env.markTDZ(arena, id.name);
+            },
+            .array => |arr| {
+                for (arr.elements) |maybe_el| {
+                    if (maybe_el) |el| try self.markPatternTDZ(env, el.pattern);
+                }
+                if (arr.rest) |r| try self.markPatternTDZ(env, r);
+            },
+            .object => |obj| {
+                for (obj.properties) |p| try self.markPatternTDZ(env, p.value);
+                if (obj.rest) |r| {
+                    if (env.declaresLocally(r.name)) {
+                        return self.throwError(.syntax_error, "Identifier '{s}' has already been declared", .{r.name});
+                    }
+                    try env.markTDZ(arena, r.name);
+                }
+            },
+        }
+    }
+
+    fn checkVarNotShadowingLexical(self: *Interpreter, env: *Environment, pattern: *const zstatements.BindingPattern) anyerror!void {
+        switch (pattern.*) {
+            .identifier => |id| if (env.tdz.contains(id.name)) {
+                return self.throwError(.syntax_error, "Identifier '{s}' has already been declared", .{id.name});
+            },
+            .array => |arr| {
+                for (arr.elements) |maybe_el| {
+                    if (maybe_el) |el| try self.checkVarNotShadowingLexical(env, el.pattern);
+                }
+                if (arr.rest) |r| try self.checkVarNotShadowingLexical(env, r);
+            },
+            .object => |obj| {
+                for (obj.properties) |p| try self.checkVarNotShadowingLexical(env, p.value);
+                if (obj.rest) |r| if (env.tdz.contains(r.name)) {
+                    return self.throwError(.syntax_error, "Identifier '{s}' has already been declared", .{r.name});
+                };
+            },
+        }
     }
 
     // ===== Statements =====
@@ -192,12 +394,21 @@ pub const Interpreter = struct {
             },
             .block => |stmts| {
                 const block_env = try env.child(arena);
-                return self.evalProgram(block_env, stmts);
+                return self.evalStatementList(block_env, stmts);
             },
             .variable => |v| {
                 for (v.declarators) |decl| {
+                    // An initializer-less `var a;` is a no-op at execution
+                    // time -- the hoist pre-pass already created the
+                    // binding, and real JS does NOT reset an existing
+                    // value (`function h(a) { var a; return a; }` keeps
+                    // the argument).
+                    if (v.kind == .@"var" and decl.init == null) continue;
                     const value = if (decl.init) |init_expr| try self.evalExpression(env, init_expr) else JSValue.UNDEFINED;
-                    try self.bindPattern(env, decl.pattern, value);
+                    // var writes to its hoisted function-scope binding
+                    // (that's how `if (1) { var x = 5; } x` works);
+                    // let/const define here, ending their TDZ.
+                    try self.bindPattern(env, decl.pattern, value, if (v.kind == .@"var") .assign else .define);
                 }
                 return .{};
             },
@@ -282,7 +493,7 @@ pub const Interpreter = struct {
                 if (result == .thrown and s.handler != null) {
                     const h = s.handler.?;
                     const catch_env = try env.child(arena);
-                    if (h.param) |p| try self.bindPattern(catch_env, p, result.thrown);
+                    if (h.param) |p| try self.bindPattern(catch_env, p, result.thrown, .define);
                     // A throw from the catch body becomes the new .thrown
                     // result; the original exception is dropped
                     // (spec-correct).
@@ -316,8 +527,11 @@ pub const Interpreter = struct {
             .switch_stmt => |s| {
                 const disc = try self.evalExpression(env, s.discriminant); // evaluated ONCE
                 // The whole CaseBlock is ONE lexical scope (a let in one
-                // case is visible in later ones -- real JS quirk).
+                // case is visible in later ones -- real JS quirk), so the
+                // lexical pre-pass runs over every case's consequent
+                // before any selector/statement evaluates.
                 const switch_env = try env.child(arena);
+                for (s.cases) |case| try self.hoistLexical(switch_env, case.consequent);
 
                 var start_index: ?usize = null;
                 for (s.cases, 0..) |case, i| {
@@ -417,8 +631,12 @@ pub const Interpreter = struct {
                     switch (init_clause) {
                         .decl => |d| {
                             for (d.declarators) |decl| {
+                                // Same no-op rule as the .variable arm:
+                                // `for (var i; ...)` must not reset a
+                                // hoisted binding.
+                                if (d.kind == .@"var" and decl.init == null) continue;
                                 const value = if (decl.init) |e| try self.evalExpression(loop_env, e) else JSValue.UNDEFINED;
-                                try self.bindPattern(loop_env, decl.pattern, value);
+                                try self.bindPattern(loop_env, decl.pattern, value, if (d.kind == .@"var") .assign else .define);
                             }
                         },
                         .expr => |e| _ = try self.evalExpression(loop_env, e),
@@ -469,18 +687,32 @@ pub const Interpreter = struct {
         };
     }
 
-    /// Recursive BindingInitialization (ECMA-262 8.6.2) in *define* mode --
-    /// every binding position (declarators, params, catch, for-in/of
-    /// declared bindings) funnels here. Destructuring as an assignment
-    /// target (`[a, b] = arr` without a declaration) is separate machinery
-    /// (phase 8b), not this. Defaults are evaluated in `env` itself, so a
-    /// later element's default can reference an earlier binding
-    /// (`[a, b = a]` -- real spec order). Ownership: the caller keeps its
-    /// reference to `value`; identifier bindings retain.
-    fn bindPattern(self: *Interpreter, env: *Environment, pattern: *const zstatements.BindingPattern, value: JSValue) anyerror!void {
+    /// How bindPattern lands a name: `.define` creates the binding in
+    /// `env` (let/const/params/catch); `.assign` writes to an existing
+    /// binding up the chain -- `var` declarators, whose bindings the
+    /// hoisting pre-pass already created at function scope.
+    const BindMode = enum { define, assign };
+
+    /// Recursive BindingInitialization (ECMA-262 8.6.2) -- every binding
+    /// position (declarators, params, catch, for-in/of declared bindings)
+    /// funnels here. Destructuring as an assignment target (`[a, b] =
+    /// arr` without a declaration) is separate machinery (phase 8b), not
+    /// this. Defaults are evaluated in `env` itself, so a later element's
+    /// default can reference an earlier binding (`[a, b = a]` -- real
+    /// spec order). Ownership: the caller keeps its reference to `value`;
+    /// identifier bindings retain.
+    fn bindPattern(self: *Interpreter, env: *Environment, pattern: *const zstatements.BindingPattern, value: JSValue, mode: BindMode) anyerror!void {
         const arena = self.arena_state.allocator();
         switch (pattern.*) {
-            .identifier => |id| try env.define(arena, id.name, value.retain()),
+            .identifier => |id| {
+                const v = value.retain();
+                switch (mode) {
+                    .define => try env.define(arena, id.name, v),
+                    // The pre-pass defined every var name; the fallback
+                    // define is belt-and-braces, not a real path.
+                    .assign => env.assign(id.name, v) catch try env.define(arena, id.name, v),
+                }
+            },
             .array => |arr_pat| {
                 const items = try self.iterableItems(value);
                 for (arr_pat.elements, 0..) |maybe_el, i| {
@@ -489,7 +721,7 @@ pub const Interpreter = struct {
                     if (v == .@"undefined") {
                         if (el.default) |def| v = try self.evalExpression(env, def);
                     }
-                    try self.bindPattern(env, el.pattern, v);
+                    try self.bindPattern(env, el.pattern, v, mode);
                 }
                 if (arr_pat.rest) |rest_pat| {
                     var rest_arr = try JSValue.newArray(arena);
@@ -498,7 +730,7 @@ pub const Interpreter = struct {
                             _ = try rest_arr.array.value.push(item.retain());
                         }
                     }
-                    try self.bindPattern(env, rest_pat, rest_arr);
+                    try self.bindPattern(env, rest_pat, rest_arr, mode);
                 }
             },
             .object => |obj_pat| {
@@ -517,7 +749,7 @@ pub const Interpreter = struct {
                     if (v == .@"undefined") {
                         if (prop.default) |def| v = try self.evalExpression(env, def);
                     }
-                    try self.bindPattern(env, prop.value, v);
+                    try self.bindPattern(env, prop.value, v, mode);
                 }
                 if (obj_pat.rest) |rest_name| {
                     // Own keys of an object source, minus the ones already
@@ -535,7 +767,10 @@ pub const Interpreter = struct {
                             try rest_obj.object.value.set(k, value.object.value.get(k).?.retain());
                         }
                     }
-                    try env.define(arena, rest_name.name, rest_obj);
+                    switch (mode) {
+                        .define => try env.define(arena, rest_name.name, rest_obj),
+                        .assign => env.assign(rest_name.name, rest_obj) catch try env.define(arena, rest_name.name, rest_obj),
+                    }
                 }
             },
         }
@@ -641,22 +876,29 @@ pub const Interpreter = struct {
     }
 
     /// Binds the loop variable for one for-in/for-of iteration. Declared
-    /// bindings (var/let/const) get a FRESH child env per iteration, so
+    /// let/const bindings get a FRESH child env per iteration, so
     /// closures created in the body capture that iteration's value (real
-    /// let/const semantics; `var`'s shared-binding nuance falls under the
-    /// already-documented no-hoisting gap). Existing bindings assign into
-    /// the enclosing scope chain.
+    /// let/const semantics); `for (var x of ...)` assigns to the single
+    /// hoisted function-scope binding instead (real shared-var
+    /// semantics). Existing bindings assign into the enclosing scope
+    /// chain.
     fn bindForIteration(self: *Interpreter, env: *Environment, binding: zstatements.ForBinding, value: JSValue) anyerror!*Environment {
         const arena = self.arena_state.allocator();
         switch (binding) {
             .declared => |d| {
+                if (d.kind == .@"var") {
+                    try self.bindPattern(env, d.pattern, value, .assign);
+                    return env;
+                }
                 const iter_env = try env.child(arena);
-                try self.bindPattern(iter_env, d.pattern, value);
+                try self.bindPattern(iter_env, d.pattern, value, .define);
                 return iter_env;
             },
             .existing => |name| {
-                env.assign(name.name, value) catch
-                    return self.throwError(.reference_error, "{s} is not defined", .{name.name});
+                env.assign(name.name, value) catch |err| return switch (err) {
+                    error.ReferenceError => self.throwError(.reference_error, "{s} is not defined", .{name.name}),
+                    error.BeforeInitialization => self.throwError(.reference_error, "Cannot access '{s}' before initialization", .{name.name}),
+                };
                 return env;
             },
             // `for ([a, b] of x)` over existing bindings -- a destructuring
@@ -792,7 +1034,11 @@ pub const Interpreter = struct {
             .string_literal => |s| return try JSValue.newString(arena, s),
             .boolean_literal => |b| return JSValue.fromBool(b),
             .null_literal => return JSValue.NULL,
-            .identifier => |name| return env.get(name) orelse self.throwError(.reference_error, "{s} is not defined", .{name}),
+            .identifier => |name| switch (env.lookup(name)) {
+                .value => |v| return v,
+                .tdz => return self.throwError(.reference_error, "Cannot access '{s}' before initialization", .{name}),
+                .not_found => return self.throwError(.reference_error, "{s} is not defined", .{name}),
+            },
             .this_expr => return env.resolveThis(),
             .paren => |inner| return self.evalExpression(env, inner),
             .sequence => |items| {
@@ -1120,11 +1366,16 @@ pub const Interpreter = struct {
             .plus => return JSValue.fromNumber(try coercion.toNumber(try self.evalExpression(env, u.operand))),
             .typeof => {
                 // typeof on an undeclared identifier is "undefined", not a
-                // ReferenceError -- a real, deliberate spec quirk.
+                // ReferenceError -- a real, deliberate spec quirk. But a
+                // TDZ binding still throws (`typeof x; let x;` is the real
+                // ReferenceError).
                 if (u.operand.data == .identifier) {
-                    const v = env.get(u.operand.data.identifier) orelse
-                        return try JSValue.newString(self.arena_state.allocator(), "undefined");
-                    return try JSValue.newString(self.arena_state.allocator(), v.typeOf());
+                    const name = u.operand.data.identifier;
+                    switch (env.lookup(name)) {
+                        .value => |v| return try JSValue.newString(self.arena_state.allocator(), v.typeOf()),
+                        .tdz => return self.throwError(.reference_error, "Cannot access '{s}' before initialization", .{name}),
+                        .not_found => return try JSValue.newString(self.arena_state.allocator(), "undefined"),
+                    }
                 }
                 const v = try self.evalExpression(env, u.operand);
                 return try JSValue.newString(self.arena_state.allocator(), v.typeOf());
@@ -1191,8 +1442,10 @@ pub const Interpreter = struct {
 
     fn assignTo(self: *Interpreter, env: *Environment, target: *zparser.Node, value: JSValue) anyerror!void {
         switch (target.data) {
-            .identifier => |name| env.assign(name, value) catch
-                return self.throwError(.reference_error, "{s} is not defined", .{name}),
+            .identifier => |name| env.assign(name, value) catch |err| return switch (err) {
+                error.ReferenceError => self.throwError(.reference_error, "{s} is not defined", .{name}),
+                error.BeforeInitialization => self.throwError(.reference_error, "Cannot access '{s}' before initialization", .{name}),
+            },
             .paren => |inner| try self.assignTo(env, inner, value),
             .member => |m| {
                 const obj = try self.evalExpression(env, m.object);
@@ -1502,7 +1755,7 @@ fn invokeFunctionNode(
         if (value == .@"undefined") {
             if (param.default) |def| value = try self.evalExpression(call_env, def);
         }
-        try self.bindPattern(call_env, param.pattern, value);
+        try self.bindPattern(call_env, param.pattern, value, .define);
     }
     if (fnode.params.rest) |rest| {
         var rest_arr = try JSValue.newArray(allocator);
@@ -1515,7 +1768,7 @@ fn invokeFunctionNode(
 
     switch (fnode.body) {
         .block => |body_stmt| {
-            const c = try self.evalProgram(call_env, body_stmt.data.block);
+            const c = try self.evalBody(call_env, body_stmt.data.block);
             if (c.type == .return_completion) return c.value;
             return JSValue.UNDEFINED;
         },

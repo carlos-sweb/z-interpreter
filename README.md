@@ -59,6 +59,12 @@ Object-literal method shorthand (`{ m() { return this.x; } }`) evaluates to ordi
 
 The class work also removed a long-documented gap: **functions now have a property bag** (`Callable.statics`, lazy) — `F.myProp = 1` works on every function, with accessor dispatch on reads and writes.
 
+## Hoisting, TDZ, and strict mode
+
+Declarations behave like real JS now, via two pre-passes over the (already-built) AST — no parser changes. At function/script entry, a recursive walk collects every `var` name (through blocks, if arms, loop bodies *and heads*, switch cases, try/catch/finally — never into nested function/class bodies) and pre-defines it as `undefined` (parameters win: `function h(a) { var a; return a; }` keeps the argument, and an initializer-less `var a;` is a no-op at execution). At *every* StatementList entry, function declarations become callable immediately (call-before-declaration and mutual recursion work) and `let`/`const`/`class` names enter their **temporal dead zone** — touching one before its declaration executes, even via `typeof`, is the real `Cannot access 'x' before initialization`, and an inner dead `let` correctly shadows an initialized outer binding. Duplicate declarations in one scope (`let x; let x;`, `let x; var x;`, `let f; function f(){}`) raise the real `Identifier 'x' has already been declared` — at scope-entry runtime, since this engine has no parse-time scope analysis. `var` assignment writes to the hoisted function-scope binding, so `if (true) { var x = 5; } x` and `for (var k of ...)`'s shared binding behave like Node. User code runs in a script scope *below* the builtins, so `let console = 5` is legal exactly as in real JS.
+
+**This engine is always-strict** (like ES modules): no implicit globals, `this === undefined` in plain calls, and `"use strict"` is an accepted no-op. Sloppy mode is deliberately not implemented.
+
 ## Known gaps (deferred to future phases)
 
 - **`with`**.
@@ -68,7 +74,7 @@ The class work also removed a long-documented gap: **functions now have a proper
 - **Class narrowings**: no fields (`x = 1` / `static x = 1`), no `#private` names, no `new.target`, no computed class-body keys; a static accessor's `this` is the statics bag (so `this.otherStatic` works but `this === C` doesn't); `super` misuse is a runtime error here, not a parse-time SyntaxError; `prototype`/`name`/`length` still shadow anything with those names in a function's property bag.
 - **`({a = 1} = {})`** (CoverInitializedName — shorthand-with-default in an object *assignment* pattern): doesn't parse as an object literal; `({a: a = 1} = {})` works. And `{a} = obj` at statement level opens a block exactly like real JS — `({a} = obj)` is the correct form.
 - **Regex literals**: parse fine (`z-parser`), but evaluating one to a real `.regex` `JSValue` needs `zregexp`, which this repo deliberately doesn't depend on for this narrow phase — `error.NotImplemented`.
-- **No hoisting, no TDZ**: `var`/`let`/`const`/function declarations are all evaluated strictly in source order, defining directly into the current environment. A real, known divergence from spec (e.g. `console.log(x); var x = 1;` is `undefined` in real JS via hoisting; here it's a `ReferenceError`).
+- **Hoisting narrowings**: no Annex B (block-level function declarations don't escape to function scope in sloppy mode — this engine has no sloppy mode); redeclaration errors are raised at scope-entry *runtime* (catchable), not parse time, and only among declarations of the same StatementList plus the function-scope bindings visible there (`let x; { var x; }` is not detected); C-style `for (let i...)` uses one binding for the whole loop (no per-iteration copying — closures in the body share `i`).
 - **Data-only consumers don't invoke getters**: `JSON.stringify` omits accessor properties (real JS calls the getter and serializes the result), and `Object.assign`/spread (`{...o}`) copy them as `undefined` — they go through z-object's raw storage, which can't call functions. `Object.values`/`entries`/member access/destructuring DO invoke getters (interpreter dispatch).
 - **No `super`** (methods have no home-object; classes don't exist yet) and no exposed `Object.defineProperty` — accessors are only definable via object literals.
 
