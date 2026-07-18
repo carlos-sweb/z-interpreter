@@ -16,4 +16,5 @@ test {
     _ = @import("coercion.zig");
     _ = @import("inspect.zig");
     _ = @import("interpreter.zig");
+    _ = @import("fiber.zig");
 }

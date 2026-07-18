@@ -74,12 +74,18 @@ Everything Node-ordering-verified: executors run synchronously, settled-promise 
 
 Narrowings: thenable adoption detects real `.promise` values only (not arbitrary objects with `.then`); unhandled rejections are silently dropped (no tracking yet); `Promise.all/race` take arrays (general iterables need Symbol.iterator); `Promise()` without `new` works (real JS requires new); timers are Linux-only (raw `nanosleep`, same note as Date's clock).
 
+## Generators and async/await (fibers)
+
+The tree-walker suspends via **stackful fibers** — a ~150-line wrapper (`src/fiber.zig`) over `std.Io.fiber`'s raw context-switch primitives (x86_64/aarch64), the mechanism QuickJS gets from its bytecode VM's heap-saved frames and we get from a stack switch instead. The recursive evaluator runs **unchanged** on the fiber's stack; `yield`/`await` switch back to the scheduler, `next()`/promise-settlement switch back in. One mechanism, both features, and JS run-to-completion falls out of the design (one fiber active at a time, cooperatively).
+
+Generators: `function*` calls build a generator object without running the body; `next(v)` drives it (`v` becomes the yield's value), the body's `return` lands on `done: true` — which for-of correctly excludes, via the **iterator protocol** (duck-typed on a callable `next`, so hand-written iterator objects work in for-of too). Independent instances, state across resumptions, throws surfacing from `next()`, `yield` inside try/finally — all Node-verified. Async: calling an async function runs it **synchronously until the first await** (real semantics) on its own fiber and returns a promise settled from within; `await` subscribes to the operand (non-promises still take one queue trip) and suspends — resumption arrives through the ordinary 13a microtask queue, so `await new Promise(res => setTimeout(res, 5))` composes fibers, promises, and timers end-to-end. try/catch around rejected awaits, sequential awaits in loops, async-calling-async, `Promise.all` of async results, and generators driven from inside async bodies (nested fibers) all behave exactly like Node.
+
 ## Known gaps (deferred to future phases)
 
 - **`with`**.
 - **User-defined iterables (`Symbol.iterator` protocol)**: requires symbol-keyed properties, and `ZObject` is string-keyed only — for-of covers the built-in iterables natively instead.
 - **`constructor` shows up in `for-in`**: our narrowed model stores it as an ordinary (enumerable) property; real JS marks it non-enumerable.
-- **Generators, `async`/`await`**: not even parseable yet anywhere in this ecosystem.
+- **Fiber narrowings**: no `yield*` delegation, no `gen.return()`/`gen.throw()`, no async arrows / async methods / async generators, no top-level await; for-of's iterator protocol duck-types on a callable `next` (no Symbol.iterator); each generator/async activation arena-allocates a 4 MiB virtual stack, never individually freed (arena-per-run — the GC phase revisits).
 - **Class narrowings**: no fields (`x = 1` / `static x = 1`), no `#private` names, no `new.target`, no computed class-body keys; a static accessor's `this` is the statics bag (so `this.otherStatic` works but `this === C` doesn't); `super` misuse is a runtime error here, not a parse-time SyntaxError; `prototype`/`name`/`length` still shadow anything with those names in a function's property bag.
 - **`({a = 1} = {})`** (CoverInitializedName — shorthand-with-default in an object *assignment* pattern): doesn't parse as an object literal; `({a: a = 1} = {})` works. And `{a} = obj` at statement level opens a block exactly like real JS — `({a} = obj)` is the correct form.
 - **Regex literals**: parse fine (`z-parser`), but evaluating one to a real `.regex` `JSValue` needs `zregexp`, which this repo deliberately doesn't depend on for this narrow phase — `error.NotImplemented`.
