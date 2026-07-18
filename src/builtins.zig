@@ -71,6 +71,12 @@ pub const date_methods = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "toISOString", dateToISOString },
 });
 
+pub const promise_methods = std.StaticStringMap(NativeFn).initComptime(.{
+    .{ "then", promiseThen },
+    .{ "catch", promiseCatch },
+    .{ "finally", promiseFinally },
+});
+
 pub const string_methods = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "toUpperCase", stringToUpperCase },
     .{ "toLowerCase", stringToLowerCase },
@@ -147,6 +153,45 @@ pub fn setupGlobals(self: *Interpreter) !void {
         .constructable = true,
     });
     try g.define(arena, "Date", date_ctor);
+
+    // Error constructors -- `new Error('msg')` (and `Error('msg')`, which
+    // real JS also allows) produce catchable/throwable .error values of
+    // the right kind.
+    inline for (.{
+        .{ "Error", zvalue.ErrorKind.generic },
+        .{ "TypeError", zvalue.ErrorKind.type_error },
+        .{ "RangeError", zvalue.ErrorKind.range_error },
+        .{ "SyntaxError", zvalue.ErrorKind.syntax_error },
+        .{ "ReferenceError", zvalue.ErrorKind.reference_error },
+    }) |entry| {
+        const ctor = try JSValue.newFunction(arena, .{
+            .ctx = self,
+            .name = entry[0],
+            .arity = 1,
+            .call = errorConstructor(entry[1]),
+            .constructable = true,
+        });
+        try g.define(arena, entry[0], ctor);
+    }
+
+    // Promise: constructable native; the statics (resolve/reject/all/
+    // race) ride the phase-10 property bag.
+    const promise_ctor = try JSValue.newFunction(arena, .{
+        .ctx = self,
+        .name = "Promise",
+        .arity = 1,
+        .call = promiseConstructor,
+        .constructable = true,
+    });
+    const promise_statics = try self.functionStatics(promise_ctor);
+    try promise_statics.object.value.set("resolve", try native(self, "resolve", promiseResolveStatic));
+    try promise_statics.object.value.set("reject", try native(self, "reject", promiseRejectStatic));
+    try promise_statics.object.value.set("all", try native(self, "all", promiseAll));
+    try promise_statics.object.value.set("race", try native(self, "race", promiseRace));
+    try g.define(arena, "Promise", promise_ctor);
+
+    try g.define(arena, "setTimeout", try native(self, "setTimeout", globalSetTimeout));
+    try g.define(arena, "clearTimeout", try native(self, "clearTimeout", globalClearTimeout));
 
     try g.define(arena, "parseInt", try native(self, "parseInt", globalParseInt));
     try g.define(arena, "parseFloat", try native(self, "parseFloat", globalParseFloat));
@@ -498,7 +543,7 @@ fn stringTrim(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 /// Milliseconds since the Unix epoch via the raw Linux syscall -- this
 /// Zig version's portable clock API needs an std.Io instance, which the
 /// interpreter doesn't thread (Linux-only for now, like the dev setup).
-fn nowMs() i64 {
+pub fn nowMs() i64 {
     var ts: std.os.linux.timespec = undefined;
     _ = std.os.linux.clock_gettime(.REALTIME, &ts);
     return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
@@ -753,4 +798,294 @@ fn globalBoolean(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     _ = allocator;
     _ = this_value;
     return JSValue.fromBool(coercion.isTruthy(arg(args, 0)));
+}
+
+// ===== Promise =====
+
+/// The pair of capabilities `new Promise(executor)` hands the executor.
+const PromiseCapCtx = struct {
+    interp: *Interpreter,
+    promise: JSValue,
+};
+
+fn capCtx(ctx: *anyopaque) *PromiseCapCtx {
+    return @ptrCast(@alignCast(ctx));
+}
+
+fn capResolve(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const c = capCtx(ctx);
+    try c.interp.resolvePromise(c.promise, arg(args, 0));
+    return JSValue.UNDEFINED;
+}
+
+fn capReject(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const c = capCtx(ctx);
+    try c.interp.rejectPromiseValue(c.promise, arg(args, 0));
+    return JSValue.UNDEFINED;
+}
+
+/// `new Promise(executor)`: executor runs SYNCHRONOUSLY (real spec
+/// behavior -- logs inside it appear before the line after `new`); its
+/// throw rejects. Calling Promise without `new` also works here (real JS
+/// requires new -- documented narrowing).
+fn promiseConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const executor = arg(args, 0);
+    if (executor != .function) {
+        return self.throwError(.type_error, "Promise resolver {s} is not a function", .{executor.typeOf()});
+    }
+    const p = try JSValue.newPromise(allocator);
+
+    const cap = try allocator.create(PromiseCapCtx);
+    cap.* = .{ .interp = self, .promise = p };
+    const resolve_fn = try JSValue.newFunction(allocator, .{ .ctx = cap, .name = "resolve", .arity = 1, .call = capResolve });
+    const reject_fn = try JSValue.newFunction(allocator, .{ .ctx = cap, .name = "reject", .arity = 1, .call = capReject });
+
+    _ = executor.function.value.call(executor.function.value.ctx, allocator, JSValue.UNDEFINED, &.{ resolve_fn, reject_fn }) catch |err| {
+        if (err != error.JsThrow) return err;
+        const ex = self.pending_exception.?;
+        self.pending_exception = null;
+        try self.rejectPromiseValue(p, ex);
+    };
+    return p;
+}
+
+fn requirePromise(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {
+    if (this_value != .promise) {
+        return interp(ctx).throwError(.type_error, "Promise.prototype.{s} called on a non-promise", .{method});
+    }
+    return this_value;
+}
+
+/// Non-callable handlers are the spec's pass-through (then(null, f) etc).
+fn handlerOrNull(v: JSValue) ?JSValue {
+    return if (v == .function) v else null;
+}
+
+fn promiseThen(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const p = try requirePromise(ctx, this_value, "then");
+    return interp(ctx).promiseThen(p, handlerOrNull(arg(args, 0)), handlerOrNull(arg(args, 1)));
+}
+
+fn promiseCatch(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const p = try requirePromise(ctx, this_value, "catch");
+    return interp(ctx).promiseThen(p, null, handlerOrNull(arg(args, 0)));
+}
+
+/// finally(f) = then(wrapper, wrapper) where each wrapper calls f() with
+/// no arguments and passes the original settlement through -- the
+/// rejection side by re-throwing the original reason. f's own throw
+/// replaces the settlement (both spec behaviors), for free, because the
+/// job runner already turns a handler throw into a derived rejection.
+const FinallyCtx = struct {
+    interp: *Interpreter,
+    handler: JSValue,
+};
+
+fn finallyCtx(ctx: *anyopaque) *FinallyCtx {
+    return @ptrCast(@alignCast(ctx));
+}
+
+fn finallyOnFulfilled(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const c = finallyCtx(ctx);
+    _ = try c.handler.function.value.call(c.handler.function.value.ctx, allocator, JSValue.UNDEFINED, &.{});
+    return arg(args, 0);
+}
+
+fn finallyOnRejected(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const c = finallyCtx(ctx);
+    _ = try c.handler.function.value.call(c.handler.function.value.ctx, allocator, JSValue.UNDEFINED, &.{});
+    return c.interp.throwValue(arg(args, 0).retain());
+}
+
+fn promiseFinally(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const p = try requirePromise(ctx, this_value, "finally");
+    const self = interp(ctx);
+    const handler = handlerOrNull(arg(args, 0)) orelse return self.promiseThen(p, null, null);
+
+    const c = try allocator.create(FinallyCtx);
+    c.* = .{ .interp = self, .handler = handler.retain() };
+    const on_f = try JSValue.newFunction(allocator, .{ .ctx = c, .name = "", .call = finallyOnFulfilled });
+    const on_r = try JSValue.newFunction(allocator, .{ .ctx = c, .name = "", .call = finallyOnRejected });
+    return self.promiseThen(p, on_f, on_r);
+}
+
+fn promiseResolveStatic(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const v = arg(args, 0);
+    // Promise.resolve(promise) returns it unchanged (real behavior).
+    if (v == .promise) return v;
+    return interp(ctx).fulfilledPromise(v);
+}
+
+fn promiseRejectStatic(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    return interp(ctx).rejectedPromise(arg(args, 0));
+}
+
+/// Shared bookkeeping for one Promise.all call.
+const AllCtx = struct {
+    interp: *Interpreter,
+    remaining: usize,
+    results: []JSValue,
+    derived: JSValue,
+
+    fn completeIfDone(c: *AllCtx) anyerror!void {
+        if (c.remaining != 0) return;
+        const arena = c.interp.arena_state.allocator();
+        var array = try JSValue.newArray(arena);
+        for (c.results) |r| _ = try array.array.value.push(r.retain());
+        try c.interp.resolvePromise(c.derived, array);
+    }
+};
+
+/// Per-element fulfillment handler: stores at its index, resolves the
+/// derived array when the last one lands.
+const AllElemCtx = struct {
+    all: *AllCtx,
+    index: usize,
+};
+
+fn allElemFulfilled(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const c: *AllElemCtx = @ptrCast(@alignCast(ctx));
+    c.all.results[c.index] = arg(args, 0).retain();
+    c.all.remaining -= 1;
+    try c.all.completeIfDone();
+    return JSValue.UNDEFINED;
+}
+
+fn allRejected(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const c: *AllCtx = @ptrCast(@alignCast(ctx));
+    // First rejection wins; settle idempotence makes later ones no-ops.
+    try c.interp.rejectPromiseValue(c.derived, arg(args, 0));
+    return JSValue.UNDEFINED;
+}
+
+/// Promise.all over an ARRAY (narrowed -- general iterables need the
+/// Symbol.iterator protocol this ecosystem doesn't have). Order is
+/// preserved by index; rejection is fail-fast.
+fn promiseAll(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const input = arg(args, 0);
+    if (input != .array) return self.throwError(.type_error, "{s} is not iterable", .{input.typeOf()});
+    const items = input.array.value.toSlice();
+
+    const derived = try JSValue.newPromise(allocator);
+    const all = try allocator.create(AllCtx);
+    all.* = .{
+        .interp = self,
+        .remaining = items.len,
+        .results = try allocator.alloc(JSValue, items.len),
+        .derived = derived,
+    };
+    for (all.results) |*r| r.* = JSValue.UNDEFINED;
+    if (items.len == 0) {
+        try all.completeIfDone();
+        return derived;
+    }
+
+    const on_r = try JSValue.newFunction(allocator, .{ .ctx = all, .name = "", .call = allRejected });
+    for (items, 0..) |item, i| {
+        const elem = try allocator.create(AllElemCtx);
+        elem.* = .{ .all = all, .index = i };
+        const on_f = try JSValue.newFunction(allocator, .{ .ctx = elem, .name = "", .call = allElemFulfilled });
+        const p = if (item == .promise) item else try self.fulfilledPromise(item);
+        _ = try self.promiseThen(p, on_f, on_r);
+    }
+    return derived;
+}
+
+/// Per-race resolution handler: first settle of ANY element settles the
+/// derived promise; the rest are silent no-ops via settle idempotence.
+const RaceCtx = struct {
+    interp: *Interpreter,
+    derived: JSValue,
+};
+
+fn raceFulfilled(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const c: *RaceCtx = @ptrCast(@alignCast(ctx));
+    try c.interp.resolvePromise(c.derived, arg(args, 0));
+    return JSValue.UNDEFINED;
+}
+
+fn raceRejected(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const c: *RaceCtx = @ptrCast(@alignCast(ctx));
+    try c.interp.rejectPromiseValue(c.derived, arg(args, 0));
+    return JSValue.UNDEFINED;
+}
+
+fn promiseRace(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const input = arg(args, 0);
+    if (input != .array) return self.throwError(.type_error, "{s} is not iterable", .{input.typeOf()});
+
+    const derived = try JSValue.newPromise(allocator);
+    const rc = try allocator.create(RaceCtx);
+    rc.* = .{ .interp = self, .derived = derived };
+    const on_f = try JSValue.newFunction(allocator, .{ .ctx = rc, .name = "", .call = raceFulfilled });
+    const on_r = try JSValue.newFunction(allocator, .{ .ctx = rc, .name = "", .call = raceRejected });
+    for (input.array.value.toSlice()) |item| {
+        const p = if (item == .promise) item else try self.fulfilledPromise(item);
+        _ = try self.promiseThen(p, on_f, on_r);
+    }
+    return derived;
+}
+
+// ===== Timers =====
+
+fn globalSetTimeout(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const self = interp(ctx);
+    const cb = arg(args, 0);
+    if (cb != .function) return self.throwError(.type_error, "The \"callback\" argument must be of type function", .{});
+    const delay = if (arg(args, 1) == .number) arg(args, 1).number else 0;
+    return JSValue.fromNumber(try self.addTimer(cb, delay));
+}
+
+fn globalClearTimeout(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    if (arg(args, 0) == .number) interp(ctx).clearTimer(arg(args, 0).number);
+    return JSValue.UNDEFINED;
+}
+
+// ===== Error constructors =====
+
+/// Comptime factory: one native per ErrorKind. The message argument is
+/// coerced with toDisplayString (Node stringifies it too); no argument =
+/// empty message.
+fn errorConstructor(comptime kind: zvalue.ErrorKind) NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+            _ = ctx;
+            _ = this_value;
+            const msg: []const u8 = switch (arg(args, 0)) {
+                .@"undefined" => "",
+                else => |v| try coercion.toDisplayString(allocator, v),
+            };
+            return JSValue.newError(allocator, kind, msg);
+        }
+    }.call;
 }

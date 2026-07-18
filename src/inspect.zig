@@ -60,6 +60,23 @@ pub fn inspect(allocator: Allocator, buf: *std.ArrayList(u8), v: JSValue) !void 
         },
         .symbol => try buf.appendSlice(allocator, "[Symbol]"),
         .regex => try buf.appendSlice(allocator, "[RegExp]"),
+        // Node's rendering: Promise { 3 } / Promise { <pending> } /
+        // Promise { <rejected> reason }.
+        .promise => |box| {
+            switch (box.value.state) {
+                .pending => try buf.appendSlice(allocator, "Promise { <pending> }"),
+                .fulfilled => {
+                    try buf.appendSlice(allocator, "Promise { ");
+                    try inspect(allocator, buf, box.value.result.?);
+                    try buf.appendSlice(allocator, " }");
+                },
+                .rejected => {
+                    try buf.appendSlice(allocator, "Promise { <rejected> ");
+                    try inspect(allocator, buf, box.value.result.?);
+                    try buf.appendSlice(allocator, " }");
+                },
+            }
+        },
         .map => try buf.appendSlice(allocator, "[Map]"),
         .set => try buf.appendSlice(allocator, "[Set]"),
         .@"error" => |box| {

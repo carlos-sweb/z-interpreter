@@ -37,6 +37,25 @@ const ClosureCtx = struct {
 /// constructor element (implicit constructor: derived classes forward to
 /// super, base classes no-op) and needs the super bindings + its name for
 /// the without-`new` TypeError.
+/// One promise reaction microtask: call `handler(argument)` and settle
+/// `derived` with the outcome. Null handler = pass-through (adoption and
+/// the missing side of .then/.catch); `finally` needs no special kind --
+/// builtins implements it as then() with native wrappers that re-throw.
+const Job = struct {
+    handler: ?JSValue,
+    argument: JSValue,
+    /// Whether `argument` is a rejection reason (drives which
+    /// pass-through side fires).
+    rejected: bool,
+    derived: ?JSValue,
+};
+
+const Timer = struct {
+    id: f64,
+    due_ms: i64,
+    callback: JSValue,
+};
+
 const ClassCtx = struct {
     interp: *Interpreter,
     ctor_fnode: ?*zfunctions.FunctionNode,
@@ -85,6 +104,15 @@ pub const Interpreter = struct {
     /// `let console = 5` must be legal -- builtins aren't lexical
     /// bindings of the script scope, just reachable through the chain.
     script_env: ?*Environment = null,
+    /// The microtask queue (promise reaction jobs), FIFO. PUBLIC contract
+    /// (QuickJS's JS_ExecutePendingJob): the engine enqueues, the HOST
+    /// drains via hasPendingJobs/runPendingJob -- run() drains as a
+    /// convenience for script-shaped usage.
+    pending_jobs: std.ArrayList(Job) = .empty,
+    /// setTimeout macrotasks, unordered (runEventLoop scans for the
+    /// earliest due). Cleared entries are swap-removed.
+    timers: std.ArrayList(Timer) = .empty,
+    next_timer_id: f64 = 1,
 
     pub fn init(backing_allocator: Allocator, console_writer: *std.Io.Writer) !Interpreter {
         var self: Interpreter = .{
@@ -126,6 +154,10 @@ pub const Interpreter = struct {
             if (err != error.JsThrow) return err;
             return error.UncaughtException;
         };
+        // Script done -> drain the queues (microtasks, then timers), the
+        // js_std_loop shape. Hosts that own their loop drive
+        // hasPendingJobs/runPendingJob themselves instead.
+        try self.runEventLoop();
         return c.value;
     }
 
@@ -137,6 +169,185 @@ pub const Interpreter = struct {
     /// user `let`/`const` may shadow them -- exactly like `console`).
     pub fn defineGlobal(self: *Interpreter, name: []const u8, value: JSValue) !void {
         try self.global_env.define(self.arena_state.allocator(), name, value.retain());
+    }
+
+    // ===== Promise jobs and timers (the engine side of the event loop) =====
+    //
+    // The QuickJS contract: the engine owns the MICROTASK queue and
+    // exposes it (hasPendingJobs/runPendingJob) for the host to drain;
+    // run() drains it itself as a convenience for script-shaped usage.
+    // Handlers are ordinary Callables -- JS closures and native functions
+    // (Promise.all's bookkeeping) go through the exact same path.
+
+    pub fn hasPendingJobs(self: *Interpreter) bool {
+        return self.pending_jobs.items.len != 0;
+    }
+
+    /// Runs ONE pending promise job (FIFO). A handler that throws rejects
+    /// the job's derived promise -- the exception never escapes here; a
+    /// rejection nobody subscribed to is silently dropped (unhandled-
+    /// rejection tracking is a documented gap).
+    pub fn runPendingJob(self: *Interpreter) anyerror!void {
+        if (self.pending_jobs.items.len == 0) return;
+        const job = self.pending_jobs.orderedRemove(0);
+        const arena = self.arena_state.allocator();
+
+        const handler = job.handler orelse {
+            // Pass-through: adoption and the missing side of .then/.catch.
+            if (job.derived) |d| {
+                if (job.rejected) {
+                    try self.settlePromise(d, .rejected, job.argument);
+                } else {
+                    try self.resolvePromise(d, job.argument);
+                }
+            }
+            return;
+        };
+        const result = handler.function.value.call(handler.function.value.ctx, arena, JSValue.UNDEFINED, &.{job.argument}) catch |err| {
+            if (err != error.JsThrow) return err;
+            const ex = self.pending_exception.?;
+            self.pending_exception = null;
+            if (job.derived) |d| try self.settlePromise(d, .rejected, ex);
+            return;
+        };
+        if (job.derived) |d| try self.resolvePromise(d, result);
+    }
+
+    /// ECMA-262 27.2.1.3.2 resolve, narrowed: resolving with another
+    /// promise ADOPTS its eventual state (thenables that aren't real
+    /// promises are not detected -- documented narrowing); resolving with
+    /// itself is the spec's chaining-cycle TypeError; anything else
+    /// fulfills.
+    pub fn resolvePromise(self: *Interpreter, p: JSValue, value: JSValue) anyerror!void {
+        if (value == .promise) {
+            if (value.promise == p.promise) {
+                const cycle = try JSValue.newError(self.arena_state.allocator(), .type_error, "Chaining cycle detected for promise");
+                return self.settlePromise(p, .rejected, cycle);
+            }
+            return self.subscribePromise(value, null, null, p);
+        }
+        try self.settlePromise(p, .fulfilled, value);
+    }
+
+    /// Rejects an EXISTING promise with a reason (executor's reject,
+    /// Promise.all's fail-fast). Public for builtins.
+    pub fn rejectPromiseValue(self: *Interpreter, p: JSValue, reason: JSValue) anyerror!void {
+        try self.settlePromise(p, .rejected, reason);
+    }
+
+    /// Settles (idempotently -- a second settle is the spec's no-op) and
+    /// enqueues every stored reaction with the settlement.
+    fn settlePromise(self: *Interpreter, p: JSValue, state: zvalue.PromiseState, value: JSValue) anyerror!void {
+        const arena = self.arena_state.allocator();
+        const reactions = try p.promise.value.settle(arena, state, value.retain());
+        defer arena.free(reactions);
+        for (reactions) |r| {
+            try self.pending_jobs.append(arena, .{
+                .handler = if (state == .fulfilled) r.on_fulfilled else r.on_rejected,
+                .argument = value,
+                .rejected = state == .rejected,
+                .derived = r.derived,
+            });
+        }
+    }
+
+    /// Registers interest in `p`'s settlement: stores the reaction while
+    /// pending, or enqueues the job immediately if already settled (a
+    /// .then on a settled promise still runs asynchronously -- through
+    /// the queue, never inline).
+    fn subscribePromise(self: *Interpreter, p: JSValue, on_fulfilled: ?JSValue, on_rejected: ?JSValue, derived: ?JSValue) anyerror!void {
+        const arena = self.arena_state.allocator();
+        const settled = try p.promise.value.subscribe(arena, .{
+            .on_fulfilled = if (on_fulfilled) |h| h.retain() else null,
+            .on_rejected = if (on_rejected) |h| h.retain() else null,
+            .derived = if (derived) |d| d.retain() else null,
+        }) orelse return;
+        try self.pending_jobs.append(arena, .{
+            .handler = if (settled.state == .fulfilled) on_fulfilled else on_rejected,
+            .argument = settled.result,
+            .rejected = settled.state == .rejected,
+            .derived = derived,
+        });
+    }
+
+    /// `p.then(onF, onR)` -- creates and returns the derived promise.
+    /// Non-callable handlers are ignored (the spec's pass-through).
+    /// Public for builtins (then/catch/finally/all/race are thin wrappers).
+    pub fn promiseThen(self: *Interpreter, p: JSValue, on_fulfilled: ?JSValue, on_rejected: ?JSValue) anyerror!JSValue {
+        const derived = try JSValue.newPromise(self.arena_state.allocator());
+        try self.subscribePromise(p, on_fulfilled, on_rejected, derived);
+        return derived;
+    }
+
+    /// Freshly-fulfilled promise (Promise.resolve on a non-promise).
+    pub fn fulfilledPromise(self: *Interpreter, value: JSValue) anyerror!JSValue {
+        const p = try JSValue.newPromise(self.arena_state.allocator());
+        try self.settlePromise(p, .fulfilled, value);
+        return p;
+    }
+
+    pub fn rejectedPromise(self: *Interpreter, reason: JSValue) anyerror!JSValue {
+        const p = try JSValue.newPromise(self.arena_state.allocator());
+        try self.settlePromise(p, .rejected, reason);
+        return p;
+    }
+
+    // ===== Timers (setTimeout macrotasks) =====
+
+    pub fn addTimer(self: *Interpreter, callback: JSValue, delay_ms: f64) !f64 {
+        const arena = self.arena_state.allocator();
+        const id = self.next_timer_id;
+        self.next_timer_id += 1;
+        const delay: i64 = if (delay_ms > 0) @intFromFloat(delay_ms) else 0;
+        try self.timers.append(arena, .{
+            .id = id,
+            .due_ms = builtins.nowMs() + delay,
+            .callback = callback.retain(),
+        });
+        return id;
+    }
+
+    pub fn clearTimer(self: *Interpreter, id: f64) void {
+        for (self.timers.items, 0..) |t, i| {
+            if (t.id == id) {
+                _ = self.timers.swapRemove(i);
+                return;
+            }
+        }
+    }
+
+    /// The convenience event loop qjs calls js_std_loop: drain microtasks,
+    /// then sleep to the earliest timer and fire it, until both queues are
+    /// empty. Lives here until z-run takes ownership of the loop (Etapa C
+    /// completa); a timer callback that throws is an ordinary uncaught
+    /// exception. Linux-only sleep, same note as Date's clock_gettime.
+    fn runEventLoop(self: *Interpreter) anyerror!void {
+        const arena = self.arena_state.allocator();
+        while (true) {
+            while (self.hasPendingJobs()) try self.runPendingJob();
+            if (self.timers.items.len == 0) return;
+
+            var earliest: usize = 0;
+            for (self.timers.items, 0..) |t, i| {
+                if (t.due_ms < self.timers.items[earliest].due_ms) earliest = i;
+            }
+            const timer = self.timers.items[earliest];
+            _ = self.timers.swapRemove(earliest);
+
+            const now = builtins.nowMs();
+            if (timer.due_ms > now) {
+                const wait_ms: u64 = @intCast(timer.due_ms - now);
+                var req: std.os.linux.timespec = .{
+                    .sec = @intCast(wait_ms / 1000),
+                    .nsec = @intCast((wait_ms % 1000) * 1_000_000),
+                };
+                _ = std.os.linux.nanosleep(&req, null);
+            }
+            _ = timer.callback.function.value.call(timer.callback.function.value.ctx, arena, JSValue.UNDEFINED, &.{}) catch |err| {
+                if (err != error.JsThrow) return err;
+                return error.UncaughtException;
+            };
+        }
     }
 
     // ===== Exception machinery =====
@@ -1283,6 +1494,10 @@ pub const Interpreter = struct {
                 if (builtins.date_methods.get(key)) |f| break :blk try self.nativeMethod("date", key, f);
                 break :blk JSValue.UNDEFINED;
             },
+            .promise => blk: {
+                if (builtins.promise_methods.get(key)) |f| break :blk try self.nativeMethod("promise", key, f);
+                break :blk JSValue.UNDEFINED;
+            },
             // Spec says TypeError here (not ReferenceError). The optional
             // chaining guards short-circuit BEFORE getProperty, so `a?.b`
             // on null still yields undefined without ever reaching this.
@@ -1325,7 +1540,7 @@ pub const Interpreter = struct {
                 break :blk JSValue.fromBool(idx < box.value.length());
             },
             .@"undefined", .@"null", .boolean, .number, .string => self.throwError(.type_error, "Cannot use 'in' operator to search for '{s}'", .{key}),
-            .function, .regex, .symbol, .map, .set, .@"error", .date => error.NotImplemented,
+            .function, .regex, .symbol, .map, .set, .@"error", .date, .promise => error.NotImplemented,
         };
     }
 
@@ -1350,7 +1565,7 @@ pub const Interpreter = struct {
 
     /// The function's statics/property bag, created lazily on first touch
     /// (same contract as functionPrototype).
-    fn functionStatics(self: *Interpreter, fn_val: JSValue) anyerror!JSValue {
+    pub fn functionStatics(self: *Interpreter, fn_val: JSValue) anyerror!JSValue {
         if (fn_val.function.value.statics) |s| return s;
         const bag = try JSValue.newObject(self.arena_state.allocator());
         fn_val.function.value.statics = bag;
@@ -1585,7 +1800,7 @@ pub const Interpreter = struct {
         defer self.construct_target = prev_target;
         const result = try callee.function.value.call(callee.function.value.ctx, arena, instance, args);
         return switch (result) {
-            .object, .array, .function, .regex, .map, .set, .@"error", .date => result,
+            .object, .array, .function, .regex, .map, .set, .@"error", .date, .promise => result,
             else => instance,
         };
     }

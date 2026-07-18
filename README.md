@@ -66,6 +66,14 @@ Declarations behave like real JS now, via two pre-passes over the (already-built
 
 **This engine is always-strict** (like ES modules): no implicit globals, `this === undefined` in plain calls, and `"use strict"` is an accepted no-op. Sloppy mode is deliberately not implemented.
 
+## Promises, the microtask queue, and timers
+
+Full Promise semantics without any coroutine machinery — `then`-callbacks are stored `Callable`s the **job queue** invokes later. The queue is a public host contract (QuickJS's `JS_ExecutePendingJob` architecture): the engine enqueues reaction jobs, `hasPendingJobs()`/`runPendingJob()` let a host drain them, and `run()` drains as a convenience — script, then microtasks, then `setTimeout` timers (sleeping to the next due time, the `js_std_loop` shape), until both queues are empty. The promise *state machine* itself lives in [z-promise](https://github.com/carlos-sweb/z-promise) (storage and transitions, generic over T); this repo owns all scheduling and calling.
+
+Everything Node-ordering-verified: executors run synchronously, settled-promise `.then` still fires async, all microtasks drain before any timer (including microtasks scheduled *from* a timer, before the next timer), chains flow values / reject on throw / recover through `catch`, `finally` passes settlements through and its own throw replaces them (implemented as `then` with native wrappers — no special job kind), resolving with a promise adopts it, double-resolve is the spec's no-op, self-resolution is the chaining-cycle TypeError. `Promise.resolve/reject/all/race` ride the phase-10 function property bag; `all` preserves index order, mixes plain values, fails fast; `race`'s first-settlement-wins falls out of settle idempotence. `new Error/TypeError/RangeError/SyntaxError/ReferenceError(msg)` are real constructable globals now. `console.log` renders Node-style: `Promise { 3 }` / `Promise { <pending> }` / `Promise { <rejected> reason }`.
+
+Narrowings: thenable adoption detects real `.promise` values only (not arbitrary objects with `.then`); unhandled rejections are silently dropped (no tracking yet); `Promise.all/race` take arrays (general iterables need Symbol.iterator); `Promise()` without `new` works (real JS requires new); timers are Linux-only (raw `nanosleep`, same note as Date's clock).
+
 ## Known gaps (deferred to future phases)
 
 - **`with`**.
