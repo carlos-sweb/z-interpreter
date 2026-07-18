@@ -805,8 +805,29 @@ pub const Interpreter = struct {
                     switch (el) {
                         .property => |prop| {
                             const key_str = try self.propertyKeyString(env, prop.computed, prop.key);
-                            const value = try self.evalExpression(env, prop.value);
-                            try obj.object.value.set(key_str, value.retain());
+                            switch (prop.kind) {
+                                .init => {
+                                    const value = try self.evalExpression(env, prop.value);
+                                    try obj.object.value.set(key_str, value.retain());
+                                },
+                                .method => {
+                                    const f = try self.makeClosure(env, zfunctions.asFunctionNode(prop.value.data.function_like));
+                                    try obj.object.value.set(key_str, f);
+                                },
+                                // get+set for the same key merge into one
+                                // accessor property (defineAccessor's
+                                // contract); data-only consumers see
+                                // UNDEFINED as its value.
+                                .get, .set => {
+                                    const f = try self.makeClosure(env, zfunctions.asFunctionNode(prop.value.data.function_like));
+                                    try obj.object.value.defineAccessor(
+                                        key_str,
+                                        if (prop.kind == .get) f else null,
+                                        if (prop.kind == .set) f else null,
+                                        JSValue.UNDEFINED,
+                                    );
+                                },
+                            }
                         },
                         .spread => |spread_node| {
                             const spread_val = try self.evalExpression(env, spread_node.data.spread);
@@ -899,9 +920,26 @@ pub const Interpreter = struct {
         return fn_value;
     }
 
-    fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!JSValue {
+    pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!JSValue {
         return switch (obj) {
-            .object => |box| (box.value.get(key) orelse JSValue.UNDEFINED).retain(),
+            // Own-then-chain walk over property *records* (not values), so
+            // accessor properties dispatch: a getter is invoked with
+            // this = the original receiver (not the prototype that holds
+            // it), a setter-only accessor reads as undefined. Data
+            // properties behave exactly as the old ZObject.get did.
+            .object => |box| blk: {
+                const arena = self.arena_state.allocator();
+                var current: ?*const @TypeOf(box.value) = &box.value;
+                while (current) |o| : (current = o.getPrototype()) {
+                    const rec = o.getOwnRecord(key) orelse continue;
+                    if (rec.isAccessor()) {
+                        const g = rec.getter orelse break :blk JSValue.UNDEFINED;
+                        break :blk try g.function.value.call(g.function.value.ctx, arena, obj, &.{});
+                    }
+                    break :blk rec.value.retain();
+                }
+                break :blk JSValue.UNDEFINED;
+            },
             .array => |box| blk: {
                 if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.length()));
                 if (builtins.array_methods.get(key)) |f| break :blk try self.nativeMethod("array", key, f);
@@ -1092,6 +1130,22 @@ pub const Interpreter = struct {
                     return;
                 }
                 if (obj != .object) return error.NotImplemented;
+                // Accessor dispatch before the plain own set: a setter
+                // anywhere on the chain is invoked with this = the
+                // receiver; a getter-only accessor swallows the write
+                // silently (sloppy-mode [[Set]]); the first *data* record
+                // found stops the walk and the write shadows it as an own
+                // property, exactly like real JS.
+                var current: ?*const @TypeOf(obj.object.value) = &obj.object.value;
+                while (current) |o| : (current = o.getPrototype()) {
+                    const rec = o.getOwnRecord(key) orelse continue;
+                    if (rec.isAccessor()) {
+                        const s = rec.setter orelse return; // getter-only: silent no-op
+                        _ = try s.function.value.call(s.function.value.ctx, self.arena_state.allocator(), obj, &.{value});
+                        return;
+                    }
+                    break;
+                }
                 try obj.object.value.set(key, value.retain());
             },
             else => return error.NotImplemented,
@@ -1186,6 +1240,7 @@ pub const Interpreter = struct {
         const name: []const u8 = switch (fnode.kind) {
             .function_decl => |d| d.name,
             .function_expr => |e| e.name orelse "",
+            .method => |m| m.name,
             .arrow => "",
         };
         const fn_value = try JSValue.newFunction(arena, .{
@@ -1193,9 +1248,13 @@ pub const Interpreter = struct {
             .name = name,
             .arity = fnode.params.items.len,
             .call = closureCall,
-            // Arrows are not constructors (spec); natives keep the
-            // default false via their own newFunction call sites.
-            .constructable = fnode.kind != .arrow,
+            // Arrows and object-literal methods are not constructors
+            // (spec); natives keep the default false via their own
+            // newFunction call sites.
+            .constructable = switch (fnode.kind) {
+                .arrow, .method => false,
+                .function_decl, .function_expr => true,
+            },
         });
         if (self_name) |n| try closure_env.define(arena, n, fn_value.retain());
         return fn_value;

@@ -660,10 +660,12 @@ fn objectKeys(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 fn objectValues(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
     const o = try requireObject(ctx, arg(args, 0), "Object.values");
-    const vs = try o.object.value.values(allocator);
-    defer allocator.free(vs);
+    const ks = try o.object.value.keys(allocator);
+    defer allocator.free(ks);
     var result = try JSValue.newArray(allocator);
-    for (vs) |v| _ = try result.array.value.push(v.retain());
+    // Per-key getProperty (not ZObject.values) so accessor properties
+    // invoke their getters, like real Object.values.
+    for (ks) |k| _ = try result.array.value.push(try interp(ctx).getProperty(o, k));
     return result;
 }
 
@@ -676,7 +678,8 @@ fn objectEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     for (ks) |k| {
         var pair = try JSValue.newArray(allocator);
         _ = try pair.array.value.push(try JSValue.newString(allocator, k));
-        _ = try pair.array.value.push(o.object.value.get(k).?.retain());
+        // getProperty, not ZObject.get -- getters must fire here too.
+        _ = try pair.array.value.push(try interp(ctx).getProperty(o, k));
         _ = try result.array.value.push(pair);
     }
     return result;

@@ -49,6 +49,10 @@ One recursive `bindPattern` (ECMA-262 8.6.2 BindingInitialization, define mode) 
 
 Destructuring **assignment** (§13.15.5 — `[a, b] = [b, a]`, `({x: o.y} = obj)`, no declaration keyword) is its mirror, `destructuringAssign`: z-parser validates the array/object literal as a pattern at parse time (the spec's cover-grammar reinterpretation as a post-hoc check), and the interpreter walks the literal AST directly in assign mode — every leaf goes through the ordinary assignment path, which is exactly what makes **member-expression targets** (`[o.x, o.y] = [1, 2]`) work; binding patterns can't even represent those. The expression's value is the RHS (`([a] = [7])[0]` is `7`), computed keys are allowed (they ride the expression AST), and `for ([k, v] of pairs)` / `for ([a, b] in obj)` destructure into existing bindings per iteration — a for-in key like `'xy'` splits by code point into `a='x', b='y'`, exactly like Node. Same source semantics as binding mode (`iterableItems`, `getProperty`, defaults only on `undefined`), same Node-verified error messages, and an undeclared identifier inside a pattern is the same `ReferenceError` a plain assignment raises (no implicit globals).
 
+## Methods and accessors
+
+Object-literal method shorthand (`{ m() { return this.x; } }`) evaluates to ordinary named closures — `o.m.name === "m"`, `typeof o.m === "function"`, `this` bound at the call site like any method call, and **not constructable** (`new o.m()` is the real TypeError). Getters/setters (`{ get v() {}, set v(x) {} }`) are stored as typed accessor slots on z-object's `Property` records (`defineAccessor` merges a get and set clause for the same key into one property) and dispatched by the interpreter: `getProperty` and member assignment walk the prototype chain over property *records*, invoking the getter/setter with `this` = the original receiver — so accessors inherited via `F.prototype = { get g() {...} }` work on instances, assigning through a getter-only accessor is sloppy-mode's silent no-op, and a setter-only accessor reads as `undefined`. Because destructuring and `Object.values`/`entries` route through `getProperty`, getters fire there too (`const {x} = { get x() { return 3; } }` → 3). Computed keys work in all three forms (`{ [k]() {} }`). All Node-verified.
+
 ## Known gaps (deferred to future phases)
 
 - **`with`**.
@@ -59,7 +63,8 @@ Destructuring **assignment** (§13.15.5 — `[a, b] = [b, a]`, `({x: o.y} = obj)
 - **`({a = 1} = {})`** (CoverInitializedName — shorthand-with-default in an object *assignment* pattern): doesn't parse as an object literal; `({a: a = 1} = {})` works. And `{a} = obj` at statement level opens a block exactly like real JS — `({a} = obj)` is the correct form.
 - **Regex literals**: parse fine (`z-parser`), but evaluating one to a real `.regex` `JSValue` needs `zregexp`, which this repo deliberately doesn't depend on for this narrow phase — `error.NotImplemented`.
 - **No hoisting, no TDZ**: `var`/`let`/`const`/function declarations are all evaluated strictly in source order, defining directly into the current environment. A real, known divergence from spec (e.g. `console.log(x); var x = 1;` is `undefined` in real JS via hoisting; here it's a `ReferenceError`).
-- **`this` for constructors**: only the member-call case (`obj.method()`) is wired; no `new`-based `this` binding.
+- **Data-only consumers don't invoke getters**: `JSON.stringify` omits accessor properties (real JS calls the getter and serializes the result), and `Object.assign`/spread (`{...o}`) copy them as `undefined` — they go through z-object's raw storage, which can't call functions. `Object.values`/`entries`/member access/destructuring DO invoke getters (interpreter dispatch).
+- **No `super`** (methods have no home-object; classes don't exist yet) and no exposed `Object.defineProperty` — accessors are only definable via object literals.
 
 ## Usage
 
