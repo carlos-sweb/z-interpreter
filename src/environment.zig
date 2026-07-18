@@ -17,6 +17,12 @@ pub const Environment = struct {
     /// this-binding handling. Falls through to JSValue.UNDEFINED at the
     /// global environment via `resolveThis`.
     this_value: ?JSValue = null,
+    /// The `super` bindings, non-null only at a class method/constructor
+    /// call boundary: the parent class's prototype object (for
+    /// `super.m()`) and constructor function (for `super(...)`). Resolved
+    /// by chain walk like `this` -- arrows nested in methods inherit.
+    super_proto: ?JSValue = null,
+    super_ctor: ?JSValue = null,
 
     pub fn child(self: *Environment, arena: Allocator) !*Environment {
         const env = try arena.create(Environment);
@@ -65,5 +71,25 @@ pub const Environment = struct {
             if (e.this_value) |v| return v;
         }
         return JSValue.UNDEFINED;
+    }
+
+    /// Walks up until a non-null super_proto is found -- null means
+    /// `super` is not legal here (not inside a class method).
+    pub fn resolveSuperProto(self: *Environment) ?JSValue {
+        var env: ?*Environment = self;
+        while (env) |e| : (env = e.parent) {
+            if (e.super_proto) |v| return v;
+        }
+        return null;
+    }
+
+    /// Walks up until a non-null super_ctor is found -- null means
+    /// `super(...)` is not legal here (not inside a derived constructor).
+    pub fn resolveSuperCtor(self: *Environment) ?JSValue {
+        var env: ?*Environment = self;
+        while (env) |e| : (env = e.parent) {
+            if (e.super_ctor) |v| return v;
+        }
+        return null;
     }
 };

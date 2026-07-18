@@ -26,6 +26,24 @@ const ClosureCtx = struct {
     interp: *Interpreter,
     function_node: *zfunctions.FunctionNode,
     closure_env: *Environment,
+    /// Non-null only for class method closures: the parent class's
+    /// prototype, so `super.m()` resolves inside the body (copied onto
+    /// the call env; arrows nested in the method inherit via chain walk).
+    super_proto: ?JSValue = null,
+};
+
+/// ctx for a class's constructor function -- the value `class C {...}`
+/// evaluates to. Distinct from ClosureCtx because a class may have NO
+/// constructor element (implicit constructor: derived classes forward to
+/// super, base classes no-op) and needs the super bindings + its name for
+/// the without-`new` TypeError.
+const ClassCtx = struct {
+    interp: *Interpreter,
+    ctor_fnode: ?*zfunctions.FunctionNode,
+    closure_env: *Environment,
+    name: []const u8,
+    super_ctor: ?JSValue,
+    super_proto: ?JSValue,
 };
 
 pub const Interpreter = struct {
@@ -54,6 +72,13 @@ pub const Interpreter = struct {
     /// Shared native-method values, keyed "type.name" (e.g. "array.push"),
     /// so `a.push === b.push` holds like real JS prototype methods.
     method_cache: std.StringHashMapUnmanaged(JSValue) = .empty,
+    /// The `new`-detection token: evalNew (and `super(...)`) set this to
+    /// the callee's ctx pointer for exactly the duration of the
+    /// constructor call; classConstructorCall requires it to match and
+    /// clears it on entry (so plain calls made *inside* a constructor
+    /// body don't inherit construct-ness). This is how `C()` without
+    /// `new` becomes the real TypeError.
+    construct_target: ?*anyopaque = null,
 
     pub fn init(backing_allocator: Allocator, console_writer: *std.Io.Writer) !Interpreter {
         var self: Interpreter = .{
@@ -228,6 +253,14 @@ pub const Interpreter = struct {
                     else => unreachable, // z-functions always produces .function_decl at statement position
                 };
                 try env.define(arena, name, value);
+                return .{};
+            },
+            .class_declaration => |ptr| {
+                const cnode = zfunctions.asClassNode(ptr);
+                const value = try self.evalClass(env, cnode);
+                // Declarations always carry a name (MissingClassName is a
+                // parse error otherwise).
+                try env.define(arena, cnode.name.?, value.retain());
                 return .{};
             },
             .throw_stmt => |arg| {
@@ -870,12 +903,28 @@ pub const Interpreter = struct {
             },
             .call => |c| return self.evalCall(env, c),
             .member => |m| {
+                // `super.x` as a plain value: lookup on the parent
+                // prototype (accessor getters get the current `this` --
+                // getProperty's receiver rule -- close enough for this
+                // narrow phase).
+                if (m.object.data == .super_expr) {
+                    const sproto = env.resolveSuperProto() orelse
+                        return self.throwError(.syntax_error, "'super' keyword unexpected here", .{});
+                    const key = try self.memberKeyString(env, m);
+                    return try self.getProperty(sproto, key);
+                }
                 const obj = try self.evalExpression(env, m.object);
                 if (m.optional and (obj == .@"undefined" or obj == .@"null")) return JSValue.UNDEFINED;
                 const key = try self.memberKeyString(env, m);
                 return try self.getProperty(obj, key);
             },
             .function_like => |ptr| return try self.makeClosure(env, zfunctions.asFunctionNode(ptr)),
+            .class_like => |ptr| return try self.evalClass(env, zfunctions.asClassNode(ptr)),
+            // Bare `super` outside call/member position, or super in a
+            // non-method context (the call/member interceptors resolve
+            // their own bindings first and raise this same error when
+            // there's nothing to resolve).
+            .super_expr => return self.throwError(.syntax_error, "'super' keyword unexpected here", .{}),
             .new_expr => |n| return self.evalNew(env, n),
             .regex_literal, .bigint_literal => return error.NotImplemented,
             // Only ever nested inside array/object-literal/call-argument
@@ -965,6 +1014,13 @@ pub const Interpreter = struct {
                 if (std.mem.eql(u8, key, "prototype")) break :blk try self.functionPrototype(obj);
                 if (std.mem.eql(u8, key, "name")) break :blk try JSValue.newString(self.arena_state.allocator(), box.value.name);
                 if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.arity));
+                // Everything else lives in the statics bag (class statics,
+                // F.myProp = 1). Recursing through getProperty gives
+                // accessor dispatch and -- because class bags chain to the
+                // parent's bag -- static inheritance. Narrowing: a static
+                // getter's `this` is the bag, not the class function, so
+                // `this.otherStatic` works but `this === C` doesn't.
+                if (box.value.statics) |bag| break :blk try self.getProperty(bag, key);
                 break :blk JSValue.UNDEFINED;
             },
             .date => blk: {
@@ -1015,6 +1071,34 @@ pub const Interpreter = struct {
             .@"undefined", .@"null", .boolean, .number, .string => self.throwError(.type_error, "Cannot use 'in' operator to search for '{s}'", .{key}),
             .function, .regex, .symbol, .map, .set, .@"error", .date => error.NotImplemented,
         };
+    }
+
+    /// [[Set]] on an `.object` JSValue with accessor dispatch: a setter
+    /// anywhere on the chain is invoked with this = the receiver; a
+    /// getter-only accessor swallows the write silently (sloppy-mode
+    /// [[Set]]); the first *data* record found stops the walk and the
+    /// write shadows it as an own property, exactly like real JS.
+    fn setObjectProperty(self: *Interpreter, obj: JSValue, key: []const u8, value: JSValue) anyerror!void {
+        var current: ?*const @TypeOf(obj.object.value) = &obj.object.value;
+        while (current) |o| : (current = o.getPrototype()) {
+            const rec = o.getOwnRecord(key) orelse continue;
+            if (rec.isAccessor()) {
+                const s = rec.setter orelse return; // getter-only: silent no-op
+                _ = try s.function.value.call(s.function.value.ctx, self.arena_state.allocator(), obj, &.{value});
+                return;
+            }
+            break;
+        }
+        try obj.object.value.set(key, value.retain());
+    }
+
+    /// The function's statics/property bag, created lazily on first touch
+    /// (same contract as functionPrototype).
+    fn functionStatics(self: *Interpreter, fn_val: JSValue) anyerror!JSValue {
+        if (fn_val.function.value.statics) |s| return s;
+        const bag = try JSValue.newObject(self.arena_state.allocator());
+        fn_val.function.value.statics = bag;
+        return bag;
     }
 
     /// F.prototype, created lazily on first touch: a fresh `{}` whose
@@ -1121,32 +1205,21 @@ pub const Interpreter = struct {
                 if (obj == .@"undefined" or obj == .@"null") {
                     return self.throwError(.type_error, "Cannot set properties of {s} (setting '{s}')", .{ if (obj == .@"null") "null" else "undefined", key });
                 }
-                // `F.prototype = {...}` overwrites the callable's slot.
-                // Arbitrary properties on functions stay out of scope
-                // (functions here have no general property bag).
-                if (obj == .function and std.mem.eql(u8, key, "prototype")) {
-                    if (value != .object) return error.NotImplemented;
-                    obj.function.value.prototype = value.retain();
-                    return;
-                }
-                if (obj != .object) return error.NotImplemented;
-                // Accessor dispatch before the plain own set: a setter
-                // anywhere on the chain is invoked with this = the
-                // receiver; a getter-only accessor swallows the write
-                // silently (sloppy-mode [[Set]]); the first *data* record
-                // found stops the walk and the write shadows it as an own
-                // property, exactly like real JS.
-                var current: ?*const @TypeOf(obj.object.value) = &obj.object.value;
-                while (current) |o| : (current = o.getPrototype()) {
-                    const rec = o.getOwnRecord(key) orelse continue;
-                    if (rec.isAccessor()) {
-                        const s = rec.setter orelse return; // getter-only: silent no-op
-                        _ = try s.function.value.call(s.function.value.ctx, self.arena_state.allocator(), obj, &.{value});
+                if (obj == .function) {
+                    // `F.prototype = {...}` overwrites the callable's
+                    // slot; everything else goes into the statics bag
+                    // (class statics, F.myProp = 1 -- the old "functions
+                    // have no property bag" gap is gone).
+                    if (std.mem.eql(u8, key, "prototype")) {
+                        if (value != .object) return error.NotImplemented;
+                        obj.function.value.prototype = value.retain();
                         return;
                     }
-                    break;
+                    const bag = try self.functionStatics(obj);
+                    return self.setObjectProperty(bag, key, value);
                 }
-                try obj.object.value.set(key, value.retain());
+                if (obj != .object) return error.NotImplemented;
+                try self.setObjectProperty(obj, key, value);
             },
             else => return error.NotImplemented,
         }
@@ -1154,6 +1227,32 @@ pub const Interpreter = struct {
 
     fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSValue {
         const arena = self.arena_state.allocator();
+        // `super(args)`: the parent constructor invoked with the CURRENT
+        // `this` (the instance under construction), armed as a
+        // construction so the parent's without-new check passes.
+        if (c.callee.data == .super_expr) {
+            const sctor = env.resolveSuperCtor() orelse
+                return self.throwError(.syntax_error, "'super' keyword unexpected here", .{});
+            const args = try self.evalArgs(env, c.args);
+            const prev_target = self.construct_target;
+            self.construct_target = sctor.function.value.ctx;
+            defer self.construct_target = prev_target;
+            return try sctor.function.value.call(sctor.function.value.ctx, arena, env.resolveThis(), args);
+        }
+        // `super.m(args)`: method looked up on the PARENT prototype but
+        // invoked with the current `this` -- the whole point of super.
+        if (c.callee.data == .member and c.callee.data.member.object.data == .super_expr) {
+            const m = c.callee.data.member;
+            const sproto = env.resolveSuperProto() orelse
+                return self.throwError(.syntax_error, "'super' keyword unexpected here", .{});
+            const key = try self.memberKeyString(env, m);
+            const method = try self.getProperty(sproto, key);
+            if (method != .function) {
+                return self.throwError(.type_error, "(intermediate value).{s} is not a function", .{key});
+            }
+            const args = try self.evalArgs(env, c.args);
+            return try method.function.value.call(method.function.value.ctx, arena, env.resolveThis(), args);
+        }
         var this_value: JSValue = JSValue.UNDEFINED;
         var callee_val: JSValue = undefined;
         if (c.callee.data == .member) {
@@ -1216,6 +1315,11 @@ pub const Interpreter = struct {
         try instance.object.value.setPrototype(&proto.object.value);
         // `new Foo` with no parens at all (args == null) is `new Foo()`.
         const args = try self.evalArgs(env, n.args orelse &.{});
+        // Arm the construct token for exactly this call -- see the field
+        // doc on `construct_target`.
+        const prev_target = self.construct_target;
+        self.construct_target = callee.function.value.ctx;
+        defer self.construct_target = prev_target;
         const result = try callee.function.value.call(callee.function.value.ctx, arena, instance, args);
         return switch (result) {
             .object, .array, .function, .regex, .map, .set, .@"error", .date => result,
@@ -1259,6 +1363,94 @@ pub const Interpreter = struct {
         if (self_name) |n| try closure_env.define(arena, n, fn_value.retain());
         return fn_value;
     }
+
+    /// A class-body method closure: an ordinary makeClosure whose
+    /// ClosureCtx additionally carries the parent prototype, so `super.m()`
+    /// resolves inside the body. Safe cast: makeClosure always installs a
+    /// ClosureCtx as the ctx of the closures it creates.
+    fn makeMethodClosure(self: *Interpreter, env: *Environment, fnode: *zfunctions.FunctionNode, super_proto: ?JSValue) anyerror!JSValue {
+        const v = try self.makeClosure(env, fnode);
+        const cc: *ClosureCtx = @ptrCast(@alignCast(v.function.value.ctx));
+        cc.super_proto = super_proto;
+        return v;
+    }
+
+    /// ECMA-262 15.7 ClassDefinitionEvaluation, narrowed: a constructable
+    /// function (classConstructorCall) whose prototype object holds the
+    /// instance methods/accessors and chains to the parent's prototype;
+    /// statics live in the function's bag, chained to the parent's bag
+    /// (static inheritance). No fields/#private/new.target -- see README.
+    fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.ClassNode) anyerror!JSValue {
+        const arena = self.arena_state.allocator();
+
+        var super_ctor: ?JSValue = null;
+        var super_proto: ?JSValue = null;
+        if (cnode.superclass) |sc_expr| {
+            const sc = try self.evalExpression(env, sc_expr);
+            if (sc != .function or !sc.function.value.constructable) {
+                const shown = try coercion.toDisplayString(arena, sc);
+                return self.throwError(.type_error, "Class extends value {s} is not a constructor or null", .{shown});
+            }
+            super_ctor = sc;
+            super_proto = try self.functionPrototype(sc);
+        }
+
+        // Named classes can self-reference inside method bodies (same
+        // wrapper-env trick as named function expressions).
+        const closure_env = if (cnode.name != null) try env.child(arena) else env;
+
+        var proto = try JSValue.newObject(arena);
+        if (super_proto) |sp| try proto.object.value.setPrototype(&sp.object.value);
+
+        var ctor_fnode: ?*zfunctions.FunctionNode = null;
+        for (cnode.elements) |el| {
+            if (!el.is_static and el.kind == .method and std.mem.eql(u8, el.key, "constructor")) {
+                ctor_fnode = el.function;
+            }
+        }
+
+        const cctx = try arena.create(ClassCtx);
+        cctx.* = .{
+            .interp = self,
+            .ctor_fnode = ctor_fnode,
+            .closure_env = closure_env,
+            .name = cnode.name orelse "",
+            .super_ctor = super_ctor,
+            .super_proto = super_proto,
+        };
+        const class_fn = try JSValue.newFunction(arena, .{
+            .ctx = cctx,
+            .name = cnode.name orelse "",
+            .arity = if (ctor_fnode) |f| f.params.items.len else 0,
+            .call = classConstructorCall,
+            .constructable = true,
+        });
+        try proto.object.value.set("constructor", class_fn.retain());
+        class_fn.function.value.prototype = proto;
+
+        // A derived class always gets a statics bag chained to the
+        // parent's (forcing the parent's into existence) so static
+        // inheritance works even when this class declares no statics.
+        if (super_ctor) |parent| {
+            const parent_bag = try self.functionStatics(parent);
+            const bag = try self.functionStatics(class_fn);
+            try bag.object.value.setPrototype(&parent_bag.object.value);
+        }
+
+        for (cnode.elements) |el| {
+            if (!el.is_static and el.kind == .method and std.mem.eql(u8, el.key, "constructor")) continue;
+            const m = try self.makeMethodClosure(closure_env, el.function, super_proto);
+            const target = if (el.is_static) try self.functionStatics(class_fn) else proto;
+            switch (el.kind) {
+                .method => try target.object.value.set(el.key, m),
+                .get => try target.object.value.defineAccessor(el.key, m, null, JSValue.UNDEFINED),
+                .set => try target.object.value.defineAccessor(el.key, null, m, JSValue.UNDEFINED),
+            }
+        }
+
+        if (cnode.name) |n| try closure_env.define(arena, n, class_fn.retain());
+        return class_fn;
+    }
 };
 
 fn labelIn(target: []const u8, labels: []const []const u8) bool {
@@ -1286,18 +1478,24 @@ fn compoundToBinary(op: zparser.AssignOp) zparser.BinaryOp {
     };
 }
 
-fn closureCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    const closure_ctx: *ClosureCtx = @ptrCast(@alignCast(ctx));
-    const self = closure_ctx.interp;
-    const fnode = closure_ctx.function_node;
-    const call_env = try closure_ctx.closure_env.child(allocator);
-
-    // Arrows have no own `this` binding -- leaving call_env.this_value
-    // null makes `resolveThis()` walk up to closure_env's, matching real
-    // lexical `this` inheritance.
-    if (fnode.kind != .arrow) {
-        call_env.this_value = this_value;
-    }
+/// The shared body of every user-code invocation: fresh call env off the
+/// closure env, this/super bindings, parameter binding (defaults, rest,
+/// destructuring via bindPattern), then the body. `this_value` null =
+/// don't bind (arrows -- resolveThis walks up instead).
+fn invokeFunctionNode(
+    self: *Interpreter,
+    fnode: *zfunctions.FunctionNode,
+    closure_env: *Environment,
+    allocator: Allocator,
+    this_value: ?JSValue,
+    super_proto: ?JSValue,
+    super_ctor: ?JSValue,
+    args: []const JSValue,
+) anyerror!JSValue {
+    const call_env = try closure_env.child(allocator);
+    if (this_value) |tv| call_env.this_value = tv;
+    call_env.super_proto = super_proto;
+    call_env.super_ctor = super_ctor;
 
     for (fnode.params.items, 0..) |param, i| {
         var value = if (i < args.len) args[i] else JSValue.UNDEFINED;
@@ -1323,5 +1521,40 @@ fn closureCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
         },
         .expression => |expr| return try self.evalExpression(call_env, expr),
     }
+}
+
+fn closureCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const closure_ctx: *ClosureCtx = @ptrCast(@alignCast(ctx));
+    const fnode = closure_ctx.function_node;
+    // Arrows have no own `this` binding -- passing null makes
+    // `resolveThis()` walk up to closure_env's, matching real lexical
+    // `this` inheritance.
+    const this: ?JSValue = if (fnode.kind != .arrow) this_value else null;
+    return invokeFunctionNode(closure_ctx.interp, fnode, closure_ctx.closure_env, allocator, this, closure_ctx.super_proto, null, args);
+}
+
+fn classConstructorCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const cctx: *ClassCtx = @ptrCast(@alignCast(ctx));
+    const self = cctx.interp;
+    if (self.construct_target != ctx) {
+        return self.throwError(.type_error, "Class constructor {s} cannot be invoked without 'new'", .{cctx.name});
+    }
+    // Consume the token: plain calls made inside the constructor body
+    // must not look like constructions (evalNew's defer restores it for
+    // its own caller either way).
+    self.construct_target = null;
+
+    if (cctx.ctor_fnode) |fnode| {
+        return invokeFunctionNode(self, fnode, cctx.closure_env, allocator, this_value, cctx.super_proto, cctx.super_ctor, args);
+    }
+    // Implicit constructor: a derived class forwards this + args to its
+    // parent (`constructor(...args) { super(...args) }`); a base class
+    // is a no-op.
+    if (cctx.super_ctor) |parent| {
+        self.construct_target = parent.function.value.ctx;
+        defer self.construct_target = null;
+        _ = try parent.function.value.call(parent.function.value.ctx, allocator, this_value, args);
+    }
+    return JSValue.UNDEFINED;
 }
 
