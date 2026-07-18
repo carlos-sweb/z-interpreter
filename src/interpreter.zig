@@ -129,6 +129,16 @@ pub const Interpreter = struct {
         return c.value;
     }
 
+    /// Installs a host-provided global binding (QuickJS-libc-style: the
+    /// engine stays free of any runtime concern; hosts like z-run add
+    /// their `os`/`std` objects through this). Retains the value. Define
+    /// BEFORE the first run() if user code must see it from the first
+    /// statement (globals land in global_env, above the script scope, so
+    /// user `let`/`const` may shadow them -- exactly like `console`).
+    pub fn defineGlobal(self: *Interpreter, name: []const u8, value: JSValue) !void {
+        try self.global_env.define(self.arena_state.allocator(), name, value.retain());
+    }
+
     // ===== Exception machinery =====
 
     /// Raise an arbitrary JSValue as a JS exception (throw statement,

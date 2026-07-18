@@ -18,6 +18,7 @@ Not spec completeness — validating the whole pipeline end-to-end for the first
 - **`console.log`'s formatter (`inspect.zig`) is standalone, not `z-json`** — `JSON.stringify`'s rules (omits `undefined`/functions, quotes every string) are wrong for `console.log` (top-level strings shouldn't be quoted; `undefined` should still print something). Legible, not spec-exact.
 - **Named function expressions can reference themselves recursively by name** (`const f = function fact(n) { return fact(n-1); }`) via a thin wrapper environment binding the name to the closure itself — the name is visible only inside the function's own body, not in the enclosing scope.
 - **`console_writer: *std.Io.Writer` is injected**, never hardcoded to real stdout — tests point it at `std.Io.Writer.Allocating` instead of touching the process's actual stdout.
+- **Hosts extend the engine via `defineGlobal(name, value)`** (QuickJS-style split: the engine stays free of any runtime concern) — [z-run](https://github.com/carlos-sweb/z-run) uses it to install its `os` global (synchronous fs, script args) without this repo knowing files exist.
 
 ## Exceptions
 
