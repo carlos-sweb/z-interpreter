@@ -91,6 +91,38 @@ test "await stays an ordinary identifier outside async bodies" {
     try helpers.expectNumber("const await = 4; await + 1;", 5);
 }
 
+test "async arrow functions (parenless and paren'd)" {
+    try helpers.expectStdout(
+        \\const f = async () => await Promise.resolve('flecha');
+        \\f().then(v => console.log(v));
+    , "flecha\n");
+    try helpers.expectStdout(
+        \\const g = async x => x * 2;
+        \\g(21).then(v => console.log('param:', v));
+    , "param: 42\n");
+    // An async arrow captures `this` lexically like any arrow.
+    try helpers.expectStdout(
+        \\const obj = { tag: 5, run() { const f = async () => this.tag; return f(); } };
+        \\obj.run().then(v => console.log(v));
+    , "5\n");
+}
+
+test "async methods in object literals and classes" {
+    try helpers.expectStdout(
+        \\const o = { async m() { return await Promise.resolve(7); } };
+        \\o.m().then(v => console.log('obj:', v));
+    , "obj: 7\n");
+    try helpers.expectStdout(
+        \\class C { async m() { return 8; } static async sm() { return 9; } }
+        \\new C().m().then(v => console.log('inst:', v));
+        \\C.sm().then(v => console.log('static:', v));
+    , "inst: 8\nstatic: 9\n");
+}
+
+test "async generators parse but are a clear runtime error" {
+    try helpers.expectUncaught("const o = { async *ag() { yield 1; } }; o.ag();", .type_error, "async generators are not supported yet");
+}
+
 test "a generator driven from inside an async function (nested fibers)" {
     try helpers.expectStdout(
         \\function* nums() { yield 1; yield 2; }

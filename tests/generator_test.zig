@@ -79,6 +79,40 @@ test "hand-written iterator objects work in for-of via the same protocol" {
     , "1\n2\n3\n");
 }
 
+test "generator methods in object literals and classes" {
+    try helpers.expectStdout(
+        \\const o = { *gen() { yield 1; yield 2; } };
+        \\for (const v of o.gen()) console.log(v);
+    , "1\n2\n");
+    try helpers.expectStdout(
+        \\class C { *nums() { yield 3; yield 4; } }
+        \\console.log([...(function(){ const a = []; for (const v of new C().nums()) a.push(v); return a; })()].join(','));
+    , "3,4\n");
+}
+
+test "yield* delegates to another generator, forwarding the return value" {
+    try helpers.expectStdout(
+        \\function* inner() { yield 'a'; yield 'b'; return 'FIN'; }
+        \\function* outer() { const r = yield* inner(); console.log('ret:', r); yield 'c'; }
+        \\for (const v of outer()) console.log(v);
+    , "a\nb\nret: FIN\nc\n");
+}
+
+test "yield* over an array and a string" {
+    try helpers.expectStdout(
+        \\function* g() { yield* [1, 2]; yield* 'ab'; }
+        \\for (const v of g()) console.log(v);
+    , "1\n2\na\nb\n");
+}
+
+test "yield* forwards the outer resume value into the inner generator" {
+    try helpers.expectStdout(
+        \\function* echo() { while (true) { const x = yield; console.log('recibido:', x); } }
+        \\function* deleg() { yield* echo(); }
+        \\const d = deleg(); d.next(); d.next('forward');
+    , "recibido: forward\n");
+}
+
 test "yield outside a generator body stays a parse error" {
     var allocating = std.Io.Writer.Allocating.init(testing.allocator);
     defer allocating.deinit();

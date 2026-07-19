@@ -1332,6 +1332,53 @@ pub const Interpreter = struct {
         };
     }
 
+    /// `yield* iterable`: drives an inner iterable, re-yielding each of
+    /// its values from the current (outer) generator and forwarding the
+    /// outer's resume value into the inner. Narrowed to iterator-protocol
+    /// objects (callable `next`), arrays, and strings -- no arbitrary
+    /// Symbol.iterator. The expression's own value is the inner
+    /// iterator's return value (arrays/strings: undefined).
+    fn evalYieldDelegate(self: *Interpreter, env: *Environment, fs: *FiberState, arg_node: *zparser.Node) anyerror!JSValue {
+        const arena = self.arena_state.allocator();
+        const iterable = try self.evalExpression(env, arg_node);
+
+        // Iterator-protocol object: forward next(resume), return the
+        // completion value.
+        if (iterable == .object) {
+            const next_fn = try self.getProperty(iterable, "next");
+            if (next_fn == .function) {
+                var resume_value = JSValue.UNDEFINED;
+                while (true) {
+                    const step = try next_fn.function.value.call(next_fn.function.value.ctx, arena, iterable, &.{resume_value});
+                    if (step != .object) return self.throwError(.type_error, "Iterator result {s} is not an object", .{step.typeOf()});
+                    if (coercion.isTruthy(try self.getProperty(step, "done"))) {
+                        return self.getProperty(step, "value");
+                    }
+                    fs.yielded = try self.getProperty(step, "value");
+                    fs.fiber.suspendSelf();
+                    if (fs.resume_is_throw) {
+                        fs.resume_is_throw = false;
+                        return self.throwValue(fs.resume_value);
+                    }
+                    resume_value = fs.resume_value;
+                }
+            }
+        }
+
+        // Arrays and strings: re-yield each element (resume value is not
+        // fed anywhere -- they aren't real iterators).
+        const items = try self.iterableItems(iterable);
+        for (items) |item| {
+            fs.yielded = item;
+            fs.fiber.suspendSelf();
+            if (fs.resume_is_throw) {
+                fs.resume_is_throw = false;
+                return self.throwValue(fs.resume_value);
+            }
+        }
+        return JSValue.UNDEFINED;
+    }
+
     /// How bindPattern lands a name: `.define` creates the binding in
     /// `env` (let/const/params/catch); `.assign` writes to an existing
     /// binding up the chain -- `var` declarators, whose bindings the
@@ -1843,6 +1890,7 @@ pub const Interpreter = struct {
             .yield_expr => |y| {
                 const fs = self.current_fiber orelse return error.NotImplemented;
                 if (fs.kind != .generator) return error.NotImplemented;
+                if (y.delegate) return self.evalYieldDelegate(env, fs, y.argument.?);
                 const value = if (y.argument) |a| try self.evalExpression(env, a) else JSValue.UNDEFINED;
                 fs.yielded = value;
                 fs.fiber.suspendSelf();
