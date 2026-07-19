@@ -92,6 +92,12 @@ ES modules with the QuickJS host split: the engine never reads files — a host-
 
 Narrowings: only `Symbol.iterator` is consulted in real behavior (`toPrimitive`/`toStringTag`/`hasInstance` exist as identities but aren't wired into coercion/toString/instanceof); implicit `sym + ''` is `NotImplemented` rather than the TypeError (`String(sym)` and `sym.toString()` work); the symbol-key encoding could theoretically collide with a user computed key containing a `\x00` byte (pathological).
 
+## Array and String method coverage
+
+Near-complete `Array.prototype` and `String.prototype`, reusing z-array/z-string (which already implement the algorithms) and adding the callback-taking ones inline. **Arrays**: the mutators `push`/`pop`/`shift`/`unshift`/`splice`/`sort` (default lexicographic or a JS comparator)/`fill`/`copyWithin`/`reverse`, the searches `indexOf`/`lastIndexOf`/`includes`/`find`/`findIndex`/`findLast`/`findLastIndex`, the iterators `map`/`filter`/`forEach`/`reduce`/`reduceRight`/`some`/`every`/`flatMap` (callbacks get the `(item, index, array)` triple), `flat` (depth), `at`, `slice`/`concat`/`join`/`toString`, and `keys`/`values`/`entries` (real iterator objects). **Index and length assignment** finally work: `arr[i] = x` (growing with `undefined` holes past the end), `arr.length = n` (truncate/extend), and `arr[i] += 1`. **Strings**: `charCodeAt`/`codePointAt`/`at`, `padStart`/`padEnd`, `substring`/`substr`/`slice`, `lastIndexOf`/`indexOf`/`includes`/`startsWith`/`endsWith`, `trim`/`trimStart`/`trimEnd`, `concat`/`repeat`/`split`, `toUpperCase`/`toLowerCase`, `replace`/`replaceAll` (string patterns, function replacers), `localeCompare`, `toString`/`valueOf`, plus `String.fromCharCode`/`fromCodePoint`. All Node-verified (z-string handles UTF-16 indexing).
+
+Narrowings: `replace`/`replaceAll`/`match`/`search` with **regex** patterns are deferred (zregexp isn't wired — a phase of its own); arrays aren't truly sparse (holes are `undefined`) and have no general property bag (`arr.foo = 1` is NotImplemented); `localeCompare` is byte order, not Unicode collation; `$`-substitution in `replace` isn't supported.
+
 ## Known gaps (deferred to future phases)
 
 - **`with`**.

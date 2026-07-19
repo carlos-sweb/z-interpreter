@@ -2179,6 +2179,39 @@ pub const Interpreter = struct {
         };
     }
 
+    /// Writing to an array: numeric indices (grow with undefined holes
+    /// past the end -- narrowing vs true sparse arrays) and `length`
+    /// (truncate/extend). Any other key is NotImplemented (arrays have no
+    /// general property bag here).
+    fn setArrayProperty(self: *Interpreter, obj: JSValue, key: []const u8, value: JSValue) anyerror!void {
+        _ = self;
+        const arr = &obj.array.value;
+        if (std.mem.eql(u8, key, "length")) {
+            const n = try coercion.toUint32(value);
+            const cur = arr.length();
+            if (n < cur) {
+                var i = cur;
+                while (i > n) : (i -= 1) {
+                    if (arr.pop()) |v| v.deinit();
+                }
+            } else {
+                var i = cur;
+                while (i < n) : (i += 1) _ = try arr.push(JSValue.UNDEFINED);
+            }
+            return;
+        }
+        const idx = std.fmt.parseInt(usize, key, 10) catch return error.NotImplemented;
+        const cur = arr.length();
+        if (idx < cur) {
+            arr.toSliceMut()[idx].deinit();
+            arr.toSliceMut()[idx] = value.retain();
+        } else {
+            var i = cur;
+            while (i < idx) : (i += 1) _ = try arr.push(JSValue.UNDEFINED);
+            _ = try arr.push(value.retain());
+        }
+    }
+
     /// [[Set]] on an `.object` JSValue with accessor dispatch: a setter
     /// anywhere on the chain is invoked with this = the receiver; a
     /// getter-only accessor swallows the write silently (sloppy-mode
@@ -2359,6 +2392,7 @@ pub const Interpreter = struct {
                     const bag = try self.functionStatics(obj);
                     return self.setObjectProperty(bag, key, value);
                 }
+                if (obj == .array) return self.setArrayProperty(obj, key, value);
                 if (obj != .object) return error.NotImplemented;
                 try self.setObjectProperty(obj, key, value);
             },

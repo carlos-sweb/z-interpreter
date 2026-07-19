@@ -62,8 +62,24 @@ pub const array_methods = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "forEach", arrayForEach },
     .{ "reduce", arrayReduce },
     .{ "find", arrayFind },
+    .{ "findIndex", arrayFindIndex },
+    .{ "findLast", arrayFindLast },
+    .{ "findLastIndex", arrayFindLastIndex },
     .{ "some", arraySome },
     .{ "every", arrayEvery },
+    .{ "reduceRight", arrayReduceRight },
+    .{ "flatMap", arrayFlatMap },
+    .{ "at", arrayAt },
+    .{ "lastIndexOf", arrayLastIndexOf },
+    .{ "fill", arrayFill },
+    .{ "copyWithin", arrayCopyWithin },
+    .{ "flat", arrayFlat },
+    .{ "splice", arraySplice },
+    .{ "sort", arraySort },
+    .{ "toString", arrayToStringMethod },
+    .{ "keys", arrayKeys },
+    .{ "values", arrayValues },
+    .{ "entries", arrayEntries },
 });
 
 pub const date_methods = std.StaticStringMap(NativeFn).initComptime(.{
@@ -118,6 +134,22 @@ pub const string_methods = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "repeat", stringRepeat },
     .{ "split", stringSplit },
     .{ "trim", stringTrim },
+    .{ "trimStart", stringTrimStart },
+    .{ "trimEnd", stringTrimEnd },
+    .{ "charCodeAt", stringCharCodeAt },
+    .{ "codePointAt", stringCodePointAt },
+    .{ "at", stringAt },
+    .{ "padStart", stringPadStart },
+    .{ "padEnd", stringPadEnd },
+    .{ "substring", stringSubstring },
+    .{ "substr", stringSubstr },
+    .{ "lastIndexOf", stringLastIndexOf },
+    .{ "concat", stringConcat },
+    .{ "replace", stringReplace },
+    .{ "replaceAll", stringReplaceAll },
+    .{ "localeCompare", stringLocaleCompare },
+    .{ "toString", stringToStringMethod },
+    .{ "valueOf", stringToStringMethod },
 });
 
 // ===== Globals =====
@@ -312,6 +344,7 @@ pub fn setupGlobals(self: *Interpreter) !void {
     const string_ctor = try JSValue.newFunction(arena, .{ .ctx = self, .name = "String", .arity = 1, .call = globalString, .constructable = true });
     const string_statics = try self.functionStatics(string_ctor);
     try string_statics.object.value.set("fromCharCode", try native(self, "fromCharCode", stringFromCharCode));
+    try string_statics.object.value.set("fromCodePoint", try native(self, "fromCodePoint", stringFromCodePoint));
     try g.define(arena, "String", string_ctor);
 
     const number_ctor = try JSValue.newFunction(arena, .{ .ctx = self, .name = "Number", .arity = 1, .call = globalNumber, .constructable = true });
@@ -1820,4 +1853,505 @@ fn symbolKeyFor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
         }
     }
     return JSValue.UNDEFINED;
+}
+
+// ===== Array.prototype (extended coverage) =====
+
+fn normIndex(raw: f64, len: usize) usize {
+    if (raw < 0) {
+        const from_end = @as(f64, @floatFromInt(len)) + raw;
+        return if (from_end < 0) 0 else @intFromFloat(from_end);
+    }
+    const i: usize = @intFromFloat(raw);
+    return @min(i, len);
+}
+
+fn arrayAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    try requireArray(ctx, this_value, "at");
+    const slice = this_value.array.value.toSlice();
+    var idx: f64 = @floatFromInt(@as(i64, @intCast(slice.len)));
+    const n = try coercion.toNumber(arg(args, 0));
+    idx = if (n < 0) @as(f64, @floatFromInt(slice.len)) + n else n;
+    if (idx < 0 or idx >= @as(f64, @floatFromInt(slice.len))) return JSValue.UNDEFINED;
+    return slice[@intFromFloat(idx)].retain();
+}
+
+fn arrayFindIndex(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    try requireArray(ctx, this_value, "findIndex");
+    const cb = try requireCallback(ctx, args);
+    for (this_value.array.value.toSlice(), 0..) |item, i| {
+        if (coercion.isTruthy(try callCallback(cb, allocator, item, i, this_value))) return JSValue.fromNumber(@floatFromInt(i));
+    }
+    return JSValue.fromNumber(-1);
+}
+
+fn arrayFindLast(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    try requireArray(ctx, this_value, "findLast");
+    const cb = try requireCallback(ctx, args);
+    const slice = this_value.array.value.toSlice();
+    var i = slice.len;
+    while (i > 0) {
+        i -= 1;
+        if (coercion.isTruthy(try callCallback(cb, allocator, slice[i], i, this_value))) return slice[i].retain();
+    }
+    return JSValue.UNDEFINED;
+}
+
+fn arrayFindLastIndex(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    try requireArray(ctx, this_value, "findLastIndex");
+    const cb = try requireCallback(ctx, args);
+    const slice = this_value.array.value.toSlice();
+    var i = slice.len;
+    while (i > 0) {
+        i -= 1;
+        if (coercion.isTruthy(try callCallback(cb, allocator, slice[i], i, this_value))) return JSValue.fromNumber(@floatFromInt(i));
+    }
+    return JSValue.fromNumber(-1);
+}
+
+fn arrayReduceRight(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    try requireArray(ctx, this_value, "reduceRight");
+    const cb = try requireCallback(ctx, args);
+    const slice = this_value.array.value.toSlice();
+    var acc: JSValue = undefined;
+    var i: usize = slice.len;
+    if (args.len > 1) {
+        acc = args[1];
+    } else {
+        if (slice.len == 0) return interp(ctx).throwError(.type_error, "Reduce of empty array with no initial value", .{});
+        i -= 1;
+        acc = slice[i];
+    }
+    while (i > 0) {
+        i -= 1;
+        acc = try cb.function.value.call(cb.function.value.ctx, allocator, JSValue.UNDEFINED, &.{ acc, slice[i], JSValue.fromNumber(@floatFromInt(i)), this_value });
+    }
+    return acc;
+}
+
+fn arrayFlatMap(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    try requireArray(ctx, this_value, "flatMap");
+    const cb = try requireCallback(ctx, args);
+    var result = try JSValue.newArray(allocator);
+    for (this_value.array.value.toSlice(), 0..) |item, i| {
+        const v = try callCallback(cb, allocator, item, i, this_value);
+        if (v == .array) {
+            for (v.array.value.toSlice()) |sub| _ = try result.array.value.push(sub.retain());
+        } else {
+            _ = try result.array.value.push(v.retain());
+        }
+    }
+    return result;
+}
+
+fn arrayLastIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    try requireArray(ctx, this_value, "lastIndexOf");
+    const target = arg(args, 0);
+    const slice = this_value.array.value.toSlice();
+    var i = slice.len;
+    while (i > 0) {
+        i -= 1;
+        if (zvalue.equality.strictEquals(slice[i], target)) return JSValue.fromNumber(@floatFromInt(i));
+    }
+    return JSValue.fromNumber(-1);
+}
+
+fn arrayFill(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    try requireArray(ctx, this_value, "fill");
+    const arr = &this_value.array.value;
+    const len = arr.length();
+    const val = arg(args, 0);
+    const start = if (arg(args, 1) == .@"undefined") 0 else normIndex(try coercion.toNumber(arg(args, 1)), len);
+    const end = if (arg(args, 2) == .@"undefined") len else normIndex(try coercion.toNumber(arg(args, 2)), len);
+    var i = start;
+    const mut = arr.toSliceMut();
+    while (i < end) : (i += 1) {
+        mut[i].deinit();
+        mut[i] = val.retain();
+    }
+    return this_value.retain();
+}
+
+fn arrayCopyWithin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    try requireArray(ctx, this_value, "copyWithin");
+    const arr = &this_value.array.value;
+    const len = arr.length();
+    const target = normIndex(try coercion.toNumber(arg(args, 0)), len);
+    const start = if (arg(args, 1) == .@"undefined") 0 else normIndex(try coercion.toNumber(arg(args, 1)), len);
+    const end = if (arg(args, 2) == .@"undefined") len else normIndex(try coercion.toNumber(arg(args, 2)), len);
+    // Snapshot the source slice (retained) so overlapping copies are correct.
+    var tmp: std.ArrayList(JSValue) = .empty;
+    defer tmp.deinit(std.heap.page_allocator);
+    var i = start;
+    while (i < end) : (i += 1) try tmp.append(std.heap.page_allocator, arr.toSlice()[i]);
+    const mut = arr.toSliceMut();
+    var t = target;
+    for (tmp.items) |src| {
+        if (t >= len) break;
+        mut[t].deinit();
+        mut[t] = src.retain();
+        t += 1;
+    }
+    return this_value.retain();
+}
+
+fn flattenInto(result: *JSValue, allocator: Allocator, slice: []const JSValue, depth: i64) anyerror!void {
+    for (slice) |item| {
+        if (depth > 0 and item == .array) {
+            try flattenInto(result, allocator, item.array.value.toSlice(), depth - 1);
+        } else {
+            _ = try result.array.value.push(item.retain());
+        }
+    }
+}
+
+fn arrayFlat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    try requireArray(ctx, this_value, "flat");
+    const depth: i64 = if (arg(args, 0) == .@"undefined") 1 else @intFromFloat(try coercion.toNumber(arg(args, 0)));
+    var result = try JSValue.newArray(allocator);
+    try flattenInto(&result, allocator, this_value.array.value.toSlice(), depth);
+    return result;
+}
+
+fn arraySplice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    try requireArray(ctx, this_value, "splice");
+    const arr = &this_value.array.value;
+    const len = arr.length();
+    const start = if (args.len == 0) 0 else normIndex(try coercion.toNumber(arg(args, 0)), len);
+    const delete_count: usize = if (args.len < 2)
+        (if (args.len == 0) 0 else len - start)
+    else blk: {
+        const dc = try coercion.toNumber(arg(args, 1));
+        if (dc <= 0) break :blk 0;
+        break :blk @min(@as(usize, @intFromFloat(dc)), len - start);
+    };
+    // Removed elements -> returned array (retained).
+    var removed = try JSValue.newArray(allocator);
+    for (arr.toSlice()[start .. start + delete_count]) |item| _ = try removed.array.value.push(item.retain());
+    // Rebuild: prefix + inserts + suffix.
+    const inserts = if (args.len > 2) args[2..] else &[_]JSValue{};
+    var rebuilt: std.ArrayList(JSValue) = .empty;
+    defer rebuilt.deinit(allocator);
+    for (arr.toSlice()[0..start]) |item| try rebuilt.append(allocator, item.retain());
+    for (inserts) |item| try rebuilt.append(allocator, item.retain());
+    for (arr.toSlice()[start + delete_count ..]) |item| try rebuilt.append(allocator, item.retain());
+    // Replace the backing contents.
+    while (arr.pop()) |v| v.deinit();
+    for (rebuilt.items) |item| _ = try arr.push(item);
+    return removed;
+}
+
+fn arraySort(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    try requireArray(ctx, this_value, "sort");
+    const self = interp(ctx);
+    const cmp = arg(args, 0);
+    if (cmp != .@"undefined" and cmp != .function) return self.throwError(.type_error, "The comparison function must be either a function or undefined", .{});
+    const arr = &this_value.array.value;
+    const n = arr.length();
+    // Insertion sort over the live backing (stable; O(n^2) is fine for
+    // the sizes involved and lets us call a JS comparator per compare).
+    var i: usize = 1;
+    const mut = arr.toSliceMut();
+    while (i < n) : (i += 1) {
+        const key = mut[i];
+        var j = i;
+        while (j > 0) {
+            const before = try sortLess(allocator, cmp, key, mut[j - 1]);
+            if (!before) break;
+            mut[j] = mut[j - 1];
+            j -= 1;
+        }
+        mut[j] = key;
+    }
+    return this_value.retain();
+}
+
+/// Whether `a` should sort before `b` (comparator < 0, or default string
+/// order). undefined always sorts last (spec).
+fn sortLess(allocator: Allocator, cmp: JSValue, a: JSValue, b: JSValue) anyerror!bool {
+    if (a == .@"undefined") return false;
+    if (b == .@"undefined") return true;
+    if (cmp == .function) {
+        const r = try cmp.function.value.call(cmp.function.value.ctx, allocator, JSValue.UNDEFINED, &.{ a, b });
+        return (try coercion.toNumber(r)) < 0;
+    }
+    const sa = try coercion.toDisplayString(allocator, a);
+    defer allocator.free(sa);
+    const sb = try coercion.toDisplayString(allocator, b);
+    defer allocator.free(sb);
+    return std.mem.order(u8, sa, sb) == .lt;
+}
+
+fn arrayToStringMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    try requireArray(ctx, this_value, "toString");
+    const s = try coercion.toDisplayString(allocator, this_value);
+    defer allocator.free(s);
+    return JSValue.newString(allocator, s);
+}
+
+/// keys()/values()/entries() -- iterator objects with `next` and a
+/// Symbol.iterator returning self. A snapshot over the current elements.
+const ArrayIterCtx = struct {
+    interp: *Interpreter,
+    items: []const JSValue, // retained snapshot
+    index: usize = 0,
+    kind: enum { keys, values, entries },
+};
+
+fn arrayIterNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    _ = args;
+    const ic: *ArrayIterCtx = @ptrCast(@alignCast(ctx));
+    var result = try JSValue.newObject(allocator);
+    if (ic.index >= ic.items.len) {
+        try result.object.value.set("value", JSValue.UNDEFINED);
+        try result.object.value.set("done", JSValue.fromBool(true));
+        return result;
+    }
+    const i = ic.index;
+    ic.index += 1;
+    const value: JSValue = switch (ic.kind) {
+        .keys => JSValue.fromNumber(@floatFromInt(i)),
+        .values => ic.items[i].retain(),
+        .entries => blk: {
+            var pair = try JSValue.newArray(allocator);
+            _ = try pair.array.value.push(JSValue.fromNumber(@floatFromInt(i)));
+            _ = try pair.array.value.push(ic.items[i].retain());
+            break :blk pair;
+        },
+    };
+    try result.object.value.set("value", value);
+    try result.object.value.set("done", JSValue.fromBool(false));
+    return result;
+}
+
+fn makeArrayIterator(self: *Interpreter, allocator: Allocator, this_value: JSValue, kind: @FieldType(ArrayIterCtx, "kind")) anyerror!JSValue {
+    const src = this_value.array.value.toSlice();
+    const snapshot = try allocator.alloc(JSValue, src.len);
+    for (src, 0..) |item, i| snapshot[i] = item.retain();
+    const ic = try allocator.create(ArrayIterCtx);
+    ic.* = .{ .interp = self, .items = snapshot, .kind = kind };
+    var obj = try JSValue.newObject(allocator);
+    try obj.object.value.set("next", try JSValue.newFunction(allocator, .{ .ctx = ic, .name = "next", .call = arrayIterNext }));
+    if (self.symbol_iterator) |sym| {
+        const key = try self.encodeKey(sym);
+        try obj.object.value.set(key, try self.nativeMethod("iterator", "self", iteratorSelfBuiltin));
+    }
+    return obj;
+}
+
+/// A `[Symbol.iterator]()` returning the receiver -- for builtin iterator
+/// objects (mirrors the interpreter's own iteratorSelf).
+fn iteratorSelfBuiltin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = ctx;
+    _ = allocator;
+    _ = args;
+    return this_value.retain();
+}
+
+fn arrayKeys(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    try requireArray(ctx, this_value, "keys");
+    return makeArrayIterator(interp(ctx), allocator, this_value, .keys);
+}
+
+fn arrayValues(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    try requireArray(ctx, this_value, "values");
+    return makeArrayIterator(interp(ctx), allocator, this_value, .values);
+}
+
+fn arrayEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    try requireArray(ctx, this_value, "entries");
+    return makeArrayIterator(interp(ctx), allocator, this_value, .entries);
+}
+
+// ===== String.prototype (extended coverage) =====
+
+fn stringTrimStart(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const data = try requireString(ctx, this_value, "trimStart");
+    const out = try zstring.trimming.trimStart(allocator, data);
+    defer allocator.free(out);
+    return JSValue.newString(allocator, out);
+}
+
+fn stringTrimEnd(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const data = try requireString(ctx, this_value, "trimEnd");
+    const out = try zstring.trimming.trimEnd(allocator, data);
+    defer allocator.free(out);
+    return JSValue.newString(allocator, out);
+}
+
+fn stringCharCodeAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const data = try requireString(ctx, this_value, "charCodeAt");
+    const idx: isize = @intFromFloat(if (arg(args, 0) == .@"undefined") 0 else try coercion.toNumber(arg(args, 0)));
+    return if (zstring.access.charCodeAt(data, idx)) |c| JSValue.fromNumber(@floatFromInt(c)) else JSValue.fromNumber(std.math.nan(f64));
+}
+
+fn stringCodePointAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const data = try requireString(ctx, this_value, "codePointAt");
+    const idx: isize = @intFromFloat(if (arg(args, 0) == .@"undefined") 0 else try coercion.toNumber(arg(args, 0)));
+    return if (zstring.access.codePointAt(data, idx)) |c| JSValue.fromNumber(@floatFromInt(c)) else JSValue.UNDEFINED;
+}
+
+fn stringAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const data = try requireString(ctx, this_value, "at");
+    const idx: isize = @intFromFloat(if (arg(args, 0) == .@"undefined") 0 else try coercion.toNumber(arg(args, 0)));
+    const out = (try zstring.access.at(allocator, data, idx)) orelse return JSValue.UNDEFINED;
+    defer allocator.free(out);
+    return JSValue.newString(allocator, out);
+}
+
+fn stringPadStart(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const data = try requireString(ctx, this_value, "padStart");
+    const target: isize = @intFromFloat(try coercion.toNumber(arg(args, 0)));
+    const pad: ?[]const u8 = if (arg(args, 1) == .string) arg(args, 1).string.value.data else null;
+    const out = try zstring.padding.padStart(allocator, data, target, pad);
+    defer allocator.free(out);
+    return JSValue.newString(allocator, out);
+}
+
+fn stringPadEnd(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const data = try requireString(ctx, this_value, "padEnd");
+    const target: isize = @intFromFloat(try coercion.toNumber(arg(args, 0)));
+    const pad: ?[]const u8 = if (arg(args, 1) == .string) arg(args, 1).string.value.data else null;
+    const out = try zstring.padding.padEnd(allocator, data, target, pad);
+    defer allocator.free(out);
+    return JSValue.newString(allocator, out);
+}
+
+fn stringSubstring(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const data = try requireString(ctx, this_value, "substring");
+    const start: isize = @intFromFloat(if (arg(args, 0) == .@"undefined") 0 else try coercion.toNumber(arg(args, 0)));
+    const end: ?isize = if (arg(args, 1) == .@"undefined") null else @intFromFloat(try coercion.toNumber(arg(args, 1)));
+    const out = try zstring.transform.substring(allocator, data, start, end);
+    defer allocator.free(out);
+    return JSValue.newString(allocator, out);
+}
+
+/// Legacy substr(start, length) -- start can be negative (from end).
+fn stringSubstr(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const data = try requireString(ctx, this_value, "substr");
+    const total: isize = @intCast(zstring.utf16.lengthUtf16(data));
+    var start: isize = @intFromFloat(if (arg(args, 0) == .@"undefined") 0 else try coercion.toNumber(arg(args, 0)));
+    if (start < 0) start = @max(total + start, 0);
+    const length: isize = if (arg(args, 1) == .@"undefined") total else @intFromFloat(try coercion.toNumber(arg(args, 1)));
+    const end = @min(start + @max(length, 0), total);
+    const out = try zstring.transform.substring(allocator, data, start, end);
+    defer allocator.free(out);
+    return JSValue.newString(allocator, out);
+}
+
+fn stringLastIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const data = try requireString(ctx, this_value, "lastIndexOf");
+    if (arg(args, 0) != .string) return JSValue.fromNumber(-1);
+    return JSValue.fromNumber(@floatFromInt(zstring.search.lastIndexOf(data, arg(args, 0).string.value.data, null)));
+}
+
+fn stringConcat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const data = try requireString(ctx, this_value, "concat");
+    var pieces: std.ArrayList([]const u8) = .empty;
+    defer pieces.deinit(allocator);
+    var owned: std.ArrayList([]u8) = .empty;
+    defer {
+        for (owned.items) |o| allocator.free(o);
+        owned.deinit(allocator);
+    }
+    for (args) |a| {
+        if (a == .string) {
+            try pieces.append(allocator, a.string.value.data);
+        } else {
+            const s = try coercion.toDisplayString(allocator, a);
+            try owned.append(allocator, s);
+            try pieces.append(allocator, s);
+        }
+    }
+    const out = try zstring.transform.concat(allocator, data, pieces.items);
+    defer allocator.free(out);
+    return JSValue.newString(allocator, out);
+}
+
+/// replace/replaceAll with STRING patterns only (regex deferred). No `$`
+/// substitution patterns (narrowing).
+fn stringReplaceImpl(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue, all: bool) anyerror!JSValue {
+    const data = try requireString(ctx, this_value, if (all) "replaceAll" else "replace");
+    const self = interp(ctx);
+    if (arg(args, 0) != .string) return self.throwError(.type_error, "string replace with a non-string pattern is not supported", .{});
+    const pattern = arg(args, 0).string.value.data;
+    // The replacement: a string, or a function called (match, offset, whole).
+    const repl_fn = arg(args, 1);
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var i: usize = 0;
+    var replaced = false;
+    while (i < data.len) {
+        if ((!replaced or all) and pattern.len > 0 and i + pattern.len <= data.len and std.mem.eql(u8, data[i .. i + pattern.len], pattern)) {
+            if (repl_fn == .function) {
+                const r = try repl_fn.function.value.call(repl_fn.function.value.ctx, allocator, JSValue.UNDEFINED, &.{
+                    arg(args, 0), JSValue.fromNumber(@floatFromInt(i)), this_value,
+                });
+                const rs = try coercion.toDisplayString(allocator, r);
+                defer allocator.free(rs);
+                try buf.appendSlice(allocator, rs);
+            } else if (repl_fn == .string) {
+                try buf.appendSlice(allocator, repl_fn.string.value.data);
+            }
+            i += pattern.len;
+            replaced = true;
+            continue;
+        }
+        try buf.append(allocator, data[i]);
+        i += 1;
+    }
+    return JSValue.newString(allocator, buf.items);
+}
+
+fn stringReplace(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    return stringReplaceImpl(ctx, allocator, this_value, args, false);
+}
+
+fn stringReplaceAll(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    return stringReplaceImpl(ctx, allocator, this_value, args, true);
+}
+
+fn stringLocaleCompare(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const data = try requireString(ctx, this_value, "localeCompare");
+    const other: []const u8 = if (arg(args, 0) == .string) arg(args, 0).string.value.data else "";
+    return JSValue.fromNumber(switch (std.mem.order(u8, data, other)) {
+        .lt => -1,
+        .eq => 0,
+        .gt => 1,
+    });
+}
+
+fn stringToStringMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const data = try requireString(ctx, this_value, "toString");
+    return JSValue.newString(allocator, data);
+}
+
+fn stringFromCodePoint(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = ctx;
+    _ = this_value;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    for (args) |a| {
+        const cp: u21 = @intCast(@as(u32, @intFromFloat(try coercion.toNumber(a))) & 0x1FFFFF);
+        var tmp: [4]u8 = undefined;
+        const n = std.unicode.utf8Encode(cp, &tmp) catch continue;
+        try buf.appendSlice(allocator, tmp[0..n]);
+    }
+    return JSValue.newString(allocator, buf.items);
 }

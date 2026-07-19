@@ -220,7 +220,8 @@ test "console.log renders a caught error legibly" {
 // ===== Feature gaps stay uncatchable =====
 
 test "a JS catch must NOT swallow interpreter feature gaps" {
-    // Array element assignment is unimplemented -- that's NotImplemented,
-    // not a JS exception, and it must abort the run even inside try/catch.
-    try helpers.expectNotImplemented("try { var a = [1]; a[0] = 2; } catch (e) {}");
+    // Assigning an arbitrary (non-index) property on an array is
+    // unimplemented -- that's NotImplemented, not a JS exception, and it
+    // must abort the run even inside try/catch.
+    try helpers.expectNotImplemented("try { var a = [1]; a.foo = 2; } catch (e) {}");
 }
