@@ -86,6 +86,12 @@ ES modules with the QuickJS host split: the engine never reads files — a host-
 
 **The headline narrowing**: imported bindings are **snapshots** taken when the source module finishes evaluating, not live bindings — so a module mutating its `export let` *after* evaluation (async) won't be seen by importers, and **import cycles are a catchable "Circular dependency" error** instead of working like real ESM (live bindings would need indirection in every Environment lookup). Also deferred: dynamic `import()`, `import.meta`, top-level `await`.
 
+## Symbols
+
+`Symbol(desc)` is a real callable-but-not-constructable global (`new Symbol()` throws) producing unique `.symbol` primitives with `.description`/`.toString()`/`String(sym)`; `Symbol.for`/`keyFor` back a cross-run registry, and the well-known symbols (`Symbol.iterator` and friends) exist as identities. **Symbol-keyed properties** work — `obj[sym] = v`, `{ [sym]: v }`, `Object.getOwnPropertySymbols` — stored under a reserved encoded key (`\x00S<ptr>`) that is invisible to `for-in`/`Object.keys`/`values`/`entries`/`getOwnPropertyNames`/`JSON.stringify`. **`Symbol.iterator` is wired into the real iteration protocol**: an object with a `[Symbol.iterator]()` method is a first-class iterable in `for-of`, array/call spread, `Array.from`, and array destructuring (`const [a, b] = it`); generators are their own iterable (`gen()[Symbol.iterator]() === gen()`). `Array.from` also handles array-likes (numeric `length` + indices). All Node-verified.
+
+Narrowings: only `Symbol.iterator` is consulted in real behavior (`toPrimitive`/`toStringTag`/`hasInstance` exist as identities but aren't wired into coercion/toString/instanceof); implicit `sym + ''` is `NotImplemented` rather than the TypeError (`String(sym)` and `sym.toString()` work); the symbol-key encoding could theoretically collide with a user computed key containing a `\x00` byte (pathological).
+
 ## Known gaps (deferred to future phases)
 
 - **`with`**.

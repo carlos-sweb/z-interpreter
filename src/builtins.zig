@@ -38,6 +38,12 @@ fn arg(args: []const JSValue, i: usize) JSValue {
     return if (i < args.len) args[i] else JSValue.UNDEFINED;
 }
 
+/// The reserved symbol-key encoding (`\x00S<ptr>`) -- invisible to
+/// string-keyed reflection (keys/values/entries/getOwnPropertyNames).
+fn isSymbolKey(k: []const u8) bool {
+    return k.len > 0 and k[0] == 0;
+}
+
 // ===== Method tables (consulted by the interpreter's getProperty) =====
 
 pub const array_methods = std.StaticStringMap(NativeFn).initComptime(.{
@@ -82,6 +88,11 @@ pub const function_methods = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "call", fnCall },
     .{ "apply", fnApply },
     .{ "bind", fnBind },
+});
+
+pub const symbol_methods = std.StaticStringMap(NativeFn).initComptime(.{
+    .{ "toString", symbolToString },
+    .{ "valueOf", symbolValueOf },
 });
 
 /// Object.prototype methods every plain object answers to (dispatched on
@@ -167,6 +178,7 @@ pub fn setupGlobals(self: *Interpreter) !void {
         .{ "defineProperties", objectDefineProperties },
         .{ "getOwnPropertyDescriptor", objectGetOwnPropertyDescriptor },
         .{ "getOwnPropertyNames", objectGetOwnPropertyNames },
+        .{ "getOwnPropertySymbols", objectGetOwnPropertySymbols },
         .{ "create", objectCreate },
         .{ "freeze", objectFreeze },          .{ "isFrozen", objectIsFrozen },
         .{ "seal", objectSeal },              .{ "isSealed", objectIsSealed },
@@ -272,6 +284,20 @@ pub fn setupGlobals(self: *Interpreter) !void {
     try promise_statics.object.value.set("all", try native(self, "all", promiseAll));
     try promise_statics.object.value.set("race", try native(self, "race", promiseRace));
     try g.define(arena, "Promise", promise_ctor);
+
+    // Symbol: callable but NOT constructable (`new Symbol()` throws).
+    // The well-known symbols and the for()/keyFor() registry are JSValue
+    // symbols owned by the interpreter (identity = Rc box).
+    const symbol_ctor = try JSValue.newFunction(arena, .{ .ctx = self, .name = "Symbol", .arity = 0, .call = symbolConstructor });
+    const symbol_statics = try self.functionStatics(symbol_ctor);
+    inline for (.{ "iterator", "asyncIterator", "hasInstance", "toPrimitive", "toStringTag", "species", "isConcatSpreadable", "match", "replace", "search", "split", "unscopables" }) |wk| {
+        const sym = try JSValue.newSymbol(arena, "Symbol." ++ wk);
+        try symbol_statics.object.value.set(wk, sym.retain());
+        if (comptime std.mem.eql(u8, wk, "iterator")) self.symbol_iterator = sym;
+    }
+    try symbol_statics.object.value.set("for", try native(self, "for", symbolFor));
+    try symbol_statics.object.value.set("keyFor", try native(self, "keyFor", symbolKeyFor));
+    try g.define(arena, "Symbol", symbol_ctor);
 
     try g.define(arena, "setTimeout", try native(self, "setTimeout", globalSetTimeout));
     try g.define(arena, "clearTimeout", try native(self, "clearTimeout", globalClearTimeout));
@@ -803,7 +829,10 @@ fn objectKeys(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     const ks = try o.object.value.keys(allocator);
     defer allocator.free(ks);
     var result = try JSValue.newArray(allocator);
-    for (ks) |k| _ = try result.array.value.push(try JSValue.newString(allocator, k));
+    for (ks) |k| {
+        if (isSymbolKey(k)) continue;
+        _ = try result.array.value.push(try JSValue.newString(allocator, k));
+    }
     return result;
 }
 
@@ -815,7 +844,10 @@ fn objectValues(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     var result = try JSValue.newArray(allocator);
     // Per-key getProperty (not ZObject.values) so accessor properties
     // invoke their getters, like real Object.values.
-    for (ks) |k| _ = try result.array.value.push(try interp(ctx).getProperty(o, k));
+    for (ks) |k| {
+        if (isSymbolKey(k)) continue;
+        _ = try result.array.value.push(try interp(ctx).getProperty(o, k));
+    }
     return result;
 }
 
@@ -826,6 +858,7 @@ fn objectEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     defer allocator.free(ks);
     var result = try JSValue.newArray(allocator);
     for (ks) |k| {
+        if (isSymbolKey(k)) continue;
         var pair = try JSValue.newArray(allocator);
         _ = try pair.array.value.push(try JSValue.newString(allocator, k));
         // getProperty, not ZObject.get -- getters must fire here too.
@@ -886,6 +919,13 @@ fn globalIsFinite(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
 fn globalString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = ctx;
     _ = this_value;
+    // String(symbol) is the one explicit coercion the spec allows --
+    // "Symbol(desc)" -- unlike implicit `sym + ''` which throws.
+    if (arg(args, 0) == .symbol) {
+        const s = try arg(args, 0).symbol.value.toString(allocator);
+        defer allocator.free(s);
+        return JSValue.newString(allocator, s);
+    }
     const s = try coercion.toDisplayString(allocator, arg(args, 0));
     defer allocator.free(s);
     return JSValue.newString(allocator, s);
@@ -1449,7 +1489,24 @@ fn objectGetOwnPropertyNames(ctx: *anyopaque, allocator: Allocator, this_value: 
     const names = try o.object.value.getOwnPropertyNames(allocator);
     defer allocator.free(names);
     var result = try JSValue.newArray(allocator);
-    for (names) |n| _ = try result.array.value.push(try JSValue.newString(allocator, n));
+    for (names) |n| {
+        if (isSymbolKey(n)) continue;
+        _ = try result.array.value.push(try JSValue.newString(allocator, n));
+    }
+    return result;
+}
+
+fn objectGetOwnPropertySymbols(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const o = try requirePlainObject(ctx, arg(args, 0), "Object.getOwnPropertySymbols");
+    const names = try o.object.value.getOwnPropertyNames(allocator);
+    defer allocator.free(names);
+    var result = try JSValue.newArray(allocator);
+    for (names) |n| {
+        if (!isSymbolKey(n)) continue;
+        if (self.symbol_keys.get(n)) |sym| _ = try result.array.value.push(sym.retain());
+    }
     return result;
 }
 
@@ -1601,14 +1658,30 @@ fn arrayFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
             }
         },
         .object => {
-            const next_fn = try self.getProperty(src, "next");
-            if (next_fn != .function) return self.throwError(.type_error, "{s} is not iterable", .{src.typeOf()});
-            while (true) {
-                const step = try next_fn.function.value.call(next_fn.function.value.ctx, allocator, src, &.{});
-                if (step != .object) return self.throwError(.type_error, "Iterator result {s} is not an object", .{step.typeOf()});
-                if (coercion.isTruthy(try self.getProperty(step, "done"))) break;
-                try push_mapped(self, allocator, &result, map_fn, try self.getProperty(step, "value"), index);
-                index += 1;
+            // Array-like fallback (has numeric `length` but is not
+            // iterable) OR the iterator protocol (Symbol.iterator /
+            // duck-typed next).
+            const len_v = try self.getProperty(src, "length");
+            const iter_key = if (self.symbol_iterator) |sym| try self.encodeKey(sym) else "";
+            const has_iter = iter_key.len > 0 and (try self.getProperty(src, iter_key)) == .function;
+            if (!has_iter and (try self.getProperty(src, "next")) != .function and len_v == .number) {
+                const n: usize = @intFromFloat(@max(0, len_v.number));
+                var i: usize = 0;
+                while (i < n) : (i += 1) {
+                    const key = try std.fmt.allocPrint(allocator, "{d}", .{i});
+                    try push_mapped(self, allocator, &result, map_fn, try self.getProperty(src, key), index);
+                    index += 1;
+                }
+            } else {
+                const iter = try self.resolveIterator(src);
+                const next_fn = try self.getProperty(iter, "next");
+                while (true) {
+                    const step = try next_fn.function.value.call(next_fn.function.value.ctx, allocator, iter, &.{});
+                    if (step != .object) return self.throwError(.type_error, "Iterator result {s} is not an object", .{step.typeOf()});
+                    if (coercion.isTruthy(try self.getProperty(step, "done"))) break;
+                    try push_mapped(self, allocator, &result, map_fn, try self.getProperty(step, "value"), index);
+                    index += 1;
+                }
             }
         },
         else => return self.throwError(.type_error, "{s} is not iterable", .{src.typeOf()}),
@@ -1691,4 +1764,60 @@ fn stringFromCharCode(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
         try buf.appendSlice(allocator, tmp[0..n]);
     }
     return JSValue.newString(allocator, buf.items);
+}
+
+// ===== Symbol =====
+
+fn symbolConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    // `new Symbol()` is a real TypeError -- Symbol is not a constructor.
+    if (self.construct_target == ctx) {
+        return self.throwError(.type_error, "Symbol is not a constructor", .{});
+    }
+    const desc: ?[]const u8 = switch (arg(args, 0)) {
+        .@"undefined" => null,
+        else => |v| try coercion.toDisplayString(allocator, v),
+    };
+    return JSValue.newSymbol(allocator, desc);
+}
+
+fn symbolToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    if (this_value != .symbol) return interp(ctx).throwError(.type_error, "Symbol.prototype.toString requires a symbol", .{});
+    const s = try this_value.symbol.value.toString(allocator);
+    defer allocator.free(s);
+    return JSValue.newString(allocator, s);
+}
+
+fn symbolValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = ctx;
+    _ = allocator;
+    _ = args;
+    return this_value.retain();
+}
+
+fn symbolFor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const key = try coercion.toDisplayString(allocator, arg(args, 0));
+    if (self.symbol_registry.get(key)) |sym| return sym.retain();
+    const sym = try JSValue.newSymbol(self.arena_state.allocator(), key);
+    try self.symbol_registry.put(self.arena_state.allocator(), key, sym.retain());
+    return sym;
+}
+
+fn symbolKeyFor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const self = interp(ctx);
+    const target = arg(args, 0);
+    if (target != .symbol) return self.throwError(.type_error, "Symbol.keyFor requires a symbol", .{});
+    var it = self.symbol_registry.iterator();
+    while (it.next()) |entry| {
+        if (entry.value_ptr.* == .symbol and entry.value_ptr.symbol == target.symbol) {
+            return JSValue.newString(self.arena_state.allocator(), entry.key_ptr.*);
+        }
+    }
+    return JSValue.UNDEFINED;
 }

@@ -143,6 +143,15 @@ fn fiberEntry(arg: *anyopaque) void {
     }
 }
 
+/// A `[Symbol.iterator]()` method that returns the receiver (generator
+/// objects are their own iterators).
+fn iteratorSelf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = ctx;
+    _ = allocator;
+    _ = args;
+    return this_value.retain();
+}
+
 /// `gen.next(v)` -- native with ctx = *FiberState.
 fn generatorNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
@@ -267,6 +276,17 @@ pub const Interpreter = struct {
     /// Module cache keyed by the loader-resolved path: each module
     /// parses and evaluates exactly once.
     modules: std.StringHashMapUnmanaged(*ModuleRecord) = .empty,
+    /// Symbol-keyed properties are stored in ZObject (string-keyed only)
+    /// under an encoded reserved key (`\x00S<ptr>`). This maps the
+    /// encoded key back to the symbol JSValue -- for
+    /// getOwnPropertySymbols and to keep symbol identity. Populated
+    /// lazily as symbol keys are used.
+    symbol_keys: std.StringHashMapUnmanaged(JSValue) = .empty,
+    /// `Symbol.for(k)` registry: the same symbol for the same key.
+    symbol_registry: std.StringHashMapUnmanaged(JSValue) = .empty,
+    /// The well-known `Symbol.iterator` value (the only one wired into
+    /// real behavior). Set in setupGlobals.
+    symbol_iterator: ?JSValue = null,
     /// The stack-depth guard: recursing below this native stack address
     /// raises the real `RangeError: Maximum call stack size exceeded`
     /// instead of segfaulting (Test262's tco-* tests found this). Set
@@ -675,6 +695,13 @@ pub const Interpreter = struct {
         fs.fiber = try fiber_mod.Fiber.init(arena, fiberEntry, fs);
         var obj = try JSValue.newObject(arena);
         try obj.object.value.set("next", try JSValue.newFunction(arena, .{ .ctx = fs, .name = "next", .call = generatorNext }));
+        // A generator IS its own iterable: `gen()[Symbol.iterator]()`
+        // returns the generator itself (so `[...gen()]` works via the
+        // Symbol.iterator path too, and `gen()[Symbol.iterator]() === gen()`).
+        if (self.symbol_iterator) |sym| {
+            const key = try self.encodeKey(sym);
+            try obj.object.value.set(key, try self.nativeMethod("iterator", "self", iteratorSelf));
+        }
         return obj;
     }
 
@@ -1328,8 +1355,46 @@ pub const Interpreter = struct {
                 }
                 break :blk try cps.toOwnedSlice(arena);
             },
+            // A user iterable (Symbol.iterator) or a hand-written iterator
+            // (duck-typed `next`) -- drained fully.
+            .object => try self.drainIterator(try self.resolveIterator(value)),
             else => self.throwError(.type_error, "{s} is not iterable", .{value.typeOf()}),
         };
+    }
+
+    /// The iterator object for a `.object`: its `[Symbol.iterator]()`
+    /// result if it has one, else the object itself if it's already an
+    /// iterator (callable `next`). TypeError otherwise (not iterable).
+    pub fn resolveIterator(self: *Interpreter, obj: JSValue) anyerror!JSValue {
+        const arena = self.arena_state.allocator();
+        if (self.symbol_iterator) |sym| {
+            const key = try self.encodeKey(sym);
+            const method = try self.getProperty(obj, key);
+            if (method == .function) {
+                const iter = try method.function.value.call(method.function.value.ctx, arena, obj, &.{});
+                if (iter != .object) return self.throwError(.type_error, "Result of the Symbol.iterator method is not an object", .{});
+                return iter;
+            }
+        }
+        // Fallback: the object is itself an iterator (generator objects,
+        // hand-written `{ next() {} }`).
+        if ((try self.getProperty(obj, "next")) == .function) return obj;
+        return self.throwError(.type_error, "{s} is not iterable", .{obj.typeOf()});
+    }
+
+    /// Runs an iterator object to completion, collecting its values.
+    pub fn drainIterator(self: *Interpreter, iter: JSValue) anyerror![]const JSValue {
+        const arena = self.arena_state.allocator();
+        const next_fn = try self.getProperty(iter, "next");
+        if (next_fn != .function) return self.throwError(.type_error, "iterator.next is not a function", .{});
+        var out: std.ArrayList(JSValue) = .empty;
+        while (true) {
+            const step = try next_fn.function.value.call(next_fn.function.value.ctx, arena, iter, &.{});
+            if (step != .object) return self.throwError(.type_error, "Iterator result {s} is not an object", .{step.typeOf()});
+            if (coercion.isTruthy(try self.getProperty(step, "done"))) break;
+            try out.append(arena, try self.getProperty(step, "value"));
+        }
+        return out.toOwnedSlice(arena);
     }
 
     /// `yield* iterable`: drives an inner iterable, re-yielding each of
@@ -1661,17 +1726,15 @@ pub const Interpreter = struct {
                     if (try self.forIterationStep(env, head.binding, v, body, labels)) |c| return c;
                 }
             },
-            // The iterator protocol, duck-typed on a callable `next` (no
-            // Symbol.iterator in this ecosystem): covers generator
-            // objects and hand-written iterators. The completion value
-            // (`done: true`'s value) is excluded, per spec.
+            // The iterator protocol: a user iterable via Symbol.iterator,
+            // or an object that IS an iterator (duck-typed `next` --
+            // generator objects, hand-written iterators). The completion
+            // value (`done: true`'s value) is excluded, per spec.
             .object => {
-                const next_fn = try self.getProperty(iterable, "next");
-                if (next_fn != .function) {
-                    return self.throwError(.type_error, "{s} is not iterable", .{iterable.typeOf()});
-                }
+                const iter = try self.resolveIterator(iterable);
+                const next_fn = try self.getProperty(iter, "next");
                 while (true) {
-                    const step = try next_fn.function.value.call(next_fn.function.value.ctx, arena, iterable, &.{});
+                    const step = try next_fn.function.value.call(next_fn.function.value.ctx, arena, iter, &.{});
                     if (step != .object) {
                         return self.throwError(.type_error, "Iterator result {s} is not an object", .{step.typeOf()});
                     }
@@ -1703,6 +1766,7 @@ pub const Interpreter = struct {
                     const ks = try o.keys(arena);
                     defer arena.free(ks);
                     for (ks) |k| {
+                        if (isSymbolKey(k)) continue; // symbols never in for-in
                         if (!seen.contains(k)) {
                             try seen.put(arena, k, {});
                             try keys_list.append(arena, k);
@@ -1787,8 +1851,7 @@ pub const Interpreter = struct {
                     };
                     if (el.data == .spread) {
                         const spread_val = try self.evalExpression(env, el.data.spread);
-                        if (spread_val != .array) return error.NotImplemented;
-                        for (spread_val.array.value.toSlice()) |item| _ = try arr.array.value.push(item.retain());
+                        for (try self.iterableItems(spread_val)) |item| _ = try arr.array.value.push(item.retain());
                         continue;
                     }
                     const v = try self.evalExpression(env, el);
@@ -1931,10 +1994,32 @@ pub const Interpreter = struct {
         }
     }
 
+    /// A property key that a symbol value can also produce. Symbols
+    /// encode to a reserved `\x00S<ptr>` string (invisible to string
+    /// iteration; registered for getOwnPropertySymbols); everything else
+    /// goes through ToString.
+    pub fn encodeKey(self: *Interpreter, value: JSValue) anyerror![]const u8 {
+        if (value == .symbol) {
+            const arena = self.arena_state.allocator();
+            const key = try std.fmt.allocPrint(arena, "\x00S{x}", .{@intFromPtr(value.symbol)});
+            if (!self.symbol_keys.contains(key)) {
+                try self.symbol_keys.put(arena, key, value.retain());
+            }
+            return key;
+        }
+        return coercion.toDisplayString(self.arena_state.allocator(), value);
+    }
+
+    /// True for the reserved symbol-key encoding -- these must stay
+    /// invisible to for-in / Object.keys/values/entries / JSON.
+    fn isSymbolKey(k: []const u8) bool {
+        return k.len > 0 and k[0] == 0;
+    }
+
     fn memberKeyString(self: *Interpreter, env: *Environment, m: anytype) anyerror![]const u8 {
         if (m.computed) {
             const k = try self.evalExpression(env, m.property);
-            return try coercion.toDisplayString(self.arena_state.allocator(), k);
+            return self.encodeKey(k);
         }
         return switch (m.property.data) {
             .identifier => |name| name,
@@ -1945,7 +2030,7 @@ pub const Interpreter = struct {
     fn propertyKeyString(self: *Interpreter, env: *Environment, computed: bool, key: *zparser.Node) anyerror![]const u8 {
         if (computed) {
             const v = try self.evalExpression(env, key);
-            return try coercion.toDisplayString(self.arena_state.allocator(), v);
+            return self.encodeKey(v);
         }
         return switch (key.data) {
             .identifier => |name| name,
@@ -2039,6 +2124,13 @@ pub const Interpreter = struct {
             },
             .promise => blk: {
                 if (builtins.promise_methods.get(key)) |f| break :blk try self.nativeMethod("promise", key, f);
+                break :blk JSValue.UNDEFINED;
+            },
+            .symbol => |box| blk: {
+                if (std.mem.eql(u8, key, "description")) {
+                    break :blk if (box.value.description) |d| try JSValue.newString(self.arena_state.allocator(), d) else JSValue.UNDEFINED;
+                }
+                if (builtins.symbol_methods.get(key)) |f| break :blk try self.nativeMethod("symbol", key, f);
                 break :blk JSValue.UNDEFINED;
             },
             // Spec says TypeError here (not ReferenceError). The optional
@@ -2336,8 +2428,7 @@ pub const Interpreter = struct {
         for (arg_nodes) |arg_node| {
             if (arg_node.data == .spread) {
                 const spread_val = try self.evalExpression(env, arg_node.data.spread);
-                if (spread_val != .array) return error.NotImplemented;
-                for (spread_val.array.value.toSlice()) |item| try args.append(arena, item.retain());
+                for (try self.iterableItems(spread_val)) |item| try args.append(arena, item.retain());
             } else {
                 try args.append(arena, try self.evalExpression(env, arg_node));
             }
