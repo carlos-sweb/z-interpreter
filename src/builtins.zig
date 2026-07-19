@@ -77,6 +77,12 @@ pub const promise_methods = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "finally", promiseFinally },
 });
 
+pub const function_methods = std.StaticStringMap(NativeFn).initComptime(.{
+    .{ "call", fnCall },
+    .{ "apply", fnApply },
+    .{ "bind", fnBind },
+});
+
 pub const string_methods = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "toUpperCase", stringToUpperCase },
     .{ "toLowerCase", stringToLowerCase },
@@ -1088,4 +1094,73 @@ fn errorConstructor(comptime kind: zvalue.ErrorKind) NativeFn {
             return JSValue.newError(allocator, kind, msg);
         }
     }.call;
+}
+
+// ===== Function.prototype.call / apply / bind =====
+
+fn requireFunction(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {
+    if (this_value != .function) {
+        return interp(ctx).throwError(.type_error, "Function.prototype.{s} called on a non-function", .{method});
+    }
+    return this_value;
+}
+
+fn fnCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const target = try requireFunction(ctx, this_value, "call");
+    const this_arg = arg(args, 0);
+    const rest = if (args.len > 1) args[1..] else &[_]JSValue{};
+    return target.function.value.call(target.function.value.ctx, allocator, this_arg, rest);
+}
+
+fn fnApply(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const target = try requireFunction(ctx, this_value, "apply");
+    const this_arg = arg(args, 0);
+    const arg_list = arg(args, 1);
+    const call_args: []const JSValue = switch (arg_list) {
+        .@"undefined", .@"null" => &.{},
+        .array => |box| box.value.toSlice(),
+        else => return interp(ctx).throwError(.type_error, "CreateListFromArrayLike called on non-object", .{}),
+    };
+    return target.function.value.call(target.function.value.ctx, allocator, this_arg, call_args);
+}
+
+/// ctx for one bound function: the target, the fixed this, and any
+/// pre-applied arguments.
+const BoundCtx = struct {
+    target: JSValue,
+    bound_this: JSValue,
+    pre_args: []const JSValue,
+};
+
+fn boundCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value; // a bound function ignores its call-site this (spec)
+    const bc: *BoundCtx = @ptrCast(@alignCast(ctx));
+    const total = try allocator.alloc(JSValue, bc.pre_args.len + args.len);
+    @memcpy(total[0..bc.pre_args.len], bc.pre_args);
+    @memcpy(total[bc.pre_args.len..], args);
+    return bc.target.function.value.call(bc.target.function.value.ctx, allocator, bc.bound_this, total);
+}
+
+/// Narrowed [[Bind]]: the bound function is NOT constructable (real
+/// bound functions are; `new (f.bind(x))()` is a documented gap).
+fn fnBind(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const target = try requireFunction(ctx, this_value, "bind");
+    const bc = try allocator.create(BoundCtx);
+    const pre = if (args.len > 1) args[1..] else &[_]JSValue{};
+    const pre_copy = try allocator.alloc(JSValue, pre.len);
+    for (pre, 0..) |a, i| pre_copy[i] = a.retain();
+    bc.* = .{
+        .target = target.retain(),
+        .bound_this = arg(args, 0).retain(),
+        .pre_args = pre_copy,
+    };
+    const target_arity = target.function.value.arity;
+    const bound_arity = if (target_arity > pre.len) target_arity - pre.len else 0;
+    const name = try std.fmt.allocPrint(allocator, "bound {s}", .{target.function.value.name});
+    return JSValue.newFunction(allocator, .{
+        .ctx = bc,
+        .name = name,
+        .arity = bound_arity,
+        .call = boundCall,
+    });
 }

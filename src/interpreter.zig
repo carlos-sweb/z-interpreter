@@ -1936,13 +1936,17 @@ pub const Interpreter = struct {
                 if (std.mem.eql(u8, key, "prototype")) break :blk try self.functionPrototype(obj);
                 if (std.mem.eql(u8, key, "name")) break :blk try JSValue.newString(self.arena_state.allocator(), box.value.name);
                 if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.arity));
-                // Everything else lives in the statics bag (class statics,
-                // F.myProp = 1). Recursing through getProperty gives
-                // accessor dispatch and -- because class bags chain to the
+                // The statics bag (class statics, F.myProp = 1) shadows
+                // the Function.prototype methods, like an own property
+                // would. Recursing through getProperty gives accessor
+                // dispatch and -- because class bags chain to the
                 // parent's bag -- static inheritance. Narrowing: a static
                 // getter's `this` is the bag, not the class function, so
                 // `this.otherStatic` works but `this === C` doesn't.
-                if (box.value.statics) |bag| break :blk try self.getProperty(bag, key);
+                if (box.value.statics) |bag| {
+                    if (bag.object.value.has(key)) break :blk try self.getProperty(bag, key);
+                }
+                if (builtins.function_methods.get(key)) |f| break :blk try self.nativeMethod("function", key, f);
                 break :blk JSValue.UNDEFINED;
             },
             .date => blk: {

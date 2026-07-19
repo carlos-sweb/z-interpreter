@@ -71,6 +71,7 @@ pub fn build(b: *std.Build) void {
         "tests/generator_test.zig",
         "tests/async_test.zig",
         "tests/module_test.zig",
+        "tests/function_methods_test.zig",
     };
 
     inline for (test_files) |test_file| {
