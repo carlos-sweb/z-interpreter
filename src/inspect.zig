@@ -59,7 +59,14 @@ pub fn inspect(allocator: Allocator, buf: *std.ArrayList(u8), v: JSValue) !void 
             try buf.appendSlice(allocator, iso);
         },
         .symbol => try buf.appendSlice(allocator, "[Symbol]"),
-        .regex => try buf.appendSlice(allocator, "[RegExp]"),
+        .regex => |box| {
+            // `/source/` -- exact flags live in the interpreter's state
+            // (reachable via .flags / .toString()); console rendering
+            // shows the source only.
+            try buf.append(allocator, '/');
+            try buf.appendSlice(allocator, box.value.getPattern());
+            try buf.append(allocator, '/');
+        },
         // Node's rendering: Promise { 3 } / Promise { <pending> } /
         // Promise { <rejected> reason }.
         .promise => |box| {

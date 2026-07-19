@@ -102,6 +102,12 @@ Narrowings: `replace`/`replaceAll`/`match`/`search` with **regex** patterns are 
 
 Full JS API over the existing z-map/z-set backing (whose SameValueZero key comparison is already the spec's Map/Set semantics — object keys by identity, `NaN` as a usable key). `new Map(iterable?)`/`new Set(iterable?)` are constructable (require `new` — `Map()` throws), accepting any iterable of entries/values. **Map**: `get`/`set` (chainable)/`has`/`delete`/`clear`/`size`/`forEach` (`(value, key, map)`, insertion order)/`keys`/`values`/`entries` (real iterator objects). **Set**: `add` (chainable)/`has`/`delete`/`clear`/`size`/`forEach`/`values`/`keys`/`entries`. Both are iterable everywhere — `for-of`, spread (`[...map]` yields `[k,v]` pairs, `[...set]` yields values), `Array.from`, destructuring. All Node-verified. Gaps: WeakMap/WeakSet (need weak refs), `Map.groupBy`, the ES2024/2025 Set operations.
 
+## Regular expressions
+
+[z-regex](https://github.com/carlos-sweb/z-regex) (a full regex engine — bytecode compiler, captures, named groups, `$`-substitution) is wired in. Regex literals (`/…/flags`) and `new RegExp(source, flags)` produce `.regex` values; JS-level state (the mutable `lastIndex`, the flags, the boolean flag set) lives in an interpreter side-table (z-regex stays a pure engine). Flags `g`/`i`/`m`/`s`/`y`/`u` map to compile options. Properties: `source`, `flags`, `global`, `ignoreCase`, `multiline`, `dotAll`, `sticky`, `unicode`, and a writable `lastIndex`. Methods: `test` and `exec` (both advance `lastIndex` on global/sticky regexes; `exec` returns the JS match array with `[0]`=whole match, `[i]`=capture, and own `index`/`input`/`groups`), `toString`. String methods take regex patterns: `match` (global → all matches, else a match array), `matchAll` (an iterator), `search`, `replace`/`replaceAll` (string replacements delegate to z-regex's `$`-substitution; function replacers get `(match, ...captures, offset, input)`), and `split`. A bad pattern is a catchable `SyntaxError`. All Node-verified (against strict-mode ES modules).
+
+Gaps: `console.log(regex)` and `String(regex)` differ — the latter includes flags (`/x/g`), console rendering shows the source only; no `Symbol.match`/`replace`/`search`/`split` custom-object protocol (dispatch keys off the real `.regex`); the `d` (indices) flag is accepted but not honored; exotic patterns z-regex doesn't support fail (never crash).
+
 ## Known gaps (deferred to future phases)
 
 - **`with`**.

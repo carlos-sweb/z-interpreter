@@ -15,6 +15,20 @@ const coercion = @import("coercion.zig");
 const inspect = @import("inspect.zig");
 const builtins = @import("builtins.zig");
 const fiber_mod = @import("fiber.zig");
+const zregex = @import("zregex");
+
+/// JS-level state a RegExp object carries beyond its compiled bytecode.
+pub const RegexState = struct {
+    source: []const u8,
+    flags: []const u8,
+    global: bool,
+    ignore_case: bool,
+    multiline: bool,
+    dot_all: bool,
+    sticky: bool,
+    unicode: bool,
+    last_index: usize = 0,
+};
 
 /// A user-defined closure's opaque Callable context: the parsed function's
 /// AST node, the environment it closed over at definition time, and a back
@@ -287,6 +301,16 @@ pub const Interpreter = struct {
     /// The well-known `Symbol.iterator` value (the only one wired into
     /// real behavior). Set in setupGlobals.
     symbol_iterator: ?JSValue = null,
+    /// JS-level RegExp state, keyed by the `.regex` Rc box pointer --
+    /// z-regex is a pure engine, so the mutable `lastIndex`, the flags
+    /// string, and the boolean flag set live here (the symbol_keys
+    /// pattern).
+    regex_state: std.AutoHashMapUnmanaged(usize, RegexState) = .empty,
+    /// Named own properties on array values (arrays have no general
+    /// property bag) -- used by exec/match result arrays for
+    /// `index`/`input`/`groups`. Keyed by the array Rc box pointer; the
+    /// value is a plain object holding the extras.
+    array_props: std.AutoHashMapUnmanaged(usize, JSValue) = .empty,
     /// The stack-depth guard: recursing below this native stack address
     /// raises the real `RangeError: Maximum call stack size exceeded`
     /// instead of segfaulting (Test262's tco-* tests found this). Set
@@ -480,6 +504,65 @@ pub const Interpreter = struct {
         const p = try JSValue.newPromise(self.arena_state.allocator());
         try self.settlePromise(p, .rejected, reason);
         return p;
+    }
+
+    // ===== RegExp =====
+
+    /// Compiles `pattern` with `flags` into a `.regex` value and records
+    /// its JS-level state. A bad pattern is a catchable SyntaxError.
+    pub fn makeRegex(self: *Interpreter, pattern: []const u8, flags: []const u8) anyerror!JSValue {
+        const arena = self.arena_state.allocator();
+        var state: RegexState = .{
+            .source = try arena.dupe(u8, pattern),
+            .flags = try arena.dupe(u8, flags),
+            .global = false,
+            .ignore_case = false,
+            .multiline = false,
+            .dot_all = false,
+            .sticky = false,
+            .unicode = false,
+        };
+        for (flags) |f| switch (f) {
+            'g' => state.global = true,
+            'i' => state.ignore_case = true,
+            'm' => state.multiline = true,
+            's' => state.dot_all = true,
+            'y' => state.sticky = true,
+            'u', 'd', 'v' => state.unicode = state.unicode or f == 'u',
+            else => return self.throwError(.syntax_error, "Invalid flags supplied to RegExp constructor '{s}'", .{flags}),
+        };
+        const re = zregex.Regex.compileWithOptions(arena, pattern, .{
+            .case_insensitive = state.ignore_case,
+            .multiline = state.multiline,
+            .dot_all = state.dot_all,
+            .sticky = state.sticky,
+        }) catch {
+            return self.throwError(.syntax_error, "Invalid regular expression: /{s}/", .{pattern});
+        };
+        const value = try JSValue.fromRegex(arena, re);
+        try self.regex_state.put(arena, @intFromPtr(value.regex), state);
+        return value;
+    }
+
+    /// The RegexState for a `.regex` value (always present -- every
+    /// `.regex` is created through makeRegex).
+    pub fn regexState(self: *Interpreter, value: JSValue) *RegexState {
+        return self.regex_state.getPtr(@intFromPtr(value.regex)).?;
+    }
+
+    /// Stores a named own property on an array (via the array_props side
+    /// table) -- exec/match result arrays' index/input/groups.
+    pub fn setArrayExtra(self: *Interpreter, array: JSValue, key: []const u8, value: JSValue) anyerror!void {
+        const arena = self.arena_state.allocator();
+        const gop = try self.array_props.getOrPut(arena, @intFromPtr(array.array));
+        if (!gop.found_existing) gop.value_ptr.* = try JSValue.newObject(arena);
+        try gop.value_ptr.object.value.set(key, value.retain());
+    }
+
+    /// A named own property of an array, if any (array_props side table).
+    fn arrayExtra(self: *Interpreter, array: JSValue, key: []const u8) ?JSValue {
+        const extras = self.array_props.get(@intFromPtr(array.array)) orelse return null;
+        return extras.object.value.get(key);
     }
 
     // ===== Modules (import/export) =====
@@ -2006,7 +2089,8 @@ pub const Interpreter = struct {
             // there's nothing to resolve).
             .super_expr => return self.throwError(.syntax_error, "'super' keyword unexpected here", .{}),
             .new_expr => |n| return self.evalNew(env, n),
-            .regex_literal, .bigint_literal => return error.NotImplemented,
+            .regex_literal => |r| return self.makeRegex(r.pattern, r.flags),
+            .bigint_literal => return error.NotImplemented,
             // Only ever nested inside array/object-literal/call-argument
             // constructs, which unwrap `.data.spread` themselves before
             // recursing -- never reached as a standalone expression.
@@ -2097,7 +2181,11 @@ pub const Interpreter = struct {
             .array => |box| blk: {
                 if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.length()));
                 if (builtins.array_methods.get(key)) |f| break :blk try self.nativeMethod("array", key, f);
-                const idx = std.fmt.parseInt(usize, key, 10) catch return error.NotImplemented;
+                const idx = std.fmt.parseInt(usize, key, 10) catch {
+                    // Non-index key: a named own property (exec-result
+                    // index/input/groups) or undefined -- never a hard gap.
+                    break :blk (self.arrayExtra(obj, key) orelse JSValue.UNDEFINED).retain();
+                };
                 if (idx >= box.value.length()) break :blk JSValue.UNDEFINED;
                 break :blk box.value.get(idx).retain();
             },
@@ -2161,6 +2249,21 @@ pub const Interpreter = struct {
                     break :blk if (box.value.description) |d| try JSValue.newString(self.arena_state.allocator(), d) else JSValue.UNDEFINED;
                 }
                 if (builtins.symbol_methods.get(key)) |f| break :blk try self.nativeMethod("symbol", key, f);
+                break :blk JSValue.UNDEFINED;
+            },
+            .regex => blk: {
+                const arena = self.arena_state.allocator();
+                const st = self.regexState(obj);
+                if (std.mem.eql(u8, key, "source")) break :blk try JSValue.newString(arena, st.source);
+                if (std.mem.eql(u8, key, "flags")) break :blk try JSValue.newString(arena, st.flags);
+                if (std.mem.eql(u8, key, "global")) break :blk JSValue.fromBool(st.global);
+                if (std.mem.eql(u8, key, "ignoreCase")) break :blk JSValue.fromBool(st.ignore_case);
+                if (std.mem.eql(u8, key, "multiline")) break :blk JSValue.fromBool(st.multiline);
+                if (std.mem.eql(u8, key, "dotAll")) break :blk JSValue.fromBool(st.dot_all);
+                if (std.mem.eql(u8, key, "sticky")) break :blk JSValue.fromBool(st.sticky);
+                if (std.mem.eql(u8, key, "unicode")) break :blk JSValue.fromBool(st.unicode);
+                if (std.mem.eql(u8, key, "lastIndex")) break :blk JSValue.fromNumber(@floatFromInt(st.last_index));
+                if (builtins.regex_methods.get(key)) |f| break :blk try self.nativeMethod("regex", key, f);
                 break :blk JSValue.UNDEFINED;
             },
             // Spec says TypeError here (not ReferenceError). The optional
@@ -2423,6 +2526,14 @@ pub const Interpreter = struct {
                     return self.setObjectProperty(bag, key, value);
                 }
                 if (obj == .array) return self.setArrayProperty(obj, key, value);
+                if (obj == .regex) {
+                    if (std.mem.eql(u8, key, "lastIndex")) {
+                        const n = try coercion.toNumber(value);
+                        self.regexState(obj).last_index = if (n > 0) @intFromFloat(n) else 0;
+                        return;
+                    }
+                    return error.NotImplemented;
+                }
                 if (obj != .object) return error.NotImplemented;
                 try self.setObjectProperty(obj, key, value);
             },

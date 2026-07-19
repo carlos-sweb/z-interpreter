@@ -83,7 +83,9 @@ pub fn toDisplayString(allocator: Allocator, v: JSValue) ![]u8 {
         },
         .date => |box| box.value.toISOString(allocator) catch try allocator.dupe(u8, "Invalid Date"),
         .promise => try allocator.dupe(u8, "[object Promise]"),
-        .object, .regex, .symbol, .map, .set, .@"error", .function => error.NotImplemented,
+        // `/source/` (flags omitted -- the exact form is regex.toString()).
+        .regex => |box| try std.fmt.allocPrint(allocator, "/{s}/", .{box.value.getPattern()}),
+        .object, .symbol, .map, .set, .@"error", .function => error.NotImplemented,
     };
 }
 

@@ -31,6 +31,9 @@ pub fn build(b: *std.Build) void {
     const zdate_dep = b.dependency("zdate", .{ .target = target, .optimize = optimize });
     const zdate_module = zdate_dep.module("zdate");
 
+    const zregex_dep = b.dependency("zregex", .{ .target = target, .optimize = optimize });
+    const zregex_module = zregex_dep.module("zregex");
+
     const zinterpreter_module = b.addModule("zinterpreter", .{
         .root_source_file = b.path("src/zinterpreter.zig"),
     });
@@ -43,6 +46,7 @@ pub fn build(b: *std.Build) void {
     zinterpreter_module.addImport("zjson", zjson_module);
     zinterpreter_module.addImport("zstring", zstring_module);
     zinterpreter_module.addImport("zdate", zdate_module);
+    zinterpreter_module.addImport("zregex", zregex_module);
 
     const test_step = b.step("test", "Run all tests");
 
@@ -80,6 +84,7 @@ pub fn build(b: *std.Build) void {
         "tests/array_methods_full_test.zig",
         "tests/string_methods_full_test.zig",
         "tests/map_set_test.zig",
+        "tests/regex_test.zig",
     };
 
     inline for (test_files) |test_file| {
@@ -101,6 +106,7 @@ pub fn build(b: *std.Build) void {
         unit_tests.root_module.addImport("zjson", zjson_module);
         unit_tests.root_module.addImport("zstring", zstring_module);
         unit_tests.root_module.addImport("zdate", zdate_module);
+        unit_tests.root_module.addImport("zregex", zregex_module);
 
         const run_unit_tests = b.addRunArtifact(unit_tests);
         test_step.dependOn(&run_unit_tests.step);
@@ -122,6 +128,7 @@ pub fn build(b: *std.Build) void {
     src_tests.root_module.addImport("zjson", zjson_module);
     src_tests.root_module.addImport("zstring", zstring_module);
     src_tests.root_module.addImport("zdate", zdate_module);
+    src_tests.root_module.addImport("zregex", zregex_module);
     const run_src_tests = b.addRunArtifact(src_tests);
     test_step.dependOn(&run_src_tests.step);
 

@@ -111,6 +111,12 @@ pub const symbol_methods = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "valueOf", symbolValueOf },
 });
 
+pub const regex_methods = std.StaticStringMap(NativeFn).initComptime(.{
+    .{ "test", regexTest },
+    .{ "exec", regexExec },
+    .{ "toString", regexToString },
+});
+
 pub const map_methods = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "get", mapGet },
     .{ "set", mapSet },
@@ -170,6 +176,9 @@ pub const string_methods = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "concat", stringConcat },
     .{ "replace", stringReplace },
     .{ "replaceAll", stringReplaceAll },
+    .{ "match", stringMatch },
+    .{ "matchAll", stringMatchAll },
+    .{ "search", stringSearch },
     .{ "localeCompare", stringLocaleCompare },
     .{ "toString", stringToStringMethod },
     .{ "valueOf", stringToStringMethod },
@@ -356,6 +365,7 @@ pub fn setupGlobals(self: *Interpreter) !void {
 
     // Map / Set: constructable natives (require `new`); the .map/.set
     // return is preserved by evalNew's object-like-override rule.
+    try g.define(arena, "RegExp", try JSValue.newFunction(arena, .{ .ctx = self, .name = "RegExp", .arity = 2, .call = regexpConstructor, .constructable = true }));
     try g.define(arena, "Map", try JSValue.newFunction(arena, .{ .ctx = self, .name = "Map", .arity = 0, .call = mapConstructor, .constructable = true }));
     try g.define(arena, "Set", try JSValue.newFunction(arena, .{ .ctx = self, .name = "Set", .arity = 0, .call = setConstructor, .constructable = true }));
 
@@ -707,6 +717,7 @@ fn stringRepeat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 
 fn stringSplit(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const data = try requireString(ctx, this_value, "split");
+    if (arg(args, 0) == .regex) return regexSplit(interp(ctx), allocator, data, arg(args, 0));
     const sep: ?[]const u8 = if (arg(args, 0) == .string) arg(args, 0).string.value.data else null;
     const parts = try zstring.split.split(allocator, data, sep, null);
     defer {
@@ -978,12 +989,18 @@ fn globalIsFinite(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
 }
 
 fn globalString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
     _ = this_value;
     // String(symbol) is the one explicit coercion the spec allows --
     // "Symbol(desc)" -- unlike implicit `sym + ''` which throws.
     if (arg(args, 0) == .symbol) {
         const s = try arg(args, 0).symbol.value.toString(allocator);
+        defer allocator.free(s);
+        return JSValue.newString(allocator, s);
+    }
+    // String(regex) is regex.toString() -- /source/flags (with flags).
+    if (arg(args, 0) == .regex) {
+        const st = interp(ctx).regexState(arg(args, 0));
+        const s = try std.fmt.allocPrint(allocator, "/{s}/{s}", .{ st.source, st.flags });
         defer allocator.free(s);
         return JSValue.newString(allocator, s);
     }
@@ -2315,11 +2332,12 @@ fn stringConcat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     return JSValue.newString(allocator, out);
 }
 
-/// replace/replaceAll with STRING patterns only (regex deferred). No `$`
-/// substitution patterns (narrowing).
+/// replace/replaceAll -- string OR regex patterns; string OR function
+/// replacements ($-substitution via z-regex for the string case).
 fn stringReplaceImpl(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue, all: bool) anyerror!JSValue {
     const data = try requireString(ctx, this_value, if (all) "replaceAll" else "replace");
     const self = interp(ctx);
+    if (arg(args, 0) == .regex) return regexReplace(self, allocator, data, arg(args, 0), arg(args, 1), all);
     if (arg(args, 0) != .string) return self.throwError(.type_error, "string replace with a non-string pattern is not supported", .{});
     const pattern = arg(args, 0).string.value.data;
     // The replacement: a string, or a function called (match, offset, whole).
@@ -2563,4 +2581,274 @@ fn setEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
         try pairs.append(allocator, pair);
     }
     return iteratorFromValues(interp(ctx), allocator, pairs.items);
+}
+
+// ===== RegExp =====
+
+const zregex = @import("zregex");
+
+fn requireRegex(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {
+    if (this_value != .regex) return interp(ctx).throwError(.type_error, "Method RegExp.prototype.{s} called on incompatible receiver", .{method});
+    return this_value;
+}
+
+/// `new RegExp(pattern, flags?)` / `RegExp(...)`. A RegExp source argument
+/// is copied (its own flags unless new ones are given).
+fn regexpConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const pat_arg = arg(args, 0);
+    var source: []const u8 = "";
+    var flags: []const u8 = "";
+    if (pat_arg == .regex) {
+        const st = self.regexState(pat_arg);
+        source = st.source;
+        flags = st.flags;
+    } else if (pat_arg != .@"undefined") {
+        source = try coercion.toDisplayString(allocator, pat_arg);
+    }
+    if (arg(args, 1) != .@"undefined") flags = try coercion.toDisplayString(allocator, arg(args, 1));
+    return self.makeRegex(source, flags);
+}
+
+/// Match at-or-after `start`: z-regex's `find` scans (respecting the
+/// compiled sticky flag), so searching from a position means searching
+/// within the suffix `input[start..]`. Returns the match (relative to
+/// that suffix) and the suffix, so callers add `start` for absolute
+/// offsets. `full` is the whole string (for the match array's `.input`).
+const RegexHit = struct { match: zregex.MatchResult, sub: []const u8, base: usize, full: []const u8, group_count: usize };
+
+fn regexFindFrom(re: JSValue, input: []const u8, start: usize) anyerror!?RegexHit {
+    if (start > input.len) return null;
+    const sub = input[start..];
+    const m = try re.regex.value.find(sub);
+    return if (m) |match| RegexHit{ .match = match, .sub = sub, .base = start, .full = input, .group_count = re.regex.value.compiled.group_count } else null;
+}
+
+/// The JS match-result array: [0]=whole match, [i]=capture i (undefined
+/// if it didn't participate), plus own `index`, `input`, and `groups`.
+/// All strings come from `hit.sub`; the absolute `.index` adds `hit.base`.
+fn makeMatchArray(self: *Interpreter, allocator: Allocator, hit: RegexHit) anyerror!JSValue {
+    const match = hit.match;
+    const input = hit.sub;
+    var result = try JSValue.newArray(allocator);
+    _ = try result.array.value.push(try JSValue.newString(allocator, match.group(input)));
+    var i: usize = 1;
+    while (i <= hit.group_count) : (i += 1) {
+        if (match.getCapture(i, input)) |cap| {
+            _ = try result.array.value.push(try JSValue.newString(allocator, cap));
+        } else {
+            _ = try result.array.value.push(JSValue.UNDEFINED);
+        }
+    }
+    // exec/match arrays carry extra own properties.
+    try setArrayOwn(self, result, "index", JSValue.fromNumber(@floatFromInt(hit.base + match.start)));
+    try setArrayOwn(self, result, "input", try JSValue.newString(allocator, hit.full));
+    if (match.named_groups.len > 0) {
+        var groups = try JSValue.newObject(allocator);
+        for (match.named_groups) |ng| {
+            const v = if (match.getNamedCapture(ng.name, input)) |c| try JSValue.newString(allocator, c) else JSValue.UNDEFINED;
+            try groups.object.value.set(ng.name, v);
+        }
+        try setArrayOwn(self, result, "groups", groups);
+    } else {
+        try setArrayOwn(self, result, "groups", JSValue.UNDEFINED);
+    }
+    return result;
+}
+
+/// Set a named own property on an array value (arrays here have no
+/// general property bag, so exec-result extras go through the array's
+/// object-ish set -- but ZArray is index-keyed; we stash these on a
+/// parallel object). Simplest faithful approach: since our arrays can't
+/// hold named props, we accept that match.index/.input/.groups live only
+/// if the array were an object. To keep it working, store them via the
+/// array's own retained slots is impossible -- so we wrap: not needed for
+/// the common `m[0]`/`m[1]` access. We DO support .index/.input/.groups
+/// by special-casing in getProperty? Simpler: attach via a side map.
+fn setArrayOwn(self: *Interpreter, array: JSValue, key: []const u8, value: JSValue) anyerror!void {
+    try self.setArrayExtra(array, key, value);
+}
+
+fn regexTest(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const re = try requireRegex(ctx, this_value, "test");
+    const self = interp(ctx);
+    const input = if (arg(args, 0) == .string) arg(args, 0).string.value.data else try coercion.toDisplayString(allocator, arg(args, 0));
+    const st = self.regexState(re);
+    const stateful = st.global or st.sticky;
+    const hit = try regexFindFrom(re, input, if (stateful) st.last_index else 0);
+    if (hit) |h| {
+        defer h.match.deinit();
+        if (stateful) st.last_index = h.base + h.match.end;
+        return JSValue.fromBool(true);
+    }
+    if (stateful) st.last_index = 0;
+    return JSValue.fromBool(false);
+}
+
+fn regexExec(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const re = try requireRegex(ctx, this_value, "exec");
+    const self = interp(ctx);
+    const input = if (arg(args, 0) == .string) arg(args, 0).string.value.data else try coercion.toDisplayString(allocator, arg(args, 0));
+    const st = self.regexState(re);
+    const stateful = st.global or st.sticky;
+    const hit = try regexFindFrom(re, input, if (stateful) st.last_index else 0);
+    if (hit) |h| {
+        defer h.match.deinit();
+        const abs_end = h.base + h.match.end;
+        if (stateful) st.last_index = if (h.match.end > h.match.start) abs_end else abs_end + 1;
+        return makeMatchArray(self, allocator, h);
+    }
+    if (stateful) st.last_index = 0;
+    return JSValue.NULL;
+}
+
+fn regexToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const re = try requireRegex(ctx, this_value, "toString");
+    const st = interp(ctx).regexState(re);
+    const s = try std.fmt.allocPrint(allocator, "/{s}/{s}", .{ st.source, st.flags });
+    defer allocator.free(s);
+    return JSValue.newString(allocator, s);
+}
+
+// ===== String methods with RegExp patterns =====
+
+/// str.match(re): non-global -> a match array (or null); global -> an
+/// array of all whole-match strings (or null).
+fn stringMatch(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const data = try requireString(ctx, this_value, "match");
+    const self = interp(ctx);
+    const re = try coerceToRegex(self, allocator, arg(args, 0));
+    const st = self.regexState(re);
+    if (!st.global) {
+        const hit = try regexFindFrom(re, data, 0);
+        if (hit) |h| {
+            defer h.match.deinit();
+            return makeMatchArray(self, allocator, h);
+        }
+        return JSValue.NULL;
+    }
+    var all = try re.regex.value.findAll(data);
+    defer {
+        for (all.items) |*mm| mm.deinit();
+        all.deinit(allocator);
+    }
+    if (all.items.len == 0) return JSValue.NULL;
+    var result = try JSValue.newArray(allocator);
+    for (all.items) |match| _ = try result.array.value.push(try JSValue.newString(allocator, match.group(data)));
+    return result;
+}
+
+/// str.matchAll(re): an iterator of match arrays.
+fn stringMatchAll(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const data = try requireString(ctx, this_value, "matchAll");
+    const self = interp(ctx);
+    const re = try coerceToRegex(self, allocator, arg(args, 0));
+    var all = try re.regex.value.findAll(data);
+    defer {
+        for (all.items) |*mm| mm.deinit();
+        all.deinit(allocator);
+    }
+    var arr = try JSValue.newArray(allocator);
+    for (all.items) |match| {
+        _ = try arr.array.value.push(try makeMatchArray(self, allocator, .{ .match = match, .sub = data, .base = 0, .full = data, .group_count = re.regex.value.compiled.group_count }));
+    }
+    return makeArrayIterator(self, allocator, arr, .values);
+}
+
+fn stringSearch(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const data = try requireString(ctx, this_value, "search");
+    const self = interp(ctx);
+    const re = try coerceToRegex(self, allocator, arg(args, 0));
+    const m = try re.regex.value.find(data);
+    if (m) |match| {
+        defer match.deinit();
+        return JSValue.fromNumber(@floatFromInt(match.start));
+    }
+    return JSValue.fromNumber(-1);
+}
+
+/// Coerce a match/replace/search/split argument to a `.regex` (a plain
+/// string becomes a source-literal regex, real JS behavior).
+fn coerceToRegex(self: *Interpreter, allocator: Allocator, v: JSValue) anyerror!JSValue {
+    if (v == .regex) return v;
+    const source = if (v == .@"undefined") "" else try coercion.toDisplayString(allocator, v);
+    return self.makeRegex(source, "");
+}
+
+/// String.prototype.replace/replaceAll with a regex pattern. Delegates
+/// string replacements to z-regex (JS `$` substitution included);
+/// function replacements loop the matches.
+fn regexReplace(self: *Interpreter, allocator: Allocator, data: []const u8, re: JSValue, repl: JSValue, all_flag: bool) anyerror!JSValue {
+    const st = self.regexState(re);
+    const replace_all = st.global or all_flag;
+    if (repl != .function) {
+        const rs = if (repl == .@"undefined") "undefined" else try coercion.toDisplayString(allocator, repl);
+        const out = if (replace_all)
+            try re.regex.value.replaceAll(allocator, data, rs)
+        else
+            try re.regex.value.replace(allocator, data, rs);
+        defer allocator.free(out);
+        return JSValue.newString(allocator, out);
+    }
+    // Function replacement: build the result splicing each match's
+    // fn(match, ...captures, offset, input) result.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var pos: usize = 0;
+    while (pos <= data.len) {
+        const m = try re.regex.value.findAt(data, pos);
+        const match = m orelse break;
+        defer match.deinit();
+        try buf.appendSlice(allocator, data[pos..match.start]);
+        // callback args: (match, cap1, cap2, ..., offset, input)
+        var call_args: std.ArrayList(JSValue) = .empty;
+        defer call_args.deinit(allocator);
+        try call_args.append(allocator, try JSValue.newString(allocator, match.group(data)));
+        var i: usize = 1;
+        while (i <= re.regex.value.compiled.group_count) : (i += 1) {
+            const cap = if (match.getCapture(i, data)) |c| try JSValue.newString(allocator, c) else JSValue.UNDEFINED;
+            try call_args.append(allocator, cap);
+        }
+        try call_args.append(allocator, JSValue.fromNumber(@floatFromInt(match.start)));
+        try call_args.append(allocator, try JSValue.newString(allocator, data));
+        const r = try repl.function.value.call(repl.function.value.ctx, allocator, JSValue.UNDEFINED, call_args.items);
+        const rs = try coercion.toDisplayString(allocator, r);
+        defer allocator.free(rs);
+        try buf.appendSlice(allocator, rs);
+        // advance past the match (empty match -> step one to avoid a loop)
+        pos = if (match.end > match.start) match.end else match.end + 1;
+        if (!replace_all) {
+            try buf.appendSlice(allocator, data[match.end..]);
+            return JSValue.newString(allocator, buf.items);
+        }
+    }
+    if (pos < data.len) try buf.appendSlice(allocator, data[pos..]);
+    return JSValue.newString(allocator, buf.items);
+}
+
+/// String.prototype.split with a regex separator. Splits at each match;
+/// the separator's capture groups are interleaved (real JS behavior).
+fn regexSplit(self: *Interpreter, allocator: Allocator, data: []const u8, re: JSValue) anyerror!JSValue {
+    _ = self;
+    var result = try JSValue.newArray(allocator);
+    var all = try re.regex.value.findAll(data);
+    defer {
+        for (all.items) |*mm| mm.deinit();
+        all.deinit(allocator);
+    }
+    var last: usize = 0;
+    for (all.items) |match| {
+        if (match.end == match.start and match.start == last) continue; // skip empty at boundary
+        _ = try result.array.value.push(try JSValue.newString(allocator, data[last..match.start]));
+        var gi: usize = 1;
+        while (gi <= re.regex.value.compiled.group_count) : (gi += 1) {
+            const cap = if (match.getCapture(gi, data)) |c| try JSValue.newString(allocator, c) else JSValue.UNDEFINED;
+            _ = try result.array.value.push(cap);
+        }
+        last = match.end;
+    }
+    _ = try result.array.value.push(try JSValue.newString(allocator, data[last..]));
+    return result;
 }

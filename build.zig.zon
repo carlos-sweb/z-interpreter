@@ -15,6 +15,7 @@
         .zstatements = .{ .path = "../z-statements" },
         .zfunctions = .{ .path = "../z-functions" },
         .zvalue = .{ .path = "../z-value" },
+        .zregex = .{ .path = "../z-regex" },
         .znumber = .{ .path = "../z-number" },
         .zmath = .{ .path = "../z-math" },
         .zjson = .{ .path = "../z-json" },

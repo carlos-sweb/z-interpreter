@@ -64,6 +64,6 @@ test "object literal with shorthand and spread" {
     }.check);
 }
 
-test "regex literal evaluates without erroring (not implemented, deferred)" {
-    try helpers.expectNotImplemented("/abc/g;");
+test "regex literal evaluates to a RegExp value" {
+    try helpers.expectStdout("const re = /abc/gi; console.log(re.source, re.flags, re.global);", "abc gi true\n");
 }
