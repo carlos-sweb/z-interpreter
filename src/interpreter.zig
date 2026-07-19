@@ -2546,6 +2546,17 @@ fn invokeFunctionNode(
     call_env.super_proto = super_proto;
     call_env.super_ctor = super_ctor;
 
+    // `arguments`: every non-arrow call gets one (arrows inherit the
+    // enclosing function's via the scope chain -- no binding here).
+    // Materialized as a real array snapshot (always-strict => unmapped;
+    // narrowing: not the exotic Arguments object -- see README). Defined
+    // BEFORE params so a parameter/rest named `arguments` shadows it.
+    if (fnode.kind != .arrow) {
+        var arguments = try JSValue.newArray(allocator);
+        for (args) |a| _ = try arguments.array.value.push(a.retain());
+        try call_env.define(allocator, "arguments", arguments);
+    }
+
     for (fnode.params.items, 0..) |param, i| {
         var value = if (i < args.len) args[i] else JSValue.UNDEFINED;
         if (value == .@"undefined") {
