@@ -57,6 +57,30 @@ const Timer = struct {
     callback: JSValue,
 };
 
+pub const LoadedModule = struct {
+    /// Loader-RESOLVED path -- the module cache key and the referrer for
+    /// this module's own imports.
+    path: []const u8,
+    source: []const u8,
+};
+
+/// The host side of module loading: resolve a specifier against its
+/// referrer and produce the source. Returning null means "not found"
+/// (the engine raises the catchable Cannot-find-module error). All
+/// allocations from the passed arena.
+pub const ModuleLoader = struct {
+    ctx: *anyopaque,
+    load: *const fn (ctx: *anyopaque, arena: Allocator, specifier: []const u8, referrer: ?[]const u8) anyerror!?LoadedModule,
+};
+
+const ModuleRecord = struct {
+    path: []const u8,
+    /// The module's export map (a plain object -- also serves directly
+    /// as the `import * as ns` namespace object).
+    exports: JSValue,
+    state: enum { loading, evaluated },
+};
+
 /// Everything one suspended activation needs: a generator object's guts,
 /// or a running async function. The JS body executes on `fiber`'s stack
 /// via the ordinary invokeFunctionNode -- yield/await switch out, the
@@ -236,6 +260,13 @@ pub const Interpreter = struct {
     /// resumeFiber save/restores it (nesting: a generator driven from
     /// inside an async function, etc.).
     current_fiber: ?*FiberState = null,
+    /// Host-provided module loader (QuickJS's JS_SetModuleLoaderFunc
+    /// shape) -- the engine never reads files. Null = `import` is a
+    /// catchable SyntaxError.
+    module_loader: ?ModuleLoader = null,
+    /// Module cache keyed by the loader-resolved path: each module
+    /// parses and evaluates exactly once.
+    modules: std.StringHashMapUnmanaged(*ModuleRecord) = .empty,
 
     pub fn init(backing_allocator: Allocator, console_writer: *std.Io.Writer) !Interpreter {
         var self: Interpreter = .{
@@ -413,6 +444,181 @@ pub const Interpreter = struct {
         const p = try JSValue.newPromise(self.arena_state.allocator());
         try self.settlePromise(p, .rejected, reason);
         return p;
+    }
+
+    // ===== Modules (import/export) =====
+
+    pub fn setModuleLoader(self: *Interpreter, loader: ModuleLoader) void {
+        self.module_loader = loader;
+    }
+
+    /// Loads and evaluates a module graph from its entry specifier, then
+    /// drains the event loop (async-heavy modules behave like run()).
+    /// The loader must be set first.
+    pub fn runModule(self: *Interpreter, specifier: []const u8) anyerror!JSValue {
+        self.pending_exception = null;
+        if (!self.globals_ready) {
+            try builtins.setupGlobals(self);
+            self.globals_ready = true;
+        }
+        const arena = self.arena_state.allocator();
+        if (self.script_env == null) self.script_env = try self.global_env.child(arena);
+        _ = self.loadModule(specifier, null) catch |err| {
+            if (err != error.JsThrow) return err;
+            return error.UncaughtException;
+        };
+        self.runEventLoop() catch |err| {
+            if (err != error.JsThrow) return err;
+            return error.UncaughtException;
+        };
+        return JSValue.UNDEFINED;
+    }
+
+    /// Resolve + parse + evaluate one module, once (cache by resolved
+    /// path). Cycles are the documented narrowing: bindings snapshot at
+    /// the end of a module's evaluation instead of staying live, so a
+    /// dependency cycle can't be linked -- catchable error instead.
+    fn loadModule(self: *Interpreter, specifier: []const u8, referrer: ?[]const u8) anyerror!*ModuleRecord {
+        const arena = self.arena_state.allocator();
+        const loader = self.module_loader orelse
+            return self.throwError(.syntax_error, "Cannot use import statement outside a module", .{});
+        const loaded = (try loader.load(loader.ctx, arena, specifier, referrer)) orelse
+            return self.throwError(.generic, "Cannot find module '{s}' imported from {s}", .{ specifier, referrer orelse "<entry>" });
+        if (self.modules.get(loaded.path)) |rec| {
+            if (rec.state == .loading) {
+                return self.throwError(.generic, "Circular dependency detected: '{s}' (live bindings are not supported)", .{loaded.path});
+            }
+            return rec;
+        }
+        const rec = try arena.create(ModuleRecord);
+        rec.* = .{ .path = loaded.path, .exports = try JSValue.newObject(arena), .state = .loading };
+        try self.modules.put(arena, loaded.path, rec);
+
+        const parser = try zfunctions.Parser.init(arena, loaded.source);
+        const program = try parser.parseProgram();
+        const module_env = try self.global_env.child(arena);
+
+        // Import pre-pass: dependencies evaluate first (DFS), then their
+        // exports bind here -- snapshots, taken after the dep finished.
+        for (program) |stmt| {
+            if (stmt.data != .import_decl) continue;
+            const imp = stmt.data.import_decl;
+            const dep = try self.loadModule(imp.source, rec.path);
+            if (imp.namespace_local) |ns| {
+                try module_env.define(arena, ns, dep.exports.retain());
+            }
+            if (imp.default_local) |dl| {
+                const v = dep.exports.object.value.get("default") orelse
+                    return self.throwError(.syntax_error, "The requested module '{s}' does not provide an export named 'default'", .{imp.source});
+                try module_env.define(arena, dl, v.retain());
+            }
+            for (imp.named) |spec| {
+                const v = dep.exports.object.value.get(spec.imported) orelse
+                    return self.throwError(.syntax_error, "The requested module '{s}' does not provide an export named '{s}'", .{ imp.source, spec.imported });
+                try module_env.define(arena, spec.local, v.retain());
+            }
+        }
+
+        try self.evalModuleBody(module_env, program, rec);
+        rec.state = .evaluated;
+        return rec;
+    }
+
+    /// The module-flavored evalBody: same hoisting (the pre-passes see
+    /// through `export` wrappers), plus export handling. Exported values
+    /// are collected AFTER the body runs -- `export { x }` before the
+    /// declaration works, and an `export let` mutated during evaluation
+    /// exports its final value.
+    fn evalModuleBody(self: *Interpreter, env: *Environment, stmts: []const *zstatements.Statement, rec: *ModuleRecord) anyerror!void {
+        const arena = self.arena_state.allocator();
+        try self.hoistVarScope(env, stmts);
+        try self.hoistLexical(env, stmts);
+
+        var decl_names: std.ArrayList([]const u8) = .empty;
+        var local_specs: std.ArrayList(zstatements.ExportSpecifier) = .empty;
+
+        for (stmts) |stmt| {
+            switch (stmt.data) {
+                .import_decl => {}, // bound by the pre-pass
+                .export_decl => |e| switch (e) {
+                    .declaration => |inner| {
+                        _ = try self.evalStatement(env, inner);
+                        try self.collectDeclaredNames(inner, &decl_names);
+                    },
+                    .default => |expr| {
+                        const v = try self.evalExpression(env, expr);
+                        try rec.exports.object.value.set("default", v.retain());
+                    },
+                    .named => |n| {
+                        if (n.source) |src| {
+                            const dep = try self.loadModule(src, rec.path);
+                            for (n.specifiers) |spec| {
+                                const v = dep.exports.object.value.get(spec.local) orelse
+                                    return self.throwError(.syntax_error, "The requested module '{s}' does not provide an export named '{s}'", .{ src, spec.local });
+                                try rec.exports.object.value.set(spec.exported, v.retain());
+                            }
+                        } else {
+                            for (n.specifiers) |spec| try local_specs.append(arena, spec);
+                        }
+                    },
+                    .all => |a| {
+                        // `export *` re-exports everything EXCEPT default
+                        // (the real rule).
+                        const dep = try self.loadModule(a.source, rec.path);
+                        const keys = try dep.exports.object.value.keys(arena);
+                        defer arena.free(keys);
+                        for (keys) |k| {
+                            if (std.mem.eql(u8, k, "default")) continue;
+                            try rec.exports.object.value.set(k, dep.exports.object.value.get(k).?.retain());
+                        }
+                    },
+                },
+                else => _ = try self.evalStatement(env, stmt),
+            }
+        }
+
+        for (decl_names.items) |name| {
+            const v = env.get(name) orelse continue;
+            try rec.exports.object.value.set(name, v.retain());
+        }
+        for (local_specs.items) |spec| {
+            const v = env.get(spec.local) orelse
+                return self.throwError(.syntax_error, "Export '{s}' is not defined in module", .{spec.local});
+            try rec.exports.object.value.set(spec.exported, v.retain());
+        }
+    }
+
+    /// Every name an exported declaration binds: declarator patterns
+    /// (destructuring included), function and class names.
+    fn collectDeclaredNames(self: *Interpreter, stmt: *zstatements.Statement, list: *std.ArrayList([]const u8)) anyerror!void {
+        const arena = self.arena_state.allocator();
+        switch (stmt.data) {
+            .variable => |v| for (v.declarators) |d| try self.collectPatternNames(d.pattern, list),
+            .function_declaration => |ptr| {
+                try list.append(arena, zfunctions.asFunctionNode(ptr).kind.function_decl.name);
+            },
+            .class_declaration => |ptr| {
+                try list.append(arena, zfunctions.asClassNode(ptr).name.?);
+            },
+            else => {},
+        }
+    }
+
+    fn collectPatternNames(self: *Interpreter, pattern: *const zstatements.BindingPattern, list: *std.ArrayList([]const u8)) anyerror!void {
+        const arena = self.arena_state.allocator();
+        switch (pattern.*) {
+            .identifier => |id| try list.append(arena, id.name),
+            .array => |arr| {
+                for (arr.elements) |maybe_el| {
+                    if (maybe_el) |el| try self.collectPatternNames(el.pattern, list);
+                }
+                if (arr.rest) |r| try self.collectPatternNames(r, list);
+            },
+            .object => |obj| {
+                for (obj.properties) |p| try self.collectPatternNames(p.value, list);
+                if (obj.rest) |r| try list.append(arena, r.name);
+            },
+        }
     }
 
     // ===== Fibers (generators / async functions) =====
@@ -658,6 +864,11 @@ pub const Interpreter = struct {
                 for (case.consequent) |cs| try self.hoistVarsInStatement(env, cs);
             },
             .with_stmt => |s| try self.hoistVarsInStatement(env, s.body),
+            // `export var x = ...` must hoist like its bare declaration.
+            .export_decl => |e| switch (e) {
+                .declaration => |inner| try self.hoistVarsInStatement(env, inner),
+                else => {},
+            },
             else => {},
         }
     }
@@ -731,6 +942,12 @@ pub const Interpreter = struct {
                         return self.throwError(.syntax_error, "Identifier '{s}' has already been declared", .{name});
                     }
                     try env.markTDZ(arena, name);
+                },
+                // `export function f() {}` hoists exactly like the bare
+                // declaration (call-before-declaration inside the module).
+                .export_decl => |e| switch (e) {
+                    .declaration => |inner| try self.hoistLexical(env, &.{inner}),
+                    else => {},
                 },
                 else => {},
             }
@@ -876,6 +1093,12 @@ pub const Interpreter = struct {
                 try env.define(arena, cnode.name.?, value.retain());
                 return .{};
             },
+            // Reaching these through evalStatement means they're NOT at a
+            // module's top level (evalModuleBody intercepts those) -- a
+            // classic script, or nested in a block. Real JS rejects both
+            // at parse time; ours is a catchable runtime error.
+            .import_decl => return self.throwError(.syntax_error, "Cannot use import statement outside a module", .{}),
+            .export_decl => return self.throwError(.syntax_error, "Unexpected token 'export'", .{}),
             .throw_stmt => |arg| {
                 // The `try` on the argument is load-bearing: `throw f()`
                 // where f itself throws must propagate f's exception.

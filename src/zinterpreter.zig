@@ -3,6 +3,8 @@ const environment_mod = @import("environment.zig");
 const completion_mod = @import("completion.zig");
 
 pub const Interpreter = interpreter_mod.Interpreter;
+pub const ModuleLoader = interpreter_mod.ModuleLoader;
+pub const LoadedModule = interpreter_mod.LoadedModule;
 pub const Environment = environment_mod.Environment;
 pub const Completion = completion_mod.Completion;
 pub const CompletionType = completion_mod.CompletionType;
