@@ -1909,7 +1909,7 @@ pub const Interpreter = struct {
 
     /// A shared native-method JSValue for a (type, name) pair, cached so
     /// `a.push === b.push` holds like real JS prototype methods.
-    fn nativeMethod(self: *Interpreter, comptime type_prefix: []const u8, name: []const u8, call_fn: builtins.NativeFn) anyerror!JSValue {
+    pub fn nativeMethod(self: *Interpreter, comptime type_prefix: []const u8, name: []const u8, call_fn: builtins.NativeFn) anyerror!JSValue {
         const arena = self.arena_state.allocator();
         const cache_key = try std.fmt.allocPrint(arena, type_prefix ++ ".{s}", .{name});
         if (self.method_cache.get(cache_key)) |cached| return cached;
@@ -1936,6 +1936,9 @@ pub const Interpreter = struct {
                     }
                     break :blk rec.value.retain();
                 }
+                // Chain miss -> the Object.prototype methods every plain
+                // object responds to (hasOwnProperty & co).
+                if (builtins.object_methods.get(key)) |f| break :blk try self.nativeMethod("object", key, f);
                 break :blk JSValue.UNDEFINED;
             },
             .array => |box| blk: {
@@ -1957,6 +1960,12 @@ pub const Interpreter = struct {
                 const arena = self.arena_state.allocator();
                 if (std.mem.eql(u8, key, "name")) break :blk try JSValue.newString(arena, box.value.kind.name());
                 if (std.mem.eql(u8, key, "message")) break :blk try JSValue.newString(arena, box.value.message);
+                // `thrown.constructor === TypeError` -- what Test262's
+                // assert.throws actually compares. Same function identity
+                // every time: the global binding for this kind's name.
+                if (std.mem.eql(u8, key, "constructor")) {
+                    break :blk (self.global_env.get(box.value.kind.name()) orelse JSValue.UNDEFINED).retain();
+                }
                 break :blk JSValue.UNDEFINED;
             },
             .function => |box| blk: {
@@ -2046,7 +2055,14 @@ pub const Interpreter = struct {
             }
             break;
         }
-        try obj.object.value.set(key, value.retain());
+        // Always-strict [[Set]] failures are real TypeErrors, not raw
+        // Zig errors (the descriptor flags finally bite here).
+        obj.object.value.set(key, value.retain()) catch |err| return switch (err) {
+            error.PropertyNotWritable => self.throwError(.type_error, "Cannot assign to read only property '{s}' of object", .{key}),
+            error.ObjectIsFrozen => self.throwError(.type_error, "Cannot assign to read only property '{s}' of object", .{key}),
+            error.ObjectNotExtensible => self.throwError(.type_error, "Cannot add property {s}, object is not extensible", .{key}),
+            else => err,
+        };
     }
 
     /// The function's statics/property bag, created lazily on first touch
@@ -2061,7 +2077,7 @@ pub const Interpreter = struct {
     /// F.prototype, created lazily on first touch: a fresh `{}` whose
     /// `constructor` points back at the function (real
     /// `F.prototype.constructor === F` behavior).
-    fn functionPrototype(self: *Interpreter, fn_val: JSValue) anyerror!JSValue {
+    pub fn functionPrototype(self: *Interpreter, fn_val: JSValue) anyerror!JSValue {
         if (fn_val.function.value.prototype) |p| return p;
         const arena = self.arena_state.allocator();
         var proto = try JSValue.newObject(arena);
@@ -2111,7 +2127,28 @@ pub const Interpreter = struct {
                 const n = try coercion.toInt32(try self.evalExpression(env, u.operand));
                 return JSValue.fromNumber(@floatFromInt(~n));
             },
-            .delete => return error.NotImplemented,
+            .delete => {
+                // Always-strict delete: unqualified identifiers are the
+                // real SyntaxError; member deletion enforces
+                // configurable; anything else evaluates and yields true.
+                if (u.operand.data == .identifier) {
+                    return self.throwError(.syntax_error, "Delete of an unqualified identifier in strict mode.", .{});
+                }
+                if (u.operand.data == .member) {
+                    const m = u.operand.data.member;
+                    const obj = try self.evalExpression(env, m.object);
+                    const key = try self.memberKeyString(env, m);
+                    if (obj != .object) return JSValue.fromBool(true);
+                    const removed = obj.object.value.delete(key) catch |err| return switch (err) {
+                        error.PropertyNotConfigurable, error.ObjectIsFrozen => self.throwError(.type_error, "Cannot delete property '{s}' of object", .{key}),
+                        else => err,
+                    };
+                    _ = removed;
+                    return JSValue.fromBool(true);
+                }
+                _ = try self.evalExpression(env, u.operand);
+                return JSValue.fromBool(true);
+            },
         }
     }
 
@@ -2291,7 +2328,7 @@ pub const Interpreter = struct {
         };
     }
 
-    fn makeClosure(self: *Interpreter, env: *Environment, fnode: *zfunctions.FunctionNode) anyerror!JSValue {
+    pub fn makeClosure(self: *Interpreter, env: *Environment, fnode: *zfunctions.FunctionNode) anyerror!JSValue {
         const arena = self.arena_state.allocator();
         // A named function expression's own name is visible inside its own
         // body (for self-recursion) even though it isn't bound in the

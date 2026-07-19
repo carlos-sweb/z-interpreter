@@ -20,6 +20,7 @@ const zmath = @import("zmath");
 const zjson = @import("zjson");
 const zstring = @import("zstring");
 const zdate = @import("zdate");
+const zfunctions = @import("zfunctions");
 const JSValue = zvalue.JSValue;
 
 const interpreter_mod = @import("interpreter.zig");
@@ -83,6 +84,17 @@ pub const function_methods = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "bind", fnBind },
 });
 
+/// Object.prototype methods every plain object answers to (dispatched on
+/// prototype-chain miss -- our objects have no real Object.prototype
+/// parent; this table plays that role).
+pub const object_methods = std.StaticStringMap(NativeFn).initComptime(.{
+    .{ "hasOwnProperty", objHasOwnProperty },
+    .{ "propertyIsEnumerable", objPropertyIsEnumerable },
+    .{ "toString", objToString },
+    .{ "valueOf", objValueOf },
+    .{ "isPrototypeOf", objIsPrototypeOf },
+});
+
 pub const string_methods = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "toUpperCase", stringToUpperCase },
     .{ "toLowerCase", stringToLowerCase },
@@ -134,19 +146,82 @@ pub fn setupGlobals(self: *Interpreter) !void {
     try json_obj.object.value.set("parse", try native(self, "parse", jsonParse));
     try g.define(arena, "JSON", json_obj);
 
-    // Plain objects, not constructor functions -- functions here have no
-    // general property bag (documented gap): typeof Object == "object",
-    // and `new Object()` doesn't exist.
-    var object_obj = try JSValue.newObject(arena);
-    try object_obj.object.value.set("keys", try native(self, "keys", objectKeys));
-    try object_obj.object.value.set("values", try native(self, "values", objectValues));
-    try object_obj.object.value.set("entries", try native(self, "entries", objectEntries));
-    try object_obj.object.value.set("assign", try native(self, "assign", objectAssign));
-    try g.define(arena, "Object", object_obj);
+    // Object: a real constructable function (typeof "function"), its
+    // statics on the property bag, its .prototype pre-populated with the
+    // same cached natives object_methods dispatches -- so the harness's
+    // detached `Object.prototype.hasOwnProperty` pattern works.
+    const object_ctor = try JSValue.newFunction(arena, .{
+        .ctx = self,
+        .name = "Object",
+        .arity = 1,
+        .call = objectConstructor,
+        .constructable = true,
+    });
+    const object_statics = try self.functionStatics(object_ctor);
+    const os_bag = object_statics.object.value;
+    _ = os_bag;
+    inline for (.{
+        .{ "keys", objectKeys },              .{ "values", objectValues },
+        .{ "entries", objectEntries },        .{ "assign", objectAssign },
+        .{ "defineProperty", objectDefineProperty },
+        .{ "defineProperties", objectDefineProperties },
+        .{ "getOwnPropertyDescriptor", objectGetOwnPropertyDescriptor },
+        .{ "getOwnPropertyNames", objectGetOwnPropertyNames },
+        .{ "create", objectCreate },
+        .{ "freeze", objectFreeze },          .{ "isFrozen", objectIsFrozen },
+        .{ "seal", objectSeal },              .{ "isSealed", objectIsSealed },
+        .{ "preventExtensions", objectPreventExtensions },
+        .{ "isExtensible", objectIsExtensible },
+        .{ "setPrototypeOf", objectSetPrototypeOf },
+    }) |entry| {
+        try object_statics.object.value.set(entry[0], try native(self, entry[0], entry[1]));
+    }
+    const object_proto = try self.functionPrototype(object_ctor);
+    inline for (.{
+        .{ "hasOwnProperty", objHasOwnProperty },
+        .{ "propertyIsEnumerable", objPropertyIsEnumerable },
+        .{ "toString", objToString },
+        .{ "valueOf", objValueOf },
+        .{ "isPrototypeOf", objIsPrototypeOf },
+    }) |entry| {
+        try object_proto.object.value.set(entry[0], try self.nativeMethod("object", entry[0], entry[1]));
+    }
+    try g.define(arena, "Object", object_ctor);
 
-    var array_obj = try JSValue.newObject(arena);
-    try array_obj.object.value.set("isArray", try native(self, "isArray", arrayIsArray));
-    try g.define(arena, "Array", array_obj);
+    // Array: constructable (new Array(n) / Array(a, b, c)) + statics.
+    const array_ctor = try JSValue.newFunction(arena, .{
+        .ctx = self,
+        .name = "Array",
+        .arity = 1,
+        .call = arrayConstructor,
+        .constructable = true,
+    });
+    const array_statics = try self.functionStatics(array_ctor);
+    try array_statics.object.value.set("isArray", try native(self, "isArray", arrayIsArray));
+    try array_statics.object.value.set("of", try native(self, "of", arrayOf));
+    try array_statics.object.value.set("from", try native(self, "from", arrayFrom));
+    try g.define(arena, "Array", array_ctor);
+
+    // Function: a constructor that PARSES -- new Function('a', 'return a')
+    // composes and compiles a real closure (a bounded eval). Its
+    // .prototype carries the cached call/apply/bind for the detached
+    // harness pattern.
+    const function_ctor = try JSValue.newFunction(arena, .{
+        .ctx = self,
+        .name = "Function",
+        .arity = 1,
+        .call = functionConstructor,
+        .constructable = true,
+    });
+    const function_proto = try self.functionPrototype(function_ctor);
+    inline for (.{
+        .{ "call", fnCall },
+        .{ "apply", fnApply },
+        .{ "bind", fnBind },
+    }) |entry| {
+        try function_proto.object.value.set(entry[0], try self.nativeMethod("function", entry[0], entry[1]));
+    }
+    try g.define(arena, "Function", function_ctor);
 
     // A real constructable native: `new Date(...)` works through evalNew's
     // object-like-return-overrides rule (a .date return replaces the plain
@@ -169,6 +244,8 @@ pub fn setupGlobals(self: *Interpreter) !void {
         .{ "RangeError", zvalue.ErrorKind.range_error },
         .{ "SyntaxError", zvalue.ErrorKind.syntax_error },
         .{ "ReferenceError", zvalue.ErrorKind.reference_error },
+        .{ "EvalError", zvalue.ErrorKind.eval_error },
+        .{ "URIError", zvalue.ErrorKind.uri_error },
     }) |entry| {
         const ctor = try JSValue.newFunction(arena, .{
             .ctx = self,
@@ -203,9 +280,29 @@ pub fn setupGlobals(self: *Interpreter) !void {
     try g.define(arena, "parseFloat", try native(self, "parseFloat", globalParseFloat));
     try g.define(arena, "isNaN", try native(self, "isNaN", globalIsNaN));
     try g.define(arena, "isFinite", try native(self, "isFinite", globalIsFinite));
-    try g.define(arena, "String", try native(self, "String", globalString));
-    try g.define(arena, "Number", try native(self, "Number", globalNumber));
-    try g.define(arena, "Boolean", try native(self, "Boolean", globalBoolean));
+    // String/Number/Boolean: callable = coercion (as before);
+    // constructable = evalNew keeps the hollow instance (typeof "object",
+    // no [[PrimitiveValue]] -- documented narrowing). Statics via bags.
+    const string_ctor = try JSValue.newFunction(arena, .{ .ctx = self, .name = "String", .arity = 1, .call = globalString, .constructable = true });
+    const string_statics = try self.functionStatics(string_ctor);
+    try string_statics.object.value.set("fromCharCode", try native(self, "fromCharCode", stringFromCharCode));
+    try g.define(arena, "String", string_ctor);
+
+    const number_ctor = try JSValue.newFunction(arena, .{ .ctx = self, .name = "Number", .arity = 1, .call = globalNumber, .constructable = true });
+    const number_statics = try self.functionStatics(number_ctor);
+    try number_statics.object.value.set("isNaN", try native(self, "isNaN", numberIsNaN));
+    try number_statics.object.value.set("isFinite", try native(self, "isFinite", numberIsFinite));
+    try number_statics.object.value.set("isInteger", try native(self, "isInteger", numberIsInteger));
+    try number_statics.object.value.set("parseFloat", try native(self, "parseFloat", globalParseFloat));
+    try number_statics.object.value.set("parseInt", try native(self, "parseInt", globalParseInt));
+    try number_statics.object.value.set("MAX_SAFE_INTEGER", JSValue.fromNumber(9007199254740991.0));
+    try number_statics.object.value.set("MIN_SAFE_INTEGER", JSValue.fromNumber(-9007199254740991.0));
+    try number_statics.object.value.set("EPSILON", JSValue.fromNumber(std.math.floatEps(f64)));
+    try number_statics.object.value.set("NaN", JSValue.fromNumber(std.math.nan(f64)));
+    try g.define(arena, "Number", number_ctor);
+
+    const boolean_ctor = try JSValue.newFunction(arena, .{ .ctx = self, .name = "Boolean", .arity = 1, .call = globalBoolean, .constructable = true });
+    try g.define(arena, "Boolean", boolean_ctor);
 }
 
 fn native(self: *Interpreter, name: []const u8, call_fn: NativeFn) !JSValue {
@@ -1165,4 +1262,433 @@ fn fnBind(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
         .arity = bound_arity,
         .call = boundCall,
     });
+}
+
+// ===== Object.prototype methods (object_methods table) =====
+
+fn requirePlainObject(ctx: *anyopaque, v: JSValue, what: []const u8) anyerror!JSValue {
+    if (v != .object) return interp(ctx).throwError(.type_error, "{s} called on non-object", .{what});
+    return v;
+}
+
+fn objHasOwnProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = ctx;
+    if (this_value != .object) return JSValue.fromBool(false);
+    const key = try coercion.toDisplayString(allocator, arg(args, 0));
+    return JSValue.fromBool(this_value.object.value.hasOwnProperty(key));
+}
+
+fn objPropertyIsEnumerable(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = ctx;
+    if (this_value != .object) return JSValue.fromBool(false);
+    const key = try coercion.toDisplayString(allocator, arg(args, 0));
+    return JSValue.fromBool(this_value.object.value.propertyIsEnumerable(key));
+}
+
+fn objToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = ctx;
+    _ = this_value;
+    _ = args;
+    return JSValue.newString(allocator, "[object Object]");
+}
+
+fn objValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = ctx;
+    _ = allocator;
+    _ = args;
+    return this_value.retain();
+}
+
+fn objIsPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = ctx;
+    _ = allocator;
+    if (this_value != .object or arg(args, 0) != .object) return JSValue.fromBool(false);
+    return JSValue.fromBool(this_value.object.value.isPrototypeOf(&arg(args, 0).object.value));
+}
+
+// ===== Object statics: constructor + descriptors =====
+
+fn objectConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = ctx;
+    _ = this_value;
+    const v = arg(args, 0);
+    return switch (v) {
+        // Object(x) on object-likes returns x; on nothing, a fresh {}.
+        .object, .array, .function, .@"error", .date, .promise, .map, .set, .regex => v.retain(),
+        else => JSValue.newObject(allocator),
+    };
+}
+
+/// Shared by defineProperty/defineProperties/create: applies ONE
+/// JS-shaped descriptor to obj[key], with the spec's partial-descriptor
+/// merge on existing configurable properties. Defining bypasses
+/// `writable` (that's assignment's rule, not definition's).
+fn definePropertyFromJs(self: *Interpreter, obj: JSValue, key: []const u8, desc: JSValue) anyerror!void {
+    const arena = self.arena_state.allocator();
+    if (desc != .object) {
+        return self.throwError(.type_error, "Property description must be an object", .{});
+    }
+    const d = &desc.object.value;
+
+    const has_get = d.hasOwnProperty("get");
+    const has_set = d.hasOwnProperty("set");
+    const has_value = d.hasOwnProperty("value");
+    const has_writable = d.hasOwnProperty("writable");
+    if ((has_get or has_set) and (has_value or has_writable)) {
+        return self.throwError(.type_error, "Invalid property descriptor. Cannot both specify accessors and a value or writable attribute", .{});
+    }
+
+    const existing = obj.object.value.getOwnRecordMut(key);
+    if (existing) |rec| {
+        if (!rec.descriptor.configurable) {
+            // Narrowed: any redefinition attempt on a non-configurable
+            // property throws (the real spec allows some same-value and
+            // writable:true->value cases).
+            return self.throwError(.type_error, "Cannot redefine property: {s}", .{key});
+        }
+    }
+
+    if (has_get or has_set) {
+        const getter = if (has_get) blk: {
+            const g = d.get("get").?;
+            break :blk if (g == .function) g.retain() else null;
+        } else null;
+        const setter = if (has_set) blk: {
+            const s = d.get("set").?;
+            break :blk if (s == .function) s.retain() else null;
+        } else null;
+        try obj.object.value.defineAccessor(key, getter, setter, JSValue.UNDEFINED);
+        const rec = obj.object.value.getOwnRecordMut(key).?;
+        if (existing == null) {
+            // New accessor property: flag defaults are FALSE per spec.
+            rec.descriptor.enumerable = false;
+            rec.descriptor.configurable = false;
+        }
+        if (d.hasOwnProperty("enumerable")) rec.descriptor.enumerable = coercion.isTruthy(d.get("enumerable").?);
+        if (d.hasOwnProperty("configurable")) rec.descriptor.configurable = coercion.isTruthy(d.get("configurable").?);
+        return;
+    }
+
+    if (existing) |rec| {
+        // Partial merge onto an existing (configurable) property.
+        if (has_value) {
+            rec.value = d.get("value").?.retain();
+            rec.getter = null;
+            rec.setter = null;
+        }
+        if (has_writable) rec.descriptor.writable = coercion.isTruthy(d.get("writable").?);
+        if (d.hasOwnProperty("enumerable")) rec.descriptor.enumerable = coercion.isTruthy(d.get("enumerable").?);
+        if (d.hasOwnProperty("configurable")) rec.descriptor.configurable = coercion.isTruthy(d.get("configurable").?);
+        return;
+    }
+
+    // New data property: absent fields default to false/undefined.
+    const value = if (has_value) d.get("value").?.retain() else JSValue.UNDEFINED;
+    const descriptor = zvalue.PropertyDescriptor{
+        .writable = if (has_writable) coercion.isTruthy(d.get("writable").?) else false,
+        .enumerable = if (d.hasOwnProperty("enumerable")) coercion.isTruthy(d.get("enumerable").?) else false,
+        .configurable = if (d.hasOwnProperty("configurable")) coercion.isTruthy(d.get("configurable").?) else false,
+    };
+    obj.object.value.defineProperty(key, value, descriptor) catch |err| return switch (err) {
+        error.ObjectNotExtensible => self.throwError(.type_error, "Cannot define property {s}, object is not extensible", .{key}),
+        error.PropertyNotConfigurable => self.throwError(.type_error, "Cannot redefine property: {s}", .{key}),
+        else => err,
+    };
+    _ = arena;
+}
+
+fn objectDefineProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const obj = arg(args, 0);
+    if (obj != .object) return self.throwError(.type_error, "Object.defineProperty called on non-object", .{});
+    const key = try coercion.toDisplayString(allocator, arg(args, 1));
+    try definePropertyFromJs(self, obj, key, arg(args, 2));
+    return obj.retain();
+}
+
+fn objectDefineProperties(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const obj = arg(args, 0);
+    if (obj != .object) return self.throwError(.type_error, "Object.defineProperties called on non-object", .{});
+    const props = arg(args, 1);
+    if (props != .object) return self.throwError(.type_error, "Property description must be an object", .{});
+    const keys = try props.object.value.keys(allocator);
+    defer allocator.free(keys);
+    for (keys) |k| {
+        try definePropertyFromJs(self, obj, k, props.object.value.get(k).?);
+    }
+    return obj.retain();
+}
+
+fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const obj = arg(args, 0);
+    if (obj != .object) return self.throwError(.type_error, "Object.getOwnPropertyDescriptor called on non-object", .{});
+    const key = try coercion.toDisplayString(allocator, arg(args, 1));
+    const rec = obj.object.value.getOwnRecord(key) orelse return JSValue.UNDEFINED;
+
+    var out = try JSValue.newObject(allocator);
+    if (rec.isAccessor()) {
+        try out.object.value.set("get", if (rec.getter) |g| g.retain() else JSValue.UNDEFINED);
+        try out.object.value.set("set", if (rec.setter) |s| s.retain() else JSValue.UNDEFINED);
+    } else {
+        try out.object.value.set("value", rec.value.retain());
+        try out.object.value.set("writable", JSValue.fromBool(rec.descriptor.writable));
+    }
+    try out.object.value.set("enumerable", JSValue.fromBool(rec.descriptor.enumerable));
+    try out.object.value.set("configurable", JSValue.fromBool(rec.descriptor.configurable));
+    return out;
+}
+
+fn objectGetOwnPropertyNames(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const o = try requirePlainObject(ctx, arg(args, 0), "Object.getOwnPropertyNames");
+    const names = try o.object.value.getOwnPropertyNames(allocator);
+    defer allocator.free(names);
+    var result = try JSValue.newArray(allocator);
+    for (names) |n| _ = try result.array.value.push(try JSValue.newString(allocator, n));
+    return result;
+}
+
+fn objectCreate(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const proto = arg(args, 0);
+    if (proto != .object and proto != .@"null") {
+        return self.throwError(.type_error, "Object prototype may only be an Object or null", .{});
+    }
+    var obj = try JSValue.newObject(allocator);
+    if (proto == .object) try obj.object.value.setPrototype(@constCast(&proto.object.value));
+    const props = arg(args, 1);
+    if (props == .object) {
+        const keys = try props.object.value.keys(allocator);
+        defer allocator.free(keys);
+        for (keys) |k| try definePropertyFromJs(self, obj, k, props.object.value.get(k).?);
+    }
+    return obj;
+}
+
+fn objectFreeze(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = ctx;
+    _ = allocator;
+    _ = this_value;
+    const v = arg(args, 0);
+    if (v == .object) v.object.value.freeze();
+    return v.retain();
+}
+
+fn objectIsFrozen(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = ctx;
+    _ = allocator;
+    _ = this_value;
+    const v = arg(args, 0);
+    return JSValue.fromBool(if (v == .object) v.object.value.is_frozen else true);
+}
+
+fn objectSeal(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = ctx;
+    _ = allocator;
+    _ = this_value;
+    const v = arg(args, 0);
+    if (v == .object) v.object.value.seal();
+    return v.retain();
+}
+
+fn objectIsSealed(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = ctx;
+    _ = allocator;
+    _ = this_value;
+    const v = arg(args, 0);
+    return JSValue.fromBool(if (v == .object) v.object.value.is_sealed or v.object.value.is_frozen else true);
+}
+
+fn objectPreventExtensions(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = ctx;
+    _ = allocator;
+    _ = this_value;
+    const v = arg(args, 0);
+    if (v == .object) v.object.value.preventExtensions();
+    return v.retain();
+}
+
+fn objectIsExtensible(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = ctx;
+    _ = allocator;
+    _ = this_value;
+    const v = arg(args, 0);
+    return JSValue.fromBool(if (v == .object) v.object.value.is_extensible else false);
+}
+
+fn objectSetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const self = interp(ctx);
+    const obj = arg(args, 0);
+    const proto = arg(args, 1);
+    if (obj != .object) return self.throwError(.type_error, "Object.setPrototypeOf called on non-object", .{});
+    if (proto == .object) {
+        try obj.object.value.setPrototype(@constCast(&proto.object.value));
+    } else if (proto == .@"null") {
+        try obj.object.value.setPrototype(null);
+    } else {
+        return self.throwError(.type_error, "Object prototype may only be an Object or null", .{});
+    }
+    return obj.retain();
+}
+
+// ===== Array / Function constructors and statics =====
+
+fn arrayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    var result = try JSValue.newArray(allocator);
+    if (args.len == 1 and args[0] == .number) {
+        const n = args[0].number;
+        if (n < 0 or n != @trunc(n) or n > 4294967294.0) {
+            return self.throwError(.range_error, "Invalid array length", .{});
+        }
+        var i: usize = 0;
+        const len: usize = @intFromFloat(n);
+        while (i < len) : (i += 1) _ = try result.array.value.push(JSValue.UNDEFINED);
+        return result;
+    }
+    for (args) |a| _ = try result.array.value.push(a.retain());
+    return result;
+}
+
+fn arrayOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = ctx;
+    _ = this_value;
+    var result = try JSValue.newArray(allocator);
+    for (args) |a| _ = try result.array.value.push(a.retain());
+    return result;
+}
+
+/// Array.from over arrays, strings (code points), and iterator-protocol
+/// objects (callable `next`), with the optional mapFn.
+fn arrayFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const src = arg(args, 0);
+    const map_fn = arg(args, 1);
+    var result = try JSValue.newArray(allocator);
+    var index: f64 = 0;
+
+    const push_mapped = struct {
+        fn go(s: *Interpreter, alloc: Allocator, res: *JSValue, mf: JSValue, item: JSValue, i: f64) anyerror!void {
+            var v = item;
+            if (mf == .function) {
+                v = try mf.function.value.call(mf.function.value.ctx, alloc, JSValue.UNDEFINED, &.{ item, JSValue.fromNumber(i) });
+            }
+            _ = s;
+            _ = try res.array.value.push(v.retain());
+        }
+    }.go;
+
+    switch (src) {
+        .array => |box| for (box.value.toSlice()) |item| {
+            try push_mapped(self, allocator, &result, map_fn, item, index);
+            index += 1;
+        },
+        .string => |box| {
+            var it = std.unicode.Utf8Iterator{ .bytes = box.value.data, .i = 0 };
+            while (it.nextCodepointSlice()) |cp| {
+                try push_mapped(self, allocator, &result, map_fn, try JSValue.newString(allocator, cp), index);
+                index += 1;
+            }
+        },
+        .object => {
+            const next_fn = try self.getProperty(src, "next");
+            if (next_fn != .function) return self.throwError(.type_error, "{s} is not iterable", .{src.typeOf()});
+            while (true) {
+                const step = try next_fn.function.value.call(next_fn.function.value.ctx, allocator, src, &.{});
+                if (step != .object) return self.throwError(.type_error, "Iterator result {s} is not an object", .{step.typeOf()});
+                if (coercion.isTruthy(try self.getProperty(step, "done"))) break;
+                try push_mapped(self, allocator, &result, map_fn, try self.getProperty(step, "value"), index);
+                index += 1;
+            }
+        },
+        else => return self.throwError(.type_error, "{s} is not iterable", .{src.typeOf()}),
+    }
+    return result;
+}
+
+/// `new Function('a', 'b', 'return a + b')` -- compose, parse with the
+/// real parser, close over the global env. A bounded eval.
+fn functionConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    var src: std.ArrayList(u8) = .empty;
+    try src.appendSlice(allocator, "(function anonymous(");
+    if (args.len > 1) {
+        for (args[0 .. args.len - 1], 0..) |a, i| {
+            if (i != 0) try src.appendSlice(allocator, ", ");
+            const s = try coercion.toDisplayString(allocator, a);
+            try src.appendSlice(allocator, s);
+        }
+    }
+    try src.appendSlice(allocator, "\n) {\n");
+    if (args.len > 0) {
+        const body = try coercion.toDisplayString(allocator, args[args.len - 1]);
+        try src.appendSlice(allocator, body);
+    }
+    try src.appendSlice(allocator, "\n})");
+
+    const parser = zfunctions.Parser.init(allocator, src.items) catch {
+        return self.throwError(.syntax_error, "Invalid function source", .{});
+    };
+    const node = parser.parseExpression() catch |err| {
+        return self.throwError(.syntax_error, "Function constructor: {s}", .{@errorName(err)});
+    };
+    const fnode_ptr = switch (node.data) {
+        .paren => |inner| switch (inner.data) {
+            .function_like => |ptr| ptr,
+            else => return self.throwError(.syntax_error, "Invalid function source", .{}),
+        },
+        else => return self.throwError(.syntax_error, "Invalid function source", .{}),
+    };
+    return self.makeClosure(self.global_env, zfunctions.asFunctionNode(fnode_ptr));
+}
+
+// ===== Number / String statics =====
+
+fn numberIsNaN(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = ctx;
+    _ = allocator;
+    _ = this_value;
+    const v = arg(args, 0);
+    return JSValue.fromBool(v == .number and std.math.isNan(v.number));
+}
+
+fn numberIsFinite(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = ctx;
+    _ = allocator;
+    _ = this_value;
+    const v = arg(args, 0);
+    return JSValue.fromBool(v == .number and std.math.isFinite(v.number));
+}
+
+fn numberIsInteger(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = ctx;
+    _ = allocator;
+    _ = this_value;
+    const v = arg(args, 0);
+    return JSValue.fromBool(v == .number and std.math.isFinite(v.number) and v.number == @trunc(v.number));
+}
+
+fn stringFromCharCode(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = ctx;
+    _ = this_value;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    for (args) |a| {
+        const code: u21 = @intCast(@as(u32, @intFromFloat(try coercion.toNumber(a))) & 0xFFFF);
+        var tmp: [4]u8 = undefined;
+        const n = std.unicode.utf8Encode(code, &tmp) catch continue;
+        try buf.appendSlice(allocator, tmp[0..n]);
+    }
+    return JSValue.newString(allocator, buf.items);
 }
