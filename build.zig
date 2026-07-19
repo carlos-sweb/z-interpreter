@@ -72,6 +72,7 @@ pub fn build(b: *std.Build) void {
         "tests/async_test.zig",
         "tests/module_test.zig",
         "tests/function_methods_test.zig",
+        "tests/stack_guard_test.zig",
     };
 
     inline for (test_files) |test_file| {

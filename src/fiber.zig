@@ -22,11 +22,13 @@ pub const supported = switch (builtin.cpu.arch) {
     else => false,
 };
 
-/// 4 MiB of virtual address space per fiber (lazily paged by the OS).
-/// Fiber stacks are arena-allocated and never individually freed --
-/// consistent with the interpreter's arena-per-run model; the GC phase
-/// revisits this.
-const stack_size = 4 * 1024 * 1024;
+/// 8 MiB of virtual address space per fiber (lazily paged by the OS --
+/// untouched pages cost nothing), matching a typical main-thread stack
+/// so the interpreter's stack-depth guard behaves the same on and off
+/// fibers. Fiber stacks are arena-allocated and never individually
+/// freed -- consistent with the interpreter's arena-per-run model; the
+/// GC phase revisits this.
+const stack_size = 8 * 1024 * 1024;
 
 pub const Fiber = struct {
     /// How to resume this fiber (valid while suspended; initially aims
@@ -39,6 +41,10 @@ pub const Fiber = struct {
     /// Set by the entry wrapper when entry_fn returns. Switching into a
     /// finished fiber is illegal (asserted).
     finished: bool,
+    /// Lowest usable stack address -- the interpreter's stack-depth
+    /// guard refuses to recurse past `stack_floor + margin` while this
+    /// fiber runs (stacks grow down).
+    stack_floor: usize,
 
     /// Allocates the stack, places the Fiber struct at its top, and arms
     /// the initial context. `entry(arg)` starts running on the first
@@ -60,6 +66,7 @@ pub const Fiber = struct {
             .entry_fn = entry,
             .arg = arg,
             .finished = false,
+            .stack_floor = @intFromPtr(stack.ptr),
         };
         return self;
     }

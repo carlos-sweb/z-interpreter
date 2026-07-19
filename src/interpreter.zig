@@ -267,6 +267,21 @@ pub const Interpreter = struct {
     /// Module cache keyed by the loader-resolved path: each module
     /// parses and evaluates exactly once.
     modules: std.StringHashMapUnmanaged(*ModuleRecord) = .empty,
+    /// The stack-depth guard: recursing below this native stack address
+    /// raises the real `RangeError: Maximum call stack size exceeded`
+    /// instead of segfaulting (Test262's tco-* tests found this). Set
+    /// from @frameAddress() at run()/runModule() entry (stacks grow
+    /// down; byte-based, so it adapts to Debug/Release frame sizes) and
+    /// swapped per fiber in resumeFiber. Zero = unguarded (direct
+    /// embedder calls that never went through run()).
+    stack_limit: usize = 0,
+
+    /// Native-stack budget assumed for the main thread (typical ulimit
+    /// is 8 MiB; leave headroom for panic handling and the host below
+    /// run()'s frame).
+    const main_stack_budget: usize = 6 * 1024 * 1024;
+    /// Reserved floor inside each 8 MiB fiber stack.
+    const fiber_stack_margin: usize = 1024 * 1024;
 
     pub fn init(backing_allocator: Allocator, console_writer: *std.Io.Writer) !Interpreter {
         var self: Interpreter = .{
@@ -296,6 +311,7 @@ pub const Interpreter = struct {
     /// signal that never escapes this module's public API.
     pub fn run(self: *Interpreter, source: []const u8) anyerror!JSValue {
         self.pending_exception = null; // stale state from a previous run()
+        self.stack_limit = @frameAddress() -| main_stack_budget;
         if (!self.globals_ready) {
             try builtins.setupGlobals(self);
             self.globals_ready = true;
@@ -457,6 +473,7 @@ pub const Interpreter = struct {
     /// The loader must be set first.
     pub fn runModule(self: *Interpreter, specifier: []const u8) anyerror!JSValue {
         self.pending_exception = null;
+        self.stack_limit = @frameAddress() -| main_stack_budget;
         if (!self.globals_ready) {
             try builtins.setupGlobals(self);
             self.globals_ready = true;
@@ -628,9 +645,12 @@ pub const Interpreter = struct {
     /// finishes.
     fn resumeFiber(self: *Interpreter, fs: *FiberState) anyerror!void {
         const prev = self.current_fiber;
+        const prev_limit = self.stack_limit;
         self.current_fiber = fs;
+        self.stack_limit = fs.fiber.stack_floor + fiber_stack_margin;
         fs.fiber.switchTo();
         self.current_fiber = prev;
+        self.stack_limit = prev_limit;
         if (fs.fatal_error) |err| {
             fs.fatal_error = null;
             return err;
@@ -1672,6 +1692,13 @@ pub const Interpreter = struct {
     // ===== Expressions =====
 
     pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node) anyerror!JSValue {
+        // The stack-depth guard (byte-based: adapts to Debug/Release
+        // frame sizes and to fiber stacks) -- deep call chains AND deep
+        // expression trees both surface as the real RangeError instead
+        // of a native stack overflow.
+        if (self.stack_limit != 0 and @frameAddress() < self.stack_limit) {
+            return self.throwError(.range_error, "Maximum call stack size exceeded", .{});
+        }
         const arena = self.arena_state.allocator();
         switch (node.data) {
             .number_literal => |n| return JSValue.fromNumber(n),
