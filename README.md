@@ -98,6 +98,10 @@ Near-complete `Array.prototype` and `String.prototype`, reusing z-array/z-string
 
 Narrowings: `replace`/`replaceAll`/`match`/`search` with **regex** patterns are deferred (zregexp isn't wired — a phase of its own); arrays aren't truly sparse (holes are `undefined`) and have no general property bag (`arr.foo = 1` is NotImplemented); `localeCompare` is byte order, not Unicode collation; `$`-substitution in `replace` isn't supported.
 
+## Map and Set
+
+Full JS API over the existing z-map/z-set backing (whose SameValueZero key comparison is already the spec's Map/Set semantics — object keys by identity, `NaN` as a usable key). `new Map(iterable?)`/`new Set(iterable?)` are constructable (require `new` — `Map()` throws), accepting any iterable of entries/values. **Map**: `get`/`set` (chainable)/`has`/`delete`/`clear`/`size`/`forEach` (`(value, key, map)`, insertion order)/`keys`/`values`/`entries` (real iterator objects). **Set**: `add` (chainable)/`has`/`delete`/`clear`/`size`/`forEach`/`values`/`keys`/`entries`. Both are iterable everywhere — `for-of`, spread (`[...map]` yields `[k,v]` pairs, `[...set]` yields values), `Array.from`, destructuring. All Node-verified. Gaps: WeakMap/WeakSet (need weak refs), `Map.groupBy`, the ES2024/2025 Set operations.
+
 ## Known gaps (deferred to future phases)
 
 - **`with`**.

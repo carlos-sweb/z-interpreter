@@ -1343,7 +1343,7 @@ pub const Interpreter = struct {
     /// and destructuring assignment: the same narrowed iterables as for-of
     /// (arrays by element, strings by code point); anything else is the
     /// real TypeError Node raises.
-    fn iterableItems(self: *Interpreter, value: JSValue) anyerror![]const JSValue {
+    pub fn iterableItems(self: *Interpreter, value: JSValue) anyerror![]const JSValue {
         const arena = self.arena_state.allocator();
         return switch (value) {
             .array => |box| box.value.toSlice(),
@@ -1358,6 +1358,26 @@ pub const Interpreter = struct {
             // A user iterable (Symbol.iterator) or a hand-written iterator
             // (duck-typed `next`) -- drained fully.
             .object => try self.drainIterator(try self.resolveIterator(value)),
+            // Sets iterate their values; Maps their [key, value] pairs --
+            // so `[...set]`, `Array.from(map)`, `f(...set)` all work.
+            .set => |box| blk: {
+                const vals = box.value.values();
+                const out = try arena.alloc(JSValue, vals.len);
+                for (vals, 0..) |v, i| out[i] = v;
+                break :blk out;
+            },
+            .map => |box| blk: {
+                const ks = box.value.keys();
+                const vs = box.value.values();
+                var out: std.ArrayList(JSValue) = .empty;
+                for (ks, vs) |k, v| {
+                    var pair = try JSValue.newArray(arena);
+                    _ = try pair.array.value.push(k.retain());
+                    _ = try pair.array.value.push(v.retain());
+                    try out.append(arena, pair);
+                }
+                break :blk try out.toOwnedSlice(arena);
+            },
             else => self.throwError(.type_error, "{s} is not iterable", .{value.typeOf()}),
         };
     }
@@ -2124,6 +2144,16 @@ pub const Interpreter = struct {
             },
             .promise => blk: {
                 if (builtins.promise_methods.get(key)) |f| break :blk try self.nativeMethod("promise", key, f);
+                break :blk JSValue.UNDEFINED;
+            },
+            .map => |box| blk: {
+                if (std.mem.eql(u8, key, "size")) break :blk JSValue.fromNumber(@floatFromInt(box.value.size()));
+                if (builtins.map_methods.get(key)) |f| break :blk try self.nativeMethod("map", key, f);
+                break :blk JSValue.UNDEFINED;
+            },
+            .set => |box| blk: {
+                if (std.mem.eql(u8, key, "size")) break :blk JSValue.fromNumber(@floatFromInt(box.value.size()));
+                if (builtins.set_methods.get(key)) |f| break :blk try self.nativeMethod("set", key, f);
                 break :blk JSValue.UNDEFINED;
             },
             .symbol => |box| blk: {

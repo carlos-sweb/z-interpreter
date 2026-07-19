@@ -79,6 +79,7 @@ pub fn build(b: *std.Build) void {
         "tests/symbol_test.zig",
         "tests/array_methods_full_test.zig",
         "tests/string_methods_full_test.zig",
+        "tests/map_set_test.zig",
     };
 
     inline for (test_files) |test_file| {
