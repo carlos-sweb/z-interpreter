@@ -672,9 +672,11 @@ fn mathRandom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 // ===== JSON =====
 
 fn jsonStringify(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
     _ = this_value;
-    const out = try zjson.stringify(allocator, arg(args, 0));
+    const out = zjson.stringify(allocator, arg(args, 0)) catch |err| switch (err) {
+        error.CircularStructure => return interp(ctx).throwError(.type_error, "Converting circular structure to JSON", .{}),
+        else => return err,
+    };
     defer allocator.free(out);
     return JSValue.newString(allocator, out);
 }
