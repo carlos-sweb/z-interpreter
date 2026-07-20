@@ -580,13 +580,32 @@ fn arrayReverse(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     return this_value.retain();
 }
 
+/// Live element at `i`, retained so it stays valid across a callback that
+/// mutates the array (e.g. `arr.length = k`, which would otherwise free the
+/// element and leave a cached `toSlice()` dangling -> "switch on corrupt
+/// value"). Null when `i` is now out of bounds (removed mid-iteration ->
+/// skip, matching the spec's per-index HasProperty check). The extra ref is
+/// reclaimed with the run's arena; callers needn't release it.
+fn liveElem(array: JSValue, i: usize) ?JSValue {
+    if (i >= array.array.value.length()) return null;
+    return array.array.value.get(i).retain();
+}
+
 fn arrayMap(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArray(ctx, this_value, "map");
     const cb = try requireCallback(ctx, args);
     var result = try JSValue.newArray(allocator);
-    for (this_value.array.value.toSlice(), 0..) |item, i| {
-        const v = try callCallback(cb, allocator, item, i, this_value);
-        _ = try result.array.value.push(v.retain());
+    const len = this_value.array.value.length();
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        // A removed index leaves a hole (undefined) so result.length stays
+        // the originally-observed length, like real Array.prototype.map.
+        if (liveElem(this_value, i)) |item| {
+            const v = try callCallback(cb, allocator, item, i, this_value);
+            _ = try result.array.value.push(v.retain());
+        } else {
+            _ = try result.array.value.push(JSValue.UNDEFINED);
+        }
     }
     return result;
 }
@@ -595,7 +614,10 @@ fn arrayFilter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     try requireArray(ctx, this_value, "filter");
     const cb = try requireCallback(ctx, args);
     var result = try JSValue.newArray(allocator);
-    for (this_value.array.value.toSlice(), 0..) |item, i| {
+    const len = this_value.array.value.length();
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        const item = liveElem(this_value, i) orelse continue;
         if (coercion.isTruthy(try callCallback(cb, allocator, item, i, this_value))) {
             _ = try result.array.value.push(item.retain());
         }
@@ -606,7 +628,10 @@ fn arrayFilter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
 fn arrayForEach(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArray(ctx, this_value, "forEach");
     const cb = try requireCallback(ctx, args);
-    for (this_value.array.value.toSlice(), 0..) |item, i| {
+    const len = this_value.array.value.length();
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        const item = liveElem(this_value, i) orelse continue;
         _ = try callCallback(cb, allocator, item, i, this_value);
     }
     return JSValue.UNDEFINED;
@@ -615,28 +640,34 @@ fn arrayForEach(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 fn arrayReduce(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArray(ctx, this_value, "reduce");
     const cb = try requireCallback(ctx, args);
-    const slice = this_value.array.value.toSlice();
+    const len = this_value.array.value.length();
     var acc: JSValue = undefined;
-    var start: usize = 0;
-    if (args.len > 1) {
-        acc = args[1];
-    } else {
-        if (slice.len == 0) return interp(ctx).throwError(.type_error, "Reduce of empty array with no initial value", .{});
-        acc = slice[0];
-        start = 1;
-    }
-    for (slice[start..], start..) |item, i| {
+    var have = args.len > 1;
+    if (have) acc = args[1];
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        const item = liveElem(this_value, i) orelse continue;
+        if (!have) {
+            acc = item;
+            have = true;
+            continue;
+        }
         acc = try cb.function.value.call(cb.function.value.ctx, allocator, JSValue.UNDEFINED, &.{
             acc, item, JSValue.fromNumber(@floatFromInt(i)), this_value,
         });
     }
+    if (!have) return interp(ctx).throwError(.type_error, "Reduce of empty array with no initial value", .{});
     return acc;
 }
 
 fn arrayFind(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArray(ctx, this_value, "find");
     const cb = try requireCallback(ctx, args);
-    for (this_value.array.value.toSlice(), 0..) |item, i| {
+    const len = this_value.array.value.length();
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        // find visits absent indices as `undefined` (unlike forEach/map).
+        const item = liveElem(this_value, i) orelse JSValue.UNDEFINED;
         if (coercion.isTruthy(try callCallback(cb, allocator, item, i, this_value))) return item.retain();
     }
     return JSValue.UNDEFINED;
@@ -645,7 +676,10 @@ fn arrayFind(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
 fn arraySome(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArray(ctx, this_value, "some");
     const cb = try requireCallback(ctx, args);
-    for (this_value.array.value.toSlice(), 0..) |item, i| {
+    const len = this_value.array.value.length();
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        const item = liveElem(this_value, i) orelse continue;
         if (coercion.isTruthy(try callCallback(cb, allocator, item, i, this_value))) return JSValue.fromBool(true);
     }
     return JSValue.fromBool(false);
@@ -654,7 +688,10 @@ fn arraySome(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
 fn arrayEvery(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArray(ctx, this_value, "every");
     const cb = try requireCallback(ctx, args);
-    for (this_value.array.value.toSlice(), 0..) |item, i| {
+    const len = this_value.array.value.length();
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        const item = liveElem(this_value, i) orelse continue;
         if (!coercion.isTruthy(try callCallback(cb, allocator, item, i, this_value))) return JSValue.fromBool(false);
     }
     return JSValue.fromBool(true);
@@ -699,7 +736,7 @@ fn stringToLowerCase(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
 
 fn stringCharAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const data = try requireString(ctx, this_value, "charAt");
-    const idx: isize = @intFromFloat(if (arg(args, 0) == .@"undefined") 0 else try coercion.toNumber(arg(args, 0)));
+    const idx: isize = toIntSat(if (arg(args, 0) == .@"undefined") 0 else try coercion.toNumber(arg(args, 0)));
     const out = try zstring.access.charAt(allocator, data, idx);
     defer allocator.free(out);
     return JSValue.newString(allocator, out);
@@ -735,8 +772,8 @@ fn stringEndsWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
 
 fn stringSlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const data = try requireString(ctx, this_value, "slice");
-    const start: isize = @intFromFloat(if (arg(args, 0) == .@"undefined") 0 else try coercion.toNumber(arg(args, 0)));
-    const end: ?isize = if (arg(args, 1) == .@"undefined") null else @intFromFloat(try coercion.toNumber(arg(args, 1)));
+    const start: isize = toIntSat(if (arg(args, 0) == .@"undefined") 0 else try coercion.toNumber(arg(args, 0)));
+    const end: ?isize = if (arg(args, 1) == .@"undefined") null else toIntSat(try coercion.toNumber(arg(args, 1)));
     const out = try zstring.transform.slice(allocator, data, start, end);
     defer allocator.free(out);
     return JSValue.newString(allocator, out);
@@ -744,8 +781,10 @@ fn stringSlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
 
 fn stringRepeat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const data = try requireString(ctx, this_value, "repeat");
-    const count: isize = @intFromFloat(if (arg(args, 0) == .@"undefined") 0 else try coercion.toNumber(arg(args, 0)));
-    if (count < 0) return interp(ctx).throwError(.range_error, "Invalid count value: {d}", .{count});
+    const nf = if (arg(args, 0) == .@"undefined") 0 else try coercion.toNumber(arg(args, 0));
+    // A negative or infinite count is a RangeError (before any saturation).
+    if (nf < 0 or std.math.isInf(nf)) return interp(ctx).throwError(.range_error, "Invalid count value: {d}", .{nf});
+    const count: isize = toIntSat(nf);
     const out = try zstring.transform.repeat(allocator, data, count);
     defer allocator.free(out);
     return JSValue.newString(allocator, out);
@@ -1176,7 +1215,12 @@ fn globalParseInt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     _ = this_value;
     const s = try argString(allocator, args, 0);
     defer allocator.free(s);
-    const radix: ?u8 = if (arg(args, 1) == .@"undefined") null else @intFromFloat(try coercion.toNumber(arg(args, 1)));
+    const radix: ?u8 = if (arg(args, 1) == .@"undefined") null else blk: {
+        // Clamp into u8; out-of-[2,36] values are left for parseInt to reject
+        // (as NaN). Avoids @intFromFloat panicking on NaN/Infinity/huge radix.
+        const r = toIntSat(try coercion.toNumber(arg(args, 1)));
+        break :blk if (r >= 0 and r <= 36) @intCast(r) else 255;
+    };
     return JSValue.fromNumber(znumber.ParsingMethods.parseInt(allocator, s, radix));
 }
 
@@ -2051,7 +2095,7 @@ fn arrayFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
             const iter_key = if (self.symbol_iterator) |sym| try self.encodeKey(sym) else "";
             const has_iter = iter_key.len > 0 and (try self.getProperty(src, iter_key)) == .function;
             if (!has_iter and (try self.getProperty(src, "next")) != .function and len_v == .number) {
-                const n: usize = @intFromFloat(@max(0, len_v.number));
+                const n: usize = @intCast(@max(0, toIntSat(len_v.number)));
                 var i: usize = 0;
                 while (i < n) : (i += 1) {
                     const key = try std.fmt.allocPrint(allocator, "{d}", .{i});
@@ -2144,7 +2188,10 @@ fn stringFromCharCode(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     for (args) |a| {
-        const code: u21 = @intCast(@as(u32, @intFromFloat(try coercion.toNumber(a))) & 0xFFFF);
+        // ToUint16: wrap into [0, 65536) (NaN/Infinity -> 0), never panicking.
+        const num = try coercion.toNumber(a);
+        const wrapped: f64 = if (std.math.isFinite(num)) @mod(@trunc(num), 65536.0) else 0;
+        const code: u21 = @intFromFloat(wrapped);
         var tmp: [4]u8 = undefined;
         const n = std.unicode.utf8Encode(code, &tmp) catch continue;
         try buf.appendSlice(allocator, tmp[0..n]);
@@ -2210,30 +2257,44 @@ fn symbolKeyFor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 
 // ===== Array.prototype (extended coverage) =====
 
+/// ECMA ToIntegerOrInfinity saturated into isize, so `@intFromFloat` can't
+/// panic on NaN / +/-Infinity / out-of-i64-range floats (NaN -> 0). Callers
+/// that need a length clamp non-negative afterwards.
+fn toIntSat(n: f64) isize {
+    if (std.math.isNan(n)) return 0;
+    const maxf: f64 = @floatFromInt(std.math.maxInt(isize));
+    const minf: f64 = @floatFromInt(std.math.minInt(isize));
+    if (n >= maxf) return std.math.maxInt(isize);
+    if (n <= minf) return std.math.minInt(isize);
+    return @intFromFloat(@trunc(n));
+}
+
 fn normIndex(raw: f64, len: usize) usize {
-    if (raw < 0) {
-        const from_end = @as(f64, @floatFromInt(len)) + raw;
-        return if (from_end < 0) 0 else @intFromFloat(from_end);
+    const i = toIntSat(raw); // NaN/Infinity-safe
+    if (i < 0) {
+        const from_end = @as(isize, @intCast(len)) + i;
+        return if (from_end < 0) 0 else @intCast(from_end);
     }
-    const i: usize = @intFromFloat(raw);
-    return @min(i, len);
+    return @min(@as(usize, @intCast(i)), len);
 }
 
 fn arrayAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     try requireArray(ctx, this_value, "at");
-    const slice = this_value.array.value.toSlice();
-    var idx: f64 = @floatFromInt(@as(i64, @intCast(slice.len)));
-    const n = try coercion.toNumber(arg(args, 0));
-    idx = if (n < 0) @as(f64, @floatFromInt(slice.len)) + n else n;
-    if (idx < 0 or idx >= @as(f64, @floatFromInt(slice.len))) return JSValue.UNDEFINED;
-    return slice[@intFromFloat(idx)].retain();
+    const len: isize = @intCast(this_value.array.value.length());
+    const rel = toIntSat(try coercion.toNumber(arg(args, 0)));
+    const idx = if (rel < 0) len + rel else rel;
+    if (idx < 0 or idx >= len) return JSValue.UNDEFINED;
+    return this_value.array.value.get(@intCast(idx)).retain();
 }
 
 fn arrayFindIndex(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArray(ctx, this_value, "findIndex");
     const cb = try requireCallback(ctx, args);
-    for (this_value.array.value.toSlice(), 0..) |item, i| {
+    const len = this_value.array.value.length();
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        const item = liveElem(this_value, i) orelse JSValue.UNDEFINED;
         if (coercion.isTruthy(try callCallback(cb, allocator, item, i, this_value))) return JSValue.fromNumber(@floatFromInt(i));
     }
     return JSValue.fromNumber(-1);
@@ -2242,11 +2303,11 @@ fn arrayFindIndex(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
 fn arrayFindLast(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArray(ctx, this_value, "findLast");
     const cb = try requireCallback(ctx, args);
-    const slice = this_value.array.value.toSlice();
-    var i = slice.len;
+    var i = this_value.array.value.length();
     while (i > 0) {
         i -= 1;
-        if (coercion.isTruthy(try callCallback(cb, allocator, slice[i], i, this_value))) return slice[i].retain();
+        const item = liveElem(this_value, i) orelse JSValue.UNDEFINED;
+        if (coercion.isTruthy(try callCallback(cb, allocator, item, i, this_value))) return item.retain();
     }
     return JSValue.UNDEFINED;
 }
@@ -2254,11 +2315,11 @@ fn arrayFindLast(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
 fn arrayFindLastIndex(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArray(ctx, this_value, "findLastIndex");
     const cb = try requireCallback(ctx, args);
-    const slice = this_value.array.value.toSlice();
-    var i = slice.len;
+    var i = this_value.array.value.length();
     while (i > 0) {
         i -= 1;
-        if (coercion.isTruthy(try callCallback(cb, allocator, slice[i], i, this_value))) return JSValue.fromNumber(@floatFromInt(i));
+        const item = liveElem(this_value, i) orelse JSValue.UNDEFINED;
+        if (coercion.isTruthy(try callCallback(cb, allocator, item, i, this_value))) return JSValue.fromNumber(@floatFromInt(i));
     }
     return JSValue.fromNumber(-1);
 }
@@ -2266,20 +2327,21 @@ fn arrayFindLastIndex(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
 fn arrayReduceRight(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArray(ctx, this_value, "reduceRight");
     const cb = try requireCallback(ctx, args);
-    const slice = this_value.array.value.toSlice();
     var acc: JSValue = undefined;
-    var i: usize = slice.len;
-    if (args.len > 1) {
-        acc = args[1];
-    } else {
-        if (slice.len == 0) return interp(ctx).throwError(.type_error, "Reduce of empty array with no initial value", .{});
-        i -= 1;
-        acc = slice[i];
-    }
+    var have = args.len > 1;
+    if (have) acc = args[1];
+    var i: usize = this_value.array.value.length();
     while (i > 0) {
         i -= 1;
-        acc = try cb.function.value.call(cb.function.value.ctx, allocator, JSValue.UNDEFINED, &.{ acc, slice[i], JSValue.fromNumber(@floatFromInt(i)), this_value });
+        const item = liveElem(this_value, i) orelse continue;
+        if (!have) {
+            acc = item;
+            have = true;
+            continue;
+        }
+        acc = try cb.function.value.call(cb.function.value.ctx, allocator, JSValue.UNDEFINED, &.{ acc, item, JSValue.fromNumber(@floatFromInt(i)), this_value });
     }
+    if (!have) return interp(ctx).throwError(.type_error, "Reduce of empty array with no initial value", .{});
     return acc;
 }
 
@@ -2287,7 +2349,10 @@ fn arrayFlatMap(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     try requireArray(ctx, this_value, "flatMap");
     const cb = try requireCallback(ctx, args);
     var result = try JSValue.newArray(allocator);
-    for (this_value.array.value.toSlice(), 0..) |item, i| {
+    const len = this_value.array.value.length();
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        const item = liveElem(this_value, i) orelse continue;
         const v = try callCallback(cb, allocator, item, i, this_value);
         if (v == .array) {
             for (v.array.value.toSlice()) |sub| _ = try result.array.value.push(sub.retain());
@@ -2364,7 +2429,7 @@ fn flattenInto(result: *JSValue, allocator: Allocator, slice: []const JSValue, d
 
 fn arrayFlat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArray(ctx, this_value, "flat");
-    const depth: i64 = if (arg(args, 0) == .@"undefined") 1 else @intFromFloat(try coercion.toNumber(arg(args, 0)));
+    const depth: i64 = if (arg(args, 0) == .@"undefined") 1 else toIntSat(try coercion.toNumber(arg(args, 0)));
     var result = try JSValue.newArray(allocator);
     try flattenInto(&result, allocator, this_value.array.value.toSlice(), depth);
     return result;
@@ -2380,7 +2445,7 @@ fn arraySplice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     else blk: {
         const dc = try coercion.toNumber(arg(args, 1));
         if (dc <= 0) break :blk 0;
-        break :blk @min(@as(usize, @intFromFloat(dc)), len - start);
+        break :blk @min(@as(usize, @intCast(toIntSat(dc))), len - start);
     };
     // Removed elements -> returned array (retained).
     var removed = try JSValue.newArray(allocator);
@@ -2546,20 +2611,20 @@ fn stringTrimEnd(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
 fn stringCharCodeAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const data = try requireString(ctx, this_value, "charCodeAt");
-    const idx: isize = @intFromFloat(if (arg(args, 0) == .@"undefined") 0 else try coercion.toNumber(arg(args, 0)));
+    const idx: isize = toIntSat(if (arg(args, 0) == .@"undefined") 0 else try coercion.toNumber(arg(args, 0)));
     return if (zstring.access.charCodeAt(data, idx)) |c| JSValue.fromNumber(@floatFromInt(c)) else JSValue.fromNumber(std.math.nan(f64));
 }
 
 fn stringCodePointAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const data = try requireString(ctx, this_value, "codePointAt");
-    const idx: isize = @intFromFloat(if (arg(args, 0) == .@"undefined") 0 else try coercion.toNumber(arg(args, 0)));
+    const idx: isize = toIntSat(if (arg(args, 0) == .@"undefined") 0 else try coercion.toNumber(arg(args, 0)));
     return if (zstring.access.codePointAt(data, idx)) |c| JSValue.fromNumber(@floatFromInt(c)) else JSValue.UNDEFINED;
 }
 
 fn stringAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const data = try requireString(ctx, this_value, "at");
-    const idx: isize = @intFromFloat(if (arg(args, 0) == .@"undefined") 0 else try coercion.toNumber(arg(args, 0)));
+    const idx: isize = toIntSat(if (arg(args, 0) == .@"undefined") 0 else try coercion.toNumber(arg(args, 0)));
     const out = (try zstring.access.at(allocator, data, idx)) orelse return JSValue.UNDEFINED;
     defer allocator.free(out);
     return JSValue.newString(allocator, out);
@@ -2567,7 +2632,7 @@ fn stringAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
 
 fn stringPadStart(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const data = try requireString(ctx, this_value, "padStart");
-    const target: isize = @intFromFloat(try coercion.toNumber(arg(args, 0)));
+    const target: isize = toIntSat(try coercion.toNumber(arg(args, 0)));
     const pad: ?[]const u8 = if (arg(args, 1) == .string) arg(args, 1).string.value.data else null;
     const out = try zstring.padding.padStart(allocator, data, target, pad);
     defer allocator.free(out);
@@ -2576,7 +2641,7 @@ fn stringPadStart(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
 
 fn stringPadEnd(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const data = try requireString(ctx, this_value, "padEnd");
-    const target: isize = @intFromFloat(try coercion.toNumber(arg(args, 0)));
+    const target: isize = toIntSat(try coercion.toNumber(arg(args, 0)));
     const pad: ?[]const u8 = if (arg(args, 1) == .string) arg(args, 1).string.value.data else null;
     const out = try zstring.padding.padEnd(allocator, data, target, pad);
     defer allocator.free(out);
@@ -2585,8 +2650,8 @@ fn stringPadEnd(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 
 fn stringSubstring(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const data = try requireString(ctx, this_value, "substring");
-    const start: isize = @intFromFloat(if (arg(args, 0) == .@"undefined") 0 else try coercion.toNumber(arg(args, 0)));
-    const end: ?isize = if (arg(args, 1) == .@"undefined") null else @intFromFloat(try coercion.toNumber(arg(args, 1)));
+    const start: isize = toIntSat(if (arg(args, 0) == .@"undefined") 0 else try coercion.toNumber(arg(args, 0)));
+    const end: ?isize = if (arg(args, 1) == .@"undefined") null else toIntSat(try coercion.toNumber(arg(args, 1)));
     const out = try zstring.transform.substring(allocator, data, start, end);
     defer allocator.free(out);
     return JSValue.newString(allocator, out);
@@ -2596,9 +2661,9 @@ fn stringSubstring(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
 fn stringSubstr(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const data = try requireString(ctx, this_value, "substr");
     const total: isize = @intCast(zstring.utf16.lengthUtf16(data));
-    var start: isize = @intFromFloat(if (arg(args, 0) == .@"undefined") 0 else try coercion.toNumber(arg(args, 0)));
+    var start: isize = toIntSat(if (arg(args, 0) == .@"undefined") 0 else try coercion.toNumber(arg(args, 0)));
     if (start < 0) start = @max(total + start, 0);
-    const length: isize = if (arg(args, 1) == .@"undefined") total else @intFromFloat(try coercion.toNumber(arg(args, 1)));
+    const length: isize = if (arg(args, 1) == .@"undefined") total else toIntSat(try coercion.toNumber(arg(args, 1)));
     const end = @min(start + @max(length, 0), total);
     const out = try zstring.transform.substring(allocator, data, start, end);
     defer allocator.free(out);
@@ -2697,12 +2762,15 @@ fn stringToStringMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
 }
 
 fn stringFromCodePoint(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
     _ = this_value;
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     for (args) |a| {
-        const cp: u21 = @intCast(@as(u32, @intFromFloat(try coercion.toNumber(a))) & 0x1FFFFF);
+        // Each argument must be an integer code point in [0, 0x10FFFF].
+        const num = try coercion.toNumber(a);
+        if (!std.math.isFinite(num) or num != @trunc(num) or num < 0 or num > 0x10FFFF)
+            return interp(ctx).throwError(.range_error, "Invalid code point {d}", .{num});
+        const cp: u21 = @intFromFloat(num);
         var tmp: [4]u8 = undefined;
         const n = std.unicode.utf8Encode(cp, &tmp) catch continue;
         try buf.appendSlice(allocator, tmp[0..n]);
