@@ -333,6 +333,11 @@ pub const Interpreter = struct {
     /// `globalThis.Object`, `var x=1; globalThis.x`, and `globalThis.y=2`
     /// (which creates a global) all stay in sync. Set in setupGlobals.
     global_object: ?JSValue = null,
+    /// The intrinsic `eval` function. A call written literally as `eval(...)`
+    /// (this exact function, un-shadowed) is *direct* eval -- it runs in the
+    /// caller's scope; any other reference is indirect (global scope). Set in
+    /// setupGlobals; compared by function-box identity in evalCall.
+    eval_fn: ?JSValue = null,
     /// JS-level RegExp state, keyed by the `.regex` Rc box pointer --
     /// z-regex is a pure engine, so the mutable `lastIndex`, the flags
     /// string, and the boolean flag set live here (the symbol_keys
@@ -404,6 +409,21 @@ pub const Interpreter = struct {
         // js_std_loop shape. Hosts that own their loop drive
         // hasPendingJobs/runPendingJob themselves instead.
         try self.runEventLoop();
+        return c.value;
+    }
+
+    /// Parse and run `src` (an `eval` string) as a program in a fresh child of
+    /// `scope`. Always-strict, so eval gets its own scope and declarations
+    /// don't leak. A parse error becomes a catchable SyntaxError; a thrown
+    /// exception from the code propagates. Returns eval's completion value.
+    pub fn evalSource(self: *Interpreter, scope: *Environment, src: []const u8) anyerror!JSValue {
+        const arena = self.arena_state.allocator();
+        const parser = zfunctions.Parser.init(arena, src) catch
+            return self.throwError(.syntax_error, "Invalid or unexpected token in eval", .{});
+        const program = parser.parseProgram() catch
+            return self.throwError(.syntax_error, "Invalid or unexpected token in eval", .{});
+        const eval_scope = try scope.child(arena);
+        const c = try self.evalBody(eval_scope, program);
         return c.value;
     }
 
@@ -2796,6 +2816,18 @@ pub const Interpreter = struct {
         }
 
         const args = try self.evalArgs(env, c.args);
+        // Direct eval: a call written literally as `eval(...)` where `eval`
+        // still refers to the intrinsic runs its string argument in the
+        // CURRENT scope (always-strict -> a child of it). Any other reference
+        // to eval (aliased, member access) is indirect and runs the global
+        // native below.
+        if (self.eval_fn) |ev| {
+            if (c.callee.data == .identifier and std.mem.eql(u8, c.callee.data.identifier, "eval") and callee_val.function == ev.function) {
+                if (args.len == 0) return JSValue.UNDEFINED;
+                if (args[0] != .string) return args[0].retain();
+                return self.evalSource(env, args[0].string.value.data);
+            }
+        }
         return try callee_val.function.value.call(callee_val.function.value.ctx, arena, this_value, args);
     }
 

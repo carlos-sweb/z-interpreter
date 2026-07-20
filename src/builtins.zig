@@ -415,6 +415,10 @@ pub fn setupGlobals(self: *Interpreter) !void {
     try g.define(arena, "setTimeout", try native(self, "setTimeout", globalSetTimeout));
     try g.define(arena, "clearTimeout", try native(self, "clearTimeout", globalClearTimeout));
 
+    const eval_fn = try native(self, "eval", globalEval);
+    self.eval_fn = eval_fn;
+    try g.define(arena, "eval", eval_fn);
+
     try g.define(arena, "parseInt", try native(self, "parseInt", globalParseInt));
     try g.define(arena, "parseFloat", try native(self, "parseFloat", globalParseFloat));
     try g.define(arena, "isNaN", try native(self, "isNaN", globalIsNaN));
@@ -1331,6 +1335,18 @@ fn globalBoolean(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     _ = allocator;
     _ = this_value;
     return JSValue.fromBool(coercion.isTruthy(arg(args, 0)));
+}
+
+/// Indirect `eval` (called as a plain value, not the literal `eval(...)`
+/// form): runs its string argument in the GLOBAL scope. A non-string
+/// argument is returned unchanged. Direct eval is handled in evalCall.
+fn globalEval(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const self = interp(ctx);
+    const a = arg(args, 0);
+    if (a != .string) return a.retain();
+    return self.evalSource(self.global_env, a.string.value.data);
 }
 
 // ===== Number.prototype (only the primitive receiver; hollow `new Number()`
