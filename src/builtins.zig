@@ -266,34 +266,34 @@ pub fn setupGlobals(self: *Interpreter) !void {
         .{ "setPrototypeOf", objectSetPrototypeOf },
         .{ "getPrototypeOf", objectGetPrototypeOf },
     }) |entry| {
-        try object_statics.object.value.set(entry[0], try native(self, entry[0], entry[1]));
+        try dneMethod(object_statics, entry[0], try native(self, entry[0], entry[1]));
     }
     self.protos.object = try self.functionPrototype(object_ctor);
     try g.define(arena, "Object", object_ctor);
 
-    var console_obj = try self.ordinaryObject();
-    try console_obj.object.value.set("log", try native(self, "log", consoleLog));
+    const console_obj = try self.ordinaryObject();
+    try dneMethod(console_obj, "log", try native(self, "log", consoleLog));
     try g.define(arena, "console", console_obj);
 
-    var math_obj = try self.ordinaryObject();
-    try math_obj.object.value.set("PI", JSValue.fromNumber(zmath.PI));
-    try math_obj.object.value.set("E", JSValue.fromNumber(zmath.E));
-    try math_obj.object.value.set("floor", try native(self, "floor", mathFloor));
-    try math_obj.object.value.set("ceil", try native(self, "ceil", mathCeil));
-    try math_obj.object.value.set("round", try native(self, "round", mathRound));
-    try math_obj.object.value.set("trunc", try native(self, "trunc", mathTrunc));
-    try math_obj.object.value.set("abs", try native(self, "abs", mathAbs));
-    try math_obj.object.value.set("sign", try native(self, "sign", mathSign));
-    try math_obj.object.value.set("sqrt", try native(self, "sqrt", mathSqrt));
-    try math_obj.object.value.set("pow", try native(self, "pow", mathPow));
-    try math_obj.object.value.set("min", try native(self, "min", mathMin));
-    try math_obj.object.value.set("max", try native(self, "max", mathMax));
-    try math_obj.object.value.set("random", try native(self, "random", mathRandom));
+    const math_obj = try self.ordinaryObject();
+    try dneConst(math_obj, "PI", JSValue.fromNumber(zmath.PI));
+    try dneConst(math_obj, "E", JSValue.fromNumber(zmath.E));
+    try dneMethod(math_obj, "floor", try native(self, "floor", mathFloor));
+    try dneMethod(math_obj, "ceil", try native(self, "ceil", mathCeil));
+    try dneMethod(math_obj, "round", try native(self, "round", mathRound));
+    try dneMethod(math_obj, "trunc", try native(self, "trunc", mathTrunc));
+    try dneMethod(math_obj, "abs", try native(self, "abs", mathAbs));
+    try dneMethod(math_obj, "sign", try native(self, "sign", mathSign));
+    try dneMethod(math_obj, "sqrt", try native(self, "sqrt", mathSqrt));
+    try dneMethod(math_obj, "pow", try native(self, "pow", mathPow));
+    try dneMethod(math_obj, "min", try native(self, "min", mathMin));
+    try dneMethod(math_obj, "max", try native(self, "max", mathMax));
+    try dneMethod(math_obj, "random", try native(self, "random", mathRandom));
     try g.define(arena, "Math", math_obj);
 
-    var json_obj = try self.ordinaryObject();
-    try json_obj.object.value.set("stringify", try native(self, "stringify", jsonStringify));
-    try json_obj.object.value.set("parse", try native(self, "parse", jsonParse));
+    const json_obj = try self.ordinaryObject();
+    try dneMethod(json_obj, "stringify", try native(self, "stringify", jsonStringify));
+    try dneMethod(json_obj, "parse", try native(self, "parse", jsonParse));
     try g.define(arena, "JSON", json_obj);
 
     // Array: constructable (new Array(n) / Array(a, b, c)) + statics.
@@ -305,9 +305,9 @@ pub fn setupGlobals(self: *Interpreter) !void {
         .constructable = true,
     });
     const array_statics = try self.functionStatics(array_ctor);
-    try array_statics.object.value.set("isArray", try native(self, "isArray", arrayIsArray));
-    try array_statics.object.value.set("of", try native(self, "of", arrayOf));
-    try array_statics.object.value.set("from", try native(self, "from", arrayFrom));
+    try dneMethod(array_statics, "isArray", try native(self, "isArray", arrayIsArray));
+    try dneMethod(array_statics, "of", try native(self, "of", arrayOf));
+    try dneMethod(array_statics, "from", try native(self, "from", arrayFrom));
     try g.define(arena, "Array", array_ctor);
 
     // Function: a constructor that PARSES -- new Function('a', 'return a')
@@ -333,9 +333,9 @@ pub fn setupGlobals(self: *Interpreter) !void {
         .constructable = true,
     });
     const date_statics = try self.functionStatics(date_ctor);
-    try date_statics.object.value.set("now", try native(self, "now", dateNow));
-    try date_statics.object.value.set("parse", try native(self, "parse", dateParse));
-    try date_statics.object.value.set("UTC", try native(self, "UTC", dateUTC));
+    try dneMethod(date_statics, "now", try native(self, "now", dateNow));
+    try dneMethod(date_statics, "parse", try native(self, "parse", dateParse));
+    try dneMethod(date_statics, "UTC", try native(self, "UTC", dateUTC));
     try g.define(arena, "Date", date_ctor);
 
     // Error constructors -- `new Error('msg')` (and `Error('msg')`, which
@@ -370,10 +370,10 @@ pub fn setupGlobals(self: *Interpreter) !void {
         .constructable = true,
     });
     const promise_statics = try self.functionStatics(promise_ctor);
-    try promise_statics.object.value.set("resolve", try native(self, "resolve", promiseResolveStatic));
-    try promise_statics.object.value.set("reject", try native(self, "reject", promiseRejectStatic));
-    try promise_statics.object.value.set("all", try native(self, "all", promiseAll));
-    try promise_statics.object.value.set("race", try native(self, "race", promiseRace));
+    try dneMethod(promise_statics, "resolve", try native(self, "resolve", promiseResolveStatic));
+    try dneMethod(promise_statics, "reject", try native(self, "reject", promiseRejectStatic));
+    try dneMethod(promise_statics, "all", try native(self, "all", promiseAll));
+    try dneMethod(promise_statics, "race", try native(self, "race", promiseRace));
     try g.define(arena, "Promise", promise_ctor);
 
     // Symbol: callable but NOT constructable (`new Symbol()` throws).
@@ -383,11 +383,11 @@ pub fn setupGlobals(self: *Interpreter) !void {
     const symbol_statics = try self.functionStatics(symbol_ctor);
     inline for (.{ "iterator", "asyncIterator", "hasInstance", "toPrimitive", "toStringTag", "species", "isConcatSpreadable", "match", "replace", "search", "split", "unscopables" }) |wk| {
         const sym = try JSValue.newSymbol(arena, "Symbol." ++ wk);
-        try symbol_statics.object.value.set(wk, sym.retain());
+        try dneConst(symbol_statics, wk, sym.retain());
         if (comptime std.mem.eql(u8, wk, "iterator")) self.symbol_iterator = sym;
     }
-    try symbol_statics.object.value.set("for", try native(self, "for", symbolFor));
-    try symbol_statics.object.value.set("keyFor", try native(self, "keyFor", symbolKeyFor));
+    try dneMethod(symbol_statics, "for", try native(self, "for", symbolFor));
+    try dneMethod(symbol_statics, "keyFor", try native(self, "keyFor", symbolKeyFor));
     try g.define(arena, "Symbol", symbol_ctor);
 
     // Map / Set: constructable natives (require `new`); the .map/.set
@@ -408,25 +408,25 @@ pub fn setupGlobals(self: *Interpreter) !void {
     // no [[PrimitiveValue]] -- documented narrowing). Statics via bags.
     const string_ctor = try JSValue.newFunction(arena, .{ .ctx = self, .name = "String", .arity = 1, .call = globalString, .constructable = true });
     const string_statics = try self.functionStatics(string_ctor);
-    try string_statics.object.value.set("fromCharCode", try native(self, "fromCharCode", stringFromCharCode));
-    try string_statics.object.value.set("fromCodePoint", try native(self, "fromCodePoint", stringFromCodePoint));
+    try dneMethod(string_statics, "fromCharCode", try native(self, "fromCharCode", stringFromCharCode));
+    try dneMethod(string_statics, "fromCodePoint", try native(self, "fromCodePoint", stringFromCodePoint));
     try g.define(arena, "String", string_ctor);
 
     const number_ctor = try JSValue.newFunction(arena, .{ .ctx = self, .name = "Number", .arity = 1, .call = globalNumber, .constructable = true });
     const number_statics = try self.functionStatics(number_ctor);
-    try number_statics.object.value.set("isNaN", try native(self, "isNaN", numberIsNaN));
-    try number_statics.object.value.set("isFinite", try native(self, "isFinite", numberIsFinite));
-    try number_statics.object.value.set("isInteger", try native(self, "isInteger", numberIsInteger));
-    try number_statics.object.value.set("parseFloat", try native(self, "parseFloat", globalParseFloat));
-    try number_statics.object.value.set("parseInt", try native(self, "parseInt", globalParseInt));
-    try number_statics.object.value.set("MAX_SAFE_INTEGER", JSValue.fromNumber(9007199254740991.0));
-    try number_statics.object.value.set("MIN_SAFE_INTEGER", JSValue.fromNumber(-9007199254740991.0));
-    try number_statics.object.value.set("EPSILON", JSValue.fromNumber(std.math.floatEps(f64)));
-    try number_statics.object.value.set("NaN", JSValue.fromNumber(std.math.nan(f64)));
-    try number_statics.object.value.set("MAX_VALUE", JSValue.fromNumber(std.math.floatMax(f64)));
-    try number_statics.object.value.set("MIN_VALUE", JSValue.fromNumber(std.math.floatTrueMin(f64)));
-    try number_statics.object.value.set("POSITIVE_INFINITY", JSValue.fromNumber(std.math.inf(f64)));
-    try number_statics.object.value.set("NEGATIVE_INFINITY", JSValue.fromNumber(-std.math.inf(f64)));
+    try dneMethod(number_statics, "isNaN", try native(self, "isNaN", numberIsNaN));
+    try dneMethod(number_statics, "isFinite", try native(self, "isFinite", numberIsFinite));
+    try dneMethod(number_statics, "isInteger", try native(self, "isInteger", numberIsInteger));
+    try dneMethod(number_statics, "parseFloat", try native(self, "parseFloat", globalParseFloat));
+    try dneMethod(number_statics, "parseInt", try native(self, "parseInt", globalParseInt));
+    try dneConst(number_statics, "MAX_SAFE_INTEGER", JSValue.fromNumber(9007199254740991.0));
+    try dneConst(number_statics, "MIN_SAFE_INTEGER", JSValue.fromNumber(-9007199254740991.0));
+    try dneConst(number_statics, "EPSILON", JSValue.fromNumber(std.math.floatEps(f64)));
+    try dneConst(number_statics, "NaN", JSValue.fromNumber(std.math.nan(f64)));
+    try dneConst(number_statics, "MAX_VALUE", JSValue.fromNumber(std.math.floatMax(f64)));
+    try dneConst(number_statics, "MIN_VALUE", JSValue.fromNumber(std.math.floatTrueMin(f64)));
+    try dneConst(number_statics, "POSITIVE_INFINITY", JSValue.fromNumber(std.math.inf(f64)));
+    try dneConst(number_statics, "NEGATIVE_INFINITY", JSValue.fromNumber(-std.math.inf(f64)));
     try g.define(arena, "Number", number_ctor);
 
     const boolean_ctor = try JSValue.newFunction(arena, .{ .ctx = self, .name = "Boolean", .arity = 1, .call = globalBoolean, .constructable = true });
@@ -444,6 +444,20 @@ fn native(self: *Interpreter, name: []const u8, call_fn: NativeFn) !JSValue {
         .name = name,
         .call = call_fn,
     });
+}
+
+/// Define a builtin method/namespace property: NON-enumerable, writable,
+/// configurable -- the spec attributes for e.g. Object.keys, Date.now,
+/// Math.floor, Array.prototype.* (so `Object.keys(Date)` is empty and
+/// verifyProperty sees enumerable:false).
+fn dneMethod(obj: JSValue, name: []const u8, value: JSValue) !void {
+    try obj.object.value.defineProperty(name, value, .{ .writable = true, .enumerable = false, .configurable = true });
+}
+
+/// Define a builtin constant: NON-enumerable, NON-writable, NON-configurable
+/// (Number.MAX_SAFE_INTEGER, Math.PI, the well-known Symbols, ...).
+fn dneConst(obj: JSValue, name: []const u8, value: JSValue) !void {
+    try obj.object.value.defineProperty(name, value, .{ .writable = false, .enumerable = false, .configurable = false });
 }
 
 // ===== console =====
@@ -1149,10 +1163,24 @@ fn requireObject(ctx: *anyopaque, v: JSValue, what: []const u8) anyerror!JSValue
     return v;
 }
 
+/// Own enumerable string keys of any value, for Object.keys/values/entries.
+/// Functions expose the enumerable entries of their statics bag (builtin
+/// statics are non-enumerable, so `Object.keys(Date)` is empty); null/
+/// undefined throw; other primitives yield nothing (narrowed -- real JS
+/// coerces strings to index keys). Caller frees the slice.
+fn ownEnumerableKeys(ctx: *anyopaque, allocator: Allocator, v: JSValue) anyerror![][]const u8 {
+    return switch (v) {
+        .object => |box| box.value.keys(allocator),
+        .function => |box| if (box.value.statics) |bag| bag.object.value.keys(allocator) else allocator.alloc([]const u8, 0),
+        .@"undefined", .@"null" => interp(ctx).throwError(.type_error, "Cannot convert undefined or null to object", .{}),
+        else => allocator.alloc([]const u8, 0),
+    };
+}
+
 fn objectKeys(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
-    const o = try requireObject(ctx, arg(args, 0), "Object.keys");
-    const ks = try o.object.value.keys(allocator);
+    const o = arg(args, 0);
+    const ks = try ownEnumerableKeys(ctx, allocator, o);
     defer allocator.free(ks);
     var result = try JSValue.newArray(allocator);
     for (ks) |k| {
@@ -1164,8 +1192,8 @@ fn objectKeys(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 
 fn objectValues(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
-    const o = try requireObject(ctx, arg(args, 0), "Object.values");
-    const ks = try o.object.value.keys(allocator);
+    const o = arg(args, 0);
+    const ks = try ownEnumerableKeys(ctx, allocator, o);
     defer allocator.free(ks);
     var result = try JSValue.newArray(allocator);
     // Per-key getProperty (not ZObject.values) so accessor properties
@@ -1179,8 +1207,8 @@ fn objectValues(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 
 fn objectEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
-    const o = try requireObject(ctx, arg(args, 0), "Object.entries");
-    const ks = try o.object.value.keys(allocator);
+    const o = arg(args, 0);
+    const ks = try ownEnumerableKeys(ctx, allocator, o);
     defer allocator.free(ks);
     var result = try JSValue.newArray(allocator);
     for (ks) |k| {

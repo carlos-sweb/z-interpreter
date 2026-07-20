@@ -37,20 +37,32 @@ test "Object.create(null) inherits nothing" {
 }
 
 test "getOwnPropertyDescriptor over functions (name/length/prototype/statics)" {
-    // A static method is reported as an own property of the constructor.
-    // (Its enumerable flag is currently true -- builtin statics ride the
-    // property bag's default data descriptor; making them non-enumerable
-    // like the spec is a separate follow-up.)
+    // Builtin static methods are non-enumerable (writable, configurable).
     try helpers.expectStdout(
         \\const d = Object.getOwnPropertyDescriptor(Date, "now");
-        \\console.log(d.value === Date.now);
-    , "true\n");
+        \\console.log(d.value === Date.now, d.writable, d.enumerable, d.configurable);
+    , "true true false true\n");
     // Function name/length carry the spec attributes (non-writable,
     // non-enumerable, configurable).
     try helpers.expectStdout(
         \\const d = Object.getOwnPropertyDescriptor(function foo(a, b) {}, "length");
         \\console.log(d.value, d.writable, d.enumerable, d.configurable);
     , "2 false false true\n");
+}
+
+test "builtin statics and constants are non-enumerable" {
+    // Object.keys over constructors / namespaces sees no builtin statics.
+    try helpers.expectStdout("console.log(Object.keys(Date).length, Object.keys(Math).length, Object.keys(Object).length);", "0 0 0\n");
+    // Number's numeric constants are non-writable, non-enumerable, non-config.
+    try helpers.expectStdout(
+        \\const d = Object.getOwnPropertyDescriptor(Number, "MAX_SAFE_INTEGER");
+        \\console.log(d.writable, d.enumerable, d.configurable, d.value);
+    , "false false false 9007199254740991\n");
+    // Well-known symbols on Symbol are non-enumerable too.
+    try helpers.expectStdout(
+        \\const d = Object.getOwnPropertyDescriptor(Symbol, "iterator");
+        \\console.log(d.enumerable, d.writable, d.configurable);
+    , "false false false\n");
 }
 
 test "builtin methods are non-enumerable (keys / for-in ignore them)" {
