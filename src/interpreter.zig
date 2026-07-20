@@ -2503,6 +2503,8 @@ pub const Interpreter = struct {
             .{ "set", "Set", builtins.set_methods },
             .{ "symbol", "Symbol", builtins.symbol_methods },
             .{ "promise", "Promise", builtins.promise_methods },
+            .{ "number", "Number", builtins.number_methods },
+            .{ "boolean", "Boolean", builtins.boolean_methods },
         }) |e| {
             const ctor = g.get(e[1]).?;
             const proto = try self.functionPrototype(ctor);
@@ -2512,11 +2514,9 @@ pub const Interpreter = struct {
         }
 
         // Types without a method table today: real (near-empty) prototypes so
-        // getPrototypeOf / reflection still work and instances chain
-        // correctly; instance methods (Number.prototype.toFixed, ...) are a
-        // documented follow-up.
+        // getPrototypeOf / reflection still work and instances chain correctly.
         const proto_attrs = zvalue.PropertyDescriptor{ .writable = true, .enumerable = false, .configurable = true };
-        inline for (.{ .{ "number", "Number" }, .{ "boolean", "Boolean" }, .{ "error", "Error" } }) |e| {
+        inline for (.{.{ "error", "Error" }}) |e| {
             const ctor = g.get(e[1]).?;
             const proto = try self.functionPrototype(ctor);
             try proto.object.value.setPrototype(&object_proto.object.value);

@@ -87,3 +87,21 @@ test "prototype.constructor round-trips and plain objects get Object.prototype" 
 test "string index access reads a one-char string" {
     try helpers.expectStdout("console.log('abc'[1], 'abc'[9]);", "b undefined\n");
 }
+
+test "Number.prototype methods" {
+    try helpers.expectStdout("console.log((255).toString(16), (255).toString(2), (10).toString());", "ff 11111111 10\n");
+    try helpers.expectStdout("console.log((3.14159).toFixed(2), (0).toFixed(0));", "3.14 0\n");
+    try helpers.expectStdout("console.log((12345).toExponential(2));", "1.23e+4\n");
+    try helpers.expectStdout("console.log((123.456).toPrecision(4));", "123.5\n");
+    try helpers.expectNumber("(5).valueOf();", 5);
+    try helpers.expectUncaught("(5).toString(37);", .range_error, "toString() radix must be between 2 and 36");
+}
+
+test "Boolean.prototype methods" {
+    try helpers.expectStdout("console.log(true.toString(), false.toString());", "true false\n");
+    try helpers.runAndCheck("true.valueOf();", {}, struct {
+        fn check(_: void, r: helpers.Result) !void {
+            try testing.expect(r.value == .boolean and r.value.boolean == true);
+        }
+    }.check);
+}

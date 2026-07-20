@@ -182,6 +182,20 @@ pub const set_methods = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "entries", setEntries },
 });
 
+pub const number_methods = std.StaticStringMap(NativeFn).initComptime(.{
+    .{ "toString", numberToString },
+    .{ "toLocaleString", numberToString },
+    .{ "valueOf", numberValueOf },
+    .{ "toFixed", numberToFixed },
+    .{ "toExponential", numberToExponential },
+    .{ "toPrecision", numberToPrecision },
+});
+
+pub const boolean_methods = std.StaticStringMap(NativeFn).initComptime(.{
+    .{ "toString", booleanToString },
+    .{ "valueOf", booleanValueOf },
+});
+
 /// Object.prototype methods every plain object answers to (dispatched on
 /// prototype-chain miss -- our objects have no real Object.prototype
 /// parent; this table plays that role).
@@ -1308,6 +1322,93 @@ fn globalBoolean(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     _ = allocator;
     _ = this_value;
     return JSValue.fromBool(coercion.isTruthy(arg(args, 0)));
+}
+
+// ===== Number.prototype (only the primitive receiver; hollow `new Number()`
+// wrapper objects have no [[NumberData]] here -- documented narrowing) =====
+
+fn requireNumber(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!f64 {
+    if (this_value != .number) return interp(ctx).throwError(.type_error, "Number.prototype.{s} called on a non-number", .{method});
+    return this_value.number;
+}
+
+/// `n.toString(radix?)` / `toLocaleString` -- radix 2..36 (default 10).
+fn numberToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const n = try requireNumber(ctx, this_value, "toString");
+    var radix: ?u8 = null;
+    if (arg(args, 0) != .@"undefined") {
+        const r = toIntSat(try coercion.toNumber(arg(args, 0)));
+        if (r < 2 or r > 36) return interp(ctx).throwError(.range_error, "toString() radix must be between 2 and 36", .{});
+        radix = @intCast(r);
+    }
+    const s = try znumber.FormattingMethods.toString(n, allocator, radix);
+    defer allocator.free(s);
+    return JSValue.newString(allocator, s);
+}
+
+fn numberValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = args;
+    return JSValue.fromNumber(try requireNumber(ctx, this_value, "valueOf"));
+}
+
+/// Shared 0..100 digit argument for toFixed/toExponential/toPrecision, with
+/// the spec's RangeError. `null` when omitted (allowed by exponential/
+/// precision). `lo` is the minimum (0 for fixed/exponential, 1 for precision).
+fn digitArg(ctx: *anyopaque, args: []const JSValue, lo: i64) anyerror!?usize {
+    if (arg(args, 0) == .@"undefined") return null;
+    const d = toIntSat(try coercion.toNumber(arg(args, 0)));
+    if (d < lo or d > 100) return interp(ctx).throwError(.range_error, "toFixed() digits argument must be between 0 and 100", .{});
+    return @intCast(d);
+}
+
+fn numberToFixed(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const n = try requireNumber(ctx, this_value, "toFixed");
+    const digits = (try digitArg(ctx, args, 0)) orelse 0;
+    const s = try znumber.FormattingMethods.toFixed(n, allocator, digits);
+    defer allocator.free(s);
+    return JSValue.newString(allocator, s);
+}
+
+fn numberToExponential(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const n = try requireNumber(ctx, this_value, "toExponential");
+    const digits = try digitArg(ctx, args, 0);
+    const s = try znumber.FormattingMethods.toExponential(n, allocator, digits);
+    defer allocator.free(s);
+    return JSValue.newString(allocator, s);
+}
+
+fn numberToPrecision(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const n = try requireNumber(ctx, this_value, "toPrecision");
+    // Omitted precision behaves like toString.
+    if (arg(args, 0) == .@"undefined") {
+        const s = try znumber.FormattingMethods.toString(n, allocator, null);
+        defer allocator.free(s);
+        return JSValue.newString(allocator, s);
+    }
+    const p = (try digitArg(ctx, args, 1)).?;
+    const s = try znumber.FormattingMethods.toPrecision(n, allocator, p);
+    defer allocator.free(s);
+    return JSValue.newString(allocator, s);
+}
+
+// ===== Boolean.prototype =====
+
+fn requireBoolean(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!bool {
+    if (this_value != .boolean) return interp(ctx).throwError(.type_error, "Boolean.prototype.{s} called on a non-boolean", .{method});
+    return this_value.boolean;
+}
+
+fn booleanToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const b = try requireBoolean(ctx, this_value, "toString");
+    return JSValue.newString(allocator, if (b) "true" else "false");
+}
+
+fn booleanValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = args;
+    return JSValue.fromBool(try requireBoolean(ctx, this_value, "valueOf"));
 }
 
 // ===== Promise =====
