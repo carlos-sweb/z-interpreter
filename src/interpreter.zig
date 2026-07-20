@@ -592,6 +592,17 @@ pub const Interpreter = struct {
         return extras.object.value.get(key);
     }
 
+    /// The array's named-own-property object (array_props side table),
+    /// created on first use. A real `.object`, so it carries full property
+    /// descriptors -- lets Object.defineProperty target an array's non-index
+    /// named keys.
+    pub fn arrayPropsObject(self: *Interpreter, array: JSValue) !JSValue {
+        const arena = self.arena_state.allocator();
+        const gop = try self.array_props.getOrPut(arena, @intFromPtr(array.array));
+        if (!gop.found_existing) gop.value_ptr.* = try self.ordinaryObject();
+        return gop.value_ptr.*;
+    }
+
     // ===== Modules (import/export) =====
 
     pub fn setModuleLoader(self: *Interpreter, loader: ModuleLoader) void {
@@ -2359,7 +2370,7 @@ pub const Interpreter = struct {
     /// past the end -- narrowing vs true sparse arrays) and `length`
     /// (truncate/extend). Any other key is NotImplemented (arrays have no
     /// general property bag here).
-    fn setArrayProperty(self: *Interpreter, obj: JSValue, key: []const u8, value: JSValue) anyerror!void {
+    pub fn setArrayProperty(self: *Interpreter, obj: JSValue, key: []const u8, value: JSValue) anyerror!void {
         _ = self;
         const arr = &obj.array.value;
         if (std.mem.eql(u8, key, "length")) {

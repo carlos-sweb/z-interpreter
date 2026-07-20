@@ -279,6 +279,8 @@ pub fn setupGlobals(self: *Interpreter) !void {
         .{ "isExtensible", objectIsExtensible },
         .{ "setPrototypeOf", objectSetPrototypeOf },
         .{ "getPrototypeOf", objectGetPrototypeOf },
+        .{ "is", objectIs },                  .{ "hasOwn", objectHasOwn },
+        .{ "fromEntries", objectFromEntries },
     }) |entry| {
         try dneMethod(object_statics, entry[0], try native(self, entry[0], entry[1]));
     }
@@ -1917,13 +1919,44 @@ fn definePropertyFromJs(self: *Interpreter, obj: JSValue, key: []const u8, desc:
     _ = arena;
 }
 
+/// Define `obj[key]` from a JS descriptor, dispatching by target type:
+/// plain objects go through the full descriptor machinery; functions define
+/// into their statics bag (a real object); arrays handle length/index by
+/// value (no per-index descriptors in this model) and named keys via the
+/// array_props object. Non-objects are a TypeError.
+fn definePropertyOn(self: *Interpreter, what: []const u8, obj: JSValue, key: []const u8, desc: JSValue) anyerror!void {
+    switch (obj) {
+        .object => try definePropertyFromJs(self, obj, key, desc),
+        .function => try definePropertyFromJs(self, try self.functionStatics(obj), key, desc),
+        .array => try arrayDefineProperty(self, obj, key, desc),
+        else => return self.throwError(.type_error, "Object.{s} called on non-object", .{what}),
+    }
+}
+
+/// Best-effort Object.defineProperty on an array: `length` and canonical
+/// indices set the value (arrays have no per-element descriptor storage, so
+/// writable/enumerable/configurable on those are ignored); any other named
+/// key is defined on the array's real array_props object.
+fn arrayDefineProperty(self: *Interpreter, arr: JSValue, key: []const u8, desc: JSValue) anyerror!void {
+    if (desc != .object) return self.throwError(.type_error, "Property description must be an object", .{});
+    if (std.mem.eql(u8, key, "length")) {
+        if (desc.object.value.get("value")) |v| try self.setArrayProperty(arr, "length", v);
+        return;
+    }
+    if (std.fmt.parseInt(usize, key, 10)) |_| {
+        const v = desc.object.value.get("value") orelse JSValue.UNDEFINED;
+        try self.setArrayProperty(arr, key, v);
+        return;
+    } else |_| {}
+    try definePropertyFromJs(self, try self.arrayPropsObject(arr), key, desc);
+}
+
 fn objectDefineProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
     const self = interp(ctx);
     const obj = arg(args, 0);
-    if (obj != .object) return self.throwError(.type_error, "Object.defineProperty called on non-object", .{});
     const key = try coercion.toDisplayString(allocator, arg(args, 1));
-    try definePropertyFromJs(self, obj, key, arg(args, 2));
+    try definePropertyOn(self, "defineProperty", obj, key, arg(args, 2));
     return obj.retain();
 }
 
@@ -1931,13 +1964,14 @@ fn objectDefineProperties(ctx: *anyopaque, allocator: Allocator, this_value: JSV
     _ = this_value;
     const self = interp(ctx);
     const obj = arg(args, 0);
-    if (obj != .object) return self.throwError(.type_error, "Object.defineProperties called on non-object", .{});
+    if (obj != .object and obj != .function and obj != .array)
+        return self.throwError(.type_error, "Object.defineProperties called on non-object", .{});
     const props = arg(args, 1);
     if (props != .object) return self.throwError(.type_error, "Property description must be an object", .{});
     const keys = try props.object.value.keys(allocator);
     defer allocator.free(keys);
     for (keys) |k| {
-        try definePropertyFromJs(self, obj, k, props.object.value.get(k).?);
+        try definePropertyOn(self, "defineProperties", obj, k, props.object.value.get(k).?);
     }
     return obj.retain();
 }
@@ -2009,13 +2043,43 @@ fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, this_va
 
 fn objectGetOwnPropertyNames(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
-    const o = try requirePlainObject(ctx, arg(args, 0), "Object.getOwnPropertyNames");
-    const names = try o.object.value.getOwnPropertyNames(allocator);
-    defer allocator.free(names);
+    const self = interp(ctx);
+    const o = arg(args, 0);
     var result = try JSValue.newArray(allocator);
-    for (names) |n| {
-        if (isSymbolKey(n)) continue;
-        _ = try result.array.value.push(try JSValue.newString(allocator, n));
+    switch (o) {
+        .object => {
+            const names = try o.object.value.getOwnPropertyNames(allocator);
+            defer allocator.free(names);
+            for (names) |n| {
+                if (isSymbolKey(n)) continue;
+                _ = try result.array.value.push(try JSValue.newString(allocator, n));
+            }
+        },
+        // Arrays: every index (as a string), then "length".
+        .array => |box| {
+            var i: usize = 0;
+            while (i < box.value.length()) : (i += 1) {
+                _ = try result.array.value.push(try JSValue.newString(allocator, try std.fmt.allocPrint(allocator, "{d}", .{i})));
+            }
+            _ = try result.array.value.push(try JSValue.newString(allocator, "length"));
+        },
+        // Functions: length, name, prototype (if any), then statics bag names.
+        .function => |box| {
+            _ = try result.array.value.push(try JSValue.newString(allocator, "length"));
+            _ = try result.array.value.push(try JSValue.newString(allocator, "name"));
+            if (box.value.prototype != null or box.value.constructable)
+                _ = try result.array.value.push(try JSValue.newString(allocator, "prototype"));
+            if (box.value.statics) |bag| {
+                const names = try bag.object.value.getOwnPropertyNames(allocator);
+                defer allocator.free(names);
+                for (names) |n| {
+                    if (isSymbolKey(n)) continue;
+                    _ = try result.array.value.push(try JSValue.newString(allocator, n));
+                }
+            }
+        },
+        .@"undefined", .@"null" => return self.throwError(.type_error, "Cannot convert undefined or null to object", .{}),
+        else => {},
     }
     return result;
 }
@@ -2118,6 +2182,53 @@ fn objectSetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
         return self.throwError(.type_error, "Object prototype may only be an Object or null", .{});
     }
     return obj.retain();
+}
+
+/// Object.is(a, b) -- SameValue: like `===` but NaN equals NaN and +0 differs
+/// from -0.
+fn objectIs(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = ctx;
+    _ = allocator;
+    _ = this_value;
+    const a = arg(args, 0);
+    const b = arg(args, 1);
+    if (a == .number and b == .number) {
+        const x = a.number;
+        const y = b.number;
+        if (std.math.isNan(x) and std.math.isNan(y)) return JSValue.fromBool(true);
+        if (x == 0 and y == 0) return JSValue.fromBool(std.math.signbit(x) == std.math.signbit(y));
+        return JSValue.fromBool(x == y);
+    }
+    return JSValue.fromBool(zvalue.equality.strictEquals(a, b));
+}
+
+/// Object.hasOwn(o, key) -- the static form of hasOwnProperty (ES2022).
+fn objectHasOwn(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const o = arg(args, 0);
+    if (o == .@"undefined" or o == .@"null") return interp(ctx).throwError(.type_error, "Cannot convert undefined or null to object", .{});
+    return objHasOwnProperty(ctx, allocator, o, if (args.len > 1) args[1..] else &.{});
+}
+
+/// Object.fromEntries(iterable) -- builds an object from [key, value] pairs.
+/// Narrowed to an array of pair-arrays (the common case); other iterables
+/// are a documented gap.
+fn objectFromEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const src = arg(args, 0);
+    if (src != .array) return self.throwError(.type_error, "Object.fromEntries requires an iterable of entries", .{});
+    var result = try self.ordinaryObject();
+    for (src.array.value.toSlice()) |pair| {
+        if (pair != .array) return self.throwError(.type_error, "Iterator value is not an entry object", .{});
+        const p = &pair.array.value;
+        const k = if (p.length() > 0) p.get(0) else JSValue.UNDEFINED;
+        const v = if (p.length() > 1) p.get(1) else JSValue.UNDEFINED;
+        const ks = try coercion.toDisplayString(allocator, k);
+        defer allocator.free(ks);
+        try result.object.value.set(ks, v.retain());
+    }
+    return result;
 }
 
 fn objectGetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {

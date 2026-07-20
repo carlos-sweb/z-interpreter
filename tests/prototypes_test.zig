@@ -97,6 +97,21 @@ test "Number.prototype methods" {
     try helpers.expectUncaught("(5).toString(37);", .range_error, "toString() radix must be between 2 and 36");
 }
 
+test "reflection over arrays and functions" {
+    // defineProperty on an array (index / length) and a function (statics).
+    try helpers.expectStdout("const a=[0,1]; Object.defineProperty(a,'2',{value:9}); console.log(a[2], a.length);", "9 3\n");
+    try helpers.expectStdout("const b=[1,2,3]; Object.defineProperty(b,'length',{value:1}); console.log(b.length);", "1\n");
+    try helpers.expectStdout("function f(){}; Object.defineProperty(f,'x',{value:7}); console.log(f.x, Object.getOwnPropertyDescriptor(f,'x').value);", "7 7\n");
+    // getOwnPropertyNames over an array / function.
+    try helpers.expectStdout("console.log(Object.getOwnPropertyNames([10,20]).join(','));", "0,1,length\n");
+}
+
+test "Object.is / hasOwn / fromEntries" {
+    try helpers.expectStdout("console.log(Object.is(NaN,NaN), Object.is(0,-0), Object.is(2,2));", "true false true\n");
+    try helpers.expectStdout("console.log(Object.hasOwn({a:1},'a'), Object.hasOwn({a:1},'b'), Object.hasOwn([9],'0'));", "true false true\n");
+    try helpers.expectStdout("console.log(JSON.stringify(Object.fromEntries([['a',1],['b',2]])));", "{\"a\":1,\"b\":2}\n");
+}
+
 test "Boolean.prototype methods" {
     try helpers.expectStdout("console.log(true.toString(), false.toString());", "true false\n");
     try helpers.runAndCheck("true.valueOf();", {}, struct {
