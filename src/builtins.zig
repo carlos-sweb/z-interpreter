@@ -238,11 +238,44 @@ pub fn setupGlobals(self: *Interpreter) !void {
     try g.define(arena, "NaN", JSValue.fromNumber(std.math.nan(f64)));
     try g.define(arena, "Infinity", JSValue.fromNumber(std.math.inf(f64)));
 
-    var console_obj = try JSValue.newObject(arena);
+    // Object comes first: its constructor and real `Object.prototype` are
+    // created up front so every ordinary object built below (console, Math,
+    // JSON, ...) can chain to it via `self.ordinaryObject()`. The prototype
+    // is populated with its methods later, uniformly, in materializeProtos.
+    const object_ctor = try JSValue.newFunction(arena, .{
+        .ctx = self,
+        .name = "Object",
+        .arity = 1,
+        .call = objectConstructor,
+        .constructable = true,
+    });
+    const object_statics = try self.functionStatics(object_ctor);
+    inline for (.{
+        .{ "keys", objectKeys },              .{ "values", objectValues },
+        .{ "entries", objectEntries },        .{ "assign", objectAssign },
+        .{ "defineProperty", objectDefineProperty },
+        .{ "defineProperties", objectDefineProperties },
+        .{ "getOwnPropertyDescriptor", objectGetOwnPropertyDescriptor },
+        .{ "getOwnPropertyNames", objectGetOwnPropertyNames },
+        .{ "getOwnPropertySymbols", objectGetOwnPropertySymbols },
+        .{ "create", objectCreate },
+        .{ "freeze", objectFreeze },          .{ "isFrozen", objectIsFrozen },
+        .{ "seal", objectSeal },              .{ "isSealed", objectIsSealed },
+        .{ "preventExtensions", objectPreventExtensions },
+        .{ "isExtensible", objectIsExtensible },
+        .{ "setPrototypeOf", objectSetPrototypeOf },
+        .{ "getPrototypeOf", objectGetPrototypeOf },
+    }) |entry| {
+        try object_statics.object.value.set(entry[0], try native(self, entry[0], entry[1]));
+    }
+    self.protos.object = try self.functionPrototype(object_ctor);
+    try g.define(arena, "Object", object_ctor);
+
+    var console_obj = try self.ordinaryObject();
     try console_obj.object.value.set("log", try native(self, "log", consoleLog));
     try g.define(arena, "console", console_obj);
 
-    var math_obj = try JSValue.newObject(arena);
+    var math_obj = try self.ordinaryObject();
     try math_obj.object.value.set("PI", JSValue.fromNumber(zmath.PI));
     try math_obj.object.value.set("E", JSValue.fromNumber(zmath.E));
     try math_obj.object.value.set("floor", try native(self, "floor", mathFloor));
@@ -258,53 +291,10 @@ pub fn setupGlobals(self: *Interpreter) !void {
     try math_obj.object.value.set("random", try native(self, "random", mathRandom));
     try g.define(arena, "Math", math_obj);
 
-    var json_obj = try JSValue.newObject(arena);
+    var json_obj = try self.ordinaryObject();
     try json_obj.object.value.set("stringify", try native(self, "stringify", jsonStringify));
     try json_obj.object.value.set("parse", try native(self, "parse", jsonParse));
     try g.define(arena, "JSON", json_obj);
-
-    // Object: a real constructable function (typeof "function"), its
-    // statics on the property bag, its .prototype pre-populated with the
-    // same cached natives object_methods dispatches -- so the harness's
-    // detached `Object.prototype.hasOwnProperty` pattern works.
-    const object_ctor = try JSValue.newFunction(arena, .{
-        .ctx = self,
-        .name = "Object",
-        .arity = 1,
-        .call = objectConstructor,
-        .constructable = true,
-    });
-    const object_statics = try self.functionStatics(object_ctor);
-    const os_bag = object_statics.object.value;
-    _ = os_bag;
-    inline for (.{
-        .{ "keys", objectKeys },              .{ "values", objectValues },
-        .{ "entries", objectEntries },        .{ "assign", objectAssign },
-        .{ "defineProperty", objectDefineProperty },
-        .{ "defineProperties", objectDefineProperties },
-        .{ "getOwnPropertyDescriptor", objectGetOwnPropertyDescriptor },
-        .{ "getOwnPropertyNames", objectGetOwnPropertyNames },
-        .{ "getOwnPropertySymbols", objectGetOwnPropertySymbols },
-        .{ "create", objectCreate },
-        .{ "freeze", objectFreeze },          .{ "isFrozen", objectIsFrozen },
-        .{ "seal", objectSeal },              .{ "isSealed", objectIsSealed },
-        .{ "preventExtensions", objectPreventExtensions },
-        .{ "isExtensible", objectIsExtensible },
-        .{ "setPrototypeOf", objectSetPrototypeOf },
-    }) |entry| {
-        try object_statics.object.value.set(entry[0], try native(self, entry[0], entry[1]));
-    }
-    const object_proto = try self.functionPrototype(object_ctor);
-    inline for (.{
-        .{ "hasOwnProperty", objHasOwnProperty },
-        .{ "propertyIsEnumerable", objPropertyIsEnumerable },
-        .{ "toString", objToString },
-        .{ "valueOf", objValueOf },
-        .{ "isPrototypeOf", objIsPrototypeOf },
-    }) |entry| {
-        try object_proto.object.value.set(entry[0], try self.nativeMethod("object", entry[0], entry[1]));
-    }
-    try g.define(arena, "Object", object_ctor);
 
     // Array: constructable (new Array(n) / Array(a, b, c)) + statics.
     const array_ctor = try JSValue.newFunction(arena, .{
@@ -331,14 +321,6 @@ pub fn setupGlobals(self: *Interpreter) !void {
         .call = functionConstructor,
         .constructable = true,
     });
-    const function_proto = try self.functionPrototype(function_ctor);
-    inline for (.{
-        .{ "call", fnCall },
-        .{ "apply", fnApply },
-        .{ "bind", fnBind },
-    }) |entry| {
-        try function_proto.object.value.set(entry[0], try self.nativeMethod("function", entry[0], entry[1]));
-    }
     try g.define(arena, "Function", function_ctor);
 
     // A real constructable native: `new Date(...)` works through evalNew's
@@ -449,6 +431,11 @@ pub fn setupGlobals(self: *Interpreter) !void {
 
     const boolean_ctor = try JSValue.newFunction(arena, .{ .ctx = self, .name = "Boolean", .arity = 1, .call = globalBoolean, .constructable = true });
     try g.define(arena, "Boolean", boolean_ctor);
+
+    // Materialize every builtin prototype as a real object (own methods with
+    // descriptors, chained to Object.prototype) now that all constructors
+    // exist. Must be last: it reads the constructors back out of the globals.
+    try self.materializeProtos();
 }
 
 fn native(self: *Interpreter, name: []const u8, call_fn: NativeFn) !JSValue {
@@ -1618,10 +1605,24 @@ fn requirePlainObject(ctx: *anyopaque, v: JSValue, what: []const u8) anyerror!JS
 }
 
 fn objHasOwnProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
-    if (this_value != .object) return JSValue.fromBool(false);
     const key = try coercion.toDisplayString(allocator, arg(args, 0));
-    return JSValue.fromBool(this_value.object.value.hasOwnProperty(key));
+    return switch (this_value) {
+        .object => |box| JSValue.fromBool(box.value.hasOwnProperty(key)),
+        // Arrays expose `length` and every in-bounds index as an own property
+        // (they have no general ZObject bag, so answer these directly).
+        .array => |box| blk: {
+            if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromBool(true);
+            const idx = std.fmt.parseInt(usize, key, 10) catch break :blk JSValue.fromBool(interp(ctx).arrayExtra(this_value, key) != null);
+            break :blk JSValue.fromBool(idx < box.value.length());
+        },
+        // Strings: `length` and in-bounds character indices are own props.
+        .string => |box| blk: {
+            if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromBool(true);
+            const idx = std.fmt.parseInt(usize, key, 10) catch break :blk JSValue.fromBool(false);
+            break :blk JSValue.fromBool(idx < box.value.data.len);
+        },
+        else => JSValue.fromBool(false),
+    };
 }
 
 fn objPropertyIsEnumerable(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1655,13 +1656,13 @@ fn objIsPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
 // ===== Object statics: constructor + descriptors =====
 
 fn objectConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
+    _ = allocator;
     _ = this_value;
     const v = arg(args, 0);
     return switch (v) {
         // Object(x) on object-likes returns x; on nothing, a fresh {}.
         .object, .array, .function, .@"error", .date, .promise, .map, .set, .regex => v.retain(),
-        else => JSValue.newObject(allocator),
+        else => try interp(ctx).ordinaryObject(),
     };
 }
 
@@ -1768,15 +1769,20 @@ fn objectDefineProperties(ctx: *anyopaque, allocator: Allocator, this_value: JSV
     return obj.retain();
 }
 
-fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = this_value;
-    const self = interp(ctx);
-    const obj = arg(args, 0);
-    if (obj != .object) return self.throwError(.type_error, "Object.getOwnPropertyDescriptor called on non-object", .{});
-    const key = try coercion.toDisplayString(allocator, arg(args, 1));
-    const rec = obj.object.value.getOwnRecord(key) orelse return JSValue.UNDEFINED;
+/// A `{value, writable, enumerable, configurable}` descriptor object (chained
+/// to Object.prototype like any ordinary object).
+fn dataDescObj(self: *Interpreter, value: JSValue, writable: bool, enumerable: bool, configurable: bool) !JSValue {
+    var out = try self.ordinaryObject();
+    try out.object.value.set("value", value);
+    try out.object.value.set("writable", JSValue.fromBool(writable));
+    try out.object.value.set("enumerable", JSValue.fromBool(enumerable));
+    try out.object.value.set("configurable", JSValue.fromBool(configurable));
+    return out;
+}
 
-    var out = try JSValue.newObject(allocator);
+/// A descriptor object built from a stored property record (data or accessor).
+fn descFromRecord(self: *Interpreter, rec: anytype) !JSValue {
+    var out = try self.ordinaryObject();
     if (rec.isAccessor()) {
         try out.object.value.set("get", if (rec.getter) |g| g.retain() else JSValue.UNDEFINED);
         try out.object.value.set("set", if (rec.setter) |s| s.retain() else JSValue.UNDEFINED);
@@ -1787,6 +1793,45 @@ fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, this_va
     try out.object.value.set("enumerable", JSValue.fromBool(rec.descriptor.enumerable));
     try out.object.value.set("configurable", JSValue.fromBool(rec.descriptor.configurable));
     return out;
+}
+
+fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const obj = arg(args, 0);
+    const key = try coercion.toDisplayString(allocator, arg(args, 1));
+    switch (obj) {
+        .object => {
+            const rec = obj.object.value.getOwnRecord(key) orelse return JSValue.UNDEFINED;
+            return descFromRecord(self, rec);
+        },
+        // Functions expose name/length/prototype as own properties (with the
+        // spec attributes) plus whatever's on their statics bag.
+        .function => |box| {
+            if (std.mem.eql(u8, key, "length"))
+                return dataDescObj(self, JSValue.fromNumber(@floatFromInt(box.value.arity)), false, false, true);
+            if (std.mem.eql(u8, key, "name"))
+                return dataDescObj(self, try JSValue.newString(allocator, box.value.name), false, false, true);
+            if (std.mem.eql(u8, key, "prototype") and (box.value.prototype != null or box.value.constructable))
+                return dataDescObj(self, try self.functionPrototype(obj), true, false, false);
+            if (box.value.statics) |bag| {
+                if (bag.object.value.getOwnRecord(key)) |rec| return descFromRecord(self, rec);
+            }
+            return JSValue.UNDEFINED;
+        },
+        // Arrays: `length` and in-bounds indices are own data properties.
+        .array => |box| {
+            if (std.mem.eql(u8, key, "length"))
+                return dataDescObj(self, JSValue.fromNumber(@floatFromInt(box.value.length())), true, false, false);
+            const idx = std.fmt.parseInt(usize, key, 10) catch return JSValue.UNDEFINED;
+            if (idx >= box.value.length()) return JSValue.UNDEFINED;
+            return dataDescObj(self, box.value.get(idx).retain(), true, true, true);
+        },
+        .@"undefined", .@"null" => return self.throwError(.type_error, "Cannot convert undefined or null to object", .{}),
+        // Other object-likes (date/regex/map/...) have no string-keyed own
+        // data properties in this model yet.
+        else => return JSValue.UNDEFINED,
+    }
 }
 
 fn objectGetOwnPropertyNames(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1900,6 +1945,36 @@ fn objectSetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
         return self.throwError(.type_error, "Object prototype may only be an Object or null", .{});
     }
     return obj.retain();
+}
+
+fn objectGetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const self = interp(ctx);
+    const obj = arg(args, 0);
+    return switch (obj) {
+        .object => blk: {
+            const p = obj.object.value.getPrototype() orelse break :blk JSValue.NULL;
+            // Recover the owning Rc box from the raw *ZObject the chain
+            // stores (it always points at a box's `value` field).
+            const Box = @TypeOf(obj.object.*);
+            const box: *Box = @fieldParentPtr("value", p);
+            break :blk (JSValue{ .object = box }).retain();
+        },
+        .array => self.protos.array.retain(),
+        .string => self.protos.string.retain(),
+        .number => self.protos.number.retain(),
+        .boolean => self.protos.boolean.retain(),
+        .function => self.protos.function.retain(),
+        .date => self.protos.date.retain(),
+        .regex => self.protos.regex.retain(),
+        .@"error" => self.protos.@"error".retain(),
+        .map => self.protos.map.retain(),
+        .set => self.protos.set.retain(),
+        .symbol => self.protos.symbol.retain(),
+        .promise => self.protos.promise.retain(),
+        .@"undefined", .@"null" => self.throwError(.type_error, "Cannot convert undefined or null to object", .{}),
+    };
 }
 
 // ===== Array / Function constructors and statics =====

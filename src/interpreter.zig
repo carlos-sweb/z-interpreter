@@ -17,6 +17,24 @@ const builtins = @import("builtins.zig");
 const fiber_mod = @import("fiber.zig");
 const zregex = @import("zregex");
 
+/// The materialized builtin prototype objects (see `Interpreter.protos`).
+/// Each is a real `.object` JSValue; `.undefined` until setupGlobals runs.
+pub const Protos = struct {
+    object: JSValue = JSValue.UNDEFINED,
+    function: JSValue = JSValue.UNDEFINED,
+    array: JSValue = JSValue.UNDEFINED,
+    string: JSValue = JSValue.UNDEFINED,
+    number: JSValue = JSValue.UNDEFINED,
+    boolean: JSValue = JSValue.UNDEFINED,
+    date: JSValue = JSValue.UNDEFINED,
+    regex: JSValue = JSValue.UNDEFINED,
+    @"error": JSValue = JSValue.UNDEFINED,
+    map: JSValue = JSValue.UNDEFINED,
+    set: JSValue = JSValue.UNDEFINED,
+    symbol: JSValue = JSValue.UNDEFINED,
+    promise: JSValue = JSValue.UNDEFINED,
+};
+
 /// JS-level state a RegExp object carries beyond its compiled bytecode.
 pub const RegexState = struct {
     source: []const u8,
@@ -301,6 +319,15 @@ pub const Interpreter = struct {
     /// The well-known `Symbol.iterator` value (the only one wired into
     /// real behavior). Set in setupGlobals.
     symbol_iterator: ?JSValue = null,
+    /// The real builtin prototype objects (`Object.prototype`,
+    /// `Array.prototype`, ...), materialized once in setupGlobals and alive
+    /// for the whole run (arena). Each holds its type's methods as real own
+    /// data properties (writable, non-enumerable, configurable), so
+    /// reflection (getOwnPropertyDescriptor / getPrototypeOf / verifyProperty)
+    /// works and identity like `[].push === Array.prototype.push` holds.
+    /// Property lookup for each primitive type walks its proto here. All
+    /// chain to `object_proto` except `object_proto` itself (chain end).
+    protos: Protos = .{},
     /// JS-level RegExp state, keyed by the `.regex` Rc box pointer --
     /// z-regex is a pure engine, so the mutable `lastIndex`, the flags
     /// string, and the boolean flag set live here (the symbol_keys
@@ -560,7 +587,7 @@ pub const Interpreter = struct {
     }
 
     /// A named own property of an array, if any (array_props side table).
-    fn arrayExtra(self: *Interpreter, array: JSValue, key: []const u8) ?JSValue {
+    pub fn arrayExtra(self: *Interpreter, array: JSValue, key: []const u8) ?JSValue {
         const extras = self.array_props.get(@intFromPtr(array.array)) orelse return null;
         return extras.object.value.get(key);
     }
@@ -1616,7 +1643,7 @@ pub const Interpreter = struct {
                     // destructured; non-object sources rest to an empty
                     // object (narrowed -- real JS copies own enumerable
                     // props of the coerced object).
-                    var rest_obj = try JSValue.newObject(arena);
+                    var rest_obj = try self.ordinaryObject();
                     if (value == .object) {
                         const keys = try value.object.value.keys(arena);
                         defer arena.free(keys);
@@ -1705,7 +1732,7 @@ pub const Interpreter = struct {
                             // element holds a `.spread` node wrapping the
                             // actual target.
                             const arg = sp.data.spread;
-                            var rest_obj = try JSValue.newObject(arena);
+                            var rest_obj = try self.ordinaryObject();
                             if (value == .object) {
                                 const keys = try value.object.value.keys(arena);
                                 defer arena.free(keys);
@@ -1963,7 +1990,7 @@ pub const Interpreter = struct {
                 return arr;
             },
             .object_literal => |elements| {
-                var obj = try JSValue.newObject(arena);
+                var obj = try self.ordinaryObject();
                 for (elements) |el| {
                     switch (el) {
                         .property => |prop| {
@@ -2173,17 +2200,19 @@ pub const Interpreter = struct {
                     }
                     break :blk rec.value.retain();
                 }
-                // Chain miss -> the Object.prototype methods every plain
-                // object responds to (hasOwnProperty & co).
-                if (builtins.object_methods.get(key)) |f| break :blk try self.nativeMethod("object", key, f);
+                // Chain miss: ordinary objects chain to the real
+                // Object.prototype (which carries hasOwnProperty & co as own
+                // properties), so a genuine miss here is `undefined`. Objects
+                // with a null prototype (Object.create(null)) correctly
+                // inherit nothing.
                 break :blk JSValue.UNDEFINED;
             },
             .array => |box| blk: {
                 if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.length()));
-                if (builtins.array_methods.get(key)) |f| break :blk try self.nativeMethod("array", key, f);
                 const idx = std.fmt.parseInt(usize, key, 10) catch {
-                    // Non-index key: a named own property (exec-result
-                    // index/input/groups) or undefined -- never a hard gap.
+                    // Method (via Array.prototype) or a named own property
+                    // (exec-result index/input/groups); else undefined.
+                    if (try self.getFromProto(obj, self.protos.array, key)) |m| break :blk m;
                     break :blk (self.arrayExtra(obj, key) orelse JSValue.UNDEFINED).retain();
                 };
                 if (idx >= box.value.length()) break :blk JSValue.UNDEFINED;
@@ -2191,8 +2220,14 @@ pub const Interpreter = struct {
             },
             .string => |box| blk: {
                 if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.data.len));
-                if (builtins.string_methods.get(key)) |f| break :blk try self.nativeMethod("string", key, f);
-                break :blk error.NotImplemented;
+                if (std.fmt.parseInt(usize, key, 10)) |idx| {
+                    // Indexed access: the one-char string at that position,
+                    // or undefined past the end (real JS string indexing).
+                    if (idx < box.value.data.len) break :blk try JSValue.newString(self.arena_state.allocator(), box.value.data[idx .. idx + 1]);
+                    break :blk JSValue.UNDEFINED;
+                } else |_| {}
+                if (try self.getFromProto(obj, self.protos.string, key)) |m| break :blk m;
+                break :blk JSValue.UNDEFINED;
             },
             // `catch (e) { console.log(e.message) }` is the most common
             // catch body in existence -- name/message are read-only views
@@ -2207,6 +2242,7 @@ pub const Interpreter = struct {
                 if (std.mem.eql(u8, key, "constructor")) {
                     break :blk (self.global_env.get(box.value.kind.name()) orelse JSValue.UNDEFINED).retain();
                 }
+                if (try self.getFromProto(obj, self.protos.@"error", key)) |m| break :blk m;
                 break :blk JSValue.UNDEFINED;
             },
             .function => |box| blk: {
@@ -2223,32 +2259,40 @@ pub const Interpreter = struct {
                 if (box.value.statics) |bag| {
                     if (bag.object.value.has(key)) break :blk try self.getProperty(bag, key);
                 }
-                if (builtins.function_methods.get(key)) |f| break :blk try self.nativeMethod("function", key, f);
+                if (try self.getFromProto(obj, self.protos.function, key)) |m| break :blk m;
+                break :blk JSValue.UNDEFINED;
+            },
+            .number => blk: {
+                if (try self.getFromProto(obj, self.protos.number, key)) |m| break :blk m;
+                break :blk JSValue.UNDEFINED;
+            },
+            .boolean => blk: {
+                if (try self.getFromProto(obj, self.protos.boolean, key)) |m| break :blk m;
                 break :blk JSValue.UNDEFINED;
             },
             .date => blk: {
-                if (builtins.date_methods.get(key)) |f| break :blk try self.nativeMethod("date", key, f);
+                if (try self.getFromProto(obj, self.protos.date, key)) |m| break :blk m;
                 break :blk JSValue.UNDEFINED;
             },
             .promise => blk: {
-                if (builtins.promise_methods.get(key)) |f| break :blk try self.nativeMethod("promise", key, f);
+                if (try self.getFromProto(obj, self.protos.promise, key)) |m| break :blk m;
                 break :blk JSValue.UNDEFINED;
             },
             .map => |box| blk: {
                 if (std.mem.eql(u8, key, "size")) break :blk JSValue.fromNumber(@floatFromInt(box.value.size()));
-                if (builtins.map_methods.get(key)) |f| break :blk try self.nativeMethod("map", key, f);
+                if (try self.getFromProto(obj, self.protos.map, key)) |m| break :blk m;
                 break :blk JSValue.UNDEFINED;
             },
             .set => |box| blk: {
                 if (std.mem.eql(u8, key, "size")) break :blk JSValue.fromNumber(@floatFromInt(box.value.size()));
-                if (builtins.set_methods.get(key)) |f| break :blk try self.nativeMethod("set", key, f);
+                if (try self.getFromProto(obj, self.protos.set, key)) |m| break :blk m;
                 break :blk JSValue.UNDEFINED;
             },
             .symbol => |box| blk: {
                 if (std.mem.eql(u8, key, "description")) {
                     break :blk if (box.value.description) |d| try JSValue.newString(self.arena_state.allocator(), d) else JSValue.UNDEFINED;
                 }
-                if (builtins.symbol_methods.get(key)) |f| break :blk try self.nativeMethod("symbol", key, f);
+                if (try self.getFromProto(obj, self.protos.symbol, key)) |m| break :blk m;
                 break :blk JSValue.UNDEFINED;
             },
             .regex => blk: {
@@ -2263,14 +2307,13 @@ pub const Interpreter = struct {
                 if (std.mem.eql(u8, key, "sticky")) break :blk JSValue.fromBool(st.sticky);
                 if (std.mem.eql(u8, key, "unicode")) break :blk JSValue.fromBool(st.unicode);
                 if (std.mem.eql(u8, key, "lastIndex")) break :blk JSValue.fromNumber(@floatFromInt(st.last_index));
-                if (builtins.regex_methods.get(key)) |f| break :blk try self.nativeMethod("regex", key, f);
+                if (try self.getFromProto(obj, self.protos.regex, key)) |m| break :blk m;
                 break :blk JSValue.UNDEFINED;
             },
             // Spec says TypeError here (not ReferenceError). The optional
             // chaining guards short-circuit BEFORE getProperty, so `a?.b`
             // on null still yields undefined without ever reaching this.
             .@"undefined", .@"null" => self.throwError(.type_error, "Cannot read properties of {s} (reading '{s}')", .{ if (obj == .@"null") "null" else "undefined", key }),
-            else => error.NotImplemented,
         };
     }
 
@@ -2382,14 +2425,104 @@ pub const Interpreter = struct {
 
     /// F.prototype, created lazily on first touch: a fresh `{}` whose
     /// `constructor` points back at the function (real
-    /// `F.prototype.constructor === F` behavior).
+    /// `F.prototype.constructor === F` behavior). Chains to Object.prototype
+    /// once it exists (every ordinary object's [[Prototype]]).
     pub fn functionPrototype(self: *Interpreter, fn_val: JSValue) anyerror!JSValue {
         if (fn_val.function.value.prototype) |p| return p;
         const arena = self.arena_state.allocator();
         var proto = try JSValue.newObject(arena);
+        if (self.protos.object == .object) try proto.object.value.setPrototype(&self.protos.object.object.value);
         try proto.object.value.set("constructor", fn_val.retain());
         fn_val.function.value.prototype = proto;
         return proto;
+    }
+
+    /// A plain object whose [[Prototype]] is the real `Object.prototype` --
+    /// what every ordinary object (literal, result object, ...) must have so
+    /// `Object.getPrototypeOf({}) === Object.prototype` and inherited
+    /// methods resolve through the chain rather than a side table.
+    pub fn ordinaryObject(self: *Interpreter) !JSValue {
+        const obj = try JSValue.newObject(self.arena_state.allocator());
+        if (self.protos.object == .object) try obj.object.value.setPrototype(&self.protos.object.object.value);
+        return obj;
+    }
+
+    /// Walk a builtin prototype object's own->chain records for `key`,
+    /// dispatching an accessor's getter with `this = receiver`. Returns null
+    /// on a full miss. This is how the primitive types (array/string/date/...)
+    /// resolve their methods now that those live on real prototype objects.
+    fn getFromProto(self: *Interpreter, receiver: JSValue, proto: JSValue, key: []const u8) anyerror!?JSValue {
+        if (proto != .object) return null;
+        const arena = self.arena_state.allocator();
+        var current: ?*const @TypeOf(proto.object.value) = &proto.object.value;
+        while (current) |o| : (current = o.getPrototype()) {
+            const rec = o.getOwnRecord(key) orelse continue;
+            if (rec.isAccessor()) {
+                const gtr = rec.getter orelse return JSValue.UNDEFINED;
+                return try gtr.function.value.call(gtr.function.value.ctx, arena, receiver, &.{});
+            }
+            return rec.value.retain();
+        }
+        return null;
+    }
+
+    /// Populate a builtin prototype with its method table as real own data
+    /// properties carrying the spec attributes for builtin methods
+    /// (writable, NON-enumerable, configurable), plus a non-enumerable
+    /// `constructor` back-reference. The functions come from `nativeMethod`,
+    /// which caches by identity so `[].push === Array.prototype.push` holds.
+    fn installProto(self: *Interpreter, proto: JSValue, comptime type_prefix: []const u8, methods: std.StaticStringMap(builtins.NativeFn), ctor: JSValue) !void {
+        const attrs = zvalue.PropertyDescriptor{ .writable = true, .enumerable = false, .configurable = true };
+        for (methods.keys()) |k| {
+            const f = try self.nativeMethod(type_prefix, k, methods.get(k).?);
+            try proto.object.value.defineProperty(k, f, attrs);
+        }
+        try proto.object.value.defineProperty("constructor", ctor.retain(), attrs);
+    }
+
+    /// Materialize the real builtin prototype objects (Object.prototype,
+    /// Array.prototype, ...) from the method tables in builtins.zig. Called
+    /// once at the end of setupGlobals, after every constructor exists.
+    /// Object.prototype is the chain end ([[Prototype]] = null); every other
+    /// prototype chains to it.
+    pub fn materializeProtos(self: *Interpreter) !void {
+        const g = self.global_env;
+
+        const object_ctor = g.get("Object").?;
+        const object_proto = try self.functionPrototype(object_ctor);
+        self.protos.object = object_proto;
+        try self.installProto(object_proto, "object", builtins.object_methods, object_ctor);
+
+        inline for (.{
+            .{ "array", "Array", builtins.array_methods },
+            .{ "string", "String", builtins.string_methods },
+            .{ "date", "Date", builtins.date_methods },
+            .{ "function", "Function", builtins.function_methods },
+            .{ "regex", "RegExp", builtins.regex_methods },
+            .{ "map", "Map", builtins.map_methods },
+            .{ "set", "Set", builtins.set_methods },
+            .{ "symbol", "Symbol", builtins.symbol_methods },
+            .{ "promise", "Promise", builtins.promise_methods },
+        }) |e| {
+            const ctor = g.get(e[1]).?;
+            const proto = try self.functionPrototype(ctor);
+            try proto.object.value.setPrototype(&object_proto.object.value);
+            try self.installProto(proto, e[0], e[2], ctor);
+            @field(self.protos, e[0]) = proto;
+        }
+
+        // Types without a method table today: real (near-empty) prototypes so
+        // getPrototypeOf / reflection still work and instances chain
+        // correctly; instance methods (Number.prototype.toFixed, ...) are a
+        // documented follow-up.
+        const proto_attrs = zvalue.PropertyDescriptor{ .writable = true, .enumerable = false, .configurable = true };
+        inline for (.{ .{ "number", "Number" }, .{ "boolean", "Boolean" }, .{ "error", "Error" } }) |e| {
+            const ctor = g.get(e[1]).?;
+            const proto = try self.functionPrototype(ctor);
+            try proto.object.value.setPrototype(&object_proto.object.value);
+            try proto.object.value.defineProperty("constructor", ctor.retain(), proto_attrs);
+            @field(self.protos, e[0]) = proto;
+        }
     }
 
     fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSValue {
@@ -2729,7 +2862,10 @@ pub const Interpreter = struct {
         const closure_env = if (cnode.name != null) try env.child(arena) else env;
 
         var proto = try JSValue.newObject(arena);
-        if (super_proto) |sp| try proto.object.value.setPrototype(&sp.object.value);
+        if (super_proto) |sp|
+            try proto.object.value.setPrototype(&sp.object.value)
+        else if (self.protos.object == .object)
+            try proto.object.value.setPrototype(&self.protos.object.object.value);
 
         var ctor_fnode: ?*zfunctions.FunctionNode = null;
         for (cnode.elements) |el| {
