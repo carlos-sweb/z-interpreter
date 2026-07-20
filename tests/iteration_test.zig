@@ -147,3 +147,14 @@ test "for-in with an existing binding leaves the last key behind" {
         }
     }.check);
 }
+
+test "for-of observes array/set/map mutation during iteration (no dangling)" {
+    // array-contract: pop() during iteration stops after one step.
+    try helpers.expectNumber("var a=[0,1],n=0; for (var x of a){ a.pop(); n++; } n;", 1);
+    // set-contract: delete() during iteration is observed.
+    try helpers.expectNumber("var s=new Set([0,1]),n=0; for (var v of s){ s.delete(1); n++; } n;", 1);
+    // map-contract: delete() during iteration is observed.
+    try helpers.expectNumber("var m=new Map([[0,'a'],[1,'b']]),n=0; for (var e of m){ m.delete(1); n++; } n;", 1);
+    // growth during iteration is observed too.
+    try helpers.expectNumber("var g=[1,2],n=0; for (var w of g){ if(n<1) g.push(9); n++; } n;", 3);
+}

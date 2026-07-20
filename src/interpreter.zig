@@ -1846,7 +1846,13 @@ pub const Interpreter = struct {
         const iterable = try self.evalExpression(env, head.iterable);
         switch (iterable) {
             .array => |box| {
-                for (box.value.toSlice()) |item| {
+                // Live iteration (ArrayIterator semantics): re-read length
+                // each step and retain the element, so a body that mutates
+                // the array (`array.pop()`) is observed and never leaves a
+                // cached slice dangling.
+                var i: usize = 0;
+                while (i < box.value.length()) : (i += 1) {
+                    const item = box.value.get(i).retain();
                     if (try self.forIterationStep(env, head.binding, item, body, labels)) |c| return c;
                 }
             },
@@ -1858,17 +1864,33 @@ pub const Interpreter = struct {
                 }
             },
             .map => |box| {
-                const pairs = try box.value.entries(arena);
-                defer arena.free(pairs);
-                for (pairs) |pair| {
+                // Live iteration (MapIterator semantics): re-read the ordered
+                // keys each step (delete compacts them), retaining key+value,
+                // so a body that mutates the map is observed and never dangles.
+                var i: usize = 0;
+                while (true) {
+                    const ks = box.value.keys();
+                    if (i >= ks.len) break;
+                    const k = ks[i].retain();
+                    const v = (box.value.get(k) orelse JSValue.UNDEFINED).retain();
+                    i += 1;
                     var entry = try JSValue.newArray(arena);
-                    _ = try entry.array.value.push(pair.key.retain());
-                    _ = try entry.array.value.push(pair.value.retain());
+                    _ = try entry.array.value.push(k);
+                    _ = try entry.array.value.push(v);
                     if (try self.forIterationStep(env, head.binding, entry, body, labels)) |c| return c;
                 }
             },
             .set => |box| {
-                for (box.value.values()) |v| {
+                // Live iteration (SetIterator semantics): re-read the ordered
+                // values each step (delete compacts them) and retain the
+                // element, so a body that mutates the set (`set.delete(x)`) is
+                // observed and never dangles a cached slice.
+                var i: usize = 0;
+                while (true) {
+                    const vals = box.value.values();
+                    if (i >= vals.len) break;
+                    const v = vals[i].retain();
+                    i += 1;
                     if (try self.forIterationStep(env, head.binding, v, body, labels)) |c| return c;
                 }
             },
