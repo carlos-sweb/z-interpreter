@@ -452,6 +452,13 @@ pub fn setupGlobals(self: *Interpreter) !void {
     // descriptors, chained to Object.prototype) now that all constructors
     // exist. Must be last: it reads the constructors back out of the globals.
     try self.materializeProtos();
+
+    // globalThis: an object whose property access is backed by the global
+    // environment (see Interpreter.global_object). It is itself a global, and
+    // `globalThis.globalThis === globalThis`.
+    const global_this = try self.ordinaryObject();
+    self.global_object = global_this;
+    try g.define(arena, "globalThis", global_this);
 }
 
 fn native(self: *Interpreter, name: []const u8, call_fn: NativeFn) !JSValue {

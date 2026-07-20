@@ -106,6 +106,16 @@ test "reflection over arrays and functions" {
     try helpers.expectStdout("console.log(Object.getOwnPropertyNames([10,20]).join(','));", "0,1,length\n");
 }
 
+test "globalThis is backed by the global environment" {
+    try helpers.expectStdout("console.log(typeof globalThis, globalThis.globalThis === globalThis);", "object true\n");
+    try helpers.expectStdout("console.log(globalThis.Object === Object, globalThis.Math === Math);", "true true\n");
+    // Reads a builtin global; writing creates a real global binding.
+    try helpers.expectStdout("console.log(globalThis.parseInt('10'));", "10\n");
+    try helpers.expectStdout("globalThis.gtx = 42; console.log(gtx, globalThis.gtx);", "42 42\n");
+    // Object.prototype methods still resolve through the chain.
+    try helpers.expectStdout("console.log(typeof globalThis.hasOwnProperty);", "function\n");
+}
+
 test "Object.is / hasOwn / fromEntries" {
     try helpers.expectStdout("console.log(Object.is(NaN,NaN), Object.is(0,-0), Object.is(2,2));", "true false true\n");
     try helpers.expectStdout("console.log(Object.hasOwn({a:1},'a'), Object.hasOwn({a:1},'b'), Object.hasOwn([9],'0'));", "true false true\n");

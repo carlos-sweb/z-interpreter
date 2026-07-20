@@ -328,6 +328,11 @@ pub const Interpreter = struct {
     /// Property lookup for each primitive type walks its proto here. All
     /// chain to `object_proto` except `object_proto` itself (chain end).
     protos: Protos = .{},
+    /// The `globalThis` object. Property reads/writes on it are backed by the
+    /// global environment (there is no separately-reified global record), so
+    /// `globalThis.Object`, `var x=1; globalThis.x`, and `globalThis.y=2`
+    /// (which creates a global) all stay in sync. Set in setupGlobals.
+    global_object: ?JSValue = null,
     /// JS-level RegExp state, keyed by the `.regex` Rc box pointer --
     /// z-regex is a pure engine, so the mutable `lastIndex`, the flags
     /// string, and the boolean flag set live here (the symbol_keys
@@ -2202,6 +2207,15 @@ pub const Interpreter = struct {
             // properties behave exactly as the old ZObject.get did.
             .object => |box| blk: {
                 const arena = self.arena_state.allocator();
+                // `globalThis`: a global binding (Object, a top-level `var`,
+                // ...) shadows its own props; a miss falls through to the
+                // normal own->chain walk (defineProperty'd props, then
+                // Object.prototype methods).
+                if (self.global_object) |go| {
+                    if (obj.object == go.object) {
+                        if (self.global_env.get(key)) |v| break :blk v.retain();
+                    }
+                }
                 var current: ?*const @TypeOf(box.value) = &box.value;
                 while (current) |o| : (current = o.getPrototype()) {
                     const rec = o.getOwnRecord(key) orelse continue;
@@ -2693,6 +2707,14 @@ pub const Interpreter = struct {
                     return error.NotImplemented;
                 }
                 if (obj != .object) return error.NotImplemented;
+                // Writing a property on `globalThis` creates/updates a global
+                // binding (`globalThis.foo = 1` makes `foo` a global).
+                if (self.global_object) |go| {
+                    if (obj.object == go.object) {
+                        try self.global_env.define(self.arena_state.allocator(), key, value.retain());
+                        return;
+                    }
+                }
                 try self.setObjectProperty(obj, key, value);
             },
             else => return error.NotImplemented,
