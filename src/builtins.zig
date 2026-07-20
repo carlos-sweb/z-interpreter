@@ -396,6 +396,10 @@ pub fn setupGlobals(self: *Interpreter) !void {
     try number_statics.object.value.set("MIN_SAFE_INTEGER", JSValue.fromNumber(-9007199254740991.0));
     try number_statics.object.value.set("EPSILON", JSValue.fromNumber(std.math.floatEps(f64)));
     try number_statics.object.value.set("NaN", JSValue.fromNumber(std.math.nan(f64)));
+    try number_statics.object.value.set("MAX_VALUE", JSValue.fromNumber(std.math.floatMax(f64)));
+    try number_statics.object.value.set("MIN_VALUE", JSValue.fromNumber(std.math.floatTrueMin(f64)));
+    try number_statics.object.value.set("POSITIVE_INFINITY", JSValue.fromNumber(std.math.inf(f64)));
+    try number_statics.object.value.set("NEGATIVE_INFINITY", JSValue.fromNumber(-std.math.inf(f64)));
     try g.define(arena, "Number", number_ctor);
 
     const boolean_ctor = try JSValue.newFunction(arena, .{ .ctx = self, .name = "Boolean", .arity = 1, .call = globalBoolean, .constructable = true });

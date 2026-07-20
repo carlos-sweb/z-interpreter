@@ -2529,7 +2529,21 @@ pub const Interpreter = struct {
                 if (obj == .regex) {
                     if (std.mem.eql(u8, key, "lastIndex")) {
                         const n = try coercion.toNumber(value);
-                        self.regexState(obj).last_index = if (n > 0) @intFromFloat(n) else 0;
+                        // `lastIndex` may be set to any Number, including
+                        // Infinity, Number.MAX_VALUE or values beyond usize
+                        // (Test262 exercises exactly these). A bare
+                        // @intFromFloat would panic on an out-of-range float,
+                        // so saturate: anything at/above usize's range (and
+                        // NaN, which fails both comparisons) is stored as the
+                        // max, which always exceeds the subject length, so
+                        // exec/test correctly find no match and reset it to 0.
+                        const max_usize_f: f64 = @floatFromInt(std.math.maxInt(usize));
+                        self.regexState(obj).last_index = if (n >= max_usize_f)
+                            std.math.maxInt(usize)
+                        else if (n > 0)
+                            @intFromFloat(n)
+                        else
+                            0;
                         return;
                     }
                     return error.NotImplemented;
