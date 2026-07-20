@@ -81,7 +81,10 @@ pub fn toDisplayString(allocator: Allocator, v: JSValue) ![]u8 {
             }
             return buf.toOwnedSlice(allocator);
         },
-        .date => |box| box.value.toISOString(allocator) catch try allocator.dupe(u8, "Invalid Date"),
+        // ToString(date) uses toString() ("Wed Jul 20 2026 ...") -- NOT
+        // toISOString (that's console.log/inspect's job); see the .date case
+        // in inspect.zig.
+        .date => |box| box.value.toString(allocator) catch try allocator.dupe(u8, "Invalid Date"),
         .promise => try allocator.dupe(u8, "[object Promise]"),
         // `/source/` (flags omitted -- the exact form is regex.toString()).
         .regex => |box| try std.fmt.allocPrint(allocator, "/{s}/", .{box.value.getPattern()}),
