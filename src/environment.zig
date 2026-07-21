@@ -33,6 +33,12 @@ pub const Environment = struct {
     /// by chain walk like `this` -- arrows nested in methods inherit.
     super_proto: ?JSValue = null,
     super_ctor: ?JSValue = null,
+    /// The enclosing class's identity (an opaque `*ClassCtx` pointer),
+    /// non-null only at a class method/constructor/field-initializer call
+    /// boundary -- ECMA-262's PrivateEnvironment, collapsed to a single
+    /// class identity. `this.#x` resolves the private name against it.
+    /// Chain-walked like `this`/super, so arrows in methods inherit it.
+    private_ctx: ?*anyopaque = null,
 
     pub fn child(self: *Environment, arena: Allocator) !*Environment {
         const env = try arena.create(Environment);
@@ -119,6 +125,16 @@ pub const Environment = struct {
         var env: ?*Environment = self;
         while (env) |e| : (env = e.parent) {
             if (e.super_proto) |v| return v;
+        }
+        return null;
+    }
+
+    /// Walks up until a non-null private_ctx is found -- null means no
+    /// enclosing class (a `#x` access there is an error).
+    pub fn resolvePrivateCtx(self: *Environment) ?*anyopaque {
+        var env: ?*Environment = self;
+        while (env) |e| : (env = e.parent) {
+            if (e.private_ctx) |v| return v;
         }
         return null;
     }

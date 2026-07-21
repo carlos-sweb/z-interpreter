@@ -73,6 +73,7 @@ pub fn build(b: *std.Build) void {
         "tests/destructuring_test.zig",
         "tests/methods_test.zig",
         "tests/classes_test.zig",
+        "tests/private_test.zig",
         "tests/hoisting_test.zig",
         "tests/promise_test.zig",
         "tests/generator_test.zig",

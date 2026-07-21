@@ -63,6 +63,19 @@ const ClosureCtx = struct {
     /// prototype, so `super.m()` resolves inside the body (copied onto
     /// the call env; arrows nested in the method inherit via chain walk).
     super_proto: ?JSValue = null,
+    /// Non-null only for class method closures: the declaring class's
+    /// identity (its *ClassCtx), so `this.#x` inside the body resolves
+    /// private names against the right class (copied onto the call env).
+    private_ctx: ?*anyopaque = null,
+};
+
+/// One instance field captured at class-definition time: the key is fully
+/// resolved (computed keys already evaluated, private keys already encoded
+/// via encodePrivateKey); the initializer expression runs per-instance at
+/// construction time.
+const FieldDef = struct {
+    key: []const u8,
+    value: ?*zparser.Node,
 };
 
 /// ctx for a class's constructor function -- the value `class C {...}`
@@ -125,6 +138,9 @@ const FiberState = struct {
     fnode: *zfunctions.FunctionNode,
     closure_env: *Environment,
     this_value: ?JSValue,
+    /// The declaring class's private identity for method bodies (so
+    /// `this.#x` works inside generator/async methods too).
+    private_ctx: ?*anyopaque,
     args: []const JSValue,
     /// Scheduler -> fiber: what the suspension point produces on resume
     /// (next(v) / the awaited promise's settlement).
@@ -152,7 +168,7 @@ fn fiberEntry(arg: *anyopaque) void {
     const fs: *FiberState = @ptrCast(@alignCast(arg));
     const self = fs.interp;
     const arena = self.arena_state.allocator();
-    const result = invokeFunctionNode(self, fs.fnode, fs.closure_env, arena, fs.this_value, null, null, fs.args) catch |err| {
+    const result = invokeFunctionNode(self, fs.fnode, fs.closure_env, arena, fs.this_value, null, null, fs.private_ctx, fs.args) catch |err| {
         if (err == error.JsThrow) {
             const ex = self.pending_exception.?;
             self.pending_exception = null;
@@ -246,6 +262,15 @@ const ClassCtx = struct {
     name: []const u8,
     super_ctor: ?JSValue,
     super_proto: ?JSValue,
+    /// Instance fields in declaration order, initialized per-instance at
+    /// construction time (base classes: at constructor entry; derived
+    /// classes: right after super() returns). Keys pre-resolved.
+    ///
+    /// NOTE: this ClassCtx pointer also doubles as the class's PRIVATE
+    /// IDENTITY -- it's what Environment.private_ctx carries and what
+    /// encodePrivateKey mixes into `#name` storage keys (brand checks fall
+    /// out of key mismatch).
+    instance_fields: []const FieldDef = &.{},
 };
 
 pub const Interpreter = struct {
@@ -338,6 +363,12 @@ pub const Interpreter = struct {
     /// caller's scope; any other reference is indirect (global scope). Set in
     /// setupGlobals; compared by function-box identity in evalCall.
     eval_fn: ?JSValue = null,
+    /// A derived-class constructor whose instance fields are waiting for
+    /// `super()` to return (spec order: parent fields -> own fields -> rest
+    /// of the ctor body). Set by classConstructorCall on entry, consumed by
+    /// evalCall's super() branch; save/restore discipline keeps nested
+    /// constructions (`constructor() { new Other(); super(); }`) correct.
+    pending_field_init: ?*anyopaque = null,
     /// JS-level RegExp state, keyed by the `.regex` Rc box pointer --
     /// z-regex is a pure engine, so the mutable `lastIndex`, the flags
     /// string, and the boolean flag set live here (the symbol_keys
@@ -826,7 +857,7 @@ pub const Interpreter = struct {
     /// Calling `function*` builds the generator object -- a plain object
     /// whose `next` native drives the (not-yet-started) fiber. The body
     /// runs nothing until the first next() (real semantics).
-    fn makeGeneratorObject(self: *Interpreter, fnode: *zfunctions.FunctionNode, closure_env: *Environment, this_value: ?JSValue, args: []const JSValue) anyerror!JSValue {
+    fn makeGeneratorObject(self: *Interpreter, fnode: *zfunctions.FunctionNode, closure_env: *Environment, this_value: ?JSValue, private_ctx: ?*anyopaque, args: []const JSValue) anyerror!JSValue {
         const arena = self.arena_state.allocator();
         const fs = try arena.create(FiberState);
         fs.* = .{
@@ -836,6 +867,7 @@ pub const Interpreter = struct {
             .fnode = fnode,
             .closure_env = closure_env,
             .this_value = this_value,
+            .private_ctx = private_ctx,
             .args = try arena.dupe(JSValue, args),
         };
         fs.fiber = try fiber_mod.Fiber.init(arena, fiberEntry, fs);
@@ -854,7 +886,7 @@ pub const Interpreter = struct {
     /// Calling `async function` starts the body IMMEDIATELY on its fiber
     /// (synchronous until the first await -- real semantics) and returns
     /// the promise; completion settles it from inside the entry.
-    fn runAsyncFunction(self: *Interpreter, fnode: *zfunctions.FunctionNode, closure_env: *Environment, this_value: ?JSValue, args: []const JSValue) anyerror!JSValue {
+    fn runAsyncFunction(self: *Interpreter, fnode: *zfunctions.FunctionNode, closure_env: *Environment, this_value: ?JSValue, private_ctx: ?*anyopaque, args: []const JSValue) anyerror!JSValue {
         const arena = self.arena_state.allocator();
         const fs = try arena.create(FiberState);
         fs.* = .{
@@ -864,6 +896,7 @@ pub const Interpreter = struct {
             .fnode = fnode,
             .closure_env = closure_env,
             .this_value = this_value,
+            .private_ctx = private_ctx,
             .args = try arena.dupe(JSValue, args),
             .promise = try JSValue.newPromise(arena),
         };
@@ -2092,6 +2125,13 @@ pub const Interpreter = struct {
             },
             .unary => |u| return self.evalUnary(env, u),
             .binary => |b| {
+                // `#x in obj` (private brand check): the LHS is a bare
+                // private name -- it must NOT be evaluated as an identifier
+                // (that would be a ReferenceError); intercept on the node.
+                if (b.op == .in and b.left.data == .identifier and b.left.data.identifier.len > 0 and b.left.data.identifier[0] == '#') {
+                    const r = try self.evalExpression(env, b.right);
+                    return JSValue.fromBool(try self.privateHas(env, r, b.left.data.identifier));
+                }
                 const l = try self.evalExpression(env, b.left);
                 const r = try self.evalExpression(env, b.right);
                 // instanceof/in need the throw machinery and the prototype
@@ -2130,6 +2170,7 @@ pub const Interpreter = struct {
                 }
                 const obj = try self.evalExpression(env, m.object);
                 if (m.optional and (obj == .@"undefined" or obj == .@"null")) return JSValue.UNDEFINED;
+                if (privateMemberName(m)) |pn| return self.privateGet(env, obj, pn);
                 const key = try self.memberKeyString(env, m);
                 return try self.getProperty(obj, key);
             },
@@ -2642,6 +2683,11 @@ pub const Interpreter = struct {
                 }
                 if (u.operand.data == .member) {
                     const m = u.operand.data.member;
+                    // `delete this.#x` is a spec EARLY error; surfaced at
+                    // runtime here (narrowing -- no static private scope).
+                    if (privateMemberName(m)) |pn| {
+                        return self.throwError(.syntax_error, "Private fields can not be deleted: {s}", .{pn});
+                    }
                     const obj = try self.evalExpression(env, m.object);
                     const key = try self.memberKeyString(env, m);
                     if (obj != .object) return JSValue.fromBool(true);
@@ -2703,6 +2749,7 @@ pub const Interpreter = struct {
             .paren => |inner| try self.assignTo(env, inner, value),
             .member => |m| {
                 const obj = try self.evalExpression(env, m.object);
+                if (privateMemberName(m)) |pn| return self.privateSet(env, obj, pn, value);
                 const key = try self.memberKeyString(env, m);
                 // Split, not a blanket conversion: null/undefined is a real
                 // spec TypeError, but every other non-object receiver
@@ -2775,7 +2822,16 @@ pub const Interpreter = struct {
             const prev_target = self.construct_target;
             self.construct_target = sctor.function.value.ctx;
             defer self.construct_target = prev_target;
-            return try sctor.function.value.call(sctor.function.value.ctx, arena, env.resolveThis(), args);
+            const result = try sctor.function.value.call(sctor.function.value.ctx, arena, env.resolveThis(), args);
+            // The derived class's own instance fields initialize exactly
+            // when super() returns (spec order: parent fields ran during
+            // the parent ctor; own fields now; rest of the body after).
+            if (self.pending_field_init) |p| {
+                self.pending_field_init = null;
+                const pc: *ClassCtx = @ptrCast(@alignCast(p));
+                try self.runInstanceFields(pc, env.resolveThis());
+            }
+            return result;
         }
         // `super.m(args)`: method looked up on the PARENT prototype but
         // invoked with the current `this` -- the whole point of super.
@@ -2797,9 +2853,15 @@ pub const Interpreter = struct {
             const m = c.callee.data.member;
             const obj = try self.evalExpression(env, m.object);
             if (m.optional and (obj == .@"undefined" or obj == .@"null")) return JSValue.UNDEFINED;
-            const key = try self.memberKeyString(env, m);
             this_value = obj;
-            callee_val = try self.getProperty(obj, key);
+            if (privateMemberName(m)) |pn| {
+                // `this.#m(args)` -- private method/field call, `this`
+                // preserved like any member call.
+                callee_val = try self.privateGet(env, obj, pn);
+            } else {
+                const key = try self.memberKeyString(env, m);
+                callee_val = try self.getProperty(obj, key);
+            }
         } else {
             callee_val = try self.evalExpression(env, c.callee);
         }
@@ -2914,21 +2976,170 @@ pub const Interpreter = struct {
     }
 
     /// A class-body method closure: an ordinary makeClosure whose
-    /// ClosureCtx additionally carries the parent prototype, so `super.m()`
-    /// resolves inside the body. Safe cast: makeClosure always installs a
+    /// ClosureCtx additionally carries the parent prototype (so `super.m()`
+    /// resolves inside the body) and the declaring class's private identity
+    /// (so `this.#x` resolves). Safe cast: makeClosure always installs a
     /// ClosureCtx as the ctx of the closures it creates.
-    fn makeMethodClosure(self: *Interpreter, env: *Environment, fnode: *zfunctions.FunctionNode, super_proto: ?JSValue) anyerror!JSValue {
+    fn makeMethodClosure(self: *Interpreter, env: *Environment, fnode: *zfunctions.FunctionNode, super_proto: ?JSValue, private_ctx: ?*anyopaque) anyerror!JSValue {
         const v = try self.makeClosure(env, fnode);
         const cc: *ClosureCtx = @ptrCast(@alignCast(v.function.value.ctx));
         cc.super_proto = super_proto;
+        cc.private_ctx = private_ctx;
         return v;
+    }
+
+    // ===== Private (`#name`) member machinery =====
+    //
+    // ECMA-262's PrivateEnvironment/PrivateName pair, collapsed onto the
+    // existing property model: each class's ClassCtx pointer IS its private
+    // identity, and `#name` members are stored as ordinary properties under
+    // the reserved key `\x00P{ctx}|{name}` -- the `\x00` prefix is already
+    // invisible to every enumeration path (Object.keys, for-in, JSON,
+    // getOwnPropertyNames all skip it), so privates are non-reflective for
+    // free. The BRAND CHECK falls out of key mismatch: another class's
+    // `#name` encodes to a different key, and a miss is the spec TypeError.
+
+    /// Encodes a private member's storage key for a given class identity.
+    fn encodePrivateKey(self: *Interpreter, class_id: *anyopaque, name: []const u8) ![]const u8 {
+        return std.fmt.allocPrint(self.arena_state.allocator(), "\x00P{x}|{s}", .{ @intFromPtr(class_id), name });
+    }
+
+    /// The object that actually stores a receiver's private members:
+    /// the object itself, or a function's statics bag (`C.#staticField`).
+    /// Null for primitives (they can never carry a brand).
+    fn privateHolder(self: *Interpreter, obj: JSValue) !?JSValue {
+        return switch (obj) {
+            .object => obj,
+            .function => try self.functionStatics(obj),
+            else => null,
+        };
+    }
+
+    fn privateGet(self: *Interpreter, env: *Environment, obj: JSValue, name: []const u8) anyerror!JSValue {
+        const ctx = env.resolvePrivateCtx() orelse
+            return self.throwError(.syntax_error, "Private field '{s}' must be declared in an enclosing class", .{name});
+        const key = try self.encodePrivateKey(ctx, name);
+        const holder = (try self.privateHolder(obj)) orelse
+            return self.throwError(.type_error, "Cannot read private member {s} from an object whose class did not declare it", .{name});
+        // Own->chain record walk with accessor dispatch (instance fields
+        // are own props; private methods/accessors live on the prototype).
+        var current: ?*const @TypeOf(holder.object.value) = &holder.object.value;
+        while (current) |o| : (current = o.getPrototype()) {
+            const rec = o.getOwnRecord(key) orelse continue;
+            if (rec.isAccessor()) {
+                const g = rec.getter orelse
+                    return self.throwError(.type_error, "'{s}' was defined without a getter", .{name});
+                return try g.function.value.call(g.function.value.ctx, self.arena_state.allocator(), obj, &.{});
+            }
+            return rec.value.retain();
+        }
+        return self.throwError(.type_error, "Cannot read private member {s} from an object whose class did not declare it", .{name});
+    }
+
+    fn privateSet(self: *Interpreter, env: *Environment, obj: JSValue, name: []const u8, value: JSValue) anyerror!void {
+        const ctx = env.resolvePrivateCtx() orelse
+            return self.throwError(.syntax_error, "Private field '{s}' must be declared in an enclosing class", .{name});
+        const key = try self.encodePrivateKey(ctx, name);
+        const holder = (try self.privateHolder(obj)) orelse
+            return self.throwError(.type_error, "Cannot write private member {s} to an object whose class did not declare it", .{name});
+        const hv = &holder.object.value;
+        if (hv.getOwnRecord(key)) |rec| {
+            if (rec.isAccessor()) {
+                const s = rec.setter orelse
+                    return self.throwError(.type_error, "'{s}' was defined without a setter", .{name});
+                _ = try s.function.value.call(s.function.value.ctx, self.arena_state.allocator(), obj, &.{value});
+                return;
+            }
+            // A brand-checked private FIELD write updates in place.
+            hv.set(key, value.retain()) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => unreachable, // reserved keys are never frozen/sealed
+            };
+            return;
+        }
+        // Chain walk: a prototype hit is an accessor (setter dispatch) or a
+        // private METHOD (not writable, spec TypeError).
+        var current = hv.getPrototype();
+        while (current) |o| : (current = o.getPrototype()) {
+            const rec = o.getOwnRecord(key) orelse continue;
+            if (rec.isAccessor()) {
+                const s = rec.setter orelse
+                    return self.throwError(.type_error, "'{s}' was defined without a setter", .{name});
+                _ = try s.function.value.call(s.function.value.ctx, self.arena_state.allocator(), obj, &.{value});
+                return;
+            }
+            return self.throwError(.type_error, "Cannot assign to private method {s}", .{name});
+        }
+        return self.throwError(.type_error, "Cannot write private member {s} to an object whose class did not declare it", .{name});
+    }
+
+    /// `#name in obj` -- true iff obj carries this class's brand for the
+    /// name (an own-or-prototype private entry under the encoded key).
+    fn privateHas(self: *Interpreter, env: *Environment, obj: JSValue, name: []const u8) anyerror!bool {
+        const ctx = env.resolvePrivateCtx() orelse
+            return self.throwError(.syntax_error, "Private field '{s}' must be declared in an enclosing class", .{name});
+        const key = try self.encodePrivateKey(ctx, name);
+        const holder = (try self.privateHolder(obj)) orelse return false;
+        var current: ?*const @TypeOf(holder.object.value) = &holder.object.value;
+        while (current) |o| : (current = o.getPrototype()) {
+            if (o.getOwnRecord(key) != null) return true;
+        }
+        return false;
+    }
+
+    /// Runs a class's instance-field initializers against a fresh instance
+    /// (this = the instance, private names resolvable, `super.x` usable).
+    /// Called at constructor entry for base classes and right after
+    /// `super()` returns for derived ones.
+    fn runInstanceFields(self: *Interpreter, cctx: *ClassCtx, instance: JSValue) anyerror!void {
+        if (cctx.instance_fields.len == 0) return;
+        if (instance != .object) return; // exotic `this` -- nothing to define on
+        const arena = self.arena_state.allocator();
+        const field_env = try cctx.closure_env.child(arena);
+        field_env.this_value = instance;
+        field_env.super_proto = cctx.super_proto;
+        field_env.private_ctx = cctx;
+        for (cctx.instance_fields) |fd| {
+            const v = if (fd.value) |vexpr| try self.evalExpression(field_env, vexpr) else JSValue.UNDEFINED;
+            const is_private = fd.key.len > 0 and fd.key[0] == 0;
+            const target = &instance.object.value;
+            target.set(fd.key, v.retain()) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                // A constructor can freeze/preventExtensions `this` BEFORE
+                // fields initialize. Per spec, a PUBLIC field then fails
+                // with a TypeError (CreateDataPropertyOrThrow) -- but a
+                // PRIVATE field still installs: private names are not
+                // ordinary properties, so [[Extensible]]/frozen don't apply.
+                // Bypass by briefly lifting the flags for the private add.
+                error.ObjectIsFrozen, error.ObjectNotExtensible, error.PropertyNotWritable => {
+                    if (!is_private) {
+                        return self.throwError(.type_error, "Cannot define property {s}, object is not extensible", .{fd.key});
+                    }
+                    const saved_frozen = target.is_frozen;
+                    const saved_ext = target.is_extensible;
+                    target.is_frozen = false;
+                    target.is_extensible = true;
+                    defer {
+                        target.is_frozen = saved_frozen;
+                        target.is_extensible = saved_ext;
+                    }
+                    target.set(fd.key, v.retain()) catch |e2| return switch (e2) {
+                        error.OutOfMemory => error.OutOfMemory,
+                        else => unreachable, // flags lifted; nothing else can gate a fresh key
+                    };
+                },
+                else => return err,
+            };
+        }
     }
 
     /// ECMA-262 15.7 ClassDefinitionEvaluation, narrowed: a constructable
     /// function (classConstructorCall) whose prototype object holds the
     /// instance methods/accessors and chains to the parent's prototype;
     /// statics live in the function's bag, chained to the parent's bag
-    /// (static inheritance). No fields/#private/new.target -- see README.
+    /// (static inheritance). Fields (public/private/static), private
+    /// methods/accessors, computed keys, and static blocks all supported;
+    /// still no new.target/decorators -- see README.
     fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.ClassNode) anyerror!JSValue {
         const arena = self.arena_state.allocator();
 
@@ -2956,7 +3167,7 @@ pub const Interpreter = struct {
 
         var ctor_fnode: ?*zfunctions.FunctionNode = null;
         for (cnode.elements) |el| {
-            if (!el.is_static and el.kind == .method and std.mem.eql(u8, el.key, "constructor")) {
+            if (!el.is_static and el.kind == .method and el.key == .ident and std.mem.eql(u8, el.key.ident, "constructor")) {
                 ctor_fnode = el.function;
             }
         }
@@ -2989,21 +3200,84 @@ pub const Interpreter = struct {
             try bag.object.value.setPrototype(&parent_bag.object.value);
         }
 
+        // The class's own name binds BEFORE static elements run (spec:
+        // ClassDefinitionEvaluation initializes the inner binding before
+        // static fields/blocks execute, so `static { C.x = 1 }` works).
+        if (cnode.name) |n| try closure_env.define(arena, n, class_fn.retain());
+
+        // One pass, in declaration order (the spec's order matters for
+        // computed-key evaluation, static field initializers, and static
+        // blocks, which all run interleaved right here).
+        var instance_fields: std.ArrayList(FieldDef) = .empty;
         for (cnode.elements) |el| {
-            if (!el.is_static and el.kind == .method and std.mem.eql(u8, el.key, "constructor")) continue;
-            const m = try self.makeMethodClosure(closure_env, el.function, super_proto);
+            if (el.kind == .static_block) {
+                // Runs once, now, with this = the class and privates in
+                // scope.
+                _ = try invokeFunctionNode(self, el.function.?, closure_env, arena, class_fn, super_proto, null, cctx, &.{});
+                continue;
+            }
+
+            // Resolve the property key: computed keys evaluate ONCE, here,
+            // in order; private keys encode against this class's identity.
+            const key: []const u8 = switch (el.key) {
+                .ident => |n| n,
+                .private => |n| try self.encodePrivateKey(cctx, n),
+                .computed => |expr| blk: {
+                    // encodeKey handles BOTH symbols (`[Symbol.iterator]`,
+                    // encoded like any symbol-keyed property) and ordinary
+                    // values (ToPropertyKey string form).
+                    const kv = try self.evalExpression(closure_env, expr);
+                    break :blk try self.encodeKey(kv);
+                },
+            };
+
+            if (el.kind == .field) {
+                if (el.is_static) {
+                    // Static fields initialize at DEFINITION time, in
+                    // order, with this = the class function.
+                    const field_env = try closure_env.child(arena);
+                    field_env.this_value = class_fn;
+                    field_env.super_proto = super_proto;
+                    field_env.private_ctx = cctx;
+                    const v = if (el.value) |vexpr| try self.evalExpression(field_env, vexpr) else JSValue.UNDEFINED;
+                    const bag = try self.functionStatics(class_fn);
+                    try bag.object.value.set(key, v.retain());
+                } else {
+                    // Instance fields are CAPTURED here (key already
+                    // resolved) and initialized per-instance at
+                    // construction time.
+                    try instance_fields.append(arena, .{ .key = key, .value = el.value });
+                }
+                continue;
+            }
+
+            // Methods / accessors.
+            if (!el.is_static and el.kind == .method and el.key == .ident and std.mem.eql(u8, el.key.ident, "constructor")) continue;
+            const m = try self.makeMethodClosure(closure_env, el.function.?, super_proto, cctx);
             const target = if (el.is_static) try self.functionStatics(class_fn) else proto;
             switch (el.kind) {
-                .method => try target.object.value.set(el.key, m),
-                .get => try target.object.value.defineAccessor(el.key, m, null, JSValue.UNDEFINED),
-                .set => try target.object.value.defineAccessor(el.key, null, m, JSValue.UNDEFINED),
+                .method => try target.object.value.set(key, m),
+                .get => try target.object.value.defineAccessor(key, m, null, JSValue.UNDEFINED),
+                .set => try target.object.value.defineAccessor(key, null, m, JSValue.UNDEFINED),
+                .field, .static_block => unreachable,
             }
         }
-
-        if (cnode.name) |n| try closure_env.define(arena, n, class_fn.retain());
+        cctx.instance_fields = try instance_fields.toOwnedSlice(arena);
         return class_fn;
     }
 };
+
+/// A non-computed member access whose property name starts with '#' can
+/// only have come from `.#name` syntax (ordinary identifiers can't contain
+/// '#') -- it denotes PRIVATE member access. Computed `obj["#x"]` remains a
+/// normal string-keyed property, per spec.
+fn privateMemberName(m: anytype) ?[]const u8 {
+    if (m.computed) return null;
+    if (m.property.data != .identifier) return null;
+    const n = m.property.data.identifier;
+    if (n.len > 0 and n[0] == '#') return n;
+    return null;
+}
 
 fn labelIn(target: []const u8, labels: []const []const u8) bool {
     for (labels) |l| {
@@ -3042,12 +3316,14 @@ fn invokeFunctionNode(
     this_value: ?JSValue,
     super_proto: ?JSValue,
     super_ctor: ?JSValue,
+    private_ctx: ?*anyopaque,
     args: []const JSValue,
 ) anyerror!JSValue {
     const call_env = try closure_env.child(allocator);
     if (this_value) |tv| call_env.this_value = tv;
     call_env.super_proto = super_proto;
     call_env.super_ctor = super_ctor;
+    call_env.private_ctx = private_ctx;
 
     // `arguments`: every non-arrow call gets one (arrows inherit the
     // enclosing function's via the scope chain -- no binding here).
@@ -3097,12 +3373,12 @@ fn closureCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
         return closure_ctx.interp.throwError(.type_error, "async generators are not supported yet", .{});
     }
     if (fnode.is_generator) {
-        return closure_ctx.interp.makeGeneratorObject(fnode, closure_ctx.closure_env, this, args);
+        return closure_ctx.interp.makeGeneratorObject(fnode, closure_ctx.closure_env, this, closure_ctx.private_ctx, args);
     }
     if (fnode.is_async) {
-        return closure_ctx.interp.runAsyncFunction(fnode, closure_ctx.closure_env, this, args);
+        return closure_ctx.interp.runAsyncFunction(fnode, closure_ctx.closure_env, this, closure_ctx.private_ctx, args);
     }
-    return invokeFunctionNode(closure_ctx.interp, fnode, closure_ctx.closure_env, allocator, this, closure_ctx.super_proto, null, args);
+    return invokeFunctionNode(closure_ctx.interp, fnode, closure_ctx.closure_env, allocator, this, closure_ctx.super_proto, null, closure_ctx.private_ctx, args);
 }
 
 fn classConstructorCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -3116,16 +3392,31 @@ fn classConstructorCall(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     // its own caller either way).
     self.construct_target = null;
 
+    // Instance fields: a BASE class initializes them before its ctor body
+    // (spec: right after this-creation); a DERIVED class defers them until
+    // super() returns -- armed here, consumed by evalCall's super() branch
+    // (save/restore keeps nested constructions inside the body correct).
+    if (cctx.super_ctor == null) {
+        try self.runInstanceFields(cctx, this_value);
+    }
+
     if (cctx.ctor_fnode) |fnode| {
-        return invokeFunctionNode(self, fnode, cctx.closure_env, allocator, this_value, cctx.super_proto, cctx.super_ctor, args);
+        if (cctx.super_ctor != null) {
+            const prev_pending = self.pending_field_init;
+            self.pending_field_init = cctx;
+            defer self.pending_field_init = prev_pending;
+            return invokeFunctionNode(self, fnode, cctx.closure_env, allocator, this_value, cctx.super_proto, cctx.super_ctor, cctx, args);
+        }
+        return invokeFunctionNode(self, fnode, cctx.closure_env, allocator, this_value, cctx.super_proto, cctx.super_ctor, cctx, args);
     }
     // Implicit constructor: a derived class forwards this + args to its
-    // parent (`constructor(...args) { super(...args) }`); a base class
-    // is a no-op.
+    // parent (`constructor(...args) { super(...args) }`) and then runs its
+    // own field initializers; a base class is a no-op.
     if (cctx.super_ctor) |parent| {
         self.construct_target = parent.function.value.ctx;
         defer self.construct_target = null;
         _ = try parent.function.value.call(parent.function.value.ctx, allocator, this_value, args);
+        try self.runInstanceFields(cctx, this_value);
     }
     return JSValue.UNDEFINED;
 }
