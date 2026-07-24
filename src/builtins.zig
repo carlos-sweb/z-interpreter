@@ -290,6 +290,7 @@ pub fn setupGlobals(self: *Interpreter) !void {
     const console_obj = try self.ordinaryObject();
     try dneMethod(console_obj, "log", try native(self, "log", consoleLog));
     try g.define(arena, "console", console_obj);
+    try g.define(arena, "print", try native(self, "print", globalPrint));
 
     const math_obj = try self.ordinaryObject();
     try dneConst(math_obj, "PI", JSValue.fromNumber(zmath.PI));
@@ -401,6 +402,7 @@ pub fn setupGlobals(self: *Interpreter) !void {
         const sym = try JSValue.newSymbol(arena, "Symbol." ++ wk);
         try dneConst(symbol_statics, wk, sym.retain());
         if (comptime std.mem.eql(u8, wk, "iterator")) self.symbol_iterator = sym;
+        if (comptime std.mem.eql(u8, wk, "asyncIterator")) self.symbol_async_iterator = sym;
     }
     try dneMethod(symbol_statics, "for", try native(self, "for", symbolFor));
     try dneMethod(symbol_statics, "keyFor", try native(self, "keyFor", symbolKeyFor));
@@ -493,6 +495,23 @@ fn consoleLog(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     _ = this_value;
     const self = interp(ctx);
     try inspect.writeConsoleLog(allocator, self.console_writer, args);
+    return JSValue.UNDEFINED;
+}
+
+/// `print(msg)`: writes ToString(msg) + a newline. A d8/jsshell/qjs-style
+/// core global (not host-specific like `os` -- it's exactly as fundamental
+/// as `console`, which already lives here), and notably what Test262's own
+/// harness (doneprintHandle.js's $DONE) uses to report async-test
+/// completion -- so this also makes the runner able to detect "did an
+/// async test finish" for every async/async-generator test that reaches
+/// $DONE, not just this phase's own tests.
+fn globalPrint(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const msg = try coercion.toDisplayString(allocator, arg(args, 0));
+    defer allocator.free(msg);
+    try self.console_writer.writeAll(msg);
+    try self.console_writer.writeByte('\n');
     return JSValue.UNDEFINED;
 }
 

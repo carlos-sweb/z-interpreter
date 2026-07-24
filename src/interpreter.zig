@@ -132,7 +132,12 @@ const ModuleRecord = struct {
 /// scheduler side (generatorNext / the await-resumption natives) switches
 /// back in with the resume slots filled.
 const FiberState = struct {
-    kind: enum { generator, async_fn },
+    /// Orthogonal: a plain generator has is_generator only, a plain async
+    /// function has is_async only, and an async generator (`async
+    /// function*`/`async *method(){}`) has BOTH -- yield and await both
+    /// suspend the same fiber, interleaved in body order.
+    is_generator: bool,
+    is_async: bool,
     interp: *Interpreter,
     fiber: *fiber_mod.Fiber,
     fnode: *zfunctions.FunctionNode,
@@ -148,22 +153,34 @@ const FiberState = struct {
     resume_is_throw: bool = false,
     /// Fiber -> scheduler: the value a `yield` produced, if any.
     yielded: ?JSValue = null,
-    /// Fiber -> scheduler on completion (generators only; async resolves
-    /// its promise from inside the entry instead).
+    /// Fiber -> scheduler on completion (any is_generator fiber, sync or
+    /// async; a plain async function resolves its promise directly from
+    /// fiberEntry instead of going through these).
     completion: ?JSValue = null,
     completed_throw: ?JSValue = null,
     /// Non-JS errors (OOM/NotImplemented) that unwound the fiber -- the
     /// scheduler side re-raises them after the switch; they must never
     /// be swallowed.
     fatal_error: ?anyerror = null,
-    /// The promise an async function returned (kind == .async_fn only).
+    /// The promise a plain async function returned (is_async and NOT
+    /// is_generator only -- async generators use pending_result_promise
+    /// instead, one promise per in-flight next()/throw() request).
     promise: ?JSValue = null,
+    /// An async generator's in-flight next(v)/throw(v) request promise:
+    /// created by asyncGeneratorNext, settled by resumeFiber's post-switch
+    /// check once the fiber actually produces a yield or completes (which
+    /// may take several await-driven resumptions to reach). Null when no
+    /// request is in flight -- v1 doesn't support overlapping next() calls
+    /// (the only real consumer, `for await`, never overlaps them).
+    pending_result_promise: ?JSValue = null,
 };
 
-/// Runs the whole function body on the fiber's stack. Completion is
-/// recorded (generator) or settles the promise directly (async --
-/// resolvePromise only enqueues jobs, it never switches, so calling it
-/// from ON the fiber is safe).
+/// Runs the whole function body on the fiber's stack. A generator (sync or
+/// async) records its outcome for whoever reads it next (generatorNext
+/// synchronously, or resumeFiber's post-switch check for async generators);
+/// a plain async function settles its one-shot promise directly here
+/// (resolvePromise/rejectPromiseValue only enqueue jobs, never switch, so
+/// calling them from ON the fiber is safe).
 fn fiberEntry(arg: *anyopaque) void {
     const fs: *FiberState = @ptrCast(@alignCast(arg));
     const self = fs.interp;
@@ -172,22 +189,24 @@ fn fiberEntry(arg: *anyopaque) void {
         if (err == error.JsThrow) {
             const ex = self.pending_exception.?;
             self.pending_exception = null;
-            switch (fs.kind) {
-                .generator => fs.completed_throw = ex,
-                .async_fn => self.rejectPromiseValue(fs.promise.?, ex) catch |e2| {
+            if (fs.is_generator) {
+                fs.completed_throw = ex;
+            } else {
+                self.rejectPromiseValue(fs.promise.?, ex) catch |e2| {
                     fs.fatal_error = e2;
-                },
+                };
             }
         } else {
             fs.fatal_error = err;
         }
         return;
     };
-    switch (fs.kind) {
-        .generator => fs.completion = result,
-        .async_fn => self.resolvePromise(fs.promise.?, result) catch |e2| {
+    if (fs.is_generator) {
+        fs.completion = result;
+    } else {
+        self.resolvePromise(fs.promise.?, result) catch |e2| {
             fs.fatal_error = e2;
-        },
+        };
     }
 }
 
@@ -223,6 +242,27 @@ fn generatorNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     const c = fs.completion orelse JSValue.UNDEFINED;
     fs.completion = null;
     return iterResult(allocator, c, true);
+}
+
+/// `asyncGen.next(v)` -- native with ctx = *FiberState (is_generator AND
+/// is_async both true). Unlike the sync generatorNext, this must itself
+/// return a PROMISE synchronously: resumeFiber may settle it right away (a
+/// yield/completion reached before any pending await) or leave it pending
+/// (the fiber suspended at an intermediate await) -- resumeFiber's
+/// post-switch check (see its doc comment) settles it either way, possibly
+/// after further await-driven resumptions.
+fn asyncGeneratorNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const fs: *FiberState = @ptrCast(@alignCast(ctx));
+    const self = fs.interp;
+    if (fs.fiber.finished) return self.fulfilledPromise(try iterResult(allocator, JSValue.UNDEFINED, true));
+
+    const p = try JSValue.newPromise(self.arena_state.allocator());
+    fs.pending_result_promise = p;
+    fs.resume_value = if (args.len > 0) args[0] else JSValue.UNDEFINED;
+    fs.resume_is_throw = false;
+    try self.resumeFiber(fs);
+    return p;
 }
 
 /// A `{ value, done }` iterator-result object.
@@ -344,6 +384,9 @@ pub const Interpreter = struct {
     /// The well-known `Symbol.iterator` value (the only one wired into
     /// real behavior). Set in setupGlobals.
     symbol_iterator: ?JSValue = null,
+    /// The well-known `Symbol.asyncIterator` -- resolveAsyncIterator's
+    /// first choice for `for await`. Set in setupGlobals.
+    symbol_async_iterator: ?JSValue = null,
     /// The real builtin prototype objects (`Object.prototype`,
     /// `Array.prototype`, ...), materialized once in setupGlobals and alive
     /// for the whole run (arena). Each holds its type's methods as real own
@@ -840,6 +883,18 @@ pub const Interpreter = struct {
     /// Scheduler -> fiber, with current_fiber bookkeeping and fatal
     /// (non-JS) error propagation. Returns when the fiber suspends or
     /// finishes.
+    ///
+    /// For an async generator with a request in flight (pending_result_
+    /// promise != null), ALSO settles that promise once the fiber actually
+    /// produces something: a yield (resolve with {value,done:false}), a
+    /// throw (reject), or a normal completion (resolve with
+    /// {value,done:true}). If the fiber suspended at a plain `await`
+    /// instead -- nothing produced yet -- the promise stays pending; a
+    /// later resumeFiber call (driven by that await's own promise settling,
+    /// via awaitOnFulfilled/awaitOnRejected) will reach this same check
+    /// again and eventually settle it. This centralizes the settling logic
+    /// so it doesn't matter whether asyncGeneratorNext or an await-
+    /// resumption job is the one calling resumeFiber for a given leg.
     fn resumeFiber(self: *Interpreter, fs: *FiberState) anyerror!void {
         const prev = self.current_fiber;
         const prev_limit = self.stack_limit;
@@ -848,10 +903,50 @@ pub const Interpreter = struct {
         fs.fiber.switchTo();
         self.current_fiber = prev;
         self.stack_limit = prev_limit;
+        if (fs.is_generator and fs.is_async) {
+            if (fs.pending_result_promise) |p| {
+                if (fs.yielded) |y| {
+                    fs.yielded = null;
+                    fs.pending_result_promise = null;
+                    try self.resolvePromise(p, try iterResult(self.arena_state.allocator(), y, false));
+                } else if (fs.completed_throw) |ex| {
+                    fs.completed_throw = null;
+                    fs.pending_result_promise = null;
+                    try self.rejectPromiseValue(p, ex);
+                } else if (fs.completion) |c| {
+                    fs.completion = null;
+                    fs.pending_result_promise = null;
+                    try self.resolvePromise(p, try iterResult(self.arena_state.allocator(), c, true));
+                }
+                // Else: suspended at a plain await mid-body -- nothing to
+                // settle yet, leave pending_result_promise as-is.
+            }
+        }
         if (fs.fatal_error) |err| {
             fs.fatal_error = null;
             return err;
         }
+    }
+
+    /// The suspend/resume mechanics of ONE `await`: subscribe to the
+    /// operand's settlement (wrapping a non-promise in an already-fulfilled
+    /// one, so `await 5` still takes a real trip through the microtask
+    /// queue -- real semantics), suspend the fiber, and once resumed either
+    /// return the settled value or re-throw it. Shared by the `.await_expr`
+    /// evaluator, AsyncGeneratorYield's implicit Await of a yielded value,
+    /// and `for await`'s per-value Await.
+    fn awaitValue(self: *Interpreter, fs: *FiberState, operand: JSValue) anyerror!JSValue {
+        const arena = self.arena_state.allocator();
+        const p = if (operand == .promise) operand else try self.fulfilledPromise(operand);
+        const on_f = try JSValue.newFunction(arena, .{ .ctx = fs, .name = "", .call = awaitOnFulfilled });
+        const on_r = try JSValue.newFunction(arena, .{ .ctx = fs, .name = "", .call = awaitOnRejected });
+        try self.subscribePromise(p, on_f, on_r, null);
+        fs.fiber.suspendSelf();
+        if (fs.resume_is_throw) {
+            fs.resume_is_throw = false;
+            return self.throwValue(fs.resume_value);
+        }
+        return fs.resume_value;
     }
 
     /// Calling `function*` builds the generator object -- a plain object
@@ -861,7 +956,8 @@ pub const Interpreter = struct {
         const arena = self.arena_state.allocator();
         const fs = try arena.create(FiberState);
         fs.* = .{
-            .kind = .generator,
+            .is_generator = true,
+            .is_async = false,
             .interp = self,
             .fiber = undefined,
             .fnode = fnode,
@@ -890,7 +986,8 @@ pub const Interpreter = struct {
         const arena = self.arena_state.allocator();
         const fs = try arena.create(FiberState);
         fs.* = .{
-            .kind = .async_fn,
+            .is_generator = false,
+            .is_async = true,
             .interp = self,
             .fiber = undefined,
             .fnode = fnode,
@@ -903,6 +1000,37 @@ pub const Interpreter = struct {
         fs.fiber = try fiber_mod.Fiber.init(arena, fiberEntry, fs);
         try self.resumeFiber(fs);
         return fs.promise.?;
+    }
+
+    /// Calling `async function*`/`async *method(){}` builds an async
+    /// generator object: like makeGeneratorObject, but `next` is
+    /// asyncGeneratorNext (returns a promise per call) and the
+    /// self-iterator hook is keyed by Symbol.asyncIterator, not
+    /// Symbol.iterator (spec: AsyncGenerator.prototype[Symbol.asyncIterator]
+    /// returns `this`). The body runs nothing until the first next(),
+    /// same as a sync generator.
+    fn makeAsyncGeneratorObject(self: *Interpreter, fnode: *zfunctions.FunctionNode, closure_env: *Environment, this_value: ?JSValue, private_ctx: ?*anyopaque, args: []const JSValue) anyerror!JSValue {
+        const arena = self.arena_state.allocator();
+        const fs = try arena.create(FiberState);
+        fs.* = .{
+            .is_generator = true,
+            .is_async = true,
+            .interp = self,
+            .fiber = undefined,
+            .fnode = fnode,
+            .closure_env = closure_env,
+            .this_value = this_value,
+            .private_ctx = private_ctx,
+            .args = try arena.dupe(JSValue, args),
+        };
+        fs.fiber = try fiber_mod.Fiber.init(arena, fiberEntry, fs);
+        var obj = try JSValue.newObject(arena);
+        try obj.object.value.set("next", try JSValue.newFunction(arena, .{ .ctx = fs, .name = "next", .call = asyncGeneratorNext }));
+        if (self.symbol_async_iterator) |sym| {
+            const key = try self.encodeKey(sym);
+            try obj.object.value.set(key, try self.nativeMethod("asyncIterator", "self", iteratorSelf));
+        }
+        return obj;
     }
 
     // ===== Timers (setTimeout macrotasks) =====
@@ -1581,6 +1709,26 @@ pub const Interpreter = struct {
         return self.throwError(.type_error, "{s} is not iterable", .{obj.typeOf()});
     }
 
+    /// Like resolveIterator, but for `for await`: tries `[Symbol.
+    /// asyncIterator]()` first (a real async iterator, e.g. an async
+    /// generator object); falls back to the ordinary sync-iterator
+    /// resolution (AsyncFromSyncIterator wrapping -- the caller Awaits
+    /// each produced value either way, which is what actually makes a
+    /// plain Symbol.iterator object work under `for await`).
+    fn resolveAsyncIterator(self: *Interpreter, obj: JSValue) anyerror!JSValue {
+        const arena = self.arena_state.allocator();
+        if (self.symbol_async_iterator) |sym| {
+            const key = try self.encodeKey(sym);
+            const method = try self.getProperty(obj, key);
+            if (method == .function) {
+                const iter = try method.function.value.call(method.function.value.ctx, arena, obj, &.{});
+                if (iter != .object) return self.throwError(.type_error, "Result of the Symbol.asyncIterator method is not an object", .{});
+                return iter;
+            }
+        }
+        return self.resolveIterator(obj);
+    }
+
     /// Runs an iterator object to completion, collecting its values.
     pub fn drainIterator(self: *Interpreter, iter: JSValue) anyerror![]const JSValue {
         const arena = self.arena_state.allocator();
@@ -1896,6 +2044,12 @@ pub const Interpreter = struct {
     /// Symbol.iterator, impossible until ZObject supports symbol keys.
     fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zstatements.Statement, labels: []const []const u8) anyerror!Completion {
         const arena = self.arena_state.allocator();
+        const is_await = head.is_await;
+        // The parser only ever sets is_await inside an async function/async
+        // generator body (await_allowed-gated), so a live fiber always
+        // exists here; a missing one would be an interpreter bug -- same
+        // contract as `.await_expr`/`.yield_expr`.
+        const fs: ?*FiberState = if (is_await) (self.current_fiber orelse return error.NotImplemented) else null;
         const iterable = try self.evalExpression(env, head.iterable);
         switch (iterable) {
             .array => |box| {
@@ -1905,14 +2059,16 @@ pub const Interpreter = struct {
                 // cached slice dangling.
                 var i: usize = 0;
                 while (i < box.value.length()) : (i += 1) {
-                    const item = box.value.get(i).retain();
+                    var item = box.value.get(i).retain();
+                    if (is_await) item = try self.awaitValue(fs.?, item);
                     if (try self.forIterationStep(env, head.binding, item, body, labels)) |c| return c;
                 }
             },
             .string => |box| {
                 var it = std.unicode.Utf8Iterator{ .bytes = box.value.data, .i = 0 };
                 while (it.nextCodepointSlice()) |cp| {
-                    const ch = try JSValue.newString(arena, cp);
+                    var ch = try JSValue.newString(arena, cp);
+                    if (is_await) ch = try self.awaitValue(fs.?, ch);
                     if (try self.forIterationStep(env, head.binding, ch, body, labels)) |c| return c;
                 }
             },
@@ -1930,6 +2086,7 @@ pub const Interpreter = struct {
                     var entry = try JSValue.newArray(arena);
                     _ = try entry.array.value.push(k);
                     _ = try entry.array.value.push(v);
+                    if (is_await) entry = try self.awaitValue(fs.?, entry);
                     if (try self.forIterationStep(env, head.binding, entry, body, labels)) |c| return c;
                 }
             },
@@ -1942,25 +2099,41 @@ pub const Interpreter = struct {
                 while (true) {
                     const vals = box.value.values();
                     if (i >= vals.len) break;
-                    const v = vals[i].retain();
+                    var v = vals[i].retain();
                     i += 1;
+                    if (is_await) v = try self.awaitValue(fs.?, v);
                     if (try self.forIterationStep(env, head.binding, v, body, labels)) |c| return c;
                 }
             },
-            // The iterator protocol: a user iterable via Symbol.iterator,
-            // or an object that IS an iterator (duck-typed `next` --
-            // generator objects, hand-written iterators). The completion
-            // value (`done: true`'s value) is excluded, per spec.
+            // The iterator protocol: a user iterable via Symbol.iterator
+            // (or Symbol.asyncIterator, for `for await`), or an object that
+            // IS an iterator (duck-typed `next` -- generator objects,
+            // hand-written iterators). The completion value (`done: true`'s
+            // value) is excluded, per spec.
             .object => {
-                const iter = try self.resolveIterator(iterable);
+                const iter = if (is_await) try self.resolveAsyncIterator(iterable) else try self.resolveIterator(iterable);
                 const next_fn = try self.getProperty(iter, "next");
                 while (true) {
-                    const step = try next_fn.function.value.call(next_fn.function.value.ctx, arena, iter, &.{});
+                    var step = try next_fn.function.value.call(next_fn.function.value.ctx, arena, iter, &.{});
+                    // A real async iterator's next() returns a PROMISE of
+                    // {value,done}; the AsyncFromSyncIterator fallback
+                    // (plain Symbol.iterator) returns the {value,done}
+                    // object directly -- either way, awaiting a non-promise
+                    // is a harmless one-tick round trip, so this one check
+                    // handles both without needing to track which case
+                    // resolveAsyncIterator picked.
+                    if (is_await and step == .promise) step = try self.awaitValue(fs.?, step);
                     if (step != .object) {
                         return self.throwError(.type_error, "Iterator result {s} is not an object", .{step.typeOf()});
                     }
                     if (coercion.isTruthy(try self.getProperty(step, "done"))) break;
-                    const value = try self.getProperty(step, "value");
+                    var value = try self.getProperty(step, "value");
+                    // Spec: for-await-of also Awaits the extracted VALUE
+                    // itself (AsyncFromSyncIteratorContinuation, for the
+                    // sync-fallback case). Awaiting an already-resolved
+                    // value from a genuine async iterator is a no-op
+                    // extra tick -- documented, narrowed simplification.
+                    if (is_await) value = try self.awaitValue(fs.?, value);
                     if (try self.forIterationStep(env, head.binding, value, body, labels)) |c| return c;
                 }
             },
@@ -2181,9 +2354,14 @@ pub const Interpreter = struct {
             // missing current_fiber would be an interpreter bug.
             .yield_expr => |y| {
                 const fs = self.current_fiber orelse return error.NotImplemented;
-                if (fs.kind != .generator) return error.NotImplemented;
+                if (!fs.is_generator) return error.NotImplemented;
                 if (y.delegate) return self.evalYieldDelegate(env, fs, y.argument.?);
-                const value = if (y.argument) |a| try self.evalExpression(env, a) else JSValue.UNDEFINED;
+                var value = if (y.argument) |a| try self.evalExpression(env, a) else JSValue.UNDEFINED;
+                // AsyncGeneratorYield: an async generator's `yield` first
+                // Awaits its operand (so `yield somePromise` yields the
+                // RESOLVED value, and rejection propagates as a thrown
+                // exception at the yield point) before suspending.
+                if (fs.is_async) value = try self.awaitValue(fs, value);
                 fs.yielded = value;
                 fs.fiber.suspendSelf();
                 if (fs.resume_is_throw) {
@@ -2194,20 +2372,9 @@ pub const Interpreter = struct {
             },
             .await_expr => |operand_node| {
                 const fs = self.current_fiber orelse return error.NotImplemented;
-                if (fs.kind != .async_fn) return error.NotImplemented;
+                if (!fs.is_async) return error.NotImplemented;
                 const operand = try self.evalExpression(env, operand_node);
-                // Awaiting a non-promise still takes one trip through the
-                // queue (real semantics -- `await 5` yields to microtasks).
-                const p = if (operand == .promise) operand else try self.fulfilledPromise(operand);
-                const on_f = try JSValue.newFunction(arena, .{ .ctx = fs, .name = "", .call = awaitOnFulfilled });
-                const on_r = try JSValue.newFunction(arena, .{ .ctx = fs, .name = "", .call = awaitOnRejected });
-                try self.subscribePromise(p, on_f, on_r, null);
-                fs.fiber.suspendSelf();
-                if (fs.resume_is_throw) {
-                    fs.resume_is_throw = false;
-                    return self.throwValue(fs.resume_value);
-                }
-                return fs.resume_value;
+                return self.awaitValue(fs, operand);
             },
             // Bare `super` outside call/member position, or super in a
             // non-method context (the call/member interceptors resolve
@@ -3370,7 +3537,7 @@ fn closureCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     // `this` inheritance.
     const this: ?JSValue = if (fnode.kind != .arrow) this_value else null;
     if (fnode.is_generator and fnode.is_async) {
-        return closure_ctx.interp.throwError(.type_error, "async generators are not supported yet", .{});
+        return closure_ctx.interp.makeAsyncGeneratorObject(fnode, closure_ctx.closure_env, this, closure_ctx.private_ctx, args);
     }
     if (fnode.is_generator) {
         return closure_ctx.interp.makeGeneratorObject(fnode, closure_ctx.closure_env, this, closure_ctx.private_ctx, args);

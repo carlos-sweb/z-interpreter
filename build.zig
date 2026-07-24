@@ -78,6 +78,7 @@ pub fn build(b: *std.Build) void {
         "tests/promise_test.zig",
         "tests/generator_test.zig",
         "tests/async_test.zig",
+        "tests/async_generator_test.zig",
         "tests/module_test.zig",
         "tests/function_methods_test.zig",
         "tests/stack_guard_test.zig",

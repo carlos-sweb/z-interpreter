@@ -119,8 +119,11 @@ test "async methods in object literals and classes" {
     , "inst: 8\nstatic: 9\n");
 }
 
-test "async generators parse but are a clear runtime error" {
-    try helpers.expectUncaught("const o = { async *ag() { yield 1; } }; o.ag();", .type_error, "async generators are not supported yet");
+test "async generator methods work (moved to async_generator_test.zig)" {
+    try helpers.expectStdout(
+        \\const o = { async *ag() { yield 1; } };
+        \\o.ag().next().then(r => console.log(r.value, r.done));
+    , "1 false\n");
 }
 
 test "a generator driven from inside an async function (nested fibers)" {
