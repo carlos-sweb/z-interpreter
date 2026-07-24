@@ -765,6 +765,13 @@ pub const Interpreter = struct {
     /// `index`/`input`/`groups`. Keyed by the array Rc box pointer; the
     /// value is a plain object holding the extras.
     array_props: std.AutoHashMapUnmanaged(usize, JSValue) = .empty,
+    /// The boxed primitive inside a `new String()`/`new Number()`/
+    /// `new Boolean()` wrapper object -- these constructors return an
+    /// ordinary object (no internal-slot concept exists on JSValue's
+    /// `.object` variant), so the wrapped primitive lives here instead,
+    /// keyed by the wrapper object's Rc box pointer. Same side-table
+    /// shape as `array_props`. See /home/sweb/.plans/primitive-wrapper-objects.md.
+    primitive_wrapper_data: std.AutoHashMapUnmanaged(usize, JSValue) = .empty,
     /// The stack-depth guard: recursing below this native stack address
     /// raises the real `RangeError: Maximum call stack size exceeded`
     /// instead of segfaulting (Test262's tco-* tests found this). Set
@@ -829,6 +836,7 @@ pub const Interpreter = struct {
         self.modules.deinit(self.gc_allocator);
         self.regex_state.deinit(self.gc_allocator);
         self.array_props.deinit(self.gc_allocator);
+        self.primitive_wrapper_data.deinit(self.gc_allocator);
         self.pending_jobs.deinit(self.gc_allocator);
         self.timers.deinit(self.gc_allocator);
 
@@ -1074,6 +1082,8 @@ pub const Interpreter = struct {
         while (srit.next()) |v| marker.value(v.*);
         var apit = self.array_props.valueIterator();
         while (apit.next()) |v| marker.value(v.*);
+        var pwit = self.primitive_wrapper_data.valueIterator();
+        while (pwit.next()) |v| marker.value(v.*);
         var mcit = self.method_cache.valueIterator();
         while (mcit.next()) |v| marker.value(v.*);
         if (self.global_object) |v| marker.value(v);
@@ -1304,6 +1314,8 @@ pub const Interpreter = struct {
         while (srit2.next()) |v| sweeper.value(v.*);
         var apit2 = self.array_props.valueIterator();
         while (apit2.next()) |v| sweeper.value(v.*);
+        var pwit2 = self.primitive_wrapper_data.valueIterator();
+        while (pwit2.next()) |v| sweeper.value(v.*);
         var mcit2 = self.method_cache.valueIterator();
         while (mcit2.next()) |v| sweeper.value(v.*);
         if (self.pending_exception) |v| sweeper.value(v);
@@ -1559,6 +1571,36 @@ pub const Interpreter = struct {
         const gop = try self.array_props.getOrPut(arena, @intFromPtr(array.array));
         if (!gop.found_existing) gop.value_ptr.* = try self.ordinaryObject();
         return gop.value_ptr.*;
+    }
+
+    /// `new String(...)`/`new Number(...)`/`new Boolean(...)`: JSValue's
+    /// `.object` variant has no internal-slot concept, so the wrapped
+    /// primitive a boxed constructor computes has nowhere to live inside
+    /// the object `evalNew` already created -- store it in the
+    /// primitive_wrapper_data side table (same shape as array_props),
+    /// keyed by the wrapper's Rc box pointer, and return the wrapper
+    /// object itself instead of the bare primitive (evalNew already
+    /// keeps `.object` results as-is, no changes needed there). Called
+    /// from inside a constructor native (globalString/globalNumber/
+    /// globalBoolean) with the primitive it just computed; a plain call
+    /// (no `new`) passes `primitive` through unchanged. Ownership: takes
+    /// `primitive` by value, no retain -- the constructor's own local
+    /// computation is the only reference, and it's either returned
+    /// (plain call) or moved into the table (constructed call), never
+    /// both. See /home/sweb/.plans/primitive-wrapper-objects.md.
+    pub fn boxPrimitiveIfConstructed(self: *Interpreter, ctx: *anyopaque, this_value: JSValue, primitive: JSValue) anyerror!JSValue {
+        if (self.construct_target != ctx) return primitive;
+        try self.primitive_wrapper_data.put(self.gc_allocator, @intFromPtr(this_value.object), primitive);
+        return this_value;
+    }
+
+    /// The primitive value boxed inside a wrapper object created via
+    /// `boxPrimitiveIfConstructed`, if `value` is one (primitive_wrapper_data
+    /// side table). Used by requireString/requireNumber/requireBoolean to
+    /// unwrap `new String(x)`/etc. before falling back to a TypeError.
+    pub fn unboxPrimitiveWrapper(self: *Interpreter, value: JSValue) ?JSValue {
+        if (value != .object) return null;
+        return self.primitive_wrapper_data.get(@intFromPtr(value.object));
     }
 
     // ===== Modules (import/export) =====

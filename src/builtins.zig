@@ -780,10 +780,13 @@ fn arrayIsArray(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 // modules, all operating on ([]const u8, allocator)) =====
 
 fn requireString(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror![]const u8 {
-    if (this_value != .string) {
+    // Unwrap a `new String(...)` object (primitive_wrapper_data side
+    // table) before rejecting -- see boxPrimitiveIfConstructed's doc.
+    const v: JSValue = if (this_value == .string) this_value else interp(ctx).unboxPrimitiveWrapper(this_value) orelse this_value;
+    if (v != .string) {
         return interp(ctx).throwError(.type_error, "String.prototype.{s} called on a non-string", .{method});
     }
-    return this_value.string.value.data;
+    return v.string.value.data;
 }
 
 fn argString(allocator: Allocator, args: []const JSValue, i: usize) ![]u8 {
@@ -1334,38 +1337,36 @@ fn globalIsFinite(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
 }
 
 fn globalString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = this_value;
+    const self = interp(ctx);
     // String(symbol) is the one explicit coercion the spec allows --
     // "Symbol(desc)" -- unlike implicit `sym + ''` which throws.
     if (arg(args, 0) == .symbol) {
         const s = try arg(args, 0).symbol.value.toString(allocator);
         defer allocator.free(s);
-        return interp(ctx).gcNewString(s);
+        return self.boxPrimitiveIfConstructed(ctx, this_value, try self.gcNewString(s));
     }
     // String(regex) is regex.toString() -- /source/flags (with flags).
     if (arg(args, 0) == .regex) {
-        const st = interp(ctx).regexState(arg(args, 0));
+        const st = self.regexState(arg(args, 0));
         const s = try std.fmt.allocPrint(allocator, "/{s}/{s}", .{ st.source, st.flags });
         defer allocator.free(s);
-        return interp(ctx).gcNewString(s);
+        return self.boxPrimitiveIfConstructed(ctx, this_value, try self.gcNewString(s));
     }
     const s = try coercion.toDisplayString(allocator, arg(args, 0));
     defer allocator.free(s);
-    return interp(ctx).gcNewString(s);
+    return self.boxPrimitiveIfConstructed(ctx, this_value, try self.gcNewString(s));
 }
 
 fn globalNumber(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
     _ = allocator;
-    _ = this_value;
-    return JSValue.fromNumber(try coercion.toNumber(arg(args, 0)));
+    const primitive = JSValue.fromNumber(try coercion.toNumber(arg(args, 0)));
+    return interp(ctx).boxPrimitiveIfConstructed(ctx, this_value, primitive);
 }
 
 fn globalBoolean(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
     _ = allocator;
-    _ = this_value;
-    return JSValue.fromBool(coercion.isTruthy(arg(args, 0)));
+    const primitive = JSValue.fromBool(coercion.isTruthy(arg(args, 0)));
+    return interp(ctx).boxPrimitiveIfConstructed(ctx, this_value, primitive);
 }
 
 /// Indirect `eval` (called as a plain value, not the literal `eval(...)`
@@ -1384,8 +1385,9 @@ fn globalEval(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 // wrapper objects have no [[NumberData]] here -- documented narrowing) =====
 
 fn requireNumber(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!f64 {
-    if (this_value != .number) return interp(ctx).throwError(.type_error, "Number.prototype.{s} called on a non-number", .{method});
-    return this_value.number;
+    const v: JSValue = if (this_value == .number) this_value else interp(ctx).unboxPrimitiveWrapper(this_value) orelse this_value;
+    if (v != .number) return interp(ctx).throwError(.type_error, "Number.prototype.{s} called on a non-number", .{method});
+    return v.number;
 }
 
 /// `n.toString(radix?)` / `toLocaleString` -- radix 2..36 (default 10).
@@ -1451,8 +1453,9 @@ fn numberToPrecision(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
 // ===== Boolean.prototype =====
 
 fn requireBoolean(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!bool {
-    if (this_value != .boolean) return interp(ctx).throwError(.type_error, "Boolean.prototype.{s} called on a non-boolean", .{method});
-    return this_value.boolean;
+    const v: JSValue = if (this_value == .boolean) this_value else interp(ctx).unboxPrimitiveWrapper(this_value) orelse this_value;
+    if (v != .boolean) return interp(ctx).throwError(.type_error, "Boolean.prototype.{s} called on a non-boolean", .{method});
+    return v.boolean;
 }
 
 fn booleanToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
