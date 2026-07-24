@@ -21,5 +21,11 @@
         .zjson = .{ .path = "../z-json" },
         .zstring = .{ .path = "../z-string" },
         .zdate = .{ .path = "../z-date" },
+        .zarray = .{ .path = "../z-array" },
+        .zobject = .{ .path = "../z-object" },
+        .zmap = .{ .path = "../z-map" },
+        .zset = .{ .path = "../z-set" },
+        .zerror = .{ .path = "../z-error" },
+        .zsymbol = .{ .path = "../z-symbol" },
     },
 }

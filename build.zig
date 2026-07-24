@@ -34,6 +34,24 @@ pub fn build(b: *std.Build) void {
     const zregex_dep = b.dependency("zregex", .{ .target = target, .optimize = optimize });
     const zregex_module = zregex_dep.module("zregex");
 
+    const zarray_dep = b.dependency("zarray", .{ .target = target, .optimize = optimize });
+    const zarray_module = zarray_dep.module("zarray");
+
+    const zobject_dep = b.dependency("zobject", .{ .target = target, .optimize = optimize });
+    const zobject_module = zobject_dep.module("zobject");
+
+    const zmap_dep = b.dependency("zmap", .{ .target = target, .optimize = optimize });
+    const zmap_module = zmap_dep.module("zmap");
+
+    const zset_dep = b.dependency("zset", .{ .target = target, .optimize = optimize });
+    const zset_module = zset_dep.module("zset");
+
+    const zerror_dep = b.dependency("zerror", .{ .target = target, .optimize = optimize });
+    const zerror_module = zerror_dep.module("zerror");
+
+    const zsymbol_dep = b.dependency("zsymbol", .{ .target = target, .optimize = optimize });
+    const zsymbol_module = zsymbol_dep.module("zsymbol");
+
     const zinterpreter_module = b.addModule("zinterpreter", .{
         .root_source_file = b.path("src/zinterpreter.zig"),
     });
@@ -47,6 +65,12 @@ pub fn build(b: *std.Build) void {
     zinterpreter_module.addImport("zstring", zstring_module);
     zinterpreter_module.addImport("zdate", zdate_module);
     zinterpreter_module.addImport("zregex", zregex_module);
+    zinterpreter_module.addImport("zarray", zarray_module);
+    zinterpreter_module.addImport("zobject", zobject_module);
+    zinterpreter_module.addImport("zmap", zmap_module);
+    zinterpreter_module.addImport("zset", zset_module);
+    zinterpreter_module.addImport("zerror", zerror_module);
+    zinterpreter_module.addImport("zsymbol", zsymbol_module);
 
     const test_step = b.step("test", "Run all tests");
 
@@ -135,6 +159,12 @@ pub fn build(b: *std.Build) void {
     src_tests.root_module.addImport("zstring", zstring_module);
     src_tests.root_module.addImport("zdate", zdate_module);
     src_tests.root_module.addImport("zregex", zregex_module);
+    src_tests.root_module.addImport("zarray", zarray_module);
+    src_tests.root_module.addImport("zobject", zobject_module);
+    src_tests.root_module.addImport("zmap", zmap_module);
+    src_tests.root_module.addImport("zset", zset_module);
+    src_tests.root_module.addImport("zerror", zerror_module);
+    src_tests.root_module.addImport("zsymbol", zsymbol_module);
     const run_src_tests = b.addRunArtifact(src_tests);
     test_step.dependOn(&run_src_tests.step);
 

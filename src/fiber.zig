@@ -25,9 +25,9 @@ pub const supported = switch (builtin.cpu.arch) {
 /// 8 MiB of virtual address space per fiber (lazily paged by the OS --
 /// untouched pages cost nothing), matching a typical main-thread stack
 /// so the interpreter's stack-depth guard behaves the same on and off
-/// fibers. Fiber stacks are arena-allocated and never individually
-/// freed -- consistent with the interpreter's arena-per-run model; the
-/// GC phase revisits this.
+/// fibers. Freed individually via `deinit()` (GC roadmap item 15) once
+/// the embedder's collector determines nothing can resume this fiber
+/// anymore -- not tied to the whole run's lifetime.
 const stack_size = 8 * 1024 * 1024;
 
 pub const Fiber = struct {
@@ -69,6 +69,19 @@ pub const Fiber = struct {
             .stack_floor = @intFromPtr(stack.ptr),
         };
         return self;
+    }
+
+    /// Frees the stack allocation this Fiber struct itself lives inside
+    /// (see `init`'s doc comment -- the struct is placed at the top of
+    /// the same slice). Must be called with the SAME allocator `init`
+    /// used, and only once nothing will ever `switchTo()` this fiber
+    /// again (GC roadmap item 15: a fiber whose generator/async object
+    /// became unreachable, finished or not, gets torn down this way
+    /// instead of leaking until the whole run ends).
+    pub fn deinit(self: *Fiber, allocator: Allocator) void {
+        const stack_ptr: [*]align(16) u8 = @ptrFromInt(self.stack_floor);
+        const stack: []align(16) u8 = stack_ptr[0..stack_size];
+        allocator.free(stack);
     }
 
     /// Scheduler -> fiber. Returns when the fiber suspends or finishes.

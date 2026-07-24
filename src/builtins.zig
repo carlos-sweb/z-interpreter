@@ -245,7 +245,7 @@ pub const string_methods = std.StaticStringMap(NativeFn).initComptime(.{
 /// Installs every global binding. Called lazily from `run()` (never from
 /// init) so `self: *Interpreter` is a stable address for native ctx.
 pub fn setupGlobals(self: *Interpreter) !void {
-    const arena = self.arena_state.allocator();
+    const arena = self.gc_allocator;
     const g = self.global_env;
 
     try g.define(arena, "undefined", JSValue.UNDEFINED);
@@ -256,7 +256,7 @@ pub fn setupGlobals(self: *Interpreter) !void {
     // created up front so every ordinary object built below (console, Math,
     // JSON, ...) can chain to it via `self.ordinaryObject()`. The prototype
     // is populated with its methods later, uniformly, in materializeProtos.
-    const object_ctor = try JSValue.newFunction(arena, .{
+    const object_ctor = try self.gcNewFunction(.{
         .ctx = self,
         .name = "Object",
         .arity = 1,
@@ -314,7 +314,7 @@ pub fn setupGlobals(self: *Interpreter) !void {
     try g.define(arena, "JSON", json_obj);
 
     // Array: constructable (new Array(n) / Array(a, b, c)) + statics.
-    const array_ctor = try JSValue.newFunction(arena, .{
+    const array_ctor = try self.gcNewFunction(.{
         .ctx = self,
         .name = "Array",
         .arity = 1,
@@ -331,7 +331,7 @@ pub fn setupGlobals(self: *Interpreter) !void {
     // composes and compiles a real closure (a bounded eval). Its
     // .prototype carries the cached call/apply/bind for the detached
     // harness pattern.
-    const function_ctor = try JSValue.newFunction(arena, .{
+    const function_ctor = try self.gcNewFunction(.{
         .ctx = self,
         .name = "Function",
         .arity = 1,
@@ -343,7 +343,7 @@ pub fn setupGlobals(self: *Interpreter) !void {
     // A real constructable native: `new Date(...)` works through evalNew's
     // object-like-return-overrides rule (a .date return replaces the plain
     // instance). Static methods live in its property bag (like Number's).
-    const date_ctor = try JSValue.newFunction(arena, .{
+    const date_ctor = try self.gcNewFunction(.{
         .ctx = self,
         .name = "Date",
         .call = dateConstructor,
@@ -367,7 +367,7 @@ pub fn setupGlobals(self: *Interpreter) !void {
         .{ "EvalError", zvalue.ErrorKind.eval_error },
         .{ "URIError", zvalue.ErrorKind.uri_error },
     }) |entry| {
-        const ctor = try JSValue.newFunction(arena, .{
+        const ctor = try self.gcNewFunction(.{
             .ctx = self,
             .name = entry[0],
             .arity = 1,
@@ -379,7 +379,7 @@ pub fn setupGlobals(self: *Interpreter) !void {
 
     // Promise: constructable native; the statics (resolve/reject/all/
     // race) ride the phase-10 property bag.
-    const promise_ctor = try JSValue.newFunction(arena, .{
+    const promise_ctor = try self.gcNewFunction(.{
         .ctx = self,
         .name = "Promise",
         .arity = 1,
@@ -396,13 +396,19 @@ pub fn setupGlobals(self: *Interpreter) !void {
     // Symbol: callable but NOT constructable (`new Symbol()` throws).
     // The well-known symbols and the for()/keyFor() registry are JSValue
     // symbols owned by the interpreter (identity = Rc box).
-    const symbol_ctor = try JSValue.newFunction(arena, .{ .ctx = self, .name = "Symbol", .arity = 0, .call = symbolConstructor });
+    const symbol_ctor = try self.gcNewFunction(.{ .ctx = self, .name = "Symbol", .arity = 0, .call = symbolConstructor });
     const symbol_statics = try self.functionStatics(symbol_ctor);
     inline for (.{ "iterator", "asyncIterator", "hasInstance", "toPrimitive", "toStringTag", "species", "isConcatSpreadable", "match", "replace", "search", "split", "unscopables" }) |wk| {
-        const sym = try JSValue.newSymbol(arena, "Symbol." ++ wk);
+        const sym = try self.gcNewSymbol("Symbol." ++ wk);
         try dneConst(symbol_statics, wk, sym.retain());
-        if (comptime std.mem.eql(u8, wk, "iterator")) self.symbol_iterator = sym;
-        if (comptime std.mem.eql(u8, wk, "asyncIterator")) self.symbol_async_iterator = sym;
+        // These interpreter fields need their OWN retained reference --
+        // they must not be an unretained alias of whatever else holds
+        // `sym` (the Symbol.<wk> static property here), since that other
+        // holder can independently release its copy (e.g. a reassignable
+        // global binding losing its old value -- see the identical fix
+        // for eval_fn/global_object just below).
+        if (comptime std.mem.eql(u8, wk, "iterator")) self.symbol_iterator = sym.retain();
+        if (comptime std.mem.eql(u8, wk, "asyncIterator")) self.symbol_async_iterator = sym.retain();
     }
     try dneMethod(symbol_statics, "for", try native(self, "for", symbolFor));
     try dneMethod(symbol_statics, "keyFor", try native(self, "keyFor", symbolKeyFor));
@@ -410,15 +416,19 @@ pub fn setupGlobals(self: *Interpreter) !void {
 
     // Map / Set: constructable natives (require `new`); the .map/.set
     // return is preserved by evalNew's object-like-override rule.
-    try g.define(arena, "RegExp", try JSValue.newFunction(arena, .{ .ctx = self, .name = "RegExp", .arity = 2, .call = regexpConstructor, .constructable = true }));
-    try g.define(arena, "Map", try JSValue.newFunction(arena, .{ .ctx = self, .name = "Map", .arity = 0, .call = mapConstructor, .constructable = true }));
-    try g.define(arena, "Set", try JSValue.newFunction(arena, .{ .ctx = self, .name = "Set", .arity = 0, .call = setConstructor, .constructable = true }));
+    try g.define(arena, "RegExp", try self.gcNewFunction(.{ .ctx = self, .name = "RegExp", .arity = 2, .call = regexpConstructor, .constructable = true }));
+    try g.define(arena, "Map", try self.gcNewFunction(.{ .ctx = self, .name = "Map", .arity = 0, .call = mapConstructor, .constructable = true }));
+    try g.define(arena, "Set", try self.gcNewFunction(.{ .ctx = self, .name = "Set", .arity = 0, .call = setConstructor, .constructable = true }));
 
     try g.define(arena, "setTimeout", try native(self, "setTimeout", globalSetTimeout));
     try g.define(arena, "clearTimeout", try native(self, "clearTimeout", globalClearTimeout));
 
     const eval_fn = try native(self, "eval", globalEval);
-    self.eval_fn = eval_fn;
+    // self.eval_fn needs its OWN retained reference -- see the same fix
+    // on symbol_iterator/global_object for why (an interpreter field
+    // aliasing a reassignable global binding, without its own retain, is
+    // left dangling the moment that binding's old value gets released).
+    self.eval_fn = eval_fn.retain();
     try g.define(arena, "eval", eval_fn);
 
     try g.define(arena, "parseInt", try native(self, "parseInt", globalParseInt));
@@ -428,13 +438,13 @@ pub fn setupGlobals(self: *Interpreter) !void {
     // String/Number/Boolean: callable = coercion (as before);
     // constructable = evalNew keeps the hollow instance (typeof "object",
     // no [[PrimitiveValue]] -- documented narrowing). Statics via bags.
-    const string_ctor = try JSValue.newFunction(arena, .{ .ctx = self, .name = "String", .arity = 1, .call = globalString, .constructable = true });
+    const string_ctor = try self.gcNewFunction(.{ .ctx = self, .name = "String", .arity = 1, .call = globalString, .constructable = true });
     const string_statics = try self.functionStatics(string_ctor);
     try dneMethod(string_statics, "fromCharCode", try native(self, "fromCharCode", stringFromCharCode));
     try dneMethod(string_statics, "fromCodePoint", try native(self, "fromCodePoint", stringFromCodePoint));
     try g.define(arena, "String", string_ctor);
 
-    const number_ctor = try JSValue.newFunction(arena, .{ .ctx = self, .name = "Number", .arity = 1, .call = globalNumber, .constructable = true });
+    const number_ctor = try self.gcNewFunction(.{ .ctx = self, .name = "Number", .arity = 1, .call = globalNumber, .constructable = true });
     const number_statics = try self.functionStatics(number_ctor);
     try dneMethod(number_statics, "isNaN", try native(self, "isNaN", numberIsNaN));
     try dneMethod(number_statics, "isFinite", try native(self, "isFinite", numberIsFinite));
@@ -451,7 +461,7 @@ pub fn setupGlobals(self: *Interpreter) !void {
     try dneConst(number_statics, "NEGATIVE_INFINITY", JSValue.fromNumber(-std.math.inf(f64)));
     try g.define(arena, "Number", number_ctor);
 
-    const boolean_ctor = try JSValue.newFunction(arena, .{ .ctx = self, .name = "Boolean", .arity = 1, .call = globalBoolean, .constructable = true });
+    const boolean_ctor = try self.gcNewFunction(.{ .ctx = self, .name = "Boolean", .arity = 1, .call = globalBoolean, .constructable = true });
     try g.define(arena, "Boolean", boolean_ctor);
 
     // Materialize every builtin prototype as a real object (own methods with
@@ -463,12 +473,15 @@ pub fn setupGlobals(self: *Interpreter) !void {
     // environment (see Interpreter.global_object). It is itself a global, and
     // `globalThis.globalThis === globalThis`.
     const global_this = try self.ordinaryObject();
-    self.global_object = global_this;
+    // Same fix as eval_fn/symbol_iterator: self.global_object needs its
+    // own retained reference, independent of the (reassignable)
+    // `globalThis` global binding.
+    self.global_object = global_this.retain();
     try g.define(arena, "globalThis", global_this);
 }
 
 fn native(self: *Interpreter, name: []const u8, call_fn: NativeFn) !JSValue {
-    return JSValue.newFunction(self.arena_state.allocator(), .{
+    return self.gcNewFunction(.{
         .ctx = self,
         .name = name,
         .call = call_fn,
@@ -597,10 +610,11 @@ fn arrayJoin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
             },
         }
     }
-    return JSValue.newString(allocator, buf.items);
+    return interp(ctx).gcNewString(buf.items);
 }
 
 fn arraySlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
     try requireArray(ctx, this_value, "slice");
     const len: f64 = @floatFromInt(this_value.array.value.length());
     var start: f64 = if (arg(args, 0) == .@"undefined") 0 else try coercion.toNumber(arg(args, 0));
@@ -609,7 +623,7 @@ fn arraySlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     if (end < 0) end = @max(len + end, 0);
     start = @min(start, len);
     end = @min(end, len);
-    var result = try JSValue.newArray(allocator);
+    var result = try interp(ctx).gcNewArray();
     var i: usize = @intFromFloat(start);
     const end_idx: usize = @intFromFloat(end);
     while (i < end_idx) : (i += 1) {
@@ -619,8 +633,9 @@ fn arraySlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 }
 
 fn arrayConcat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
     try requireArray(ctx, this_value, "concat");
-    var result = try JSValue.newArray(allocator);
+    var result = try interp(ctx).gcNewArray();
     for (this_value.array.value.toSlice()) |item| _ = try result.array.value.push(item.retain());
     for (args) |a| {
         if (a == .array) {
@@ -654,7 +669,7 @@ fn liveElem(array: JSValue, i: usize) ?JSValue {
 fn arrayMap(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArray(ctx, this_value, "map");
     const cb = try requireCallback(ctx, args);
-    var result = try JSValue.newArray(allocator);
+    var result = try interp(ctx).gcNewArray();
     const len = this_value.array.value.length();
     var i: usize = 0;
     while (i < len) : (i += 1) {
@@ -673,7 +688,7 @@ fn arrayMap(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
 fn arrayFilter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArray(ctx, this_value, "filter");
     const cb = try requireCallback(ctx, args);
-    var result = try JSValue.newArray(allocator);
+    var result = try interp(ctx).gcNewArray();
     const len = this_value.array.value.length();
     var i: usize = 0;
     while (i < len) : (i += 1) {
@@ -783,7 +798,7 @@ fn stringToUpperCase(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     const data = try requireString(ctx, this_value, "toUpperCase");
     const out = try zstring.case.toUpperCase(allocator, data);
     defer allocator.free(out);
-    return JSValue.newString(allocator, out);
+    return interp(ctx).gcNewString(out);
 }
 
 fn stringToLowerCase(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -791,7 +806,7 @@ fn stringToLowerCase(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     const data = try requireString(ctx, this_value, "toLowerCase");
     const out = try zstring.case.toLowerCase(allocator, data);
     defer allocator.free(out);
-    return JSValue.newString(allocator, out);
+    return interp(ctx).gcNewString(out);
 }
 
 fn stringCharAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -799,7 +814,7 @@ fn stringCharAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     const idx: isize = toIntSat(if (arg(args, 0) == .@"undefined") 0 else try coercion.toNumber(arg(args, 0)));
     const out = try zstring.access.charAt(allocator, data, idx);
     defer allocator.free(out);
-    return JSValue.newString(allocator, out);
+    return interp(ctx).gcNewString(out);
 }
 
 fn stringIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -836,7 +851,7 @@ fn stringSlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     const end: ?isize = if (arg(args, 1) == .@"undefined") null else toIntSat(try coercion.toNumber(arg(args, 1)));
     const out = try zstring.transform.slice(allocator, data, start, end);
     defer allocator.free(out);
-    return JSValue.newString(allocator, out);
+    return interp(ctx).gcNewString(out);
 }
 
 fn stringRepeat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -847,7 +862,7 @@ fn stringRepeat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     const count: isize = toIntSat(nf);
     const out = try zstring.transform.repeat(allocator, data, count);
     defer allocator.free(out);
-    return JSValue.newString(allocator, out);
+    return interp(ctx).gcNewString(out);
 }
 
 fn stringSplit(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -859,9 +874,9 @@ fn stringSplit(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
         for (parts) |p| allocator.free(p);
         allocator.free(parts);
     }
-    var result = try JSValue.newArray(allocator);
+    var result = try interp(ctx).gcNewArray();
     for (parts) |p| {
-        _ = try result.array.value.push(try JSValue.newString(allocator, p));
+        _ = try result.array.value.push(try interp(ctx).gcNewString(p));
     }
     return result;
 }
@@ -871,7 +886,7 @@ fn stringTrim(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     const data = try requireString(ctx, this_value, "trim");
     const out = try zstring.trimming.trim(allocator, data);
     defer allocator.free(out);
-    return JSValue.newString(allocator, out);
+    return interp(ctx).gcNewString(out);
 }
 
 // ===== Date =====
@@ -916,27 +931,27 @@ fn timeClip(n: f64) i64 {
 /// field yields an Invalid Date rather than crashing. Called without `new` it
 /// still returns a .date (real JS returns a string there -- documented).
 fn dateConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
+    _ = allocator;
     _ = this_value;
-    if (args.len == 0) return JSValue.newDate(allocator, nowMs());
+    if (args.len == 0) return interp(ctx).gcNewDate(nowMs());
     if (args.len == 1) {
         const first = args[0];
         if (first == .string) {
-            return JSValue.newDate(allocator, zvalue.ZDate.fromString(first.string.value.data).timestamp);
+            return interp(ctx).gcNewDate(zvalue.ZDate.fromString(first.string.value.data).timestamp);
         }
-        if (first == .date) return JSValue.newDate(allocator, first.date.value.getTime());
-        return JSValue.newDate(allocator, timeClip(try coercion.toNumber(first)));
+        if (first == .date) return interp(ctx).gcNewDate(first.date.value.getTime());
+        return interp(ctx).gcNewDate(timeClip(try coercion.toNumber(first)));
     }
     // Multi-arg form: read up to 7 fields; a present-but-invalid field (NaN,
     // Infinity, out of i32) makes the whole Date Invalid.
     var fields: [7]?i32 = .{ null, null, null, null, null, null, null };
     var i: usize = 0;
     while (i < args.len and i < 7) : (i += 1) {
-        fields[i] = (try dateField(args[i])) orelse return JSValue.newDate(allocator, INVALID_DATE_MS);
+        fields[i] = (try dateField(args[i])) orelse return interp(ctx).gcNewDate(INVALID_DATE_MS);
     }
     // year and month are always present here (args.len >= 2).
     const d = zvalue.ZDate.fromComponents(fields[0].?, fields[1].?, fields[2], fields[3], fields[4], fields[5], fields[6]);
-    return JSValue.newDate(allocator, d.timestamp);
+    return interp(ctx).gcNewDate(d.timestamp);
 }
 
 /// `Date.now()` -> current time in ms.
@@ -1022,7 +1037,7 @@ fn dateToISOString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     const iso = d.date.value.toISOString(allocator) catch
         return interp(ctx).throwError(.range_error, "Invalid time value", .{});
     defer allocator.free(iso);
-    return JSValue.newString(allocator, iso);
+    return interp(ctx).gcNewString(iso);
 }
 
 /// `toJSON` -> ISO string, or `null` for an Invalid Date (real JS: it calls
@@ -1032,7 +1047,7 @@ fn dateToJSON(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     const d = try requireDate(ctx, this_value, "toJSON");
     const s = (d.date.value.toJSON(allocator) catch null) orelse return JSValue.NULL;
     defer allocator.free(s);
-    return JSValue.newString(allocator, s);
+    return interp(ctx).gcNewString(s);
 }
 
 /// String-returning ZDate formatters (`toString`/`toDateString`/... ). These
@@ -1044,9 +1059,9 @@ fn dateFormatter(comptime method: []const u8) NativeFn {
             _ = args;
             const d = try requireDate(ctx, this_value, method);
             const s = @field(zvalue.ZDate, method)(d.date.value, allocator) catch
-                return JSValue.newString(allocator, "Invalid Date");
+                return interp(ctx).gcNewString("Invalid Date");
             defer allocator.free(s);
-            return JSValue.newString(allocator, s);
+            return interp(ctx).gcNewString(s);
         }
     }.call;
 }
@@ -1059,9 +1074,9 @@ fn dateLocale(comptime method: []const u8) NativeFn {
             _ = args;
             const d = try requireDate(ctx, this_value, method);
             const s = @field(zvalue.ZDate, method)(d.date.value, allocator, null) catch
-                return JSValue.newString(allocator, "Invalid Date");
+                return interp(ctx).gcNewString("Invalid Date");
             defer allocator.free(s);
-            return JSValue.newString(allocator, s);
+            return interp(ctx).gcNewString(s);
         }
     }.call;
 }
@@ -1187,7 +1202,7 @@ fn jsonStringify(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
         else => return err,
     };
     defer allocator.free(out);
-    return JSValue.newString(allocator, out);
+    return interp(ctx).gcNewString(out);
 }
 
 fn jsonParse(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1228,10 +1243,10 @@ fn objectKeys(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     const o = arg(args, 0);
     const ks = try ownEnumerableKeys(ctx, allocator, o);
     defer allocator.free(ks);
-    var result = try JSValue.newArray(allocator);
+    var result = try interp(ctx).gcNewArray();
     for (ks) |k| {
         if (isSymbolKey(k)) continue;
-        _ = try result.array.value.push(try JSValue.newString(allocator, k));
+        _ = try result.array.value.push(try interp(ctx).gcNewString(k));
     }
     return result;
 }
@@ -1241,7 +1256,7 @@ fn objectValues(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     const o = arg(args, 0);
     const ks = try ownEnumerableKeys(ctx, allocator, o);
     defer allocator.free(ks);
-    var result = try JSValue.newArray(allocator);
+    var result = try interp(ctx).gcNewArray();
     // Per-key getProperty (not ZObject.values) so accessor properties
     // invoke their getters, like real Object.values.
     for (ks) |k| {
@@ -1256,11 +1271,11 @@ fn objectEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     const o = arg(args, 0);
     const ks = try ownEnumerableKeys(ctx, allocator, o);
     defer allocator.free(ks);
-    var result = try JSValue.newArray(allocator);
+    var result = try interp(ctx).gcNewArray();
     for (ks) |k| {
         if (isSymbolKey(k)) continue;
-        var pair = try JSValue.newArray(allocator);
-        _ = try pair.array.value.push(try JSValue.newString(allocator, k));
+        var pair = try interp(ctx).gcNewArray();
+        _ = try pair.array.value.push(try interp(ctx).gcNewString(k));
         // getProperty, not ZObject.get -- getters must fire here too.
         _ = try pair.array.value.push(try interp(ctx).getProperty(o, k));
         _ = try result.array.value.push(pair);
@@ -1328,18 +1343,18 @@ fn globalString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     if (arg(args, 0) == .symbol) {
         const s = try arg(args, 0).symbol.value.toString(allocator);
         defer allocator.free(s);
-        return JSValue.newString(allocator, s);
+        return interp(ctx).gcNewString(s);
     }
     // String(regex) is regex.toString() -- /source/flags (with flags).
     if (arg(args, 0) == .regex) {
         const st = interp(ctx).regexState(arg(args, 0));
         const s = try std.fmt.allocPrint(allocator, "/{s}/{s}", .{ st.source, st.flags });
         defer allocator.free(s);
-        return JSValue.newString(allocator, s);
+        return interp(ctx).gcNewString(s);
     }
     const s = try coercion.toDisplayString(allocator, arg(args, 0));
     defer allocator.free(s);
-    return JSValue.newString(allocator, s);
+    return interp(ctx).gcNewString(s);
 }
 
 fn globalNumber(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1387,7 +1402,7 @@ fn numberToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     }
     const s = try znumber.FormattingMethods.toString(n, allocator, radix);
     defer allocator.free(s);
-    return JSValue.newString(allocator, s);
+    return interp(ctx).gcNewString(s);
 }
 
 fn numberValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1411,7 +1426,7 @@ fn numberToFixed(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     const digits = (try digitArg(ctx, args, 0)) orelse 0;
     const s = try znumber.FormattingMethods.toFixed(n, allocator, digits);
     defer allocator.free(s);
-    return JSValue.newString(allocator, s);
+    return interp(ctx).gcNewString(s);
 }
 
 fn numberToExponential(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1419,7 +1434,7 @@ fn numberToExponential(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
     const digits = try digitArg(ctx, args, 0);
     const s = try znumber.FormattingMethods.toExponential(n, allocator, digits);
     defer allocator.free(s);
-    return JSValue.newString(allocator, s);
+    return interp(ctx).gcNewString(s);
 }
 
 fn numberToPrecision(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1428,12 +1443,12 @@ fn numberToPrecision(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     if (arg(args, 0) == .@"undefined") {
         const s = try znumber.FormattingMethods.toString(n, allocator, null);
         defer allocator.free(s);
-        return JSValue.newString(allocator, s);
+        return interp(ctx).gcNewString(s);
     }
     const p = (try digitArg(ctx, args, 1)).?;
     const s = try znumber.FormattingMethods.toPrecision(n, allocator, p);
     defer allocator.free(s);
-    return JSValue.newString(allocator, s);
+    return interp(ctx).gcNewString(s);
 }
 
 // ===== Boolean.prototype =====
@@ -1444,9 +1459,10 @@ fn requireBoolean(ctx: *anyopaque, this_value: JSValue, method: []const u8) anye
 }
 
 fn booleanToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
     _ = args;
     const b = try requireBoolean(ctx, this_value, "toString");
-    return JSValue.newString(allocator, if (b) "true" else "false");
+    return interp(ctx).gcNewString(if (b) "true" else "false");
 }
 
 fn booleanValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1458,7 +1474,7 @@ fn booleanValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
 // ===== Promise =====
 
 /// The pair of capabilities `new Promise(executor)` hands the executor.
-const PromiseCapCtx = struct {
+pub const PromiseCapCtx = struct {
     interp: *Interpreter,
     promise: JSValue,
 };
@@ -1494,12 +1510,13 @@ fn promiseConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     if (executor != .function) {
         return self.throwError(.type_error, "Promise resolver {s} is not a function", .{executor.typeOf()});
     }
-    const p = try JSValue.newPromise(allocator);
+    const p = try interp(ctx).gcNewPromise();
 
     const cap = try allocator.create(PromiseCapCtx);
     cap.* = .{ .interp = self, .promise = p };
-    const resolve_fn = try JSValue.newFunction(allocator, .{ .ctx = cap, .name = "resolve", .arity = 1, .call = capResolve });
-    const reject_fn = try JSValue.newFunction(allocator, .{ .ctx = cap, .name = "reject", .arity = 1, .call = capReject });
+    try self.gcTrackPromiseCapCtx(cap);
+    const resolve_fn = try interp(ctx).gcNewFunction(.{ .ctx = cap, .name = "resolve", .arity = 1, .call = capResolve });
+    const reject_fn = try interp(ctx).gcNewFunction(.{ .ctx = cap, .name = "reject", .arity = 1, .call = capReject });
 
     _ = executor.function.value.call(executor.function.value.ctx, allocator, JSValue.UNDEFINED, &.{ resolve_fn, reject_fn }) catch |err| {
         if (err != error.JsThrow) return err;
@@ -1569,8 +1586,8 @@ fn promiseFinally(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
 
     const c = try allocator.create(FinallyCtx);
     c.* = .{ .interp = self, .handler = handler.retain() };
-    const on_f = try JSValue.newFunction(allocator, .{ .ctx = c, .name = "", .call = finallyOnFulfilled });
-    const on_r = try JSValue.newFunction(allocator, .{ .ctx = c, .name = "", .call = finallyOnRejected });
+    const on_f = try interp(ctx).gcNewFunction(.{ .ctx = c, .name = "", .call = finallyOnFulfilled });
+    const on_r = try interp(ctx).gcNewFunction(.{ .ctx = c, .name = "", .call = finallyOnRejected });
     return self.promiseThen(p, on_f, on_r);
 }
 
@@ -1598,8 +1615,7 @@ const AllCtx = struct {
 
     fn completeIfDone(c: *AllCtx) anyerror!void {
         if (c.remaining != 0) return;
-        const arena = c.interp.arena_state.allocator();
-        var array = try JSValue.newArray(arena);
+        var array = try c.interp.gcNewArray();
         for (c.results) |r| _ = try array.array.value.push(r.retain());
         try c.interp.resolvePromise(c.derived, array);
     }
@@ -1641,7 +1657,7 @@ fn promiseAll(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     if (input != .array) return self.throwError(.type_error, "{s} is not iterable", .{input.typeOf()});
     const items = input.array.value.toSlice();
 
-    const derived = try JSValue.newPromise(allocator);
+    const derived = try interp(ctx).gcNewPromise();
     const all = try allocator.create(AllCtx);
     all.* = .{
         .interp = self,
@@ -1655,11 +1671,11 @@ fn promiseAll(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
         return derived;
     }
 
-    const on_r = try JSValue.newFunction(allocator, .{ .ctx = all, .name = "", .call = allRejected });
+    const on_r = try interp(ctx).gcNewFunction(.{ .ctx = all, .name = "", .call = allRejected });
     for (items, 0..) |item, i| {
         const elem = try allocator.create(AllElemCtx);
         elem.* = .{ .all = all, .index = i };
-        const on_f = try JSValue.newFunction(allocator, .{ .ctx = elem, .name = "", .call = allElemFulfilled });
+        const on_f = try interp(ctx).gcNewFunction(.{ .ctx = elem, .name = "", .call = allElemFulfilled });
         const p = if (item == .promise) item else try self.fulfilledPromise(item);
         _ = try self.promiseThen(p, on_f, on_r);
     }
@@ -1695,11 +1711,11 @@ fn promiseRace(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     const input = arg(args, 0);
     if (input != .array) return self.throwError(.type_error, "{s} is not iterable", .{input.typeOf()});
 
-    const derived = try JSValue.newPromise(allocator);
+    const derived = try interp(ctx).gcNewPromise();
     const rc = try allocator.create(RaceCtx);
     rc.* = .{ .interp = self, .derived = derived };
-    const on_f = try JSValue.newFunction(allocator, .{ .ctx = rc, .name = "", .call = raceFulfilled });
-    const on_r = try JSValue.newFunction(allocator, .{ .ctx = rc, .name = "", .call = raceRejected });
+    const on_f = try interp(ctx).gcNewFunction(.{ .ctx = rc, .name = "", .call = raceFulfilled });
+    const on_r = try interp(ctx).gcNewFunction(.{ .ctx = rc, .name = "", .call = raceRejected });
     for (input.array.value.toSlice()) |item| {
         const p = if (item == .promise) item else try self.fulfilledPromise(item);
         _ = try self.promiseThen(p, on_f, on_r);
@@ -1734,13 +1750,12 @@ fn globalClearTimeout(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
 fn errorConstructor(comptime kind: zvalue.ErrorKind) NativeFn {
     return struct {
         fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-            _ = ctx;
             _ = this_value;
             const msg: []const u8 = switch (arg(args, 0)) {
                 .@"undefined" => "",
                 else => |v| try coercion.toDisplayString(allocator, v),
             };
-            return JSValue.newError(allocator, kind, msg);
+            return interp(ctx).gcNewError(kind, msg);
         }
     }.call;
 }
@@ -1806,7 +1821,7 @@ fn fnBind(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     const target_arity = target.function.value.arity;
     const bound_arity = if (target_arity > pre.len) target_arity - pre.len else 0;
     const name = try std.fmt.allocPrint(allocator, "bound {s}", .{target.function.value.name});
-    return JSValue.newFunction(allocator, .{
+    return interp(ctx).gcNewFunction(.{
         .ctx = bc,
         .name = name,
         .arity = bound_arity,
@@ -1850,10 +1865,10 @@ fn objPropertyIsEnumerable(ctx: *anyopaque, allocator: Allocator, this_value: JS
 }
 
 fn objToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
+    _ = allocator;
     _ = this_value;
     _ = args;
-    return JSValue.newString(allocator, "[object Object]");
+    return interp(ctx).gcNewString("[object Object]");
 }
 
 fn objValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1888,7 +1903,7 @@ fn objectConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
 /// merge on existing configurable properties. Defining bypasses
 /// `writable` (that's assignment's rule, not definition's).
 fn definePropertyFromJs(self: *Interpreter, obj: JSValue, key: []const u8, desc: JSValue) anyerror!void {
-    const arena = self.arena_state.allocator();
+    const arena = self.gc_allocator;
     if (desc != .object) {
         return self.throwError(.type_error, "Property description must be an object", .{});
     }
@@ -2060,7 +2075,7 @@ fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, this_va
             if (std.mem.eql(u8, key, "length"))
                 return dataDescObj(self, JSValue.fromNumber(@floatFromInt(box.value.arity)), false, false, true);
             if (std.mem.eql(u8, key, "name"))
-                return dataDescObj(self, try JSValue.newString(allocator, box.value.name), false, false, true);
+                return dataDescObj(self, try interp(ctx).gcNewString(box.value.name), false, false, true);
             if (std.mem.eql(u8, key, "prototype") and (box.value.prototype != null or box.value.constructable))
                 return dataDescObj(self, try self.functionPrototype(obj), true, false, false);
             if (box.value.statics) |bag| {
@@ -2087,36 +2102,36 @@ fn objectGetOwnPropertyNames(ctx: *anyopaque, allocator: Allocator, this_value: 
     _ = this_value;
     const self = interp(ctx);
     const o = arg(args, 0);
-    var result = try JSValue.newArray(allocator);
+    var result = try interp(ctx).gcNewArray();
     switch (o) {
         .object => {
             const names = try o.object.value.getOwnPropertyNames(allocator);
             defer allocator.free(names);
             for (names) |n| {
                 if (isSymbolKey(n)) continue;
-                _ = try result.array.value.push(try JSValue.newString(allocator, n));
+                _ = try result.array.value.push(try interp(ctx).gcNewString(n));
             }
         },
         // Arrays: every index (as a string), then "length".
         .array => |box| {
             var i: usize = 0;
             while (i < box.value.length()) : (i += 1) {
-                _ = try result.array.value.push(try JSValue.newString(allocator, try std.fmt.allocPrint(allocator, "{d}", .{i})));
+                _ = try result.array.value.push(try interp(ctx).gcNewString(try std.fmt.allocPrint(allocator, "{d}", .{i})));
             }
-            _ = try result.array.value.push(try JSValue.newString(allocator, "length"));
+            _ = try result.array.value.push(try interp(ctx).gcNewString("length"));
         },
         // Functions: length, name, prototype (if any), then statics bag names.
         .function => |box| {
-            _ = try result.array.value.push(try JSValue.newString(allocator, "length"));
-            _ = try result.array.value.push(try JSValue.newString(allocator, "name"));
+            _ = try result.array.value.push(try interp(ctx).gcNewString("length"));
+            _ = try result.array.value.push(try interp(ctx).gcNewString("name"));
             if (box.value.prototype != null or box.value.constructable)
-                _ = try result.array.value.push(try JSValue.newString(allocator, "prototype"));
+                _ = try result.array.value.push(try interp(ctx).gcNewString("prototype"));
             if (box.value.statics) |bag| {
                 const names = try bag.object.value.getOwnPropertyNames(allocator);
                 defer allocator.free(names);
                 for (names) |n| {
                     if (isSymbolKey(n)) continue;
-                    _ = try result.array.value.push(try JSValue.newString(allocator, n));
+                    _ = try result.array.value.push(try interp(ctx).gcNewString(n));
                 }
             }
         },
@@ -2132,7 +2147,7 @@ fn objectGetOwnPropertySymbols(ctx: *anyopaque, allocator: Allocator, this_value
     const o = try requirePlainObject(ctx, arg(args, 0), "Object.getOwnPropertySymbols");
     const names = try o.object.value.getOwnPropertyNames(allocator);
     defer allocator.free(names);
-    var result = try JSValue.newArray(allocator);
+    var result = try interp(ctx).gcNewArray();
     for (names) |n| {
         if (!isSymbolKey(n)) continue;
         if (self.symbol_keys.get(n)) |sym| _ = try result.array.value.push(sym.retain());
@@ -2147,7 +2162,7 @@ fn objectCreate(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     if (proto != .object and proto != .@"null") {
         return self.throwError(.type_error, "Object prototype may only be an Object or null", .{});
     }
-    var obj = try JSValue.newObject(allocator);
+    var obj = try interp(ctx).gcNewObject();
     if (proto == .object) try obj.object.value.setPrototype(@constCast(&proto.object.value));
     const props = arg(args, 1);
     if (props == .object) {
@@ -2306,9 +2321,10 @@ fn objectGetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
 // ===== Array / Function constructors and statics =====
 
 fn arrayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
     _ = this_value;
     const self = interp(ctx);
-    var result = try JSValue.newArray(allocator);
+    var result = try self.gcNewArray();
     if (args.len == 1 and args[0] == .number) {
         const n = args[0].number;
         if (n < 0 or n != @trunc(n) or n > 4294967294.0) {
@@ -2324,9 +2340,9 @@ fn arrayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
 }
 
 fn arrayOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
+    _ = allocator;
     _ = this_value;
-    var result = try JSValue.newArray(allocator);
+    var result = try interp(ctx).gcNewArray();
     for (args) |a| _ = try result.array.value.push(a.retain());
     return result;
 }
@@ -2338,7 +2354,7 @@ fn arrayFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     const self = interp(ctx);
     const src = arg(args, 0);
     const map_fn = arg(args, 1);
-    var result = try JSValue.newArray(allocator);
+    var result = try interp(ctx).gcNewArray();
     var index: f64 = 0;
 
     const push_mapped = struct {
@@ -2365,7 +2381,7 @@ fn arrayFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
         .string => |box| {
             var it = std.unicode.Utf8Iterator{ .bytes = box.value.data, .i = 0 };
             while (it.nextCodepointSlice()) |cp| {
-                try push_mapped(self, allocator, &result, map_fn, try JSValue.newString(allocator, cp), index);
+                try push_mapped(self, allocator, &result, map_fn, try interp(ctx).gcNewString(cp), index);
                 index += 1;
             }
         },
@@ -2465,7 +2481,6 @@ fn numberIsInteger(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
 }
 
 fn stringFromCharCode(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
     _ = this_value;
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
@@ -2478,7 +2493,7 @@ fn stringFromCharCode(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
         const n = std.unicode.utf8Encode(code, &tmp) catch continue;
         try buf.appendSlice(allocator, tmp[0..n]);
     }
-    return JSValue.newString(allocator, buf.items);
+    return interp(ctx).gcNewString(buf.items);
 }
 
 // ===== Symbol =====
@@ -2494,7 +2509,7 @@ fn symbolConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
         .@"undefined" => null,
         else => |v| try coercion.toDisplayString(allocator, v),
     };
-    return JSValue.newSymbol(allocator, desc);
+    return self.gcNewSymbol(desc);
 }
 
 fn symbolToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -2502,7 +2517,7 @@ fn symbolToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     if (this_value != .symbol) return interp(ctx).throwError(.type_error, "Symbol.prototype.toString requires a symbol", .{});
     const s = try this_value.symbol.value.toString(allocator);
     defer allocator.free(s);
-    return JSValue.newString(allocator, s);
+    return interp(ctx).gcNewString(s);
 }
 
 fn symbolValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -2517,8 +2532,8 @@ fn symbolFor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     const self = interp(ctx);
     const key = try coercion.toDisplayString(allocator, arg(args, 0));
     if (self.symbol_registry.get(key)) |sym| return sym.retain();
-    const sym = try JSValue.newSymbol(self.arena_state.allocator(), key);
-    try self.symbol_registry.put(self.arena_state.allocator(), key, sym.retain());
+    const sym = try self.gcNewSymbol(key);
+    try self.symbol_registry.put(self.gc_allocator, key, sym.retain());
     return sym;
 }
 
@@ -2531,7 +2546,7 @@ fn symbolKeyFor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     var it = self.symbol_registry.iterator();
     while (it.next()) |entry| {
         if (entry.value_ptr.* == .symbol and entry.value_ptr.symbol == target.symbol) {
-            return JSValue.newString(self.arena_state.allocator(), entry.key_ptr.*);
+            return interp(ctx).gcNewString(entry.key_ptr.*);
         }
     }
     return JSValue.UNDEFINED;
@@ -2630,7 +2645,7 @@ fn arrayReduceRight(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
 fn arrayFlatMap(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArray(ctx, this_value, "flatMap");
     const cb = try requireCallback(ctx, args);
-    var result = try JSValue.newArray(allocator);
+    var result = try interp(ctx).gcNewArray();
     const len = this_value.array.value.length();
     var i: usize = 0;
     while (i < len) : (i += 1) {
@@ -2712,7 +2727,7 @@ fn flattenInto(result: *JSValue, allocator: Allocator, slice: []const JSValue, d
 fn arrayFlat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArray(ctx, this_value, "flat");
     const depth: i64 = if (arg(args, 0) == .@"undefined") 1 else toIntSat(try coercion.toNumber(arg(args, 0)));
-    var result = try JSValue.newArray(allocator);
+    var result = try interp(ctx).gcNewArray();
     try flattenInto(&result, allocator, this_value.array.value.toSlice(), depth);
     return result;
 }
@@ -2730,7 +2745,7 @@ fn arraySplice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
         break :blk @min(@as(usize, @intCast(toIntSat(dc))), len - start);
     };
     // Removed elements -> returned array (retained).
-    var removed = try JSValue.newArray(allocator);
+    var removed = try interp(ctx).gcNewArray();
     for (arr.toSlice()[start .. start + delete_count]) |item| _ = try removed.array.value.push(item.retain());
     // Rebuild: prefix + inserts + suffix.
     const inserts = if (args.len > 2) args[2..] else &[_]JSValue{};
@@ -2791,7 +2806,7 @@ fn arrayToStringMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
     try requireArray(ctx, this_value, "toString");
     const s = try coercion.toDisplayString(allocator, this_value);
     defer allocator.free(s);
-    return JSValue.newString(allocator, s);
+    return interp(ctx).gcNewString(s);
 }
 
 /// keys()/values()/entries() -- iterator objects with `next` and a
@@ -2804,10 +2819,11 @@ const ArrayIterCtx = struct {
 };
 
 fn arrayIterNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
     _ = this_value;
     _ = args;
     const ic: *ArrayIterCtx = @ptrCast(@alignCast(ctx));
-    var result = try JSValue.newObject(allocator);
+    var result = try ic.interp.gcNewObject();
     if (ic.index >= ic.items.len) {
         try result.object.value.set("value", JSValue.UNDEFINED);
         try result.object.value.set("done", JSValue.fromBool(true));
@@ -2819,7 +2835,7 @@ fn arrayIterNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
         .keys => JSValue.fromNumber(@floatFromInt(i)),
         .values => ic.items[i].retain(),
         .entries => blk: {
-            var pair = try JSValue.newArray(allocator);
+            var pair = try ic.interp.gcNewArray();
             _ = try pair.array.value.push(JSValue.fromNumber(@floatFromInt(i)));
             _ = try pair.array.value.push(ic.items[i].retain());
             break :blk pair;
@@ -2836,8 +2852,8 @@ pub fn makeArrayIterator(self: *Interpreter, allocator: Allocator, this_value: J
     for (src, 0..) |item, i| snapshot[i] = item.retain();
     const ic = try allocator.create(ArrayIterCtx);
     ic.* = .{ .interp = self, .items = snapshot, .kind = kind };
-    var obj = try JSValue.newObject(allocator);
-    try obj.object.value.set("next", try JSValue.newFunction(allocator, .{ .ctx = ic, .name = "next", .call = arrayIterNext }));
+    var obj = try self.gcNewObject();
+    try obj.object.value.set("next", try self.gcNewFunction(.{ .ctx = ic, .name = "next", .call = arrayIterNext }));
     if (self.symbol_iterator) |sym| {
         const key = try self.encodeKey(sym);
         try obj.object.value.set(key, try self.nativeMethod("iterator", "self", iteratorSelfBuiltin));
@@ -2879,7 +2895,7 @@ fn stringTrimStart(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     const data = try requireString(ctx, this_value, "trimStart");
     const out = try zstring.trimming.trimStart(allocator, data);
     defer allocator.free(out);
-    return JSValue.newString(allocator, out);
+    return interp(ctx).gcNewString(out);
 }
 
 fn stringTrimEnd(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -2887,7 +2903,7 @@ fn stringTrimEnd(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     const data = try requireString(ctx, this_value, "trimEnd");
     const out = try zstring.trimming.trimEnd(allocator, data);
     defer allocator.free(out);
-    return JSValue.newString(allocator, out);
+    return interp(ctx).gcNewString(out);
 }
 
 fn stringCharCodeAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -2909,7 +2925,7 @@ fn stringAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
     const idx: isize = toIntSat(if (arg(args, 0) == .@"undefined") 0 else try coercion.toNumber(arg(args, 0)));
     const out = (try zstring.access.at(allocator, data, idx)) orelse return JSValue.UNDEFINED;
     defer allocator.free(out);
-    return JSValue.newString(allocator, out);
+    return interp(ctx).gcNewString(out);
 }
 
 fn stringPadStart(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -2918,7 +2934,7 @@ fn stringPadStart(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     const pad: ?[]const u8 = if (arg(args, 1) == .string) arg(args, 1).string.value.data else null;
     const out = try zstring.padding.padStart(allocator, data, target, pad);
     defer allocator.free(out);
-    return JSValue.newString(allocator, out);
+    return interp(ctx).gcNewString(out);
 }
 
 fn stringPadEnd(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -2927,7 +2943,7 @@ fn stringPadEnd(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     const pad: ?[]const u8 = if (arg(args, 1) == .string) arg(args, 1).string.value.data else null;
     const out = try zstring.padding.padEnd(allocator, data, target, pad);
     defer allocator.free(out);
-    return JSValue.newString(allocator, out);
+    return interp(ctx).gcNewString(out);
 }
 
 fn stringSubstring(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -2936,7 +2952,7 @@ fn stringSubstring(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     const end: ?isize = if (arg(args, 1) == .@"undefined") null else toIntSat(try coercion.toNumber(arg(args, 1)));
     const out = try zstring.transform.substring(allocator, data, start, end);
     defer allocator.free(out);
-    return JSValue.newString(allocator, out);
+    return interp(ctx).gcNewString(out);
 }
 
 /// Legacy substr(start, length) -- start can be negative (from end).
@@ -2949,7 +2965,7 @@ fn stringSubstr(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     const end = @min(start + @max(length, 0), total);
     const out = try zstring.transform.substring(allocator, data, start, end);
     defer allocator.free(out);
-    return JSValue.newString(allocator, out);
+    return interp(ctx).gcNewString(out);
 }
 
 fn stringLastIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -2979,7 +2995,7 @@ fn stringConcat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     }
     const out = try zstring.transform.concat(allocator, data, pieces.items);
     defer allocator.free(out);
-    return JSValue.newString(allocator, out);
+    return interp(ctx).gcNewString(out);
 }
 
 /// replace/replaceAll -- string OR regex patterns; string OR function
@@ -3015,7 +3031,7 @@ fn stringReplaceImpl(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
         try buf.append(allocator, data[i]);
         i += 1;
     }
-    return JSValue.newString(allocator, buf.items);
+    return interp(ctx).gcNewString(buf.items);
 }
 
 fn stringReplace(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -3038,9 +3054,10 @@ fn stringLocaleCompare(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
 }
 
 fn stringToStringMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
     _ = args;
     const data = try requireString(ctx, this_value, "toString");
-    return JSValue.newString(allocator, data);
+    return interp(ctx).gcNewString(data);
 }
 
 fn stringFromCodePoint(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -3057,7 +3074,7 @@ fn stringFromCodePoint(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
         const n = std.unicode.utf8Encode(cp, &tmp) catch continue;
         try buf.appendSlice(allocator, tmp[0..n]);
     }
-    return JSValue.newString(allocator, buf.items);
+    return interp(ctx).gcNewString(buf.items);
 }
 
 // ===== Map / Set =====
@@ -3073,10 +3090,11 @@ fn requireSet(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror
 }
 
 fn mapConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
     _ = this_value;
     const self = interp(ctx);
     if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor Map requires 'new'", .{});
-    var m = try JSValue.newMap(allocator);
+    var m = try interp(ctx).gcNewMap();
     const init = arg(args, 0);
     if (init != .@"undefined" and init != .@"null") {
         for (try self.iterableItems(init)) |entry| {
@@ -3090,10 +3108,11 @@ fn mapConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
 }
 
 fn setConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
     _ = this_value;
     const self = interp(ctx);
     if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor Set requires 'new'", .{});
-    var s = try JSValue.newSet(allocator);
+    var s = try interp(ctx).gcNewSet();
     const init = arg(args, 0);
     if (init != .@"undefined" and init != .@"null") {
         for (try self.iterableItems(init)) |v| try s.set.value.add(v.retain());
@@ -3167,7 +3186,7 @@ fn mapForEach(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 
 /// Snapshot slice -> array iterator (reuses the array-iterator machinery).
 fn iteratorFromValues(self: *Interpreter, allocator: Allocator, items: []const JSValue) anyerror!JSValue {
-    var arr = try JSValue.newArray(allocator);
+    var arr = try self.gcNewArray();
     for (items) |it| _ = try arr.array.value.push(it.retain());
     return makeArrayIterator(self, allocator, arr, .values);
 }
@@ -3192,7 +3211,7 @@ fn mapEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     var pairs: std.ArrayList(JSValue) = .empty;
     defer pairs.deinit(allocator);
     for (ks, vs) |k, v| {
-        var pair = try JSValue.newArray(allocator);
+        var pair = try interp(ctx).gcNewArray();
         _ = try pair.array.value.push(k.retain());
         _ = try pair.array.value.push(v.retain());
         try pairs.append(allocator, pair);
@@ -3248,7 +3267,7 @@ fn setEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     var pairs: std.ArrayList(JSValue) = .empty;
     defer pairs.deinit(allocator);
     for (s.set.value.values()) |v| {
-        var pair = try JSValue.newArray(allocator);
+        var pair = try interp(ctx).gcNewArray();
         _ = try pair.array.value.push(v.retain());
         _ = try pair.array.value.push(v.retain());
         try pairs.append(allocator, pair);
@@ -3302,25 +3321,26 @@ fn regexFindFrom(re: JSValue, input: []const u8, start: usize) anyerror!?RegexHi
 /// if it didn't participate), plus own `index`, `input`, and `groups`.
 /// All strings come from `hit.sub`; the absolute `.index` adds `hit.base`.
 fn makeMatchArray(self: *Interpreter, allocator: Allocator, hit: RegexHit) anyerror!JSValue {
+    _ = allocator;
     const match = hit.match;
     const input = hit.sub;
-    var result = try JSValue.newArray(allocator);
-    _ = try result.array.value.push(try JSValue.newString(allocator, match.group(input)));
+    var result = try self.gcNewArray();
+    _ = try result.array.value.push(try self.gcNewString(match.group(input)));
     var i: usize = 1;
     while (i <= hit.group_count) : (i += 1) {
         if (match.getCapture(i, input)) |cap| {
-            _ = try result.array.value.push(try JSValue.newString(allocator, cap));
+            _ = try result.array.value.push(try self.gcNewString(cap));
         } else {
             _ = try result.array.value.push(JSValue.UNDEFINED);
         }
     }
     // exec/match arrays carry extra own properties.
     try setArrayOwn(self, result, "index", JSValue.fromNumber(@floatFromInt(hit.base + match.start)));
-    try setArrayOwn(self, result, "input", try JSValue.newString(allocator, hit.full));
+    try setArrayOwn(self, result, "input", try self.gcNewString(hit.full));
     if (match.named_groups.len > 0) {
-        var groups = try JSValue.newObject(allocator);
+        var groups = try self.gcNewObject();
         for (match.named_groups) |ng| {
-            const v = if (match.getNamedCapture(ng.name, input)) |c| try JSValue.newString(allocator, c) else JSValue.UNDEFINED;
+            const v = if (match.getNamedCapture(ng.name, input)) |c| try self.gcNewString(c) else JSValue.UNDEFINED;
             try groups.object.value.set(ng.name, v);
         }
         try setArrayOwn(self, result, "groups", groups);
@@ -3382,7 +3402,7 @@ fn regexToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     const st = interp(ctx).regexState(re);
     const s = try std.fmt.allocPrint(allocator, "/{s}/{s}", .{ st.source, st.flags });
     defer allocator.free(s);
-    return JSValue.newString(allocator, s);
+    return interp(ctx).gcNewString(s);
 }
 
 // ===== String methods with RegExp patterns =====
@@ -3408,8 +3428,8 @@ fn stringMatch(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
         all.deinit(allocator);
     }
     if (all.items.len == 0) return JSValue.NULL;
-    var result = try JSValue.newArray(allocator);
-    for (all.items) |match| _ = try result.array.value.push(try JSValue.newString(allocator, match.group(data)));
+    var result = try interp(ctx).gcNewArray();
+    for (all.items) |match| _ = try result.array.value.push(try interp(ctx).gcNewString(match.group(data)));
     return result;
 }
 
@@ -3423,7 +3443,7 @@ fn stringMatchAll(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
         for (all.items) |*mm| mm.deinit();
         all.deinit(allocator);
     }
-    var arr = try JSValue.newArray(allocator);
+    var arr = try interp(ctx).gcNewArray();
     for (all.items) |match| {
         _ = try arr.array.value.push(try makeMatchArray(self, allocator, .{ .match = match, .sub = data, .base = 0, .full = data, .group_count = re.regex.value.compiled.group_count }));
     }
@@ -3463,7 +3483,7 @@ fn regexReplace(self: *Interpreter, allocator: Allocator, data: []const u8, re: 
         else
             try re.regex.value.replace(allocator, data, rs);
         defer allocator.free(out);
-        return JSValue.newString(allocator, out);
+        return self.gcNewString(out);
     }
     // Function replacement: build the result splicing each match's
     // fn(match, ...captures, offset, input) result.
@@ -3478,14 +3498,14 @@ fn regexReplace(self: *Interpreter, allocator: Allocator, data: []const u8, re: 
         // callback args: (match, cap1, cap2, ..., offset, input)
         var call_args: std.ArrayList(JSValue) = .empty;
         defer call_args.deinit(allocator);
-        try call_args.append(allocator, try JSValue.newString(allocator, match.group(data)));
+        try call_args.append(allocator, try self.gcNewString(match.group(data)));
         var i: usize = 1;
         while (i <= re.regex.value.compiled.group_count) : (i += 1) {
-            const cap = if (match.getCapture(i, data)) |c| try JSValue.newString(allocator, c) else JSValue.UNDEFINED;
+            const cap = if (match.getCapture(i, data)) |c| try self.gcNewString(c) else JSValue.UNDEFINED;
             try call_args.append(allocator, cap);
         }
         try call_args.append(allocator, JSValue.fromNumber(@floatFromInt(match.start)));
-        try call_args.append(allocator, try JSValue.newString(allocator, data));
+        try call_args.append(allocator, try self.gcNewString(data));
         const r = try repl.function.value.call(repl.function.value.ctx, allocator, JSValue.UNDEFINED, call_args.items);
         const rs = try coercion.toDisplayString(allocator, r);
         defer allocator.free(rs);
@@ -3494,18 +3514,17 @@ fn regexReplace(self: *Interpreter, allocator: Allocator, data: []const u8, re: 
         pos = if (match.end > match.start) match.end else match.end + 1;
         if (!replace_all) {
             try buf.appendSlice(allocator, data[match.end..]);
-            return JSValue.newString(allocator, buf.items);
+            return self.gcNewString(buf.items);
         }
     }
     if (pos < data.len) try buf.appendSlice(allocator, data[pos..]);
-    return JSValue.newString(allocator, buf.items);
+    return self.gcNewString(buf.items);
 }
 
 /// String.prototype.split with a regex separator. Splits at each match;
 /// the separator's capture groups are interleaved (real JS behavior).
 fn regexSplit(self: *Interpreter, allocator: Allocator, data: []const u8, re: JSValue) anyerror!JSValue {
-    _ = self;
-    var result = try JSValue.newArray(allocator);
+    var result = try self.gcNewArray();
     var all = try re.regex.value.findAll(data);
     defer {
         for (all.items) |*mm| mm.deinit();
@@ -3514,14 +3533,14 @@ fn regexSplit(self: *Interpreter, allocator: Allocator, data: []const u8, re: JS
     var last: usize = 0;
     for (all.items) |match| {
         if (match.end == match.start and match.start == last) continue; // skip empty at boundary
-        _ = try result.array.value.push(try JSValue.newString(allocator, data[last..match.start]));
+        _ = try result.array.value.push(try self.gcNewString(data[last..match.start]));
         var gi: usize = 1;
         while (gi <= re.regex.value.compiled.group_count) : (gi += 1) {
-            const cap = if (match.getCapture(gi, data)) |c| try JSValue.newString(allocator, c) else JSValue.UNDEFINED;
+            const cap = if (match.getCapture(gi, data)) |c| try self.gcNewString(c) else JSValue.UNDEFINED;
             _ = try result.array.value.push(cap);
         }
         last = match.end;
     }
-    _ = try result.array.value.push(try JSValue.newString(allocator, data[last..]));
+    _ = try result.array.value.push(try self.gcNewString(data[last..]));
     return result;
 }
