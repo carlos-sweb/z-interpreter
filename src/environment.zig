@@ -154,4 +154,80 @@ pub const Environment = struct {
         }
         return null;
     }
+
+    /// GC prep (roadmap item 15, phase 2): enumerates every node directly
+    /// reachable from this environment, for a future mark-phase to recurse
+    /// through. `visitor` is duck-typed with `value(JSValue) void` (a
+    /// binding/this/super value) and `environment(*Environment) void`
+    /// (the parent link -- environments aren't JSValues, so they get their
+    /// own visit method). `tdz` holds only names, nothing to trace.
+    ///
+    /// Deliberately does NOT touch `private_ctx`: it's a `*ClassCtx` in
+    /// disguise (`*anyopaque` here so this file doesn't need to know about
+    /// the interpreter's class machinery) -- the caller special-cases it
+    /// after calling this, once it has the real type back.
+    pub fn traceChildren(self: *const Environment, visitor: anytype) void {
+        if (self.parent) |p| visitor.environment(p);
+        var it = self.bindings.valueIterator();
+        while (it.next()) |v| visitor.value(v.*);
+        if (self.this_value) |v| visitor.value(v);
+        if (self.super_proto) |v| visitor.value(v);
+        if (self.super_ctor) |v| visitor.value(v);
+    }
 };
+
+const MockVisitor = struct {
+    values: std.ArrayList(JSValue) = .empty,
+    environments: std.ArrayList(*Environment) = .empty,
+
+    fn value(self: *MockVisitor, v: JSValue) void {
+        self.values.append(std.testing.allocator, v) catch unreachable;
+    }
+    fn environment(self: *MockVisitor, e: *Environment) void {
+        self.environments.append(std.testing.allocator, e) catch unreachable;
+    }
+    fn deinit(self: *MockVisitor) void {
+        self.values.deinit(std.testing.allocator);
+        self.environments.deinit(std.testing.allocator);
+    }
+};
+
+test "traceChildren visits the parent, every binding, this/super, but not tdz names or private_ctx" {
+    const testing = std.testing;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var parent = Environment{ .parent = null };
+    var child_env = try parent.child(arena);
+    try child_env.define(arena, "x", JSValue.fromNumber(1));
+    try child_env.define(arena, "y", JSValue.fromNumber(2));
+    try child_env.markTDZ(arena, "z"); // TDZ-only: no value to visit
+    child_env.this_value = JSValue.fromNumber(3);
+    child_env.super_proto = JSValue.fromNumber(4);
+    child_env.super_ctor = JSValue.fromNumber(5);
+    child_env.private_ctx = @ptrFromInt(0xdead); // must NOT be visited (opaque here)
+
+    var mock: MockVisitor = .{};
+    defer mock.deinit();
+    child_env.traceChildren(&mock);
+
+    try testing.expectEqual(@as(usize, 1), mock.environments.items.len);
+    try testing.expectEqual(&parent, mock.environments.items[0]);
+    // x, y, this_value, super_proto, super_ctor -- exactly 5 values, nothing
+    // from tdz-only "z" and no trace of private_ctx's opaque pointer.
+    try testing.expectEqual(@as(usize, 5), mock.values.items.len);
+    var sum: f64 = 0;
+    for (mock.values.items) |v| sum += v.number;
+    try testing.expectEqual(@as(f64, 1 + 2 + 3 + 4 + 5), sum);
+}
+
+test "traceChildren on the root environment (no parent) visits zero environments" {
+    const testing = std.testing;
+    var root = Environment{ .parent = null };
+    var mock: MockVisitor = .{};
+    defer mock.deinit();
+    root.traceChildren(&mock);
+    try testing.expectEqual(@as(usize, 0), mock.environments.items.len);
+    try testing.expectEqual(@as(usize, 0), mock.values.items.len);
+}

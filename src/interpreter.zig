@@ -67,6 +67,15 @@ const ClosureCtx = struct {
     /// identity (its *ClassCtx), so `this.#x` inside the body resolves
     /// private names against the right class (copied onto the call env).
     private_ctx: ?*anyopaque = null,
+
+    /// GC prep (roadmap item 15, phase 2): see Environment.traceChildren
+    /// for the visitor contract. private_ctx is downcast back to *ClassCtx
+    /// here (same file, so no opacity problem like Environment has).
+    fn traceChildren(self: *const ClosureCtx, visitor: anytype) void {
+        visitor.environment(self.closure_env);
+        if (self.super_proto) |v| visitor.value(v);
+        if (self.private_ctx) |pc| classCtxFromOpaque(pc).traceChildren(visitor);
+    }
 };
 
 /// One instance field captured at class-definition time: the key is fully
@@ -173,6 +182,24 @@ const FiberState = struct {
     /// request is in flight -- v1 doesn't support overlapping next() calls
     /// (the only real consumer, `for await`, never overlaps them).
     pending_result_promise: ?JSValue = null,
+
+    /// GC prep (roadmap item 15, phase 2): see Environment.traceChildren
+    /// for the visitor contract. `interp`/`fiber`/`fnode` aren't
+    /// JSValue/Environment -- fiber stacks get their own GC handling in a
+    /// later phase (they're not part of this value graph). `is_generator`/
+    /// `is_async`/`resume_is_throw`/`fatal_error` carry no values.
+    fn traceChildren(self: *const FiberState, visitor: anytype) void {
+        visitor.environment(self.closure_env);
+        if (self.this_value) |v| visitor.value(v);
+        if (self.private_ctx) |pc| classCtxFromOpaque(pc).traceChildren(visitor);
+        for (self.args) |a| visitor.value(a);
+        visitor.value(self.resume_value);
+        if (self.yielded) |v| visitor.value(v);
+        if (self.completion) |v| visitor.value(v);
+        if (self.completed_throw) |v| visitor.value(v);
+        if (self.promise) |v| visitor.value(v);
+        if (self.pending_result_promise) |v| visitor.value(v);
+    }
 };
 
 /// Runs the whole function body on the fiber's stack. A generator (sync or
@@ -311,7 +338,150 @@ const ClassCtx = struct {
     /// encodePrivateKey mixes into `#name` storage keys (brand checks fall
     /// out of key mismatch).
     instance_fields: []const FieldDef = &.{},
+
+    /// GC prep (roadmap item 15, phase 2): see Environment.traceChildren
+    /// for the visitor contract. `instance_fields[i].value` is an AST
+    /// node (the unevaluated initializer expression), not a JSValue --
+    /// nothing to trace there.
+    fn traceChildren(self: *const ClassCtx, visitor: anytype) void {
+        visitor.environment(self.closure_env);
+        if (self.super_ctor) |v| visitor.value(v);
+        if (self.super_proto) |v| visitor.value(v);
+    }
 };
+
+/// `Environment.private_ctx`/`ClosureCtx.private_ctx`/`FiberState.private_ctx`
+/// are typed `*anyopaque` so environment.zig doesn't need to know about the
+/// class machinery, but every non-null value stored there is always a
+/// `*ClassCtx` (see ClassCtx's own doc comment on doubling as the private
+/// identity) -- this makes that assumption explicit at the one place that
+/// needs to see through it (GC tracing).
+fn classCtxFromOpaque(ptr: *anyopaque) *ClassCtx {
+    return @ptrCast(@alignCast(ptr));
+}
+
+const TraceMockVisitor = struct {
+    values: std.ArrayList(JSValue) = .empty,
+    environments: std.ArrayList(*Environment) = .empty,
+
+    fn value(self: *TraceMockVisitor, v: JSValue) void {
+        self.values.append(std.testing.allocator, v) catch unreachable;
+    }
+    fn environment(self: *TraceMockVisitor, e: *Environment) void {
+        self.environments.append(std.testing.allocator, e) catch unreachable;
+    }
+    fn deinit(self: *TraceMockVisitor) void {
+        self.values.deinit(std.testing.allocator);
+        self.environments.deinit(std.testing.allocator);
+    }
+};
+
+test "ClassCtx.traceChildren visits closure_env and both super refs, skips null ones" {
+    const testing = std.testing;
+    var env = Environment{ .parent = null };
+    var cctx = ClassCtx{
+        .interp = undefined,
+        .ctor_fnode = null,
+        .closure_env = &env,
+        .name = "C",
+        .super_ctor = JSValue.fromNumber(1),
+        .super_proto = null, // base class: no super -- must NOT be visited
+    };
+    var mock: TraceMockVisitor = .{};
+    defer mock.deinit();
+    cctx.traceChildren(&mock);
+
+    try testing.expectEqual(@as(usize, 1), mock.environments.items.len);
+    try testing.expectEqual(&env, mock.environments.items[0]);
+    try testing.expectEqual(@as(usize, 1), mock.values.items.len);
+    try testing.expectEqual(@as(f64, 1), mock.values.items[0].number);
+}
+
+test "ClosureCtx.traceChildren visits closure_env, super_proto, and its ClassCtx's own children" {
+    const testing = std.testing;
+    var class_env = Environment{ .parent = null };
+    var cctx = ClassCtx{
+        .interp = undefined,
+        .ctor_fnode = null,
+        .closure_env = &class_env,
+        .name = "C",
+        .super_ctor = null,
+        .super_proto = JSValue.fromNumber(9),
+    };
+    var method_env = Environment{ .parent = null };
+    var cc = ClosureCtx{
+        .interp = undefined,
+        .function_node = undefined,
+        .closure_env = &method_env,
+        .super_proto = JSValue.fromNumber(42),
+        .private_ctx = &cctx,
+    };
+    var mock: TraceMockVisitor = .{};
+    defer mock.deinit();
+    cc.traceChildren(&mock);
+
+    // method_env (its own closure_env) + class_env (through private_ctx's
+    // ClassCtx.traceChildren) -- private_ctx must NOT itself be surfaced as
+    // an opaque pointer, only its downcast children.
+    try testing.expectEqual(@as(usize, 2), mock.environments.items.len);
+    try testing.expectEqual(&method_env, mock.environments.items[0]);
+    try testing.expectEqual(&class_env, mock.environments.items[1]);
+    // ClosureCtx's own super_proto (42) + ClassCtx's super_proto (9).
+    try testing.expectEqual(@as(usize, 2), mock.values.items.len);
+    try testing.expectEqual(@as(f64, 42), mock.values.items[0].number);
+    try testing.expectEqual(@as(f64, 9), mock.values.items[1].number);
+}
+
+test "ClosureCtx.traceChildren with no private_ctx only visits closure_env" {
+    const testing = std.testing;
+    var env = Environment{ .parent = null };
+    var cc = ClosureCtx{
+        .interp = undefined,
+        .function_node = undefined,
+        .closure_env = &env,
+    };
+    var mock: TraceMockVisitor = .{};
+    defer mock.deinit();
+    cc.traceChildren(&mock);
+
+    try testing.expectEqual(@as(usize, 1), mock.environments.items.len);
+    try testing.expectEqual(@as(usize, 0), mock.values.items.len);
+}
+
+test "FiberState.traceChildren visits closure_env, this, args, and every in-flight slot" {
+    const testing = std.testing;
+    var env = Environment{ .parent = null };
+    var args = [_]JSValue{ JSValue.fromNumber(1), JSValue.fromNumber(2) };
+    var fs = FiberState{
+        .is_generator = true,
+        .is_async = true,
+        .interp = undefined,
+        .fiber = undefined,
+        .fnode = undefined,
+        .closure_env = &env,
+        .this_value = JSValue.fromNumber(3),
+        .private_ctx = null,
+        .args = &args,
+        .resume_value = JSValue.fromNumber(4),
+        .yielded = JSValue.fromNumber(5),
+        .completion = JSValue.fromNumber(6),
+        .completed_throw = null, // not thrown -- must NOT be visited
+        .promise = null, // async generator: uses pending_result_promise instead
+        .pending_result_promise = JSValue.fromNumber(7),
+    };
+    var mock: TraceMockVisitor = .{};
+    defer mock.deinit();
+    fs.traceChildren(&mock);
+
+    try testing.expectEqual(@as(usize, 1), mock.environments.items.len);
+    // this(3) + args[0](1) + args[1](2) + resume_value(4) + yielded(5) +
+    // completion(6) + pending_result_promise(7) -- completed_throw/promise
+    // stayed null, 7 values total.
+    try testing.expectEqual(@as(usize, 7), mock.values.items.len);
+    var sum: f64 = 0;
+    for (mock.values.items) |v| sum += v.number;
+    try testing.expectEqual(@as(f64, 1 + 2 + 3 + 4 + 5 + 6 + 7), sum);
+}
 
 pub const Interpreter = struct {
     arena_state: std.heap.ArenaAllocator,
