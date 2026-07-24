@@ -616,19 +616,16 @@ fn arrayJoin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
 fn arraySlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     try requireArray(ctx, this_value, "slice");
-    const len: f64 = @floatFromInt(this_value.array.value.length());
-    var start: f64 = if (arg(args, 0) == .@"undefined") 0 else try coercion.toNumber(arg(args, 0));
-    var end: f64 = if (arg(args, 1) == .@"undefined") len else try coercion.toNumber(arg(args, 1));
-    if (start < 0) start = @max(len + start, 0);
-    if (end < 0) end = @max(len + end, 0);
-    start = @min(start, len);
-    end = @min(end, len);
+    const start: ?isize = if (arg(args, 0) == .@"undefined") null else toIntSat(try coercion.toNumber(arg(args, 0)));
+    const end: ?isize = if (arg(args, 1) == .@"undefined") null else toIntSat(try coercion.toNumber(arg(args, 1)));
+    // z-array's own slice() does the negative-index/clamping arithmetic
+    // (same rules ECMA-262 wants); it just copies the raw JSValue bytes
+    // without retaining (it doesn't know T might be refcounted), so we
+    // retain each element ourselves on the way into the GC-tracked result.
+    var sliced = try this_value.array.value.slice(start, end);
+    defer sliced.deinit();
     var result = try interp(ctx).gcNewArray();
-    var i: usize = @intFromFloat(start);
-    const end_idx: usize = @intFromFloat(end);
-    while (i < end_idx) : (i += 1) {
-        _ = try result.array.value.push(this_value.array.value.get(i).retain());
-    }
+    for (sliced.toSlice()) |item| _ = try result.array.value.push(item.retain());
     return result;
 }
 
@@ -2705,16 +2702,21 @@ fn arrayFill(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     _ = allocator;
     try requireArray(ctx, this_value, "fill");
     const arr = &this_value.array.value;
-    const len = arr.length();
     const val = arg(args, 0);
-    const start = if (arg(args, 1) == .@"undefined") 0 else normIndex(try coercion.toNumber(arg(args, 1)), len);
-    const end = if (arg(args, 2) == .@"undefined") len else normIndex(try coercion.toNumber(arg(args, 2)), len);
-    var i = start;
-    const mut = arr.toSliceMut();
-    while (i < end) : (i += 1) {
-        mut[i].deinit();
-        mut[i] = val.retain();
-    }
+    const start: ?isize = if (arg(args, 1) == .@"undefined") null else toIntSat(try coercion.toNumber(arg(args, 1)));
+    const end: ?isize = if (arg(args, 2) == .@"undefined") null else toIntSat(try coercion.toNumber(arg(args, 2)));
+    // z-array's fill() copies `val`'s raw bytes into every touched slot
+    // without retaining (doesn't know T is refcounted) and without
+    // releasing what was there before. Use slice() as a read-only probe
+    // over the SAME index math fill() will use internally, purely to
+    // find out which slots are about to be touched: release what's
+    // there now, retain `val` once per slot, then let fill() do the
+    // actual write.
+    var touched = try arr.slice(start, end);
+    defer touched.deinit();
+    for (touched.toSlice()) |v| v.deinit();
+    for (touched.toSlice()) |_| _ = val.retain();
+    arr.fill(val, start, end);
     return this_value.retain();
 }
 
@@ -2763,28 +2765,37 @@ fn arrayFlat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
 fn arraySplice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArray(ctx, this_value, "splice");
     const arr = &this_value.array.value;
-    const len = arr.length();
-    const start = if (args.len == 0) 0 else normIndex(try coercion.toNumber(arg(args, 0)), len);
-    const delete_count: usize = if (args.len < 2)
-        (if (args.len == 0) 0 else len - start)
+    const start: isize = if (args.len == 0) 0 else toIntSat(try coercion.toNumber(arg(args, 0)));
+    // Spec nuance z-array's own `null` default doesn't capture: with
+    // ZERO arguments at all, deleteCount is 0 (not "delete the rest");
+    // with exactly one argument (start only, no deleteCount), it IS
+    // "delete the rest" -- z-array's `null` already means that.
+    const delete_count: ?usize = if (args.len == 0)
+        0
+    else if (args.len == 1)
+        null
     else blk: {
         const dc = try coercion.toNumber(arg(args, 1));
         if (dc <= 0) break :blk 0;
-        break :blk @min(@as(usize, @intCast(toIntSat(dc))), len - start);
+        break :blk @intCast(toIntSat(dc));
     };
-    // Removed elements -> returned array (retained).
+    // Retain each inserted value once (the array gains a reference,
+    // separate from whatever the caller still holds) -- z-array's own
+    // splice() copies raw bytes in, no retain of its own.
+    const raw_inserts = if (args.len > 2) args[2..] else &[_]JSValue{};
+    const inserts = try allocator.alloc(JSValue, raw_inserts.len);
+    defer allocator.free(inserts);
+    for (raw_inserts, 0..) |item, i| inserts[i] = item.retain();
+
+    var deleted = try arr.splice(start, delete_count, inserts);
+    defer deleted.deinit();
+    // z-array's splice() already physically removed these from `arr`
+    // (self.items.replaceRange), so `deleted` is the sole owner of that
+    // reference -- moving it into the GC-tracked result is NOT a retain,
+    // same "shallow move" contract as everywhere else this file talks to
+    // z-array's raw ZArray(T).
     var removed = try interp(ctx).gcNewArray();
-    for (arr.toSlice()[start .. start + delete_count]) |item| _ = try removed.array.value.push(item.retain());
-    // Rebuild: prefix + inserts + suffix.
-    const inserts = if (args.len > 2) args[2..] else &[_]JSValue{};
-    var rebuilt: std.ArrayList(JSValue) = .empty;
-    defer rebuilt.deinit(allocator);
-    for (arr.toSlice()[0..start]) |item| try rebuilt.append(allocator, item.retain());
-    for (inserts) |item| try rebuilt.append(allocator, item.retain());
-    for (arr.toSlice()[start + delete_count ..]) |item| try rebuilt.append(allocator, item.retain());
-    // Replace the backing contents.
-    while (arr.pop()) |v| v.deinit();
-    for (rebuilt.items) |item| _ = try arr.push(item);
+    for (deleted.toSlice()) |item| _ = try removed.array.value.push(item);
     return removed;
 }
 
