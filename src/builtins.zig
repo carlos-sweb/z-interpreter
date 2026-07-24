@@ -1556,7 +1556,7 @@ fn promiseCatch(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 /// rejection side by re-throwing the original reason. f's own throw
 /// replaces the settlement (both spec behaviors), for free, because the
 /// job runner already turns a handler throw into a derived rejection.
-const FinallyCtx = struct {
+pub const FinallyCtx = struct {
     interp: *Interpreter,
     handler: JSValue,
 };
@@ -1586,6 +1586,7 @@ fn promiseFinally(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
 
     const c = try allocator.create(FinallyCtx);
     c.* = .{ .interp = self, .handler = handler.retain() };
+    try self.gcTrackFinallyCtx(c);
     const on_f = try interp(ctx).gcNewFunction(.{ .ctx = c, .name = "", .call = finallyOnFulfilled });
     const on_r = try interp(ctx).gcNewFunction(.{ .ctx = c, .name = "", .call = finallyOnRejected });
     return self.promiseThen(p, on_f, on_r);
@@ -1607,7 +1608,7 @@ fn promiseRejectStatic(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
 }
 
 /// Shared bookkeeping for one Promise.all call.
-const AllCtx = struct {
+pub const AllCtx = struct {
     interp: *Interpreter,
     remaining: usize,
     results: []JSValue,
@@ -1623,7 +1624,7 @@ const AllCtx = struct {
 
 /// Per-element fulfillment handler: stores at its index, resolves the
 /// derived array when the last one lands.
-const AllElemCtx = struct {
+pub const AllElemCtx = struct {
     all: *AllCtx,
     index: usize,
 };
@@ -1665,6 +1666,7 @@ fn promiseAll(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
         .results = try allocator.alloc(JSValue, items.len),
         .derived = derived,
     };
+    try self.gcTrackAllCtx(all);
     for (all.results) |*r| r.* = JSValue.UNDEFINED;
     if (items.len == 0) {
         try all.completeIfDone();
@@ -1675,6 +1677,7 @@ fn promiseAll(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     for (items, 0..) |item, i| {
         const elem = try allocator.create(AllElemCtx);
         elem.* = .{ .all = all, .index = i };
+        try self.gcTrackAllElemCtx(elem);
         const on_f = try interp(ctx).gcNewFunction(.{ .ctx = elem, .name = "", .call = allElemFulfilled });
         const p = if (item == .promise) item else try self.fulfilledPromise(item);
         _ = try self.promiseThen(p, on_f, on_r);
@@ -1684,7 +1687,7 @@ fn promiseAll(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 
 /// Per-race resolution handler: first settle of ANY element settles the
 /// derived promise; the rest are silent no-ops via settle idempotence.
-const RaceCtx = struct {
+pub const RaceCtx = struct {
     interp: *Interpreter,
     derived: JSValue,
 };
@@ -1714,6 +1717,7 @@ fn promiseRace(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     const derived = try interp(ctx).gcNewPromise();
     const rc = try allocator.create(RaceCtx);
     rc.* = .{ .interp = self, .derived = derived };
+    try self.gcTrackRaceCtx(rc);
     const on_f = try interp(ctx).gcNewFunction(.{ .ctx = rc, .name = "", .call = raceFulfilled });
     const on_r = try interp(ctx).gcNewFunction(.{ .ctx = rc, .name = "", .call = raceRejected });
     for (input.array.value.toSlice()) |item| {
@@ -1751,10 +1755,9 @@ fn errorConstructor(comptime kind: zvalue.ErrorKind) NativeFn {
     return struct {
         fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
             _ = this_value;
-            const msg: []const u8 = switch (arg(args, 0)) {
-                .@"undefined" => "",
-                else => |v| try coercion.toDisplayString(allocator, v),
-            };
+            const has_msg = arg(args, 0) != .@"undefined";
+            const msg: []const u8 = if (has_msg) try coercion.toDisplayString(allocator, arg(args, 0)) else "";
+            defer if (has_msg) allocator.free(msg);
             return interp(ctx).gcNewError(kind, msg);
         }
     }.call;
@@ -1790,10 +1793,16 @@ fn fnApply(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
 
 /// ctx for one bound function: the target, the fixed this, and any
 /// pre-applied arguments.
-const BoundCtx = struct {
+pub const BoundCtx = struct {
     target: JSValue,
     bound_this: JSValue,
     pre_args: []const JSValue,
+    /// Owned (formatted fresh per `.bind()` call -- "bound " ++ target's
+    /// name); freed alongside the ctx itself, see freeGarbageNode's
+    /// `.bound_ctx` case. Unlike every other `Callable.name` in this file
+    /// (always a string literal or AST-borrowed slice), this one is real
+    /// heap memory that needs an owner.
+    name: []const u8,
 };
 
 fn boundCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1813,14 +1822,16 @@ fn fnBind(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     const pre = if (args.len > 1) args[1..] else &[_]JSValue{};
     const pre_copy = try allocator.alloc(JSValue, pre.len);
     for (pre, 0..) |a, i| pre_copy[i] = a.retain();
+    const name = try std.fmt.allocPrint(allocator, "bound {s}", .{target.function.value.name});
     bc.* = .{
         .target = target.retain(),
         .bound_this = arg(args, 0).retain(),
         .pre_args = pre_copy,
+        .name = name,
     };
+    try interp(ctx).gcTrackBoundCtx(bc);
     const target_arity = target.function.value.arity;
     const bound_arity = if (target_arity > pre.len) target_arity - pre.len else 0;
-    const name = try std.fmt.allocPrint(allocator, "bound {s}", .{target.function.value.name});
     return interp(ctx).gcNewFunction(.{
         .ctx = bc,
         .name = name,
@@ -1838,6 +1849,7 @@ fn requirePlainObject(ctx: *anyopaque, v: JSValue, what: []const u8) anyerror!JS
 
 fn objHasOwnProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const key = try coercion.toDisplayString(allocator, arg(args, 0));
+    defer allocator.free(key);
     return switch (this_value) {
         .object => |box| JSValue.fromBool(box.value.hasOwnProperty(key)),
         // Arrays expose `length` and every in-bounds index as an own property
@@ -1861,6 +1873,7 @@ fn objPropertyIsEnumerable(ctx: *anyopaque, allocator: Allocator, this_value: JS
     _ = ctx;
     if (this_value != .object) return JSValue.fromBool(false);
     const key = try coercion.toDisplayString(allocator, arg(args, 0));
+    defer allocator.free(key);
     return JSValue.fromBool(this_value.object.value.propertyIsEnumerable(key));
 }
 
@@ -2013,6 +2026,7 @@ fn objectDefineProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     const self = interp(ctx);
     const obj = arg(args, 0);
     const key = try coercion.toDisplayString(allocator, arg(args, 1));
+    defer allocator.free(key);
     try definePropertyOn(self, "defineProperty", obj, key, arg(args, 2));
     return obj.retain();
 }
@@ -2064,6 +2078,7 @@ fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, this_va
     const self = interp(ctx);
     const obj = arg(args, 0);
     const key = try coercion.toDisplayString(allocator, arg(args, 1));
+    defer allocator.free(key);
     switch (obj) {
         .object => {
             const rec = obj.object.value.getOwnRecord(key) orelse return JSValue.UNDEFINED;
@@ -2116,7 +2131,9 @@ fn objectGetOwnPropertyNames(ctx: *anyopaque, allocator: Allocator, this_value: 
         .array => |box| {
             var i: usize = 0;
             while (i < box.value.length()) : (i += 1) {
-                _ = try result.array.value.push(try interp(ctx).gcNewString(try std.fmt.allocPrint(allocator, "{d}", .{i})));
+                const idx_str = try std.fmt.allocPrint(allocator, "{d}", .{i});
+                defer allocator.free(idx_str);
+                _ = try result.array.value.push(try interp(ctx).gcNewString(idx_str));
             }
             _ = try result.array.value.push(try interp(ctx).gcNewString("length"));
         },
@@ -2391,12 +2408,14 @@ fn arrayFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
             // duck-typed next).
             const len_v = try self.getProperty(src, "length");
             const iter_key = if (self.symbol_iterator) |sym| try self.encodeKey(sym) else "";
+            defer if (iter_key.len > 0) allocator.free(iter_key);
             const has_iter = iter_key.len > 0 and (try self.getProperty(src, iter_key)) == .function;
             if (!has_iter and (try self.getProperty(src, "next")) != .function and len_v == .number) {
                 const n: usize = @intCast(@max(0, toIntSat(len_v.number)));
                 var i: usize = 0;
                 while (i < n) : (i += 1) {
                     const key = try std.fmt.allocPrint(allocator, "{d}", .{i});
+                    defer allocator.free(key);
                     try push_mapped(self, allocator, &result, map_fn, try self.getProperty(src, key), index);
                     index += 1;
                 }
@@ -2428,12 +2447,14 @@ fn functionConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
         for (args[0 .. args.len - 1], 0..) |a, i| {
             if (i != 0) try src.appendSlice(allocator, ", ");
             const s = try coercion.toDisplayString(allocator, a);
+            defer allocator.free(s);
             try src.appendSlice(allocator, s);
         }
     }
     try src.appendSlice(allocator, "\n) {\n");
     if (args.len > 0) {
         const body = try coercion.toDisplayString(allocator, args[args.len - 1]);
+        defer allocator.free(body);
         try src.appendSlice(allocator, body);
     }
     try src.appendSlice(allocator, "\n})");
@@ -2509,6 +2530,7 @@ fn symbolConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
         .@"undefined" => null,
         else => |v| try coercion.toDisplayString(allocator, v),
     };
+    defer if (desc) |d| allocator.free(d);
     return self.gcNewSymbol(desc);
 }
 
@@ -2531,7 +2553,13 @@ fn symbolFor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     _ = this_value;
     const self = interp(ctx);
     const key = try coercion.toDisplayString(allocator, arg(args, 0));
-    if (self.symbol_registry.get(key)) |sym| return sym.retain();
+    if (self.symbol_registry.get(key)) |sym| {
+        allocator.free(key);
+        return sym.retain();
+    }
+    // Not found: `key`'s ownership transfers to symbol_registry as its
+    // own hashmap key (no separate free -- matches self.symbol_keys'
+    // established convention elsewhere).
     const sym = try self.gcNewSymbol(key);
     try self.symbol_registry.put(self.gc_allocator, key, sym.retain());
     return sym;
@@ -2811,7 +2839,7 @@ fn arrayToStringMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
 
 /// keys()/values()/entries() -- iterator objects with `next` and a
 /// Symbol.iterator returning self. A snapshot over the current elements.
-const ArrayIterCtx = struct {
+pub const ArrayIterCtx = struct {
     interp: *Interpreter,
     items: []const JSValue, // retained snapshot
     index: usize = 0,
@@ -2852,10 +2880,12 @@ pub fn makeArrayIterator(self: *Interpreter, allocator: Allocator, this_value: J
     for (src, 0..) |item, i| snapshot[i] = item.retain();
     const ic = try allocator.create(ArrayIterCtx);
     ic.* = .{ .interp = self, .items = snapshot, .kind = kind };
+    try self.gcTrackArrayIterCtx(ic);
     var obj = try self.gcNewObject();
     try obj.object.value.set("next", try self.gcNewFunction(.{ .ctx = ic, .name = "next", .call = arrayIterNext }));
     if (self.symbol_iterator) |sym| {
         const key = try self.encodeKey(sym);
+        defer allocator.free(key);
         try obj.object.value.set(key, try self.nativeMethod("iterator", "self", iteratorSelfBuiltin));
     }
     return obj;
@@ -3292,14 +3322,22 @@ fn regexpConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     const pat_arg = arg(args, 0);
     var source: []const u8 = "";
     var flags: []const u8 = "";
+    var owned_source: ?[]const u8 = null;
+    var owned_flags: ?[]const u8 = null;
+    defer if (owned_source) |s| allocator.free(s);
+    defer if (owned_flags) |f| allocator.free(f);
     if (pat_arg == .regex) {
         const st = self.regexState(pat_arg);
         source = st.source;
         flags = st.flags;
     } else if (pat_arg != .@"undefined") {
-        source = try coercion.toDisplayString(allocator, pat_arg);
+        owned_source = try coercion.toDisplayString(allocator, pat_arg);
+        source = owned_source.?;
     }
-    if (arg(args, 1) != .@"undefined") flags = try coercion.toDisplayString(allocator, arg(args, 1));
+    if (arg(args, 1) != .@"undefined") {
+        owned_flags = try coercion.toDisplayString(allocator, arg(args, 1));
+        flags = owned_flags.?;
+    }
     return self.makeRegex(source, flags);
 }
 
@@ -3366,7 +3404,9 @@ fn setArrayOwn(self: *Interpreter, array: JSValue, key: []const u8, value: JSVal
 fn regexTest(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const re = try requireRegex(ctx, this_value, "test");
     const self = interp(ctx);
-    const input = if (arg(args, 0) == .string) arg(args, 0).string.value.data else try coercion.toDisplayString(allocator, arg(args, 0));
+    const is_str = arg(args, 0) == .string;
+    const input = if (is_str) arg(args, 0).string.value.data else try coercion.toDisplayString(allocator, arg(args, 0));
+    defer if (!is_str) allocator.free(input);
     const st = self.regexState(re);
     const stateful = st.global or st.sticky;
     const hit = try regexFindFrom(re, input, if (stateful) st.last_index else 0);
@@ -3382,7 +3422,9 @@ fn regexTest(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
 fn regexExec(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const re = try requireRegex(ctx, this_value, "exec");
     const self = interp(ctx);
-    const input = if (arg(args, 0) == .string) arg(args, 0).string.value.data else try coercion.toDisplayString(allocator, arg(args, 0));
+    const is_str = arg(args, 0) == .string;
+    const input = if (is_str) arg(args, 0).string.value.data else try coercion.toDisplayString(allocator, arg(args, 0));
+    defer if (!is_str) allocator.free(input);
     const st = self.regexState(re);
     const stateful = st.global or st.sticky;
     const hit = try regexFindFrom(re, input, if (stateful) st.last_index else 0);
@@ -3466,7 +3508,9 @@ fn stringSearch(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 /// string becomes a source-literal regex, real JS behavior).
 fn coerceToRegex(self: *Interpreter, allocator: Allocator, v: JSValue) anyerror!JSValue {
     if (v == .regex) return v;
-    const source = if (v == .@"undefined") "" else try coercion.toDisplayString(allocator, v);
+    const has_src = v != .@"undefined";
+    const source = if (has_src) try coercion.toDisplayString(allocator, v) else "";
+    defer if (has_src) allocator.free(source);
     return self.makeRegex(source, "");
 }
 
@@ -3477,7 +3521,9 @@ fn regexReplace(self: *Interpreter, allocator: Allocator, data: []const u8, re: 
     const st = self.regexState(re);
     const replace_all = st.global or all_flag;
     if (repl != .function) {
-        const rs = if (repl == .@"undefined") "undefined" else try coercion.toDisplayString(allocator, repl);
+        const has_repl = repl != .@"undefined";
+        const rs = if (has_repl) try coercion.toDisplayString(allocator, repl) else "undefined";
+        defer if (has_repl) allocator.free(rs);
         const out = if (replace_all)
             try re.regex.value.replaceAll(allocator, data, rs)
         else
@@ -3497,7 +3543,10 @@ fn regexReplace(self: *Interpreter, allocator: Allocator, data: []const u8, re: 
         try buf.appendSlice(allocator, data[pos..match.start]);
         // callback args: (match, cap1, cap2, ..., offset, input)
         var call_args: std.ArrayList(JSValue) = .empty;
-        defer call_args.deinit(allocator);
+        defer {
+            for (call_args.items) |a| a.deinit();
+            call_args.deinit(allocator);
+        }
         try call_args.append(allocator, try self.gcNewString(match.group(data)));
         var i: usize = 1;
         while (i <= re.regex.value.compiled.group_count) : (i += 1) {
@@ -3507,6 +3556,7 @@ fn regexReplace(self: *Interpreter, allocator: Allocator, data: []const u8, re: 
         try call_args.append(allocator, JSValue.fromNumber(@floatFromInt(match.start)));
         try call_args.append(allocator, try self.gcNewString(data));
         const r = try repl.function.value.call(repl.function.value.ctx, allocator, JSValue.UNDEFINED, call_args.items);
+        defer r.deinit();
         const rs = try coercion.toDisplayString(allocator, r);
         defer allocator.free(rs);
         try buf.appendSlice(allocator, rs);

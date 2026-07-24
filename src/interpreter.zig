@@ -525,6 +525,20 @@ const GcNode = union(enum) {
     fiber_state: *FiberState,
     class_ctx: *ClassCtx,
     promise_cap_ctx: *builtins.PromiseCapCtx,
+    /// Native-function contexts (Callable.ctx) for `.bind()`, `.then().
+    /// finally()`, `Promise.all`, `Promise.race`, and array
+    /// `.keys()`/`.values()`/`.entries()` iterators -- discovered via the
+    /// same registry-lookup-on-ctx-address mechanism as
+    /// closure_ctx/class_ctx/promise_cap_ctx (see `traceValueChildren`'s
+    /// `.function` case). Added together (roadmap item 15 follow-up):
+    /// none of these had ANY teardown path before, native-forever leaks
+    /// for every bind()/finally()/all()/race()/array-iterator call.
+    bound_ctx: *builtins.BoundCtx,
+    finally_ctx: *builtins.FinallyCtx,
+    all_ctx: *builtins.AllCtx,
+    all_elem_ctx: *builtins.AllElemCtx,
+    race_ctx: *builtins.RaceCtx,
+    array_iter_ctx: *builtins.ArrayIterCtx,
 
     /// The registry key: the node's own address, regardless of kind.
     fn address(self: GcNode) usize {
@@ -878,6 +892,24 @@ pub const Interpreter = struct {
     pub fn gcTrackPromiseCapCtx(self: *Interpreter, cap: *builtins.PromiseCapCtx) !void {
         try self.gcTrackNode(.{ .promise_cap_ctx = cap });
     }
+    pub fn gcTrackBoundCtx(self: *Interpreter, bc: *builtins.BoundCtx) !void {
+        try self.gcTrackNode(.{ .bound_ctx = bc });
+    }
+    pub fn gcTrackFinallyCtx(self: *Interpreter, c: *builtins.FinallyCtx) !void {
+        try self.gcTrackNode(.{ .finally_ctx = c });
+    }
+    pub fn gcTrackAllCtx(self: *Interpreter, c: *builtins.AllCtx) !void {
+        try self.gcTrackNode(.{ .all_ctx = c });
+    }
+    pub fn gcTrackAllElemCtx(self: *Interpreter, c: *builtins.AllElemCtx) !void {
+        try self.gcTrackNode(.{ .all_elem_ctx = c });
+    }
+    pub fn gcTrackRaceCtx(self: *Interpreter, c: *builtins.RaceCtx) !void {
+        try self.gcTrackNode(.{ .race_ctx = c });
+    }
+    pub fn gcTrackArrayIterCtx(self: *Interpreter, c: *builtins.ArrayIterCtx) !void {
+        try self.gcTrackNode(.{ .array_iter_ctx = c });
+    }
 
     /// `Environment.child()` over `gc_allocator`, tracked. Every call site
     /// that used to do `env.child(self.gc_allocator)` should
@@ -974,6 +1006,22 @@ pub const Interpreter = struct {
                     .fiber_state => |fs| fs.traceChildren(visitor),
                     .class_ctx => |cx| cx.traceChildren(visitor),
                     .promise_cap_ctx => |cap| visitor.value(cap.promise),
+                    .bound_ctx => |bc| {
+                        visitor.value(bc.target);
+                        visitor.value(bc.bound_this);
+                        for (bc.pre_args) |a| visitor.value(a);
+                    },
+                    .finally_ctx => |c| visitor.value(c.handler),
+                    .all_ctx => |c| {
+                        for (c.results) |r| visitor.value(r);
+                        visitor.value(c.derived);
+                    },
+                    // .all_elem_ctx's `all: *AllCtx` is a borrowed
+                    // traversal link (AllCtx is independently reachable
+                    // via the shared on_r's ctx) -- nothing owned to trace.
+                    .all_elem_ctx => {},
+                    .race_ctx => |c| visitor.value(c.derived),
+                    .array_iter_ctx => |c| for (c.items) |item| visitor.value(item),
                     else => {},
                 };
             },
@@ -1154,6 +1202,36 @@ pub const Interpreter = struct {
             .promise_cap_ctx => |cap| {
                 sweeper.value(cap.promise);
                 self.gc_allocator.destroy(cap);
+            },
+            .bound_ctx => |bc| {
+                sweeper.value(bc.target);
+                sweeper.value(bc.bound_this);
+                for (bc.pre_args) |a| sweeper.value(a);
+                self.gc_allocator.free(bc.pre_args);
+                self.gc_allocator.free(bc.name);
+                self.gc_allocator.destroy(bc);
+            },
+            .finally_ctx => |c| {
+                sweeper.value(c.handler);
+                self.gc_allocator.destroy(c);
+            },
+            .all_ctx => |c| {
+                for (c.results) |r| sweeper.value(r);
+                sweeper.value(c.derived);
+                self.gc_allocator.free(c.results);
+                self.gc_allocator.destroy(c);
+            },
+            // AllElemCtx doesn't own `all` (see traceValueChildren) --
+            // just the struct itself.
+            .all_elem_ctx => |c| self.gc_allocator.destroy(c),
+            .race_ctx => |c| {
+                sweeper.value(c.derived);
+                self.gc_allocator.destroy(c);
+            },
+            .array_iter_ctx => |c| {
+                for (c.items) |v| sweeper.value(v);
+                self.gc_allocator.free(c.items);
+                self.gc_allocator.destroy(c);
             },
         }
     }
@@ -1757,6 +1835,7 @@ pub const Interpreter = struct {
         // Symbol.iterator path too, and `gen()[Symbol.iterator]() === gen()`).
         if (self.symbol_iterator) |sym| {
             const key = try self.encodeKey(sym);
+            defer self.gc_allocator.free(key);
             try obj.object.value.set(key, try self.nativeMethod("iterator", "self", iteratorSelf));
         }
         return obj;
@@ -1813,6 +1892,7 @@ pub const Interpreter = struct {
         try obj.object.value.set("next", try self.gcNewFunction(.{ .ctx = fs, .name = "next", .call = asyncGeneratorNext }));
         if (self.symbol_async_iterator) |sym| {
             const key = try self.encodeKey(sym);
+            defer self.gc_allocator.free(key);
             try obj.object.value.set(key, try self.nativeMethod("asyncIterator", "self", iteratorSelf));
         }
         return obj;
@@ -2194,6 +2274,7 @@ pub const Interpreter = struct {
             // bodies, a matching labelled break converts to normal here.
             .labelled => |s| {
                 var labels: std.ArrayList([]const u8) = .empty;
+                defer labels.deinit(arena);
                 try labels.append(arena, s.label);
                 var inner = s.body;
                 while (inner.data == .labelled) {
@@ -2479,6 +2560,7 @@ pub const Interpreter = struct {
         const arena = self.gc_allocator;
         if (self.symbol_iterator) |sym| {
             const key = try self.encodeKey(sym);
+            defer self.gc_allocator.free(key);
             const method = try self.getProperty(obj, key);
             if (method == .function) {
                 const iter = try method.function.value.call(method.function.value.ctx, arena, obj, &.{});
@@ -2502,6 +2584,7 @@ pub const Interpreter = struct {
         const arena = self.gc_allocator;
         if (self.symbol_async_iterator) |sym| {
             const key = try self.encodeKey(sym);
+            defer self.gc_allocator.free(key);
             const method = try self.getProperty(obj, key);
             if (method == .function) {
                 const iter = try method.function.value.call(method.function.value.ctx, arena, obj, &.{});
@@ -2711,12 +2794,17 @@ pub const Interpreter = struct {
                     }
                     return self.throwError(.type_error, "Cannot destructure '{s}' as it is {s}.", .{ what, what });
                 }
-                var consumed: std.ArrayList([]const u8) = .empty;
+                var consumed: std.ArrayList(PropKey) = .empty;
+                defer {
+                    for (consumed.items) |pk| pk.free(arena);
+                    consumed.deinit(arena);
+                }
                 for (elements) |el| {
                     switch (el) {
                         .property => |prop| {
-                            const key = try self.propertyKeyString(env, prop.computed, prop.key);
-                            try consumed.append(arena, key);
+                            const pk = try self.propertyKeyString(env, prop.computed, prop.key);
+                            const key = pk.key;
+                            try consumed.append(arena, pk);
                             var v = try self.getProperty(value, key);
                             var el_target = prop.value;
                             if (el_target.data == .assignment and el_target.data.assignment.op == .assign) {
@@ -2738,7 +2826,7 @@ pub const Interpreter = struct {
                                 defer arena.free(keys);
                                 outer: for (keys) |k| {
                                     for (consumed.items) |c| {
-                                        if (std.mem.eql(u8, c, k)) continue :outer;
+                                        if (std.mem.eql(u8, c.key, k)) continue :outer;
                                     }
                                     try rest_obj.object.value.set(k, value.object.value.get(k).?.retain());
                                 }
@@ -2938,7 +3026,9 @@ pub const Interpreter = struct {
         switch (target) {
             .object => |box| {
                 var seen: std.StringHashMapUnmanaged(void) = .empty;
+                defer seen.deinit(arena);
                 var keys_list: std.ArrayList([]const u8) = .empty;
+                defer keys_list.deinit(arena);
                 var current: ?*const @TypeOf(box.value) = &box.value;
                 while (current) |o| : (current = o.getPrototype()) {
                     const ks = try o.keys(arena);
@@ -2961,6 +3051,7 @@ pub const Interpreter = struct {
                 var i: usize = 0;
                 while (i < len) : (i += 1) {
                     const key_str = try std.fmt.allocPrint(arena, "{d}", .{i});
+                    defer arena.free(key_str);
                     const kv = try self.gcNewString(key_str);
                     if (try self.forIterationStep(env, head.binding, kv, body, labels)) |c| return c;
                 }
@@ -2969,6 +3060,7 @@ pub const Interpreter = struct {
                 var i: usize = 0;
                 while (i < box.value.data.len) : (i += 1) {
                     const key_str = try std.fmt.allocPrint(arena, "{d}", .{i});
+                    defer arena.free(key_str);
                     const kv = try self.gcNewString(key_str);
                     if (try self.forIterationStep(env, head.binding, kv, body, labels)) |c| return c;
                 }
@@ -3042,7 +3134,9 @@ pub const Interpreter = struct {
                 for (elements) |el| {
                     switch (el) {
                         .property => |prop| {
-                            const key_str = try self.propertyKeyString(env, prop.computed, prop.key);
+                            const pk = try self.propertyKeyString(env, prop.computed, prop.key);
+                            defer pk.free(self.gc_allocator);
+                            const key_str = pk.key;
                             switch (prop.kind) {
                                 .init => {
                                     const value = try self.evalExpression(env, prop.value);
@@ -3122,14 +3216,16 @@ pub const Interpreter = struct {
                 if (m.object.data == .super_expr) {
                     const sproto = env.resolveSuperProto() orelse
                         return self.throwError(.syntax_error, "'super' keyword unexpected here", .{});
-                    const key = try self.memberKeyString(env, m);
-                    return try self.getProperty(sproto, key);
+                    const pk = try self.memberKeyString(env, m);
+                    defer pk.free(self.gc_allocator);
+                    return try self.getProperty(sproto, pk.key);
                 }
                 const obj = try self.evalExpression(env, m.object);
                 if (m.optional and (obj == .@"undefined" or obj == .@"null")) return JSValue.UNDEFINED;
                 if (privateMemberName(m)) |pn| return self.privateGet(env, obj, pn);
-                const key = try self.memberKeyString(env, m);
-                return try self.getProperty(obj, key);
+                const pk = try self.memberKeyString(env, m);
+                defer pk.free(self.gc_allocator);
+                return try self.getProperty(obj, pk.key);
             },
             .function_like => |ptr| return try self.makeClosure(env, zfunctions.asFunctionNode(ptr)),
             .class_like => |ptr| return try self.evalClass(env, zfunctions.asClassNode(ptr)),
@@ -3178,13 +3274,17 @@ pub const Interpreter = struct {
     /// A property key that a symbol value can also produce. Symbols
     /// encode to a reserved `\x00S<ptr>` string (invisible to string
     /// iteration; registered for getOwnPropertySymbols); everything else
-    /// goes through ToString.
+    /// goes through ToString. Always returns a FRESH, caller-owned
+    /// allocation (even for a symbol seen before) -- `self.symbol_keys`
+    /// keeps its own independent copy as the map key, so the two owners
+    /// never alias the same buffer.
     pub fn encodeKey(self: *Interpreter, value: JSValue) anyerror![]const u8 {
         if (value == .symbol) {
             const arena = self.gc_allocator;
             const key = try std.fmt.allocPrint(arena, "\x00S{x}", .{@intFromPtr(value.symbol)});
             if (!self.symbol_keys.contains(key)) {
-                try self.symbol_keys.put(arena, key, value.retain());
+                const stored_key = try arena.dupe(u8, key);
+                try self.symbol_keys.put(arena, stored_key, value.retain());
             }
             return key;
         }
@@ -3197,26 +3297,52 @@ pub const Interpreter = struct {
         return k.len > 0 and k[0] == 0;
     }
 
-    fn memberKeyString(self: *Interpreter, env: *Environment, m: anytype) anyerror![]const u8 {
+    /// A property-key string that may or may not be a fresh allocation --
+    /// `.identifier`/literal keys are AST-borrowed (`owned = false`, must
+    /// NOT be freed: some consumers, e.g. `Environment.define`/`assign`,
+    /// store the key slice directly rather than duplicating it, so freeing
+    /// a borrowed one would leave a dangling map key); computed keys go
+    /// through `encodeKey` and ARE a fresh allocation (`owned = true`).
+    /// Call `.free()` unconditionally at every call site -- it's a no-op
+    /// for the borrowed case.
+    const PropKey = struct {
+        key: []const u8,
+        owned: bool,
+
+        fn free(self: PropKey, allocator: Allocator) void {
+            if (self.owned) allocator.free(self.key);
+        }
+    };
+
+    fn memberKeyString(self: *Interpreter, env: *Environment, m: anytype) anyerror!PropKey {
         if (m.computed) {
+            // NOT `defer k.deinit()`: evalExpression's ownership isn't
+            // uniform -- an `.identifier` read returns the binding's
+            // value BORROWED (env.lookup's `.value` case, no retain;
+            // see evalExpression's own `.identifier` arm), while other
+            // node kinds (literals, calls, getProperty reads) return an
+            // owned value. Releasing unconditionally here double-frees
+            // the extremely common `obj[someVar]` case (refcount
+            // underflow, confirmed via Test262 nested for-in crash).
             const k = try self.evalExpression(env, m.property);
-            return self.encodeKey(k);
+            return .{ .key = try self.encodeKey(k), .owned = true };
         }
         return switch (m.property.data) {
-            .identifier => |name| name,
+            .identifier => |name| .{ .key = name, .owned = false },
             else => error.NotImplemented,
         };
     }
 
-    fn propertyKeyString(self: *Interpreter, env: *Environment, computed: bool, key: *zparser.Node) anyerror![]const u8 {
+    /// Same borrowed/owned contract as `memberKeyString`.
+    fn propertyKeyString(self: *Interpreter, env: *Environment, computed: bool, key: *zparser.Node) anyerror!PropKey {
         if (computed) {
             const v = try self.evalExpression(env, key);
-            return self.encodeKey(v);
+            return .{ .key = try self.encodeKey(v), .owned = true };
         }
         return switch (key.data) {
-            .identifier => |name| name,
-            .string_literal => |s| s,
-            .number_literal => |n| try znumber.FormattingMethods.toString(n, self.gc_allocator, null),
+            .identifier => |name| .{ .key = name, .owned = false },
+            .string_literal => |s| .{ .key = s, .owned = false },
+            .number_literal => |n| .{ .key = try znumber.FormattingMethods.toString(n, self.gc_allocator, null), .owned = true },
             else => error.NotImplemented,
         };
     }
@@ -3416,6 +3542,7 @@ pub const Interpreter = struct {
     fn evalIn(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
         const arena = self.gc_allocator;
         const key = try coercion.toDisplayString(arena, l);
+        defer arena.free(key);
         return switch (r) {
             .object => |box| JSValue.fromBool(box.value.has(key)),
             .array => |box| blk: {
@@ -3662,7 +3789,9 @@ pub const Interpreter = struct {
                         return self.throwError(.syntax_error, "Private fields can not be deleted: {s}", .{pn});
                     }
                     const obj = try self.evalExpression(env, m.object);
-                    const key = try self.memberKeyString(env, m);
+                    const pk = try self.memberKeyString(env, m);
+                    defer pk.free(self.gc_allocator);
+                    const key = pk.key;
                     if (obj != .object) return JSValue.fromBool(true);
                     // Capture before deleting (the record's pointer doesn't
                     // survive fetchOrderedRemove): ZObject.delete() frees the
@@ -3739,7 +3868,9 @@ pub const Interpreter = struct {
             .member => |m| {
                 const obj = try self.evalExpression(env, m.object);
                 if (privateMemberName(m)) |pn| return self.privateSet(env, obj, pn, value);
-                const key = try self.memberKeyString(env, m);
+                const pk = try self.memberKeyString(env, m);
+                defer pk.free(self.gc_allocator);
+                const key = pk.key;
                 // Split, not a blanket conversion: null/undefined is a real
                 // spec TypeError, but every other non-object receiver
                 // (arrays, strings, numbers) is a genuine feature gap --
@@ -3789,7 +3920,14 @@ pub const Interpreter = struct {
                 // binding (`globalThis.foo = 1` makes `foo` a global).
                 if (self.global_object) |go| {
                     if (obj.object == go.object) {
-                        try self.global_env.define(self.gc_allocator, key, value.retain());
+                        // `Environment.define` stores `key` BY REFERENCE
+                        // (never dupes -- every other call site passes an
+                        // AST-borrowed, forever-valid name). `key` here can
+                        // be the PropKey-owned case (`globalThis[computed]
+                        // = x`), which `pk.free()` reclaims once this
+                        // function returns -- dupe defensively so the new
+                        // global binding's name always outlives that.
+                        try self.global_env.define(self.gc_allocator, try self.gc_allocator.dupe(u8, key), value.retain());
                         return;
                     }
                 }
@@ -3829,10 +3967,11 @@ pub const Interpreter = struct {
             const m = c.callee.data.member;
             const sproto = env.resolveSuperProto() orelse
                 return self.throwError(.syntax_error, "'super' keyword unexpected here", .{});
-            const key = try self.memberKeyString(env, m);
-            const method = try self.getProperty(sproto, key);
+            const pk = try self.memberKeyString(env, m);
+            defer pk.free(self.gc_allocator);
+            const method = try self.getProperty(sproto, pk.key);
             if (method != .function) {
-                return self.throwError(.type_error, "(intermediate value).{s} is not a function", .{key});
+                return self.throwError(.type_error, "(intermediate value).{s} is not a function", .{pk.key});
             }
             const args = try self.evalArgs(env, c.args);
             defer self.gc_allocator.free(args);
@@ -3850,8 +3989,9 @@ pub const Interpreter = struct {
                 // preserved like any member call.
                 callee_val = try self.privateGet(env, obj, pn);
             } else {
-                const key = try self.memberKeyString(env, m);
-                callee_val = try self.getProperty(obj, key);
+                const pk = try self.memberKeyString(env, m);
+                defer pk.free(self.gc_allocator);
+                callee_val = try self.getProperty(obj, pk.key);
             }
         } else {
             callee_val = try self.evalExpression(env, c.callee);
@@ -4141,7 +4281,9 @@ pub const Interpreter = struct {
         if (cnode.superclass) |sc_expr| {
             const sc = try self.evalExpression(env, sc_expr);
             if (sc != .function or !sc.function.value.constructable) {
+                defer sc.deinit();
                 const shown = try coercion.toDisplayString(arena, sc);
+                defer arena.free(shown);
                 return self.throwError(.type_error, "Class extends value {s} is not a constructor or null", .{shown});
             }
             super_ctor = sc;
@@ -4219,7 +4361,17 @@ pub const Interpreter = struct {
                 .computed => |expr| blk: {
                     // encodeKey handles BOTH symbols (`[Symbol.iterator]`,
                     // encoded like any symbol-keyed property) and ordinary
-                    // values (ToPropertyKey string form).
+                    // values (ToPropertyKey string form). Neither `kv` nor
+                    // the encoded key itself is freed here: evalExpression's
+                    // ownership isn't uniform (an `.identifier` read is
+                    // BORROWED, no retain -- see memberKeyString's doc
+                    // comment for the Test262-confirmed crash this caused
+                    // once already), and the encoded key must outlive this
+                    // loop iteration anyway (stored in `instance_fields`
+                    // for per-construction use; freeGarbageNode's
+                    // `.class_ctx` case only frees the array, not each
+                    // key's content -- documented residual gap, narrow/
+                    // one-time-per-class, not chased further here).
                     const kv = try self.evalExpression(closure_env, expr);
                     break :blk try self.encodeKey(kv);
                 },
