@@ -1999,7 +1999,9 @@ pub const Interpreter = struct {
                 return iter_env;
             },
             .existing => |name| {
-                env.assign(name.name, value) catch |err| return switch (err) {
+                // env.assign takes ownership -- retain, matching bindPattern's
+                // convention (the caller keeps its own reference to `value`).
+                env.assign(name.name, value.retain()) catch |err| return switch (err) {
                     error.ReferenceError => self.throwError(.reference_error, "{s} is not defined", .{name.name}),
                     error.BeforeInitialization => self.throwError(.reference_error, "Cannot access '{s}' before initialization", .{name.name}),
                 };
@@ -2521,7 +2523,11 @@ pub const Interpreter = struct {
                 break :blk JSValue.UNDEFINED;
             },
             .function => |box| blk: {
-                if (std.mem.eql(u8, key, "prototype")) break :blk try self.functionPrototype(obj);
+                // functionPrototype() returns a borrow of Callable.prototype's
+                // own reference (matching every other branch here, which all
+                // retain before returning -- necessary now that
+                // Callable.deinit() actually releases .prototype).
+                if (std.mem.eql(u8, key, "prototype")) break :blk (try self.functionPrototype(obj)).retain();
                 if (std.mem.eql(u8, key, "name")) break :blk try JSValue.newString(self.arena_state.allocator(), box.value.name);
                 if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.arity));
                 // The statics bag (class statics, F.myProp = 1) shadows
@@ -2681,12 +2687,21 @@ pub const Interpreter = struct {
         }
         // Always-strict [[Set]] failures are real TypeErrors, not raw
         // Zig errors (the descriptor flags finally bite here).
+        // getOwn (NOT get): get() walks the prototype chain, which would
+        // capture an INHERITED value here and wrongly release something
+        // the prototype object still owns -- set() only ever touches own
+        // properties, so the displaced value must come from getOwn().
+        const old = obj.object.value.getOwn(key);
         obj.object.value.set(key, value.retain()) catch |err| return switch (err) {
             error.PropertyNotWritable => self.throwError(.type_error, "Cannot assign to read only property '{s}' of object", .{key}),
             error.ObjectIsFrozen => self.throwError(.type_error, "Cannot assign to read only property '{s}' of object", .{key}),
             error.ObjectNotExtensible => self.throwError(.type_error, "Cannot add property {s}, object is not extensible", .{key}),
             else => err,
         };
+        // The property write above just overwrote (or shadowed) whatever
+        // was there -- release the value it displaced (ZObject.set doesn't
+        // know about JSValue/refcounting, so this is the interpreter's job).
+        if (old) |o| o.deinit();
     }
 
     /// The function's statics/property bag, created lazily on first touch
@@ -2858,11 +2873,25 @@ pub const Interpreter = struct {
                     const obj = try self.evalExpression(env, m.object);
                     const key = try self.memberKeyString(env, m);
                     if (obj != .object) return JSValue.fromBool(true);
+                    // Capture before deleting (the record's pointer doesn't
+                    // survive fetchOrderedRemove): ZObject.delete() frees the
+                    // key string but doesn't know about JSValue/refcounting,
+                    // so releasing the removed value/getter/setter is on us.
+                    const old_rec = obj.object.value.getOwnRecord(key);
+                    const old_value = if (old_rec) |r| r.value else null;
+                    const old_getter = if (old_rec) |r| r.getter else null;
+                    const old_setter = if (old_rec) |r| r.setter else null;
                     const removed = obj.object.value.delete(key) catch |err| return switch (err) {
                         error.PropertyNotConfigurable, error.ObjectIsFrozen => self.throwError(.type_error, "Cannot delete property '{s}' of object", .{key}),
                         else => err,
                     };
-                    _ = removed;
+                    if (removed) {
+                        // An accessor's `value` is a placeholder (see
+                        // Property(T)'s doc comment), safe to deinit either way.
+                        if (old_value) |v| v.deinit();
+                        if (old_getter) |g| g.deinit();
+                        if (old_setter) |s| s.deinit();
+                    }
                     return JSValue.fromBool(true);
                 }
                 _ = try self.evalExpression(env, u.operand);
@@ -2909,7 +2938,9 @@ pub const Interpreter = struct {
 
     fn assignTo(self: *Interpreter, env: *Environment, target: *zparser.Node, value: JSValue) anyerror!void {
         switch (target.data) {
-            .identifier => |name| env.assign(name, value) catch |err| return switch (err) {
+            // env.assign takes ownership -- retain, matching bindPattern's
+            // convention (the caller keeps its own reference to `value`).
+            .identifier => |name| env.assign(name, value.retain()) catch |err| return switch (err) {
                 error.ReferenceError => self.throwError(.reference_error, "{s} is not defined", .{name}),
                 error.BeforeInitialization => self.throwError(.reference_error, "Cannot access '{s}' before initialization", .{name}),
             },

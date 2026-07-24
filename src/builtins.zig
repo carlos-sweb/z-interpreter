@@ -3110,7 +3110,17 @@ fn mapGet(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
 fn mapSet(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const m = try requireMap(ctx, this_value, "set");
-    try m.map.value.set(arg(args, 0).retain(), arg(args, 1).retain());
+    const key = arg(args, 0);
+    const value = arg(args, 1);
+    // std.array_hash_map's put() only replaces the VALUE on an existing
+    // key (getOrPutContext leaves key_ptr alone) -- so retaining the key
+    // argument when the key already exists would retain something that
+    // never gets stored, a pure leak. Capture+release the displaced value
+    // the same way (set() silently overwrites it otherwise).
+    const existed = m.map.value.has(key);
+    const old_value = if (existed) m.map.value.get(key) else null;
+    try m.map.value.set(if (existed) key else key.retain(), value.retain());
+    if (old_value) |v| v.deinit();
     return m.retain(); // chainable
 }
 
@@ -3123,7 +3133,17 @@ fn mapHas(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
 fn mapDelete(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const m = try requireMap(ctx, this_value, "delete");
-    return JSValue.fromBool(m.map.value.delete(arg(args, 0)));
+    const key = arg(args, 0);
+    // delete() only returns a bool (no removed key/value) -- capture the
+    // value first so we can release it. The stored KEY isn't released here
+    // (deliberately out of scope): for object/symbol/function keys
+    // SameValueZero is reference identity so `key` IS the stored box, but
+    // for strings it's value equality over possibly-different boxes, and
+    // ZMap doesn't expose "the actual stored key" to disambiguate safely.
+    const old_value = m.map.value.get(key);
+    const removed = m.map.value.delete(key);
+    if (removed) if (old_value) |v| v.deinit();
+    return JSValue.fromBool(removed);
 }
 
 fn mapClear(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {

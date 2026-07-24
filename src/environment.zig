@@ -97,11 +97,17 @@ pub const Environment = struct {
     /// current environment -- that's `define`'s job). No implicit global
     /// creation: an undeclared name is a hard error, and assigning to a
     /// binding still in its dead zone (`x = 1; let x;`) is its own error.
+    ///
+    /// Ownership: takes `value` (the caller must already own/have retained
+    /// it, same contract as `define`), and releases whatever was
+    /// previously in the slot -- every call site now retains before
+    /// calling, so the displaced value is safe to release here.
     pub fn assign(self: *Environment, name: []const u8, value: JSValue) AssignError!void {
         var env: ?*Environment = self;
         while (env) |e| : (env = e.parent) {
             if (e.tdz.contains(name)) return AssignError.BeforeInitialization;
             if (e.bindings.getPtr(name)) |slot| {
+                slot.deinit();
                 slot.* = value;
                 return;
             }
