@@ -2325,8 +2325,6 @@ fn objectFromEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
 }
 
 fn objectGetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = this_value;
     const self = interp(ctx);
     const obj = arg(args, 0);
     return switch (obj) {
@@ -2350,6 +2348,11 @@ fn objectGetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
         .set => self.protos.set.retain(),
         .symbol => self.protos.symbol.retain(),
         .promise => self.protos.promise.retain(),
+        .bigint => self.protos.bigint.retain(),
+        // No getPrototypeOf trap dispatch yet (Proxy plan, later phase)
+        // -- delegates transparently to target, correct for the
+        // no-trap case.
+        .proxy => |box| objectGetPrototypeOf(ctx, allocator, this_value, &.{box.value.target}),
         .@"undefined", .@"null" => self.throwError(.type_error, "Cannot convert undefined or null to object", .{}),
     };
 }

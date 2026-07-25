@@ -86,6 +86,19 @@ pub fn inspect(allocator: Allocator, buf: *std.ArrayList(u8), v: JSValue) !void 
         },
         .map => try buf.appendSlice(allocator, "[Map]"),
         .set => try buf.appendSlice(allocator, "[Set]"),
+        // Placeholder until trap dispatch exists (Proxy plan, later
+        // phases) -- real Node renders through the target transparently.
+        .proxy => try buf.appendSlice(allocator, "[Proxy]"),
+        .bigint => |box| {
+            // Trailing `n` is a console.log/inspect-only convention --
+            // coercion.zig's ToString (toDisplayString) deliberately
+            // does NOT include it (`${1n}` === "1", but console.log(1n)
+            // prints "1n").
+            const s = try box.value.toString(allocator, 10);
+            defer allocator.free(s);
+            try buf.appendSlice(allocator, s);
+            try buf.append(allocator, 'n');
+        },
         .@"error" => |box| {
             // "TypeError: message" (or bare "TypeError" for an empty
             // message) -- exactly Node's console.log(err) minus the stack.

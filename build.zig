@@ -52,6 +52,9 @@ pub fn build(b: *std.Build) void {
     const zsymbol_dep = b.dependency("zsymbol", .{ .target = target, .optimize = optimize });
     const zsymbol_module = zsymbol_dep.module("zsymbol");
 
+    const zbigint_dep = b.dependency("zbigint", .{ .target = target, .optimize = optimize });
+    const zbigint_module = zbigint_dep.module("zbigint");
+
     const zinterpreter_module = b.addModule("zinterpreter", .{
         .root_source_file = b.path("src/zinterpreter.zig"),
     });
@@ -71,6 +74,7 @@ pub fn build(b: *std.Build) void {
     zinterpreter_module.addImport("zset", zset_module);
     zinterpreter_module.addImport("zerror", zerror_module);
     zinterpreter_module.addImport("zsymbol", zsymbol_module);
+    zinterpreter_module.addImport("zbigint", zbigint_module);
 
     const test_step = b.step("test", "Run all tests");
 
@@ -115,6 +119,8 @@ pub fn build(b: *std.Build) void {
         "tests/string_methods_full_test.zig",
         "tests/map_set_test.zig",
         "tests/regex_test.zig",
+        "tests/bigint_test.zig",
+        "tests/proxy_test.zig",
     };
 
     inline for (test_files) |test_file| {
@@ -165,6 +171,7 @@ pub fn build(b: *std.Build) void {
     src_tests.root_module.addImport("zset", zset_module);
     src_tests.root_module.addImport("zerror", zerror_module);
     src_tests.root_module.addImport("zsymbol", zsymbol_module);
+    src_tests.root_module.addImport("zbigint", zbigint_module);
     const run_src_tests = b.addRunArtifact(src_tests);
     test_step.dependOn(&run_src_tests.step);
 

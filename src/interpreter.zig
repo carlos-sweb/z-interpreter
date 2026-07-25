@@ -24,6 +24,7 @@ const zerror = @import("zerror");
 const zsymbol = @import("zsymbol");
 const zstring = @import("zstring");
 const zdate = @import("zdate");
+const zbigint = @import("zbigint");
 
 /// The materialized builtin prototype objects (see `Interpreter.protos`).
 /// Each is a real `.object` JSValue; `.undefined` until setupGlobals runs.
@@ -41,6 +42,7 @@ pub const Protos = struct {
     set: JSValue = JSValue.UNDEFINED,
     symbol: JSValue = JSValue.UNDEFINED,
     promise: JSValue = JSValue.UNDEFINED,
+    bigint: JSValue = JSValue.UNDEFINED,
 };
 
 /// JS-level state a RegExp object carries beyond its compiled bytecode.
@@ -508,6 +510,12 @@ const GcNode = union(enum) {
     @"error": *zvalue.Rc(zerror.ZError(JSValue)),
     function: *zvalue.Rc(zvalue.Callable),
     promise: *zvalue.Rc(zvalue.ZPromise(JSValue)),
+    /// NOT a leaf like symbol/string/date/bigint below -- holds
+    /// `target`/`handler` JSValues that can form real cycles (a handler
+    /// closing over the very proxy it traps), so it needs full
+    /// trace/sweep like array/object/map/set/error/function/promise
+    /// above.
+    proxy: *zvalue.Rc(zvalue.Proxy),
     /// Symbols and strings are leaves (hold no JSValue children, can't
     /// cycle) but are STILL registered: a value that's created and
     /// immediately retained for storage elsewhere (every well-known
@@ -521,6 +529,11 @@ const GcNode = union(enum) {
     symbol: *zvalue.Rc(zsymbol.ZSymbol),
     string: *zvalue.Rc(zstring.ZString),
     date: *zvalue.Rc(zdate.ZDate),
+    /// Same "leaf, but still registered" rationale as symbol/string above
+    /// -- a BigInt literal is created and often immediately retained for
+    /// storage elsewhere, hitting the same "declaration leaves refcount
+    /// 2, not 1" quirk.
+    bigint: *zvalue.Rc(zbigint.ZBigInt),
     environment: *Environment,
     closure_ctx: *ClosureCtx,
     fiber_state: *FiberState,
@@ -583,6 +596,8 @@ const Marker = struct {
             .symbol => |box| @intFromPtr(box),
             .string => |box| @intFromPtr(box),
             .date => |box| @intFromPtr(box),
+            .bigint => |box| @intFromPtr(box),
+            .proxy => |box| @intFromPtr(box),
         };
         const gop = self.reached.getOrPut(self.interp.gc_allocator, addr) catch return;
         if (gop.found_existing) return;
@@ -629,6 +644,7 @@ const Sweeper = struct {
             .regex => |box| @intFromPtr(box),
             .symbol => |box| @intFromPtr(box),
             .date => |box| @intFromPtr(box),
+            .bigint => |box| @intFromPtr(box),
             .array => |box| @intFromPtr(box),
             .object => |box| @intFromPtr(box),
             .map => |box| @intFromPtr(box),
@@ -636,6 +652,7 @@ const Sweeper = struct {
             .@"error" => |box| @intFromPtr(box),
             .function => |box| @intFromPtr(box),
             .promise => |box| @intFromPtr(box),
+            .proxy => |box| @intFromPtr(box),
         };
         if (self.garbage.contains(addr)) return;
         v.deinit();
@@ -898,6 +915,8 @@ pub const Interpreter = struct {
             .symbol => |box| .{ .symbol = box },
             .string => |box| .{ .string = box },
             .date => |box| .{ .date = box },
+            .bigint => |box| .{ .bigint = box },
+            .proxy => |box| .{ .proxy = box },
             else => return,
         };
         v.setGcHook(self, gcOnBoxDestroyed);
@@ -1037,6 +1056,16 @@ pub const Interpreter = struct {
         try self.gcTrack(v);
         return v;
     }
+    pub fn gcNewBigInt(self: *Interpreter, raw_digit_text: []const u8) !JSValue {
+        const v = try JSValue.newBigInt(self.gc_allocator, raw_digit_text);
+        try self.gcTrack(v);
+        return v;
+    }
+    pub fn gcNewProxy(self: *Interpreter, target: JSValue, handler: JSValue) !JSValue {
+        const v = try JSValue.newProxy(self.gc_allocator, target, handler);
+        try self.gcTrack(v);
+        return v;
+    }
 
     /// GC prep (phase 4): visits every JSValue directly held by a
     /// container-shaped box, mirroring `JSValue.deinit()`'s own recursive
@@ -1047,7 +1076,7 @@ pub const Interpreter = struct {
     /// (or anything else untracked) just miss the lookup and stop there.
     fn traceValueChildren(self: *Interpreter, v: JSValue, visitor: anytype) void {
         switch (v) {
-            .@"undefined", .@"null", .boolean, .number, .string, .regex, .symbol, .date => {},
+            .@"undefined", .@"null", .boolean, .number, .string, .regex, .symbol, .date, .bigint => {},
             .array => |box| for (box.value.toSliceMut()) |*child| visitor.value(child.*),
             .object => |box| for (box.value.properties.values()) |prop| {
                 visitor.value(prop.value);
@@ -1094,6 +1123,10 @@ pub const Interpreter = struct {
                     if (reaction.on_rejected) |h| visitor.value(h);
                     if (reaction.derived) |d| visitor.value(d);
                 }
+            },
+            .proxy => |box| {
+                visitor.value(box.value.target);
+                visitor.value(box.value.handler);
             },
         }
     }
@@ -1230,6 +1263,15 @@ pub const Interpreter = struct {
                 // ZDate is a pure value with no allocator of its own --
                 // only the box itself needs freeing (matches
                 // JSValue.deinit()'s own `.date` arm).
+                box.destroy();
+            },
+            .bigint => |box| {
+                box.value.deinit();
+                box.destroy();
+            },
+            .proxy => |box| {
+                sweeper.value(box.value.target);
+                sweeper.value(box.value.handler);
                 box.destroy();
             },
             .environment => |e| {
@@ -3367,7 +3409,7 @@ pub const Interpreter = struct {
             .super_expr => return self.throwError(.syntax_error, "'super' keyword unexpected here", .{}),
             .new_expr => |n| return self.evalNew(env, n),
             .regex_literal => |r| return self.makeRegex(r.pattern, r.flags),
-            .bigint_literal => return error.NotImplemented,
+            .bigint_literal => |raw| return self.gcNewBigInt(raw),
             // Only ever nested inside array/object-literal/call-argument
             // constructs, which unwrap `.data.spread` themselves before
             // recursing -- never reached as a standalone expression.
@@ -3578,6 +3620,16 @@ pub const Interpreter = struct {
                 if (try self.getFromProto(obj, self.protos.date, key)) |m| break :blk m;
                 break :blk JSValue.UNDEFINED;
             },
+            .bigint => blk: {
+                if (try self.getFromProto(obj, self.protos.bigint, key)) |m| break :blk m;
+                break :blk JSValue.UNDEFINED;
+            },
+            // No `get` trap dispatch yet (Proxy plan phase 3) -- this is
+            // just the "no trap installed" base case (transparent
+            // delegation to target), which happens to already be
+            // correct behavior for a handler with no `get` trap. Phase 3
+            // adds the trap CHECK on top of this.
+            .proxy => |box| try self.getProperty(box.value.target, key),
             .promise => blk: {
                 if (try self.getFromProto(obj, self.protos.promise, key)) |m| break :blk m;
                 break :blk JSValue.UNDEFINED;
@@ -3655,7 +3707,10 @@ pub const Interpreter = struct {
                 break :blk JSValue.fromBool(idx < box.value.length());
             },
             .@"undefined", .@"null", .boolean, .number, .string => self.throwError(.type_error, "Cannot use 'in' operator to search for '{s}'", .{key}),
-            .function, .regex, .symbol, .map, .set, .@"error", .date, .promise => error.NotImplemented,
+            // No `has` trap dispatch yet (Proxy plan phase 3) --
+            // transparent delegation to target, correct for no trap.
+            .proxy => |box| self.evalIn(l, box.value.target),
+            .function, .regex, .symbol, .map, .set, .@"error", .date, .promise, .bigint => error.NotImplemented,
         };
     }
 

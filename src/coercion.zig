@@ -13,7 +13,10 @@ pub fn isTruthy(v: JSValue) bool {
         .boolean => |b| b,
         .number => |n| n != 0 and !std.math.isNan(n),
         .string => |box| box.value.data.len != 0,
-        .array, .object, .regex, .symbol, .map, .set, .@"error", .function, .date, .promise => true,
+        // Falsy only for 0n -- the one variant here that isn't
+        // unconditionally true, matching real JS ToBoolean(BigInt).
+        .bigint => |box| !box.value.isZero(),
+        .array, .object, .regex, .symbol, .map, .set, .@"error", .function, .date, .promise, .proxy => true,
     };
 }
 
@@ -34,7 +37,14 @@ pub fn toNumber(v: JSValue) !f64 {
         // Number(date) is its millisecond timestamp (real ToPrimitive
         // "number" hint behavior for Dates).
         .date => |box| @floatFromInt(box.value.getTime()),
-        .array, .object, .regex, .symbol, .map, .set, .@"error", .function, .promise => error.NotImplemented,
+        // Explicit Number(1n) is spec-legal and must work -- but this
+        // function being callable does NOT mean implicit `1n + 1` is
+        // safe; binaryOp/evalUnary must intercept bigint operands before
+        // reaching a blind toNumber call on a mixed pair (roadmap item
+        // 18, phase 4 -- not yet wired, so implicit arithmetic mixing
+        // is temporarily silently permitted rather than a TypeError).
+        .bigint => |box| box.value.toFloat(),
+        .array, .object, .regex, .symbol, .map, .set, .@"error", .function, .promise, .proxy => error.NotImplemented,
     };
 }
 
@@ -88,7 +98,11 @@ pub fn toDisplayString(allocator: Allocator, v: JSValue) ![]u8 {
         .promise => try allocator.dupe(u8, "[object Promise]"),
         // `/source/` (flags omitted -- the exact form is regex.toString()).
         .regex => |box| try std.fmt.allocPrint(allocator, "/{s}/", .{box.value.getPattern()}),
-        .object, .symbol, .map, .set, .@"error", .function => error.NotImplemented,
+        // Digits only, no trailing `n` -- that suffix is a console.log/
+        // inspect-only display convention (see inspect.zig's own .bigint
+        // case), not part of ToString: `${1n}` === "1", not "1n".
+        .bigint => |box| try box.value.toString(allocator, 10),
+        .object, .symbol, .map, .set, .@"error", .function, .proxy => error.NotImplemented,
     };
 }
 
