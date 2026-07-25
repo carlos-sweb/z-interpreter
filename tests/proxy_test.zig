@@ -19,6 +19,7 @@ const testing = std.testing;
 const zinterpreter = @import("zinterpreter");
 const zvalue = @import("zvalue");
 const JSValue = zvalue.JSValue;
+const helpers = @import("helpers.zig");
 
 const Ctx = struct {
     interp: zinterpreter.Interpreter,
@@ -59,6 +60,31 @@ test "property read with no `get` trap delegates transparently to the target" {
     try ctx.interp.defineGlobal("p", p);
     _ = try ctx.interp.run("console.log(p.greeting);");
     try testing.expectEqualStrings("hi\n", ctx.allocating.written());
+}
+
+test "new Proxy(target, handler) via real JS source, no traps" {
+    try helpers.expectStdout(
+        \\const target = { greeting: 'hi', x: 1 };
+        \\const p = new Proxy(target, {});
+        \\console.log(typeof p, p.greeting, 'x' in p, 'y' in p);
+    , "object hi true false\n");
+}
+
+test "Proxy() without `new` is a real TypeError" {
+    try helpers.expectUncaught("Proxy({}, {});", .type_error, "Constructor Proxy requires 'new'");
+}
+
+test "new Proxy with a non-object target or handler is a real TypeError (one combined message, matching Node)" {
+    try helpers.expectUncaught("new Proxy(1, {});", .type_error, "Cannot create proxy with a non-object as target or handler");
+    try helpers.expectUncaught("new Proxy({}, 1);", .type_error, "Cannot create proxy with a non-object as target or handler");
+}
+
+test "new Proxy over a function target: typeof is \"function\" (calling it is phase 4, not covered here)" {
+    try helpers.expectStdout(
+        \\function f() { return 42; }
+        \\const p = new Proxy(f, {});
+        \\console.log(typeof p);
+    , "function\n");
 }
 
 test "'in' with no `has` trap delegates transparently to the target" {

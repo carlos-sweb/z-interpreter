@@ -4225,7 +4225,7 @@ pub const Interpreter = struct {
         defer self.construct_target = prev_target;
         const result = try callee.function.value.call(callee.function.value.ctx, arena, instance, args);
         return switch (result) {
-            .object, .array, .function, .regex, .map, .set, .@"error", .date, .promise => result,
+            .object, .array, .function, .regex, .map, .set, .@"error", .date, .promise, .proxy => result,
             else => instance,
         };
     }

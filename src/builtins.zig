@@ -362,6 +362,17 @@ pub fn setupGlobals(self: *Interpreter) !void {
     try dneMethod(date_statics, "UTC", try native(self, "UTC", dateUTC));
     try g.define(arena, "Date", date_ctor);
 
+    // `new Proxy(target, handler)` -- unlike Date, MUST reject a bare
+    // (non-new) call (proxyConstructor's own construct_target check).
+    const proxy_ctor = try self.gcNewFunction(.{
+        .ctx = self,
+        .name = "Proxy",
+        .arity = 2,
+        .call = proxyConstructor,
+        .constructable = true,
+    });
+    try g.define(arena, "Proxy", proxy_ctor);
+
     // Error constructors -- `new Error('msg')` (and `Error('msg')`, which
     // real JS also allows) produce catchable/throwable .error values of
     // the right kind.
@@ -3630,6 +3641,34 @@ fn regexReplace(self: *Interpreter, allocator: Allocator, data: []const u8, re: 
     }
     if (pos < data.len) try buf.appendSlice(allocator, data[pos..]);
     return self.gcNewString(buf.items);
+}
+
+// ===== Proxy =====
+
+/// Real `new Proxy(target, handler)` requires BOTH to be "an Object" in
+/// spec terms -- which spans every non-primitive JSValue tag in this
+/// engine (plain objects, arrays, functions, regexes, maps, sets,
+/// errors, dates, promises, even another proxy), not just `.object`.
+fn isObjectLike(v: JSValue) bool {
+    return switch (v) {
+        .@"undefined", .@"null", .boolean, .number, .string, .symbol, .bigint => false,
+        else => true,
+    };
+}
+
+fn proxyConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const self = interp(ctx);
+    if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor Proxy requires 'new'", .{});
+    const target = arg(args, 0);
+    const handler = arg(args, 1);
+    // Real Node uses ONE combined message for either failure, not two
+    // distinct ones (verified against actual Node, not assumed).
+    if (!isObjectLike(target) or !isObjectLike(handler)) {
+        return self.throwError(.type_error, "Cannot create proxy with a non-object as target or handler", .{});
+    }
+    return self.gcNewProxy(target.retain(), handler.retain());
 }
 
 /// String.prototype.split with a regex separator. Splits at each match;
