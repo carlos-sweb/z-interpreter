@@ -288,7 +288,14 @@ pub fn setupGlobals(self: *Interpreter) !void {
     try g.define(arena, "Object", object_ctor);
 
     const console_obj = try self.ordinaryObject();
+    // Real Node: log/info/debug -> stdout, error/warn -> stderr (verified
+    // against actual Node, not assumed) -- same rendering either way,
+    // only the destination writer differs. See consoleLog/consoleError.
     try dneMethod(console_obj, "log", try native(self, "log", consoleLog));
+    try dneMethod(console_obj, "info", try native(self, "info", consoleLog));
+    try dneMethod(console_obj, "debug", try native(self, "debug", consoleLog));
+    try dneMethod(console_obj, "error", try native(self, "error", consoleError));
+    try dneMethod(console_obj, "warn", try native(self, "warn", consoleError));
     try g.define(arena, "console", console_obj);
     try g.define(arena, "print", try native(self, "print", globalPrint));
 
@@ -508,6 +515,13 @@ fn consoleLog(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     _ = this_value;
     const self = interp(ctx);
     try inspect.writeConsoleLog(allocator, self.console_writer, args);
+    return JSValue.UNDEFINED;
+}
+
+fn consoleError(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    try inspect.writeConsoleLog(allocator, self.console_error_writer, args);
     return JSValue.UNDEFINED;
 }
 

@@ -663,8 +663,16 @@ pub const Interpreter = struct {
     global_env: *Environment,
     /// Injected, not hardcoded to real stdout -- lets tests point this at
     /// an in-memory buffer instead of touching the process's actual
-    /// stdout.
+    /// stdout. console.log/info/debug write here.
     console_writer: *std.Io.Writer,
+    /// console.error/warn write here instead (real Node: log/info/debug
+    /// go to stdout, error/warn go to stderr -- confirmed against real
+    /// Node, not assumed). Defaults to the SAME writer as console_writer
+    /// in `init()` (so the 11+ existing call sites across tests/z-run
+    /// that only pass one writer keep working unchanged); a caller that
+    /// wants real stdout/stderr separation (z-run's main.zig) sets this
+    /// field directly after construction.
+    console_error_writer: *std.Io.Writer,
     /// The JS exception currently in flight. INVARIANT: meaningful only
     /// while `error.JsThrow` is unwinding; every raiser (throwValue/
     /// throwError) sets it unconditionally immediately before returning
@@ -796,6 +804,7 @@ pub const Interpreter = struct {
             .gc_allocator = backing_allocator,
             .global_env = undefined,
             .console_writer = console_writer,
+            .console_error_writer = console_writer,
         };
         const global_env = try self.gc_allocator.create(Environment);
         global_env.* = .{ .parent = null };
