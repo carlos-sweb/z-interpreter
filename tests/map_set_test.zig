@@ -30,6 +30,24 @@ test "Map: forEach order and entries iteration" {
     , "a=1,b=2\n[[\"a\",1],[\"b\",2]]\na 1\nb 2\n");
 }
 
+test "Map.forEach: deleting the current entry mid-callback does not corrupt iteration" {
+    try helpers.expectStdout(
+        \\const m = new Map([['a', 1], ['b', 2], ['c', 3]]);
+        \\const seen = [];
+        \\m.forEach((v, k) => { seen.push(k); m.delete(k); });
+        \\console.log(seen.join(','), m.size);
+    , "a,b,c 0\n");
+}
+
+test "Set.forEach: deleting the current entry mid-callback does not corrupt iteration" {
+    try helpers.expectStdout(
+        \\const s = new Set([1, 2, 3]);
+        \\const seen = [];
+        \\s.forEach(v => { seen.push(v); s.delete(v); });
+        \\console.log(seen.join(','), s.size);
+    , "1,2,3 0\n");
+}
+
 test "Set: uniqueness, has/delete/size, chainable add, iteration" {
     try helpers.expectStdout(
         \\const s = new Set([1, 2, 2, 3, 3, 3]);

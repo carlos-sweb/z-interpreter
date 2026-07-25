@@ -3241,7 +3241,26 @@ fn mapForEach(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     const cb = try requireCallback(ctx, args);
     const ks = m.map.value.keys();
     const vs = m.map.value.values();
-    for (ks, vs) |k, v| {
+    // Snapshot + retain before calling into JS: `ks`/`vs` are live slices
+    // into the map's storage, and the callback may mutate `m` (delete/
+    // set), which can resize/compact that storage and invalidate them
+    // mid-iteration -- a real, confirmed crash ("switch on corrupt
+    // value" in JSValue.retain(), Test262). A copy WITHOUT retaining
+    // isn't enough either: a callback that deletes the very entry being
+    // visited would leave the snapshot pointing at an already-freed box.
+    const snap_keys = try allocator.alloc(JSValue, ks.len);
+    defer allocator.free(snap_keys);
+    const snap_values = try allocator.alloc(JSValue, ks.len);
+    defer allocator.free(snap_values);
+    for (ks, vs, 0..) |k, v, i| {
+        snap_keys[i] = k.retain();
+        snap_values[i] = v.retain();
+    }
+    defer for (snap_keys, snap_values) |k, v| {
+        k.deinit();
+        v.deinit();
+    };
+    for (snap_keys, snap_values) |k, v| {
         _ = try cb.function.value.call(cb.function.value.ctx, allocator, JSValue.UNDEFINED, &.{ v, k, m });
     }
     return JSValue.UNDEFINED;
@@ -3312,7 +3331,13 @@ fn setClear(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
 fn setForEach(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const s = try requireSet(ctx, this_value, "forEach");
     const cb = try requireCallback(ctx, args);
-    for (s.set.value.values()) |v| {
+    const vs = s.set.value.values();
+    // Same snapshot-and-retain rationale as mapForEach above.
+    const snap_values = try allocator.alloc(JSValue, vs.len);
+    defer allocator.free(snap_values);
+    for (vs, 0..) |v, i| snap_values[i] = v.retain();
+    defer for (snap_values) |v| v.deinit();
+    for (snap_values) |v| {
         _ = try cb.function.value.call(cb.function.value.ctx, allocator, JSValue.UNDEFINED, &.{ v, v, s });
     }
     return JSValue.UNDEFINED;

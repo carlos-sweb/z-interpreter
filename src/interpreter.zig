@@ -2071,6 +2071,9 @@ pub const Interpreter = struct {
     /// allocPrint's OOM propagates as OOM, never as JsThrow.
     pub fn throwError(self: *Interpreter, kind: zvalue.ErrorKind, comptime fmt: []const u8, args: anytype) anyerror {
         const msg = try std.fmt.allocPrint(self.gc_allocator, fmt, args);
+        // ZError.init() (zerror.zig) dupes `message` into its own storage --
+        // this formatted copy is only scratch space for that call.
+        defer self.gc_allocator.free(msg);
         return self.throwValue(try self.gcNewError(kind, msg));
     }
 
