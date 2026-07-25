@@ -904,6 +904,33 @@ pub const Interpreter = struct {
         try self.gc_registry.put(self.gc_allocator, node.address(), node);
     }
 
+    /// Registers every container node of a JSValue tree built OUTSIDE the
+    /// gcNew*/gcTrack path -- namely JSON.parse/YAML.parse, which construct
+    /// their result via z-value's raw constructors (JSValue.newObject/
+    /// newArray/newString) one level at a time, with no call back into the
+    /// interpreter that would normally register each node. Without this,
+    /// the whole tree (root AND every nested node) is invisible to
+    /// freeAllGcNodes()/collectGarbage() and only survives via correct Rc
+    /// bookkeeping, if at all -- an unassigned or later-orphaned
+    /// JSON.parse() result leaks unconditionally otherwise. Scoped to the
+    /// node kinds a JSON/YAML parser can actually produce (object/array/
+    /// string); a plain recursive walk with no cycle guard is safe because
+    /// freshly parsed text can never encode a back-reference.
+    pub fn gcAdoptTree(self: *Interpreter, v: JSValue) !void {
+        switch (v) {
+            .object => |box| {
+                try self.gcTrack(v);
+                for (box.value.properties.values()) |prop| try self.gcAdoptTree(prop.value);
+            },
+            .array => |box| {
+                try self.gcTrack(v);
+                for (box.value.toSliceMut()) |child| try self.gcAdoptTree(child);
+            },
+            .string => try self.gcTrack(v),
+            else => {},
+        }
+    }
+
     /// Registers a non-Rc GC node (Environment/ClosureCtx/FiberState/
     /// ClassCtx) -- these have no `Rc.destroy()` teardown path of their
     /// own at all, so the registry entry is the ONLY thing standing

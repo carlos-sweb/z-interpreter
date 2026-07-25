@@ -160,6 +160,27 @@ test "JSON.parse of invalid input is a catchable SyntaxError" {
     }.check);
 }
 
+// zjson.parse builds its result tree via z-value's raw constructors, one
+// level at a time, entirely outside the interpreter's gcNew*/gcTrack path.
+// A tree whose only reference is a global that's never explicitly cleared
+// (the common case: a top-level `const config = JSON.parse(...)`) has
+// nothing that would ever call .deinit() on it -- if the tree also isn't
+// registered in the GC registry, interp.deinit()'s freeAllGcNodes() can't
+// find it either, and it leaks unconditionally. This uses testing.allocator
+// as the backing allocator (same as every other test here), which fails
+// the test outright on any real leak -- no manual refcount inspection
+// needed, the runner catches it.
+test "JSON.parse's result tree is GC-tracked, not orphaned when only a global variable holds it" {
+    try helpers.runAndCheck(
+        \\var probe = JSON.parse('{"a": [1, 2, {"deep": true}], "b": "x"}');
+        \\undefined;
+    , {}, struct {
+        fn check(_: void, result: helpers.Result) !void {
+            _ = result;
+        }
+    }.check);
+}
+
 // ===== Object statics + Array.isArray =====
 
 test "Object.keys/values/entries" {

@@ -1221,14 +1221,19 @@ fn jsonStringify(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
 
 fn jsonParse(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
+    const self = interp(ctx);
     const text = arg(args, 0);
-    if (text != .string) return interp(ctx).throwError(.syntax_error, "Unexpected token in JSON", .{});
-    return zjson.parse(allocator, text.string.value.data) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
+    if (text != .string) return self.throwError(.syntax_error, "Unexpected token in JSON", .{});
+    const value = zjson.parse(allocator, text.string.value.data) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
         // A real, catchable SyntaxError -- matching JSON.parse's spec'd
         // failure mode.
-        else => interp(ctx).throwError(.syntax_error, "Unexpected token in JSON", .{}),
+        else => return self.throwError(.syntax_error, "Unexpected token in JSON", .{}),
     };
+    // zjson.parse builds the tree via z-value's raw constructors, bypassing
+    // gcNew*/gcTrack at every level -- see gcAdoptTree's doc comment.
+    try self.gcAdoptTree(value);
+    return value;
 }
 
 // ===== Object statics =====
