@@ -87,6 +87,33 @@ test "new Proxy over a function target: typeof is \"function\" (calling it is ph
     , "function\n");
 }
 
+test "get/set/has/deleteProperty traps all fire, in the right order, with the right args" {
+    // Deliberately avoids `+` string concatenation inside the trap
+    // bodies (console.log's comma-separated args instead) -- `+`
+    // concat has a real, PRE-EXISTING, unrelated leak in this engine
+    // (see operators_test.zig's "string concatenation via +"), and
+    // using it here would misattribute that leak to this test.
+    try helpers.expectStdout(
+        \\const target = { a: 1 };
+        \\const p = new Proxy(target, {
+        \\  get(t, k, r) { console.log('get', k); return t[k]; },
+        \\  set(t, k, v, r) { console.log('set', k, v); t[k] = v; return true; },
+        \\  has(t, k) { console.log('has', k); return k in t; },
+        \\  deleteProperty(t, k) { console.log('del', k); delete t[k]; return true; },
+        \\});
+        \\console.log(p.a);
+        \\p.b = 2;
+        \\console.log(target.b);
+        \\console.log('a' in p);
+        \\delete p.a;
+        \\console.log(target.a);
+    , "get a\n1\nset b 2\n2\nhas a\ntrue\ndel a\nundefined\n");
+}
+
+test "a falsy `set` trap result is a real TypeError (always-strict engine, matching Node's ESM/strict behavior)" {
+    try helpers.expectUncaught("const p = new Proxy({}, { set() { return false; } }); p.x = 1;", .type_error, "'set' on proxy: trap returned falsish for property 'x'");
+}
+
 test "'in' with no `has` trap delegates transparently to the target" {
     var ctx = try Ctx.init();
     defer ctx.deinit();

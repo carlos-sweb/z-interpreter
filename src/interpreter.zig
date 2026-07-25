@@ -3516,6 +3516,23 @@ pub const Interpreter = struct {
         return fn_value;
     }
 
+    /// Looks up `proxy.handler[trap_name]`; returns it if present AND
+    /// callable, `null` otherwise -- `null` is exactly the "no trap
+    /// installed, delegate to target directly" case every Proxy
+    /// operation falls back to. `getProperty` on the handler already
+    /// returns an owned (retained) value; callers of this function own
+    /// the returned function and must `.deinit()` it when done (a
+    /// `null` result has already released it).
+    fn proxyTrap(self: *Interpreter, proxy: *zvalue.Rc(zvalue.Proxy), trap_name: []const u8) anyerror!?JSValue {
+        if (proxy.value.handler != .object) return null;
+        const fn_val = try self.getProperty(proxy.value.handler, trap_name);
+        if (fn_val != .function) {
+            fn_val.deinit();
+            return null;
+        }
+        return fn_val;
+    }
+
     pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!JSValue {
         return switch (obj) {
             // Own-then-chain walk over property *records* (not values), so
@@ -3624,12 +3641,21 @@ pub const Interpreter = struct {
                 if (try self.getFromProto(obj, self.protos.bigint, key)) |m| break :blk m;
                 break :blk JSValue.UNDEFINED;
             },
-            // No `get` trap dispatch yet (Proxy plan phase 3) -- this is
-            // just the "no trap installed" base case (transparent
-            // delegation to target), which happens to already be
-            // correct behavior for a handler with no `get` trap. Phase 3
-            // adds the trap CHECK on top of this.
-            .proxy => |box| try self.getProperty(box.value.target, key),
+            // get(target, property, receiver) -- receiver is the proxy
+            // itself, not the target (matters when the trap forwards via
+            // Reflect.get(target, property, receiver) for correct `this`
+            // binding on inherited accessors -- narrowing: this engine's
+            // Reflect.get, once it exists, ignores the receiver arg like
+            // getFromProto already does elsewhere).
+            .proxy => |box| blk: {
+                if (try self.proxyTrap(box, "get")) |trap_fn| {
+                    defer trap_fn.deinit();
+                    const key_val = try self.gcNewString(key);
+                    defer key_val.deinit();
+                    break :blk try trap_fn.function.value.call(trap_fn.function.value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, key_val, obj });
+                }
+                break :blk try self.getProperty(box.value.target, key);
+            },
             .promise => blk: {
                 if (try self.getFromProto(obj, self.protos.promise, key)) |m| break :blk m;
                 break :blk JSValue.UNDEFINED;
@@ -3707,9 +3733,18 @@ pub const Interpreter = struct {
                 break :blk JSValue.fromBool(idx < box.value.length());
             },
             .@"undefined", .@"null", .boolean, .number, .string => self.throwError(.type_error, "Cannot use 'in' operator to search for '{s}'", .{key}),
-            // No `has` trap dispatch yet (Proxy plan phase 3) --
-            // transparent delegation to target, correct for no trap.
-            .proxy => |box| self.evalIn(l, box.value.target),
+            // has(target, property) -- ToBoolean-coerced.
+            .proxy => |box| blk: {
+                if (try self.proxyTrap(box, "has")) |trap_fn| {
+                    defer trap_fn.deinit();
+                    const key_val = try self.gcNewString(key);
+                    defer key_val.deinit();
+                    const result = try trap_fn.function.value.call(trap_fn.function.value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, key_val });
+                    defer result.deinit();
+                    break :blk JSValue.fromBool(coercion.isTruthy(result));
+                }
+                break :blk try self.evalIn(l, box.value.target);
+            },
             .function, .regex, .symbol, .map, .set, .@"error", .date, .promise, .bigint => error.NotImplemented,
         };
     }
@@ -3780,6 +3815,31 @@ pub const Interpreter = struct {
         // was there -- release the value it displaced (ZObject.set doesn't
         // know about JSValue/refcounting, so this is the interpreter's job).
         if (old) |o| o.deinit();
+    }
+
+    /// Deletes `obj`'s own `key`, releasing the displaced value/getter/
+    /// setter (ZObject.delete() frees the key string but knows nothing
+    /// about JSValue/refcounting). ALWAYS returns true on this path --
+    /// matches real spec [[Delete]]: removing a missing key is still a
+    /// "successful" delete; the only failure case (non-configurable/
+    /// frozen) throws instead of returning false, same as before this
+    /// was factored out of `evalUnary`'s `.delete` case (now shared with
+    /// a Proxy's `deleteProperty` trap fallback, when absent).
+    fn deleteObjectProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!bool {
+        const old_rec = obj.object.value.getOwnRecord(key);
+        const old_value = if (old_rec) |r| r.value else null;
+        const old_getter = if (old_rec) |r| r.getter else null;
+        const old_setter = if (old_rec) |r| r.setter else null;
+        const removed = obj.object.value.delete(key) catch |err| return switch (err) {
+            error.PropertyNotConfigurable, error.ObjectIsFrozen => self.throwError(.type_error, "Cannot delete property '{s}' of object", .{key}),
+            else => err,
+        };
+        if (removed) {
+            if (old_value) |v| v.deinit();
+            if (old_getter) |g| g.deinit();
+            if (old_setter) |s| s.deinit();
+        }
+        return true;
     }
 
     /// The function's statics/property bag, created lazily on first touch
@@ -3951,27 +4011,23 @@ pub const Interpreter = struct {
                     const pk = try self.memberKeyString(env, m);
                     defer pk.free(self.gc_allocator);
                     const key = pk.key;
-                    if (obj != .object) return JSValue.fromBool(true);
-                    // Capture before deleting (the record's pointer doesn't
-                    // survive fetchOrderedRemove): ZObject.delete() frees the
-                    // key string but doesn't know about JSValue/refcounting,
-                    // so releasing the removed value/getter/setter is on us.
-                    const old_rec = obj.object.value.getOwnRecord(key);
-                    const old_value = if (old_rec) |r| r.value else null;
-                    const old_getter = if (old_rec) |r| r.getter else null;
-                    const old_setter = if (old_rec) |r| r.setter else null;
-                    const removed = obj.object.value.delete(key) catch |err| return switch (err) {
-                        error.PropertyNotConfigurable, error.ObjectIsFrozen => self.throwError(.type_error, "Cannot delete property '{s}' of object", .{key}),
-                        else => err,
-                    };
-                    if (removed) {
-                        // An accessor's `value` is a placeholder (see
-                        // Property(T)'s doc comment), safe to deinit either way.
-                        if (old_value) |v| v.deinit();
-                        if (old_getter) |g| g.deinit();
-                        if (old_setter) |s| s.deinit();
+                    if (obj == .proxy) {
+                        const box = obj.proxy;
+                        if (try self.proxyTrap(box, "deleteProperty")) |trap_fn| {
+                            defer trap_fn.deinit();
+                            const key_val = try self.gcNewString(key);
+                            defer key_val.deinit();
+                            const result = try trap_fn.function.value.call(trap_fn.function.value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, key_val });
+                            defer result.deinit();
+                            return JSValue.fromBool(coercion.isTruthy(result));
+                        }
+                        if (box.value.target == .object) {
+                            return JSValue.fromBool(try self.deleteObjectProperty(box.value.target, key));
+                        }
+                        return JSValue.fromBool(true);
                     }
-                    return JSValue.fromBool(true);
+                    if (obj != .object) return JSValue.fromBool(true);
+                    return JSValue.fromBool(try self.deleteObjectProperty(obj, key));
                 }
                 _ = try self.evalExpression(env, u.operand);
                 return JSValue.fromBool(true);
@@ -4072,6 +4128,28 @@ pub const Interpreter = struct {
                             0;
                         return;
                     }
+                    return error.NotImplemented;
+                }
+                if (obj == .proxy) {
+                    const box = obj.proxy;
+                    if (try self.proxyTrap(box, "set")) |trap_fn| {
+                        defer trap_fn.deinit();
+                        const key_val = try self.gcNewString(key);
+                        defer key_val.deinit();
+                        const result = try trap_fn.function.value.call(trap_fn.function.value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, key_val, value, obj });
+                        defer result.deinit();
+                        // Always-strict engine: a falsy trap result is a
+                        // real TypeError, not a silent no-op.
+                        if (!coercion.isTruthy(result)) {
+                            return self.throwError(.type_error, "'set' on proxy: trap returned falsish for property '{s}'", .{key});
+                        }
+                        return;
+                    }
+                    // No trap: set directly on target, matching the
+                    // narrow set of receiver kinds this function already
+                    // special-cases above (function/array/regex/object).
+                    if (box.value.target == .object) return self.setObjectProperty(box.value.target, key, value);
+                    if (box.value.target == .array) return self.setArrayProperty(box.value.target, key, value);
                     return error.NotImplemented;
                 }
                 if (obj != .object) return error.NotImplemented;
