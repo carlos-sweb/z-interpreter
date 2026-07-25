@@ -502,6 +502,7 @@ test "FiberState.traceChildren visits closure_env, this, args, and every in-flig
 const GcNode = union(enum) {
     array: *zvalue.Rc(zarray.ZArray(JSValue)),
     object: *zvalue.Rc(zobject.ZObject(JSValue)),
+    regex: *zvalue.Rc(zregex.Regex),
     map: *zvalue.Rc(zmap.ZMap(JSValue, JSValue)),
     set: *zvalue.Rc(zset.ZSet(JSValue)),
     @"error": *zvalue.Rc(zerror.ZError(JSValue)),
@@ -570,9 +571,10 @@ const Marker = struct {
 
     pub fn value(self: *Marker, v: JSValue) void {
         const addr: usize = switch (v) {
-            .@"undefined", .@"null", .boolean, .number, .regex => return,
+            .@"undefined", .@"null", .boolean, .number => return,
             .array => |box| @intFromPtr(box),
             .object => |box| @intFromPtr(box),
+            .regex => |box| @intFromPtr(box),
             .map => |box| @intFromPtr(box),
             .set => |box| @intFromPtr(box),
             .@"error" => |box| @intFromPtr(box),
@@ -831,8 +833,14 @@ pub const Interpreter = struct {
 
         // modules' keys (loaded.path) are arena-allocated (the loader
         // gets the arena, not gc_allocator -- see loadModule), freed in
-        // bulk by arena_state.deinit() below; only the map's own backing
-        // array is gc_allocator's to free here.
+        // bulk by arena_state.deinit() below. The *ModuleRecord VALUES
+        // are gc_allocator's, though (gc.create(ModuleRecord) in
+        // loadModule) -- freeAllGcNodes() above already tore down each
+        // record's `.exports` JSValue (it's a GC root via markRoots, see
+        // collectGarbage), so only the record struct itself (the pointer
+        // container) needs destroying here, not its fields.
+        var mod_it = self.modules.valueIterator();
+        while (mod_it.next()) |rec| self.gc_allocator.destroy(rec.*);
         self.modules.deinit(self.gc_allocator);
         self.regex_state.deinit(self.gc_allocator);
         self.array_props.deinit(self.gc_allocator);
@@ -852,6 +860,15 @@ pub const Interpreter = struct {
     fn gcOnBoxDestroyed(ctx: *anyopaque, box: *anyopaque) void {
         const self: *Interpreter = @ptrCast(@alignCast(ctx));
         _ = self.gc_registry.remove(@intFromPtr(box));
+        // A destroyed box might be a `.regex` with its own entry in
+        // regex_state (source/flags duped separately from whatever the
+        // Regex engine itself owns, for `.source`/`.flags` reflection --
+        // see makeRegex) -- a no-op lookup for every other box kind,
+        // real cleanup only for regex boxes.
+        if (self.regex_state.fetchRemove(@intFromPtr(box))) |kv| {
+            self.gc_allocator.free(kv.value.source);
+            self.gc_allocator.free(kv.value.flags);
+        }
     }
 
     /// Registers a container-shaped JSValue (leaves are silently ignored --
@@ -863,6 +880,7 @@ pub const Interpreter = struct {
         const node: GcNode = switch (v) {
             .array => |box| .{ .array = box },
             .object => |box| .{ .object = box },
+            .regex => |box| .{ .regex = box },
             .map => |box| .{ .map = box },
             .set => |box| .{ .set = box },
             .@"error" => |box| .{ .@"error" = box },
@@ -1161,6 +1179,10 @@ pub const Interpreter = struct {
                 box.destroy();
             },
             .symbol => |box| {
+                box.value.deinit();
+                box.destroy();
+            },
+            .regex => |box| {
                 box.value.deinit();
                 box.destroy();
             },
@@ -1537,6 +1559,7 @@ pub const Interpreter = struct {
             return self.throwError(.syntax_error, "Invalid regular expression: /{s}/", .{pattern});
         };
         const value = try JSValue.fromRegex(arena, re);
+        try self.gcTrack(value);
         try self.regex_state.put(arena, @intFromPtr(value.regex), state);
         return value;
     }
