@@ -2676,9 +2676,13 @@ fn arrayFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
             index += 1;
         },
         // Sets/Maps are iterable -- drain via the shared iterable path.
-        .set, .map => for (try self.iterableItems(src)) |item| {
-            try push_mapped(self, allocator, &result, map_fn, item, index);
-            index += 1;
+        .set, .map => {
+            const items = try self.iterableItems(src);
+            defer self.gc_allocator.free(items);
+            for (items) |item| {
+                try push_mapped(self, allocator, &result, map_fn, item, index);
+                index += 1;
+            }
         },
         .string => |box| {
             var it = std.unicode.Utf8Iterator{ .bytes = box.value.data, .i = 0 };
@@ -3426,7 +3430,9 @@ fn mapConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     var m = try interp(ctx).gcNewMap();
     const init = arg(args, 0);
     if (init != .@"undefined" and init != .@"null") {
-        for (try self.iterableItems(init)) |entry| {
+        const items = try self.iterableItems(init);
+        defer self.gc_allocator.free(items);
+        for (items) |entry| {
             if (entry != .array and entry != .object) return self.throwError(.type_error, "Iterator value {s} is not an entry object", .{entry.typeOf()});
             const k = try self.getProperty(entry, "0");
             const v = try self.getProperty(entry, "1");
@@ -3444,7 +3450,9 @@ fn setConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     var s = try interp(ctx).gcNewSet();
     const init = arg(args, 0);
     if (init != .@"undefined" and init != .@"null") {
-        for (try self.iterableItems(init)) |v| try s.set.value.add(v.retain());
+        const items = try self.iterableItems(init);
+        defer self.gc_allocator.free(items);
+        for (items) |v| try s.set.value.add(v.retain());
     }
     return s;
 }

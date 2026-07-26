@@ -36,6 +36,18 @@ backtrace (bajaron de 50 a 20 también, probablemente algunas de esas
 eran del mismo bug, ocurriendo dentro de un contexto de fiber sin
 backtrace capturable).
 
+**Actualización 2026-07-26 (3ra ronda)**: se arregló también la causa
+#3 (`iterableItems`/`drainIterator`'s contrato de ownership mezclado).
+**Total: 30 allocations leaked** (-20 desde el fix anterior, **-87%
+desde el inicio de la auditoría: 239 → 30**), 446/446 tests, sin
+regresiones (sweep completo de Test262 confirmado). Solo quedan las
+causas #2b, #7, #8 (ya documentadas, deliberadas, dejadas tal cual) y
+~18 sin backtrace (ver esa sección, sin cambios de naturaleza). El
+audit queda esencialmente cerrado: de los 8 sitios con causa raíz
+identificada, 5 están arreglados y 3 son narrowings deliberados
+documentados en el propio código — no queda ningún bug real sin
+atender con backtrace disponible.
+
 Como referencia histórica: esta cuenta era **609 leaks** al empezar la
 "Fase 3-5" de GC (2026-07-24), bajó a **411** después de esa fase, y a
 **235** tras arreglar `throwError()` (mensaje sin liberar) y
@@ -132,26 +144,29 @@ ejecuciones), tratado igual que el caso `.computed` justo al lado (que
 tiene el mismo comentario). **No es un bug nuevo, no recomendado tocar
 sin revisar el diseño de `instance_fields`/`freeGarbageNode` completo.**
 
-### 3. `iterableItems`/`drainIterator` — 17 allocations — inconsistencia de ownership, requiere rediseño
+### 3. `iterableItems`/`drainIterator` — 17 allocations — ✅ ARREGLADO
 
-**`interpreter.zig:2670`** (`iterableItems`) y **`interpreter.zig:2752`**
-(`drainIterator`): ambas devuelven `[]const JSValue` recién asignado
-(`toOwnedSlice`/`arena.alloc`) en la mayoría de sus ramas — EXCEPTO la
-rama `.array` (línea 2673: `box.value.toSlice()`), que devuelve un
-slice PRESTADO hacia el storage interno del array (jamás debe
-liberarse). Los 5 call sites (`interpreter.zig:2801, 2840, 2925, 3312,
-4509` — spread de array, destructuring, `for...of`/`for...in` sobre
-patterns) nunca liberan el slice devuelto, correctamente para el caso
-`.array` pero incorrectamente para `.string`/`.object`/`.set`/`.map`.
+**`interpreter.zig`** (`iterableItems`/`drainIterator`): ambas devolvían
+`[]const JSValue` recién asignado (`toOwnedSlice`/`arena.alloc`) en la
+mayoría de sus ramas — EXCEPTO la rama `.array` (`box.value.toSlice()`),
+que devolvía un slice PRESTADO hacia el storage interno del array
+(jamás debía liberarse). Los call sites nunca liberaban el slice
+devuelto, correctamente para el caso `.array` pero incorrectamente para
+`.string`/`.object`/`.set`/`.map`.
 
-**No es un fix de una línea**: como el contrato de la función mezcla
-"prestado" y "propio" según el tipo de entrada, liberar ciegamente en
-cada call site causaría un double-free/use-after-free en el caso
-`.array`. El fix limpio es el MISMO patrón ya aplicado esta sesión a
-`ownEnumerableKeys`/`freeOwnedKeys` en el trabajo de Proxy: unificar el
-contrato (siempre dupear/asignar fresco, incluso para `.array`) y
-actualizar los 5 call sites para liberar. Vale la pena como una fase
-separada y acotada, no un parche rápido.
+**Fix aplicado**: se unificó el contrato — TODAS las ramas devuelven
+ahora un slice fresco/propio (la rama `.array` pasó de
+`box.value.toSlice()` a copiar en un `arena.alloc` + `@memcpy`, mismo
+patrón que ya usaban `.set`/`.map`). Se agregó `defer ...free(items)`
+en los **8 call sites reales** que resultaron existir (más de los 5
+estimados originalmente en la auditoría — 3 en `builtins.zig` se habían
+pasado por alto: `Array.from` sobre Set/Map, y los constructores `new
+Map(iterable)`/`new Set(iterable)`): `evalYieldDelegate` (`yield*` sobre
+array/string), `bindPattern`'s rama `.array`, `destructuringAssign`'s
+rama `.array_literal`, el spread dentro de un array-literal, el spread
+de argumentos de una llamada (`evalArgs`), más los 3 de `builtins.zig`.
+Mismo patrón ya aplicado esta sesión a `ownEnumerableKeys`/
+`freeOwnedKeys` durante el trabajo de Proxy.
 
 ### 4. `evalModuleBody`'s listas de nombres — 6 allocations — ✅ ARREGLADO
 
@@ -266,24 +281,25 @@ Queda como trabajo pendiente, no descartado.
 
 | # | Causa | Allocations (original) | Tipo | Estado |
 |---|---|---|---|---|
-| 1 | `+`-concat sin GC-track | 126 | Bug real, ya documentado | ✅ **ARREGLADO** (2026-07-25, 2da ronda) |
+| 1 | `+`-concat sin GC-track | 126 | Bug real, ya documentado | ✅ **ARREGLADO** (2026-07-25) |
 | 2 | `encodePrivateKey` en Get/Set/Has | ~19 | Bug real, NUEVO hallazgo | ✅ **ARREGLADO** (2026-07-25) |
 | 2b | `encodePrivateKey` en evalClass | 11 | Documentado, deliberado | Sin tocar |
-| 3 | `iterableItems`/`drainIterator` ownership | 17 | Bug real | Sin tocar — fase propia (mismo patrón que `ownEnumerableKeys`) |
+| 3 | `iterableItems`/`drainIterator` ownership | 17 | Bug real | ✅ **ARREGLADO** (2026-07-26) |
 | 4 | `evalModuleBody`'s 2 ArrayLists | 6 | Bug real, NUEVO hallazgo | ✅ **ARREGLADO** (2026-07-25) |
 | 5 | `boundCall`'s args array | 1 | Bug real, NUEVO hallazgo | ✅ **ARREGLADO** (2026-07-25) |
 | 6 | `makeRegex`'s error paths | 1-2 | Bug real, NUEVO hallazgo | ✅ **ARREGLADO** (2026-07-25) |
 | 7 | `globalThis[computed]=x` key dupe | 1 | Documentado, difícil de arreglar limpio | Sin tocar |
 | 8 | `evalClass`'s computed key | 1 | Documentado, deliberado | Sin tocar |
-| — | Empty-stack-trace (fibers, `new Function`) | 50 → 20 | Sin diagnosticar | Investigación futura, distinto enfoque |
+| — | Empty-stack-trace (fibers, `new Function`) | 50 → 18 | Sin diagnosticar | Investigación futura, distinto enfoque |
 
-**Resultado final de las 2 rondas de fixes**: 239 → 50 allocations
-leaked (-189, **-79%**), 446/446 tests siguen pasando, sin regresiones
-en ninguna ronda. Solo quedan sin tocar los ítems ya documentados como
-deliberados (#2b, #7, #8) y #3 (`iterableItems`/`drainIterator`,
-requiere el mismo tipo de rediseño de contrato que `ownEnumerableKeys`
-tuvo durante el trabajo de Proxy) — dejado como fase propia, no
-mezclado con este trabajo.
+**Resultado final de las 3 rondas de fixes**: 239 → 30 allocations
+leaked (-209, **-87%**), 446/446 tests siguen pasando, sin regresiones
+en ninguna ronda (cada una verificada con un sweep completo de
+Test262). Solo quedan sin tocar los ítems ya documentados como
+deliberados (#2b, #7, #8) — todos pequeños, acotados por forma del
+código fuente (no por ejecución), y ya razonados en sus propios
+comentarios en el código. El audit queda cerrado: no queda ningún bug
+real con backtrace disponible sin atender.
 
 ## Nota sobre por qué esto solo se ve en Debug
 

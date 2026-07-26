@@ -2674,10 +2674,24 @@ pub const Interpreter = struct {
     /// and destructuring assignment: the same narrowed iterables as for-of
     /// (arrays by element, strings by code point); anything else is the
     /// real TypeError Node raises.
+    /// Every branch returns a FRESH, caller-owned slice (the container
+    /// only -- the `JSValue`s inside are the same already-alive
+    /// references the source held, not retained here; callers `.retain()`
+    /// individually wherever they actually store one). Callers must
+    /// free the returned slice with `self.gc_allocator.free(...)` once
+    /// done. The `.array` case dupes rather than returning
+    /// `box.value.toSlice()`'s borrowed slice directly -- a single
+    /// uniform contract across every branch, same reasoning as
+    /// `ownEnumerableKeys`/`freeOwnedKeys`'s always-owned contract.
     pub fn iterableItems(self: *Interpreter, value: JSValue) anyerror![]const JSValue {
         const arena = self.gc_allocator;
         return switch (value) {
-            .array => |box| box.value.toSlice(),
+            .array => |box| blk: {
+                const src = box.value.toSlice();
+                const out = try arena.alloc(JSValue, src.len);
+                @memcpy(out, src);
+                break :blk out;
+            },
             .string => |box| blk: {
                 var cps: std.ArrayList(JSValue) = .empty;
                 var it = std.unicode.Utf8Iterator{ .bytes = box.value.data, .i = 0 };
@@ -2806,6 +2820,7 @@ pub const Interpreter = struct {
         // Arrays and strings: re-yield each element (resume value is not
         // fed anywhere -- they aren't real iterators).
         const items = try self.iterableItems(iterable);
+        defer arena.free(items);
         for (items) |item| {
             fs.yielded = item;
             fs.fiber.suspendSelf();
@@ -2845,6 +2860,7 @@ pub const Interpreter = struct {
             },
             .array => |arr_pat| {
                 const items = try self.iterableItems(value);
+                defer arena.free(items);
                 for (arr_pat.elements, 0..) |maybe_el, i| {
                     const el = maybe_el orelse continue; // elision hole
                     var v = if (i < items.len) items[i] else JSValue.UNDEFINED;
@@ -2930,6 +2946,7 @@ pub const Interpreter = struct {
         switch (target.data) {
             .array_literal => |elements| {
                 const items = try self.iterableItems(value);
+                defer arena.free(items);
                 for (elements, 0..) |maybe_el, i| {
                     const el = maybe_el orelse continue; // hole still consumes its index
                     if (el.data == .spread) {
@@ -3316,7 +3333,9 @@ pub const Interpreter = struct {
                     };
                     if (el.data == .spread) {
                         const spread_val = try self.evalExpression(env, el.data.spread);
-                        for (try self.iterableItems(spread_val)) |item| _ = try arr.array.value.push(item.retain());
+                        const items = try self.iterableItems(spread_val);
+                        defer arena.free(items);
+                        for (items) |item| _ = try arr.array.value.push(item.retain());
                         continue;
                     }
                     const v = try self.evalExpression(env, el);
@@ -4543,7 +4562,9 @@ pub const Interpreter = struct {
         for (arg_nodes) |arg_node| {
             if (arg_node.data == .spread) {
                 const spread_val = try self.evalExpression(env, arg_node.data.spread);
-                for (try self.iterableItems(spread_val)) |item| try args.append(arena, item.retain());
+                const items = try self.iterableItems(spread_val);
+                defer arena.free(items);
+                for (items) |item| try args.append(arena, item.retain());
             } else {
                 try args.append(arena, try self.evalExpression(env, arg_node));
             }
