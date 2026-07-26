@@ -18,12 +18,23 @@ una pequeña discrepancia de 8 entradas entre el conteo directo (239) y
 las agrupadas (231 traceadas totales vs 239 reales), variación menor del
 parseo, no afecta las conclusiones.
 
-**Actualización 2026-07-25, mismo día**: se arreglaron los 4 candidatos
-de bajo riesgo (#2, #4, #5, #6 abajo) a pedido explícito del usuario.
-**Total después de los fixes: 194 allocations leaked** (-45, -19%),
-446/446 tests siguen pasando. Las secciones de abajo quedan marcadas
-✅ ARREGLADO donde corresponde; el resto del análisis (causas #1, #2b,
-#3, #7, #8, y los 50 sin backtrace) sigue vigente sin cambios.
+**Actualización 2026-07-25, mismo día (1ra ronda)**: se arreglaron los 4
+candidatos de bajo riesgo (#2, #4, #5, #6 abajo) a pedido explícito del
+usuario. **Total: 194 allocations leaked** (-45, -19%), 446/446 tests.
+
+**Actualización 2026-07-25, mismo día (2da ronda)**: se arregló también
+la causa #1 (`+`-concat sin GC-track), moviendo la lógica de
+string-concat a `interpreter.zig` (nueva `Interpreter.stringConcat`,
+interceptada antes de `coercion.binaryOp` en los dos call sites de
+binary-op, mismo patrón que `bigintArithmetic`) — la rama string dentro
+de `coercion.zig`'s `binaryOp` quedó eliminada (inalcanzable, la
+interceptación siempre gana primero). **Total: ~50 allocations leaked**
+(-144 desde el fix anterior, -79% desde el inicio de la auditoría: 239 → 50),
+446/446 tests, sin regresiones. Solo quedan las causas #2b, #3, #7, #8
+(todas ya documentadas/deliberadas o requieren rediseño) y ~20 sin
+backtrace (bajaron de 50 a 20 también, probablemente algunas de esas
+eran del mismo bug, ocurriendo dentro de un contexto de fiber sin
+backtrace capturable).
 
 Como referencia histórica: esta cuenta era **609 leaks** al empezar la
 "Fase 3-5" de GC (2026-07-24), bajó a **411** después de esa fase, y a
@@ -38,40 +49,39 @@ pasar por el código con el leak).
 
 ## Causas raíz identificadas (231 de 239 allocations, backtrace completo)
 
-### 1. `binaryOp`'s `+` string-concat — 126 allocations (63 pares) — YA DOCUMENTADO, sin arreglar
+### 1. `binaryOp`'s `+` string-concat — 126 allocations (63 pares) — ✅ ARREGLADO
 
-**`coercion.zig:165`** (dentro de `binaryOp`'s rama `.add`):
+**`coercion.zig:165`** (dentro de `binaryOp`'s rama `.add`), tal como
+estaba antes del fix:
 
 ```zig
 break :blk try JSValue.newString(allocator, joined);
 ```
 
-Usa el constructor CRUDO `JSValue.newString` en vez de
-`Interpreter.gcNewString` — el resultado nunca se registra en el GC
-registry (`gcTrack`), así que si nadie lo retiene explícitamente después
+Usaba el constructor CRUDO `JSValue.newString` en vez de
+`Interpreter.gcNewString` — el resultado nunca se registraba en el GC
+registry (`gcTrack`), así que si nadie lo retenía explícitamente después
 (el caso común: el resultado de un `a + b` que se usa una vez y se
 descarta, p.ej. como argumento de `console.log` o dentro de un mensaje de
-`assert.js`), nunca se libera. Cada string concatenada leakea DOS
+`assert.js`), nunca se liberaba. Cada string concatenada leakeaba DOS
 allocations (el buffer de bytes vía `ZString.initOwned` en
 `z-string/src/core/string.zig:53`, y la caja `Rc` que lo envuelve en
-`z-value/src/rc.zig:34`) — de ahí el conteo par 63+63.
+`z-value/src/rc.zig:34`) — de ahí el conteo par 63+63. Era, con
+diferencia, el mayor contribuyente (126 de 239 = 53%) porque `+` con
+strings aparece en TODO tipo de test, incluyendo el propio harness
+`assert.js` de Test262 al construir mensajes de error.
 
-**Ya documentado** desde antes de esta sesión (`operators_test.zig`'s
-test "string concatenation via +"), y explícitamente evitado en tests
-nuevos de Proxy/BigInt cuando es posible. Es, con diferencia, el mayor
-contribuyente (126 de 239 = 53%) porque `+` con strings aparece en TODO
-tipo de test, incluyendo el propio harness `assert.js` de Test262 al
-construir mensajes de error.
-
-**Fix real**: cambiar esa línea a pasar por `Interpreter.gcNewString`
-en vez de `JSValue.newString` directo — pero `coercion.zig` es
-deliberadamente independiente del `Interpreter` (no tiene acceso a
-`self`/`gc_allocator` con tracking, solo a un `Allocator` plano), igual
-que el motivo documentado para por qué `instanceof`/`in` se interceptan
-en `interpreter.zig` en vez de delegarse. Arreglarlo bien requiere
-threading algo de vuelta a `coercion.binaryOp` (un callback, o mover el
-`.add` string-concat case a interpreter.zig como se hizo con
-`bigintArithmetic` esta sesión) — no es un fix de una línea.
+**Fix aplicado**: nueva `Interpreter.stringConcat(left, right)` en
+`interpreter.zig`, que hace exactamente lo mismo pero termina en
+`self.gcNewString(joined)` (GC-tracked). Interceptada en los dos call
+sites de operador binario (`evalExpression`'s `.binary` case y
+`evalAssignment`'s compound-assignment case) ANTES de delegar a
+`coercion.binaryOp`, cuando `op == .add` — mismo patrón exacto ya
+establecido para `bigintArithmetic` (`coercion.zig` deliberadamente no
+tiene acceso a `self`/GC tracking, solo a un `Allocator` plano). La
+rama string dentro de `coercion.zig`'s `binaryOp` quedó eliminada por
+inalcanzable — la interceptación siempre la gana primero; solo el
+`.add` numérico sigue viviendo ahí.
 
 ### 2. `encodePrivateKey` en accesos runtime a `#privateField` — ~19 allocations — ✅ ARREGLADO
 
@@ -254,9 +264,9 @@ Queda como trabajo pendiente, no descartado.
 
 ## Resumen de qué hacer
 
-| # | Causa | Allocations | Tipo | Estado |
+| # | Causa | Allocations (original) | Tipo | Estado |
 |---|---|---|---|---|
-| 1 | `+`-concat sin GC-track | 126 | Bug real, ya documentado | Sin tocar — requiere mover el `.add`-string-concat case a interpreter.zig (como se hizo con `bigintArithmetic`) — fase propia |
+| 1 | `+`-concat sin GC-track | 126 | Bug real, ya documentado | ✅ **ARREGLADO** (2026-07-25, 2da ronda) |
 | 2 | `encodePrivateKey` en Get/Set/Has | ~19 | Bug real, NUEVO hallazgo | ✅ **ARREGLADO** (2026-07-25) |
 | 2b | `encodePrivateKey` en evalClass | 11 | Documentado, deliberado | Sin tocar |
 | 3 | `iterableItems`/`drainIterator` ownership | 17 | Bug real | Sin tocar — fase propia (mismo patrón que `ownEnumerableKeys`) |
@@ -265,14 +275,15 @@ Queda como trabajo pendiente, no descartado.
 | 6 | `makeRegex`'s error paths | 1-2 | Bug real, NUEVO hallazgo | ✅ **ARREGLADO** (2026-07-25) |
 | 7 | `globalThis[computed]=x` key dupe | 1 | Documentado, difícil de arreglar limpio | Sin tocar |
 | 8 | `evalClass`'s computed key | 1 | Documentado, deliberado | Sin tocar |
-| — | Empty-stack-trace (fibers, `new Function`) | 50 | Sin diagnosticar | Investigación futura, distinto enfoque |
+| — | Empty-stack-trace (fibers, `new Function`) | 50 → 20 | Sin diagnosticar | Investigación futura, distinto enfoque |
 
-**Resultado de los 4 fixes**: 239 → 194 allocations leaked (-45, -19%),
-446/446 tests siguen pasando, sin regresiones. Los ítems #1 y #3 son los
-de mayor volumen restante pero requieren cambios de arquitectura (mover
-lógica entre `coercion.zig` e `interpreter.zig`, o rehacer un contrato
-de ownership) — mejor como fases separadas, no mezcladas con el trabajo
-de BigInt actual.
+**Resultado final de las 2 rondas de fixes**: 239 → 50 allocations
+leaked (-189, **-79%**), 446/446 tests siguen pasando, sin regresiones
+en ninguna ronda. Solo quedan sin tocar los ítems ya documentados como
+deliberados (#2b, #7, #8) y #3 (`iterableItems`/`drainIterator`,
+requiere el mismo tipo de rediseño de contrato que `ownEnumerableKeys`
+tuvo durante el trabajo de Proxy) — dejado como fase propia, no
+mezclado con este trabajo.
 
 ## Nota sobre por qué esto solo se ve en Debug
 

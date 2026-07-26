@@ -3403,6 +3403,9 @@ pub const Interpreter = struct {
                     .in => return self.evalIn(l, r),
                     else => {
                         if (try self.bigintArithmetic(b.op, l, r)) |result| return result;
+                        if (b.op == .add) {
+                            if (try self.stringConcat(l, r)) |result| return result;
+                        }
                         return try coercion.binaryOp(arena, b.op, l, r);
                     },
                 }
@@ -4146,6 +4149,29 @@ pub const Interpreter = struct {
         }
     }
 
+    /// `+`'s string-concat path (ECMA-262: if either operand's
+    /// ToPrimitive is a String, `+` concatenates rather than adding
+    /// numerically) -- intercepted here, before `coercion.binaryOp`,
+    /// instead of living inside `coercion.binaryOp` itself (which used
+    /// to build the result via a raw `JSValue.newString`, invisible to
+    /// the GC registry -- a real, long-documented leak, since nothing
+    /// ever calls `gcTrack`/`deinit` on a bare expression-statement
+    /// result that's simply discarded). `gcNewString` needs `self`,
+    /// which `coercion.zig` deliberately doesn't have (same reasoning as
+    /// `bigintArithmetic` right below). Returns `null` when neither
+    /// operand is a string, so the caller falls through to
+    /// `coercion.binaryOp`'s plain numeric `+`.
+    fn stringConcat(self: *Interpreter, left: JSValue, right: JSValue) anyerror!?JSValue {
+        if (left != .string and right != .string) return null;
+        const ls = try coercion.toDisplayString(self.gc_allocator, left);
+        defer self.gc_allocator.free(ls);
+        const rs = try coercion.toDisplayString(self.gc_allocator, right);
+        defer self.gc_allocator.free(rs);
+        const joined = try std.mem.concat(self.gc_allocator, u8, &.{ ls, rs });
+        defer self.gc_allocator.free(joined);
+        return try self.gcNewString(joined);
+    }
+
     /// Real JS BigInt arithmetic/bitwise operators need same-type
     /// enforcement (mixing BigInt and Number is a TypeError, not a
     /// silent coercion) plus RangeError machinery (division by zero,
@@ -4157,12 +4183,13 @@ pub const Interpreter = struct {
     ///
     /// Returns `null` for anything that should fall through to
     /// `coercion.binaryOp` unchanged: neither operand is a bigint, `+`'s
-    /// string-concat path (a bigint operand there just needs its
-    /// ToString, which `coercion.toDisplayString` already handles), and
-    /// every relational/equality operator (`<`/`>`/`<=`/`>=`/`==`/`!=`/
-    /// `===`/`!==`) -- real JS allows those to mix BigInt and Number
-    /// without throwing, and `coercion.zig` already handles that mixing
-    /// itself (no throw machinery needed for a comparison).
+    /// string-concat path (handled separately by `stringConcat`, a
+    /// bigint operand there just needs its ToString, which
+    /// `coercion.toDisplayString` already handles), and every
+    /// relational/equality operator (`<`/`>`/`<=`/`>=`/`==`/`!=`/`===`/
+    /// `!==`) -- real JS allows those to mix BigInt and Number without
+    /// throwing, and `coercion.zig` already handles that mixing itself
+    /// (no throw machinery needed for a comparison).
     fn bigintArithmetic(self: *Interpreter, op: zparser.BinaryOp, left: JSValue, right: JSValue) anyerror!?JSValue {
         const l_big = left == .bigint;
         const r_big = right == .bigint;
@@ -4360,10 +4387,13 @@ pub const Interpreter = struct {
                 const current = try self.evalExpression(env, a.target);
                 const rhs = try self.evalExpression(env, a.value);
                 const bop = compoundToBinary(a.op);
-                const result = if (try self.bigintArithmetic(bop, current, rhs)) |r|
-                    r
-                else
-                    try coercion.binaryOp(self.gc_allocator, bop, current, rhs);
+                const result = blk: {
+                    if (try self.bigintArithmetic(bop, current, rhs)) |r| break :blk r;
+                    if (bop == .add) {
+                        if (try self.stringConcat(current, rhs)) |r| break :blk r;
+                    }
+                    break :blk try coercion.binaryOp(self.gc_allocator, bop, current, rhs);
+                };
                 try self.assignTo(env, a.target, result);
                 return result;
             },

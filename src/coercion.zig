@@ -154,18 +154,12 @@ fn bigintEqualsString(allocator: Allocator, bi: zbigint.ZBigInt, s: []const u8) 
 /// eagerly evaluate the right operand.
 pub fn binaryOp(allocator: Allocator, op: zparser.BinaryOp, left: JSValue, right: JSValue) !JSValue {
     return switch (op) {
-        .add => blk: {
-            if (left == .string or right == .string) {
-                const ls = try toDisplayString(allocator, left);
-                defer allocator.free(ls);
-                const rs = try toDisplayString(allocator, right);
-                defer allocator.free(rs);
-                const joined = try std.mem.concat(allocator, u8, &.{ ls, rs });
-                defer allocator.free(joined);
-                break :blk try JSValue.newString(allocator, joined);
-            }
-            break :blk JSValue.fromNumber((try toNumber(left)) + (try toNumber(right)));
-        },
+        // String-concat is always intercepted by the interpreter's own
+        // `stringConcat` BEFORE reaching here (needs `gcNewString` for
+        // GC tracking, which this module deliberately doesn't have --
+        // same reasoning as instanceof/in below) -- only the plain
+        // numeric case ever actually runs this branch.
+        .add => JSValue.fromNumber((try toNumber(left)) + (try toNumber(right))),
         .sub => JSValue.fromNumber((try toNumber(left)) - (try toNumber(right))),
         .mul => JSValue.fromNumber((try toNumber(left)) * (try toNumber(right))),
         .div => JSValue.fromNumber((try toNumber(left)) / (try toNumber(right))),
