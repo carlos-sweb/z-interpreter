@@ -21,6 +21,7 @@ const zjson = @import("zjson");
 const zstring = @import("zstring");
 const zdate = @import("zdate");
 const zfunctions = @import("zfunctions");
+const zbigint = @import("zbigint");
 const JSValue = zvalue.JSValue;
 
 const interpreter_mod = @import("interpreter.zig");
@@ -194,6 +195,12 @@ pub const number_methods = std.StaticStringMap(NativeFn).initComptime(.{
 pub const boolean_methods = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "toString", booleanToString },
     .{ "valueOf", booleanValueOf },
+});
+
+pub const bigint_methods = std.StaticStringMap(NativeFn).initComptime(.{
+    .{ "toString", bigintToString },
+    .{ "toLocaleString", bigintToString },
+    .{ "valueOf", bigintValueOf },
 });
 
 /// Object.prototype methods every plain object answers to (dispatched on
@@ -494,6 +501,17 @@ pub fn setupGlobals(self: *Interpreter) !void {
 
     const boolean_ctor = try self.gcNewFunction(.{ .ctx = self, .name = "Boolean", .arity = 1, .call = globalBoolean, .constructable = true });
     try g.define(arena, "Boolean", boolean_ctor);
+
+    // Unlike String/Number/Boolean, BigInt is NEVER constructable --
+    // `new BigInt(5)` is a real TypeError in real JS (there's no
+    // [[BigIntData]] wrapper object at all), which `constructValue`'s
+    // existing generic `!callee.function.value.constructable` guard
+    // already produces for free by just leaving this false.
+    const bigint_ctor = try self.gcNewFunction(.{ .ctx = self, .name = "BigInt", .arity = 1, .call = globalBigInt, .constructable = false });
+    const bigint_statics = try self.functionStatics(bigint_ctor);
+    try dneMethod(bigint_statics, "asIntN", try native(self, "asIntN", bigintAsIntN));
+    try dneMethod(bigint_statics, "asUintN", try native(self, "asUintN", bigintAsUintN));
+    try g.define(arena, "BigInt", bigint_ctor);
 
     // Materialize every builtin prototype as a real object (own methods with
     // descriptors, chained to Object.prototype) now that all constructors
@@ -1556,6 +1574,147 @@ fn booleanValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     return JSValue.fromBool(try requireBoolean(ctx, this_value, "valueOf"));
 }
 
+// ===== BigInt =====
+
+/// `BigInt(value)` -- unlike String/Number/Boolean, never reached via
+/// `new` (the constructor isn't `constructable` at all, see its
+/// registration), so there's no hollow-wrapper case to handle here.
+/// ECMA-262 ToBigInt -- used by `BigInt.asIntN`/`asUintN`'s own
+/// `bigint` parameter, and by everything the `BigInt(value)` global
+/// itself doesn't special-case. Real ToBigInt REJECTS Number with a
+/// TypeError (`BigInt.asUintN(8, 5)` really does throw in Node) --
+/// Number only converts via the DIFFERENT NumberToBigInt algorithm the
+/// `BigInt(value)` constructor call runs instead, never through this.
+fn toBigIntValue(self: *Interpreter, allocator: Allocator, a: JSValue) anyerror!JSValue {
+    return switch (a) {
+        .bigint => a.retain(),
+        .boolean => |b| self.gcNewBigIntValue(try zbigint.ZBigInt.fromInt(self.gc_allocator, if (b) 1 else 0)),
+        .string => |box| {
+            const trimmed = std.mem.trim(u8, box.value.data, " \t\n\r");
+            const text = if (trimmed.len == 0) "0" else trimmed;
+            const v = zbigint.ZBigInt.fromDigitText(self.gc_allocator, text) catch
+                return self.throwError(.syntax_error, "Cannot convert {s} to a BigInt", .{box.value.data});
+            return self.gcNewBigIntValue(v);
+        },
+        .@"undefined" => self.throwError(.type_error, "Cannot convert undefined to a BigInt", .{}),
+        .@"null" => self.throwError(.type_error, "Cannot convert null to a BigInt", .{}),
+        .number => {
+            const shown = try coercion.toDisplayString(allocator, a);
+            defer allocator.free(shown);
+            return self.throwError(.type_error, "Cannot convert {s} to a BigInt", .{shown});
+        },
+        // Real ToPrimitive for array/object (valueOf/toString/
+        // Symbol.toPrimitive) doesn't exist in this ecosystem yet --
+        // same narrowing as coercion.toNumber's own object arm -- so
+        // every non-primitive collapses to one generic TypeError rather
+        // than real JS's more specific per-shape SyntaxError.
+        else => self.throwError(.type_error, "Cannot convert an object to a BigInt", .{}),
+    };
+}
+
+/// `BigInt(value)`'s own algorithm: Number gets a special conversion
+/// (NumberToBigInt, integer-only, RangeError otherwise) that plain
+/// ToBigInt does NOT have -- everything else (including the "not an
+/// integer" narrowing on strings/booleans-that-aren't-really-numbers)
+/// delegates to the shared `toBigIntValue`.
+fn globalBigInt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const a = arg(args, 0);
+    if (a == .number) {
+        if (std.math.isNan(a.number) or std.math.isInf(a.number) or @floor(a.number) != a.number) {
+            const shown = try coercion.toDisplayString(allocator, a);
+            defer allocator.free(shown);
+            return self.throwError(.range_error, "The number {s} cannot be converted to a BigInt because it is not an integer", .{shown});
+        }
+        return self.gcNewBigIntValue(try zbigint.ZBigInt.fromFloat(self.gc_allocator, a.number));
+    }
+    return toBigIntValue(self, allocator, a);
+}
+
+fn requireBigInt(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {
+    if (this_value == .bigint) return this_value;
+    return interp(ctx).throwError(.type_error, "BigInt.prototype.{s} called on a non-BigInt", .{method});
+}
+
+/// `n.toString(radix?)` -- radix 2..36 (default 10), same contract as
+/// `Number.prototype.toString`.
+fn bigintToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const v = try requireBigInt(ctx, this_value, "toString");
+    var radix: u8 = 10;
+    if (arg(args, 0) != .@"undefined") {
+        const r = toIntSat(try coercion.toNumber(arg(args, 0)));
+        if (r < 2 or r > 36) return interp(ctx).throwError(.range_error, "toString() radix argument must be between 2 and 36", .{});
+        radix = @intCast(r);
+    }
+    const s = try v.bigint.value.toString(allocator, radix);
+    defer allocator.free(s);
+    return interp(ctx).gcNewString(s);
+}
+
+fn bigintValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = args;
+    return (try requireBigInt(ctx, this_value, "valueOf")).retain();
+}
+
+/// Shared by `BigInt.asIntN`/`asUintN`: validates the `bits` argument
+/// (a non-negative safe integer, matching Node's exact RangeError text)
+/// and the `bigint` argument, then returns `(1n << bits) - 1n` (the
+/// low-`bits`-bits mask) -- caller owns the returned `ZBigInt`.
+fn bigintAsNArgs(ctx: *anyopaque, args: []const JSValue) anyerror!struct { bits: usize, x: JSValue, mask: zbigint.ZBigInt } {
+    const self = interp(ctx);
+    const bits_n = try coercion.toNumber(arg(args, 0));
+    if (std.math.isNan(bits_n) or std.math.isInf(bits_n) or bits_n < 0 or @floor(bits_n) != bits_n) {
+        return self.throwError(.range_error, "Invalid value: not (convertible to) a safe integer", .{});
+    }
+    const bits: usize = @intFromFloat(bits_n);
+    // Real spec: `bigint` also goes through ToBigInt (accepts boolean/
+    // string/number, not just an already-bigint value) -- `x` is OWNED
+    // (`toBigIntValue` always returns a fresh reference), so every
+    // caller must `.deinit()` it once done reading `.bigint.value`.
+    const x = try toBigIntValue(self, self.gc_allocator, arg(args, 1));
+    var one = try zbigint.ZBigInt.fromInt(self.gc_allocator, 1);
+    defer one.deinit();
+    var shifted = try zbigint.ZBigInt.shiftLeft(self.gc_allocator, one, bits);
+    defer shifted.deinit();
+    const mask = try zbigint.ZBigInt.sub(self.gc_allocator, shifted, one);
+    return .{ .bits = bits, .x = x, .mask = mask };
+}
+
+fn bigintAsUintN(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const self = interp(ctx);
+    var parsed = try bigintAsNArgs(ctx, args);
+    defer parsed.mask.deinit();
+    defer parsed.x.deinit();
+    const result = try zbigint.ZBigInt.bitAnd(self.gc_allocator, parsed.x.bigint.value, parsed.mask);
+    return self.gcNewBigIntValue(result);
+}
+
+fn bigintAsIntN(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const self = interp(ctx);
+    var parsed = try bigintAsNArgs(ctx, args);
+    defer parsed.mask.deinit();
+    defer parsed.x.deinit();
+    if (parsed.bits == 0) return self.gcNewBigIntValue(try zbigint.ZBigInt.fromInt(self.gc_allocator, 0));
+    var unsigned_val = try zbigint.ZBigInt.bitAnd(self.gc_allocator, parsed.x.bigint.value, parsed.mask);
+    defer unsigned_val.deinit();
+    var one = try zbigint.ZBigInt.fromInt(self.gc_allocator, 1);
+    defer one.deinit();
+    var half = try zbigint.ZBigInt.shiftLeft(self.gc_allocator, one, parsed.bits - 1);
+    defer half.deinit();
+    if (unsigned_val.cmp(half) != .lt) {
+        var full = try zbigint.ZBigInt.shiftLeft(self.gc_allocator, one, parsed.bits);
+        defer full.deinit();
+        return self.gcNewBigIntValue(try zbigint.ZBigInt.sub(self.gc_allocator, unsigned_val, full));
+    }
+    return self.gcNewBigIntValue(try unsigned_val.clone());
+}
+
 // ===== Promise =====
 
 /// The pair of capabilities `new Promise(executor)` hands the executor.
@@ -1894,6 +2053,7 @@ fn boundCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     _ = this_value; // a bound function ignores its call-site this (spec)
     const bc: *BoundCtx = @ptrCast(@alignCast(ctx));
     const total = try allocator.alloc(JSValue, bc.pre_args.len + args.len);
+    defer allocator.free(total);
     @memcpy(total[0..bc.pre_args.len], bc.pre_args);
     @memcpy(total[bc.pre_args.len..], args);
     return bc.target.function.value.call(bc.target.function.value.ctx, allocator, bc.bound_this, total);

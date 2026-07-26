@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const zvalue = @import("zvalue");
 const znumber = @import("znumber");
 const zparser = @import("zparser");
+const zbigint = @import("zbigint");
 const JSValue = zvalue.JSValue;
 
 /// ECMA-262 ToBoolean. Arrays/objects/functions are truthy even when
@@ -110,17 +111,41 @@ pub fn toDisplayString(allocator: Allocator, v: JSValue) ![]u8 {
 /// (`==`/`!=`) -- only the primitive-coercion cases; any comparison
 /// involving a non-null/undefined array/object/function/etc. against a
 /// mismatched tag is `error.NotImplemented` (needs real ToPrimitive).
-fn looseEquals(a: JSValue, b: JSValue) !bool {
+fn looseEquals(allocator: Allocator, a: JSValue, b: JSValue) !bool {
     if (@as(std.meta.Tag(JSValue), a) == @as(std.meta.Tag(JSValue), b)) {
         return zvalue.equality.strictEquals(a, b);
     }
     if ((a == .@"undefined" or a == .@"null") and (b == .@"undefined" or b == .@"null")) return true;
     if (a == .@"undefined" or a == .@"null" or b == .@"undefined" or b == .@"null") return false;
-    if (a == .boolean) return looseEquals(JSValue.fromNumber(try toNumber(a)), b);
-    if (b == .boolean) return looseEquals(a, JSValue.fromNumber(try toNumber(b)));
+    if (a == .boolean) return looseEquals(allocator, JSValue.fromNumber(try toNumber(a)), b);
+    if (b == .boolean) return looseEquals(allocator, a, JSValue.fromNumber(try toNumber(b)));
     if (a == .number and b == .string) return a.number == try toNumber(b);
     if (a == .string and b == .number) return (try toNumber(a)) == b.number;
+    // Real JS explicitly allows `==`/`!=` to mix BigInt with Number/
+    // String (unlike the arithmetic operators, which throw) --
+    // number mixing is narrowed to float comparison (documented
+    // precision-loss narrowing, same as ToNumber(bigint) elsewhere in
+    // this file); string mixing parses exact digit text (StringToBigInt
+    // is integer-only, unlike the general numeric-string grammar), a
+    // parse failure meaning "not equal", not an error.
+    if (a == .bigint and b == .number) return bigintEqualsNumber(a.bigint.value, b.number);
+    if (a == .number and b == .bigint) return bigintEqualsNumber(b.bigint.value, a.number);
+    if (a == .bigint and b == .string) return try bigintEqualsString(allocator, a.bigint.value, b.string.value.data);
+    if (a == .string and b == .bigint) return try bigintEqualsString(allocator, b.bigint.value, a.string.value.data);
     return error.NotImplemented;
+}
+
+fn bigintEqualsNumber(bi: zbigint.ZBigInt, n: f64) bool {
+    if (std.math.isNan(n) or std.math.isInf(n) or @floor(n) != n) return false;
+    return bi.toFloat() == n;
+}
+
+fn bigintEqualsString(allocator: Allocator, bi: zbigint.ZBigInt, s: []const u8) !bool {
+    const trimmed = std.mem.trim(u8, s, " \t\n\r");
+    if (trimmed.len == 0) return bi.isZero();
+    var parsed = zbigint.ZBigInt.fromDigitText(allocator, trimmed) catch return false;
+    defer parsed.deinit();
+    return bi.eql(parsed);
 }
 
 /// Evaluates every non-short-circuiting BinaryOp. `&&`/`||`/`??` and their
@@ -146,14 +171,31 @@ pub fn binaryOp(allocator: Allocator, op: zparser.BinaryOp, left: JSValue, right
         .div => JSValue.fromNumber((try toNumber(left)) / (try toNumber(right))),
         .mod => JSValue.fromNumber(@mod(try toNumber(left), try toNumber(right))),
         .pow => JSValue.fromNumber(std.math.pow(f64, try toNumber(left), try toNumber(right))),
-        .lt => JSValue.fromBool((try toNumber(left)) < (try toNumber(right))),
-        .gt => JSValue.fromBool((try toNumber(left)) > (try toNumber(right))),
-        .le => JSValue.fromBool((try toNumber(left)) <= (try toNumber(right))),
-        .ge => JSValue.fromBool((try toNumber(left)) >= (try toNumber(right))),
+        // Real JS allows `<`/`>`/`<=`/`>=` to mix BigInt and Number
+        // without throwing. Both-bigint compares exactly (no precision
+        // loss); a mixed pair falls back to the existing ToNumber path
+        // (documented narrowing -- same precision-loss tradeoff as
+        // ToNumber(bigint) elsewhere in this file).
+        .lt => if (left == .bigint and right == .bigint)
+            JSValue.fromBool(left.bigint.value.cmp(right.bigint.value) == .lt)
+        else
+            JSValue.fromBool((try toNumber(left)) < (try toNumber(right))),
+        .gt => if (left == .bigint and right == .bigint)
+            JSValue.fromBool(left.bigint.value.cmp(right.bigint.value) == .gt)
+        else
+            JSValue.fromBool((try toNumber(left)) > (try toNumber(right))),
+        .le => if (left == .bigint and right == .bigint)
+            JSValue.fromBool(left.bigint.value.cmp(right.bigint.value) != .gt)
+        else
+            JSValue.fromBool((try toNumber(left)) <= (try toNumber(right))),
+        .ge => if (left == .bigint and right == .bigint)
+            JSValue.fromBool(left.bigint.value.cmp(right.bigint.value) != .lt)
+        else
+            JSValue.fromBool((try toNumber(left)) >= (try toNumber(right))),
         .eqeqeq => JSValue.fromBool(zvalue.equality.strictEquals(left, right)),
         .noteqeq => JSValue.fromBool(!zvalue.equality.strictEquals(left, right)),
-        .eq => JSValue.fromBool(try looseEquals(left, right)),
-        .ne => JSValue.fromBool(!try looseEquals(left, right)),
+        .eq => JSValue.fromBool(try looseEquals(allocator, left, right)),
+        .ne => JSValue.fromBool(!try looseEquals(allocator, left, right)),
         .bitand => JSValue.fromNumber(@floatFromInt((try toInt32(left)) & (try toInt32(right)))),
         .bitor => JSValue.fromNumber(@floatFromInt((try toInt32(left)) | (try toInt32(right)))),
         .bitxor => JSValue.fromNumber(@floatFromInt((try toInt32(left)) ^ (try toInt32(right)))),

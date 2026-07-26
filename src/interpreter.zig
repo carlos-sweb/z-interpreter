@@ -1061,6 +1061,13 @@ pub const Interpreter = struct {
         try self.gcTrack(v);
         return v;
     }
+    /// For a `ZBigInt` already computed by an arithmetic op (`.add`/
+    /// `.mul`/etc.), not parsed from literal digit text.
+    pub fn gcNewBigIntValue(self: *Interpreter, v: zbigint.ZBigInt) !JSValue {
+        const jv = try JSValue.newBigIntFromValue(self.gc_allocator, v);
+        try self.gcTrack(jv);
+        return jv;
+    }
     pub fn gcNewProxy(self: *Interpreter, target: JSValue, handler: JSValue) !JSValue {
         const v = try JSValue.newProxy(self.gc_allocator, target, handler);
         try self.gcTrack(v);
@@ -1619,6 +1626,11 @@ pub const Interpreter = struct {
             .sticky = false,
             .unicode = false,
         };
+        // Only fires on an error return below (invalid flags/pattern) --
+        // on success `state` is copied into `self.regex_state` and these
+        // two dupes become that copy's own, no-longer-freeable-here data.
+        errdefer arena.free(state.source);
+        errdefer arena.free(state.flags);
         for (flags) |f| switch (f) {
             'g' => state.global = true,
             'i' => state.ignore_case = true,
@@ -1796,7 +1808,9 @@ pub const Interpreter = struct {
         try self.hoistLexical(env, stmts);
 
         var decl_names: std.ArrayList([]const u8) = .empty;
+        defer decl_names.deinit(arena);
         var local_specs: std.ArrayList(zstatements.ExportSpecifier) = .empty;
+        defer local_specs.deinit(arena);
 
         for (stmts) |stmt| {
             switch (stmt.data) {
@@ -3387,7 +3401,10 @@ pub const Interpreter = struct {
                 switch (b.op) {
                     .instanceof => return self.evalInstanceof(l, r),
                     .in => return self.evalIn(l, r),
-                    else => return try coercion.binaryOp(arena, b.op, l, r),
+                    else => {
+                        if (try self.bigintArithmetic(b.op, l, r)) |result| return result;
+                        return try coercion.binaryOp(arena, b.op, l, r);
+                    },
                 }
             },
             .logical => |l| {
@@ -4108,6 +4125,7 @@ pub const Interpreter = struct {
             .{ "promise", "Promise", builtins.promise_methods },
             .{ "number", "Number", builtins.number_methods },
             .{ "boolean", "Boolean", builtins.boolean_methods },
+            .{ "bigint", "BigInt", builtins.bigint_methods },
         }) |e| {
             const ctor = g.get(e[1]).?;
             const proto = try self.functionPrototype(ctor);
@@ -4128,11 +4146,116 @@ pub const Interpreter = struct {
         }
     }
 
+    /// Real JS BigInt arithmetic/bitwise operators need same-type
+    /// enforcement (mixing BigInt and Number is a TypeError, not a
+    /// silent coercion) plus RangeError machinery (division by zero,
+    /// negative exponent) that coercion.zig's `binaryOp` deliberately
+    /// doesn't have (same reasoning as instanceof/in above) -- also
+    /// needs `gcNewBigIntValue` to keep the result GC-tracked, which
+    /// coercion.zig has no access to at all. Intercepted here, before
+    /// `coercion.binaryOp`, whenever at least one operand is a bigint.
+    ///
+    /// Returns `null` for anything that should fall through to
+    /// `coercion.binaryOp` unchanged: neither operand is a bigint, `+`'s
+    /// string-concat path (a bigint operand there just needs its
+    /// ToString, which `coercion.toDisplayString` already handles), and
+    /// every relational/equality operator (`<`/`>`/`<=`/`>=`/`==`/`!=`/
+    /// `===`/`!==`) -- real JS allows those to mix BigInt and Number
+    /// without throwing, and `coercion.zig` already handles that mixing
+    /// itself (no throw machinery needed for a comparison).
+    fn bigintArithmetic(self: *Interpreter, op: zparser.BinaryOp, left: JSValue, right: JSValue) anyerror!?JSValue {
+        const l_big = left == .bigint;
+        const r_big = right == .bigint;
+        if (!l_big and !r_big) return null;
+        switch (op) {
+            .add => if (left == .string or right == .string) return null,
+            .lt, .gt, .le, .ge, .eq, .ne, .eqeqeq, .noteqeq => return null,
+            .instanceof, .in => unreachable, // intercepted by the caller before this is ever reached
+            else => {},
+        }
+        if (op == .ushr) {
+            if (l_big and r_big) {
+                return self.throwError(.type_error, "BigInts have no unsigned right shift, use >> instead", .{});
+            }
+            return self.throwError(.type_error, "Cannot mix BigInt and other types, use explicit conversions", .{});
+        }
+        if (!l_big or !r_big) {
+            return self.throwError(.type_error, "Cannot mix BigInt and other types, use explicit conversions", .{});
+        }
+        const a = left.bigint.value;
+        const b = right.bigint.value;
+        const result: zbigint.ZBigInt = switch (op) {
+            .add => zbigint.ZBigInt.add(self.gc_allocator, a, b) catch |e| return try self.bigintErr(e),
+            .sub => zbigint.ZBigInt.sub(self.gc_allocator, a, b) catch |e| return try self.bigintErr(e),
+            .mul => zbigint.ZBigInt.mul(self.gc_allocator, a, b) catch |e| return try self.bigintErr(e),
+            .div => zbigint.ZBigInt.divTrunc(self.gc_allocator, a, b) catch |e| return try self.bigintErr(e),
+            .mod => zbigint.ZBigInt.remTrunc(self.gc_allocator, a, b) catch |e| return try self.bigintErr(e),
+            .pow => zbigint.ZBigInt.pow(self.gc_allocator, a, b) catch |e| return try self.bigintErr(e),
+            .bitand => zbigint.ZBigInt.bitAnd(self.gc_allocator, a, b) catch |e| return try self.bigintErr(e),
+            .bitor => zbigint.ZBigInt.bitOr(self.gc_allocator, a, b) catch |e| return try self.bigintErr(e),
+            .bitxor => zbigint.ZBigInt.bitXor(self.gc_allocator, a, b) catch |e| return try self.bigintErr(e),
+            // A negative shift count flips direction (`a << -n === a >>
+            // n`), matching real JS BigInt semantics -- z-bigint's own
+            // shiftLeft/shiftRight only take an unsigned `usize`.
+            .shl => try self.bigintShift(a, b, true),
+            .shr => try self.bigintShift(a, b, false),
+            else => unreachable,
+        };
+        return try self.gcNewBigIntValue(result);
+    }
+
+    fn bigintShift(self: *Interpreter, a: zbigint.ZBigInt, b: zbigint.ZBigInt, left_shift: bool) anyerror!zbigint.ZBigInt {
+        const amt = b.value.toInt(i64) catch return self.throwError(.range_error, "BigInt shift amount out of range", .{});
+        const do_left = if (amt >= 0) left_shift else !left_shift;
+        const magnitude: usize = @intCast(if (amt >= 0) amt else -amt);
+        return if (do_left) zbigint.ZBigInt.shiftLeft(self.gc_allocator, a, magnitude) else zbigint.ZBigInt.shiftRight(self.gc_allocator, a, magnitude);
+    }
+
+    fn bigintErr(self: *Interpreter, e: zbigint.BigIntError) anyerror!JSValue {
+        return switch (e) {
+            error.DivisionByZero => self.throwError(.range_error, "Division by zero", .{}),
+            error.NegativeExponent => self.throwError(.range_error, "Exponent must be positive", .{}),
+            error.OutOfMemory => error.OutOfMemory,
+            error.InvalidDigits => unreachable, // arithmetic ops never parse text
+        };
+    }
+
+    /// `++`/`--`'s shared "add or subtract exactly one" step -- bigint
+    /// stays bigint (`1n++` must not silently become a Number), anything
+    /// else goes through the existing ToNumber-based path unchanged.
+    fn incDecOne(self: *Interpreter, current: JSValue, increment: bool) anyerror!JSValue {
+        if (current == .bigint) {
+            var one = try zbigint.ZBigInt.fromInt(self.gc_allocator, 1);
+            defer one.deinit();
+            const result = if (increment)
+                try zbigint.ZBigInt.add(self.gc_allocator, current.bigint.value, one)
+            else
+                try zbigint.ZBigInt.sub(self.gc_allocator, current.bigint.value, one);
+            return try self.gcNewBigIntValue(result);
+        }
+        const n = try coercion.toNumber(current);
+        return JSValue.fromNumber(if (increment) n + 1 else n - 1);
+    }
+
     fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSValue {
         switch (u.op) {
             .not => return JSValue.fromBool(!coercion.isTruthy(try self.evalExpression(env, u.operand))),
-            .minus => return JSValue.fromNumber(-(try coercion.toNumber(try self.evalExpression(env, u.operand)))),
-            .plus => return JSValue.fromNumber(try coercion.toNumber(try self.evalExpression(env, u.operand))),
+            .minus => {
+                const v = try self.evalExpression(env, u.operand);
+                if (v == .bigint) return try self.gcNewBigIntValue(try v.bigint.value.negate());
+                return JSValue.fromNumber(-(try coercion.toNumber(v)));
+            },
+            .plus => {
+                // Real spec: unary `+` is ALWAYS a ToNumber, and
+                // ToNumber(bigint) is itself a TypeError -- unlike
+                // explicit `Number(1n)` (a different, permissive
+                // conversion), so this can't just delegate to
+                // coercion.toNumber (which intentionally allows the
+                // explicit-conversion case).
+                const v = try self.evalExpression(env, u.operand);
+                if (v == .bigint) return self.throwError(.type_error, "Cannot convert a BigInt value to a number", .{});
+                return JSValue.fromNumber(try coercion.toNumber(v));
+            },
             .typeof => {
                 // typeof on an undeclared identifier is "undefined", not a
                 // ReferenceError -- a real, deliberate spec quirk. But a
@@ -4154,19 +4277,32 @@ pub const Interpreter = struct {
                 return JSValue.UNDEFINED;
             },
             .pre_inc, .pre_dec => {
-                const old = try coercion.toNumber(try self.evalExpression(env, u.operand));
-                const new_val = JSValue.fromNumber(if (u.op == .pre_inc) old + 1 else old - 1);
+                const old = try self.evalExpression(env, u.operand);
+                const new_val = try self.incDecOne(old, u.op == .pre_inc);
                 try self.assignTo(env, u.operand, new_val);
                 return new_val;
             },
             .post_inc, .post_dec => {
-                const old = try coercion.toNumber(try self.evalExpression(env, u.operand));
-                const new_val = JSValue.fromNumber(if (u.op == .post_inc) old + 1 else old - 1);
+                const old = try self.evalExpression(env, u.operand);
+                const new_val = try self.incDecOne(old, u.op == .post_inc);
                 try self.assignTo(env, u.operand, new_val);
-                return JSValue.fromNumber(old);
+                // Real spec: the EXPRESSION's value is `old` already
+                // ToNumeric'd, not the raw pre-coercion operand (e.g.
+                // `let x = "1"; x++` evaluates to the number 1, not the
+                // string "1"). For bigint, a fresh independently-owned
+                // box holding the same value -- `old`'s own box's
+                // ownership (borrowed vs retained) depends on what kind
+                // of expression `u.operand` was, same pre-existing
+                // non-uniformity `evalExpression` has everywhere else in
+                // this engine, so it's left untouched rather than
+                // guessed at; this returns a value of its own instead of
+                // trying to share `old`'s.
+                return if (old == .bigint) try self.gcNewBigIntValue(try old.bigint.value.clone()) else JSValue.fromNumber(try coercion.toNumber(old));
             },
             .bitnot => {
-                const n = try coercion.toInt32(try self.evalExpression(env, u.operand));
+                const v = try self.evalExpression(env, u.operand);
+                if (v == .bigint) return try self.gcNewBigIntValue(try zbigint.ZBigInt.not(self.gc_allocator, v.bigint.value));
+                const n = try coercion.toInt32(v);
                 return JSValue.fromNumber(@floatFromInt(~n));
             },
             .delete => {
@@ -4223,7 +4359,11 @@ pub const Interpreter = struct {
             else => {
                 const current = try self.evalExpression(env, a.target);
                 const rhs = try self.evalExpression(env, a.value);
-                const result = try coercion.binaryOp(self.gc_allocator, compoundToBinary(a.op), current, rhs);
+                const bop = compoundToBinary(a.op);
+                const result = if (try self.bigintArithmetic(bop, current, rhs)) |r|
+                    r
+                else
+                    try coercion.binaryOp(self.gc_allocator, bop, current, rhs);
                 try self.assignTo(env, a.target, result);
                 return result;
             },
@@ -4522,6 +4662,7 @@ pub const Interpreter = struct {
         const ctx = env.resolvePrivateCtx() orelse
             return self.throwError(.syntax_error, "Private field '{s}' must be declared in an enclosing class", .{name});
         const key = try self.encodePrivateKey(ctx, name);
+        defer self.gc_allocator.free(key);
         const holder = (try self.privateHolder(obj)) orelse
             return self.throwError(.type_error, "Cannot read private member {s} from an object whose class did not declare it", .{name});
         // Own->chain record walk with accessor dispatch (instance fields
@@ -4543,6 +4684,7 @@ pub const Interpreter = struct {
         const ctx = env.resolvePrivateCtx() orelse
             return self.throwError(.syntax_error, "Private field '{s}' must be declared in an enclosing class", .{name});
         const key = try self.encodePrivateKey(ctx, name);
+        defer self.gc_allocator.free(key);
         const holder = (try self.privateHolder(obj)) orelse
             return self.throwError(.type_error, "Cannot write private member {s} to an object whose class did not declare it", .{name});
         const hv = &holder.object.value;
@@ -4582,6 +4724,7 @@ pub const Interpreter = struct {
         const ctx = env.resolvePrivateCtx() orelse
             return self.throwError(.syntax_error, "Private field '{s}' must be declared in an enclosing class", .{name});
         const key = try self.encodePrivateKey(ctx, name);
+        defer self.gc_allocator.free(key);
         const holder = (try self.privateHolder(obj)) orelse return false;
         var current: ?*const @TypeOf(holder.object.value) = &holder.object.value;
         while (current) |o| : (current = o.getPrototype()) {
