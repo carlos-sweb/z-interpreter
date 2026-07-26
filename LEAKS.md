@@ -10,13 +10,17 @@ backtrace, agrupada por el primer frame perteneciente a un repo `z-*`
 (descartando frames de `std` y del propio `zig-cache`). Script ad-hoc, no
 committeado (vive en `/tmp` de la sesión que hizo esta auditoría).
 
-**Total al momento de la auditoría: 239 allocations leaked**, repartidas
-en 26 archivos de test. De esas, 231 tienen backtrace completo (agrupadas
-abajo en 11 sitios de código con causa raíz identificada); 50 no tienen
-backtrace en absoluto ("empty stack trace" — ver sección propia) — hay
-una pequeña discrepancia de 8 entradas entre el conteo directo (239) y
-las agrupadas (231 traceadas totales vs 239 reales), variación menor del
-parseo, no afecta las conclusiones.
+**Total al momento de la auditoría original (2026-07-25): 239 allocations
+leaked**, repartidas en 26 archivos de test. De esas, 231 tenían
+backtrace completo (agrupadas abajo en 11 sitios de código con causa
+raíz identificada); 50 no tenían backtrace en absoluto ("empty stack
+trace" — ver sección propia) — había una pequeña discrepancia de 8
+entradas entre el conteo directo (239) y las agrupadas (231 traceadas
+totales vs 239 reales), variación menor del parseo, no afectaba las
+conclusiones. **Estos números (239/231/50) son los ORIGINALES, de
+referencia histórica — desactualizados desde las 3 rondas de fixes de
+abajo. El estado ACTUAL (re-verificado 2026-07-26) está al final de
+esta sección y en la tabla resumen.**
 
 **Actualización 2026-07-25, mismo día (1ra ronda)**: se arreglaron los 4
 candidatos de bajo riesgo (#2, #4, #5, #6 abajo) a pedido explícito del
@@ -38,15 +42,29 @@ backtrace capturable).
 
 **Actualización 2026-07-26 (3ra ronda)**: se arregló también la causa
 #3 (`iterableItems`/`drainIterator`'s contrato de ownership mezclado).
-**Total: 30 allocations leaked** (-20 desde el fix anterior, **-87%
-desde el inicio de la auditoría: 239 → 30**), 446/446 tests, sin
-regresiones (sweep completo de Test262 confirmado). Solo quedan las
-causas #2b, #7, #8 (ya documentadas, deliberadas, dejadas tal cual) y
-~18 sin backtrace (ver esa sección, sin cambios de naturaleza). El
-audit queda esencialmente cerrado: de los 8 sitios con causa raíz
-identificada, 5 están arreglados y 3 son narrowings deliberados
-documentados en el propio código — no queda ningún bug real sin
-atender con backtrace disponible.
+446/446 tests, sin regresiones (sweep completo de Test262 confirmado,
+byte-idéntico al baseline). El audit queda esencialmente cerrado: de
+los 8 sitios con causa raíz identificada, 5 están arreglados y 3 son
+narrowings deliberados documentados en el propio código — no queda
+ningún bug real sin atender con backtrace disponible.
+
+**Estado ACTUAL (re-verificado 2026-07-26, corrida fresca de
+`zig build test`): ~30 allocations leaked** (`-209` desde el original
+239, **-87%**; el número exacto fluctúa ±1-2 entre corridas por el
+bucket sin backtrace, ver abajo). Desglose real medido en esta corrida:
+
+| causa | allocations medidas ahora |
+|---|---|
+| #2b (`encodePrivateKey` en `evalClass`) | 9 |
+| #7 (`setPropertyOnValue`'s dupe de key) | 1 |
+| #8 (`evalClass`'s key computada) | 1 |
+| Sin backtrace (ver sección propia, actualizada) | 18 |
+| **Total** | **~29-31** |
+
+(Los `11`/`1`/`1` en la tabla resumen más abajo son los conteos
+ORIGINALES de la auditoría del 2026-07-25, no re-medidos hasta ahora —
+la pequeña diferencia con los de arriba, 11 vs 9, es variación normal
+entre corridas de test paralelas, no una regresión.)
 
 Como referencia histórica: esta cuenta era **609 leaks** al empezar la
 "Fase 3-5" de GC (2026-07-24), bajó a **411** después de esa fase, y a
@@ -59,7 +77,12 @@ pasar por el código con el leak).
 
 ---
 
-## Causas raíz identificadas (231 de 239 allocations, backtrace completo)
+## Causas raíz identificadas (231 de 239 allocations originales, backtrace completo)
+
+Los conteos "N allocations" en cada sección de abajo son los ORIGINALES
+de la auditoría (2026-07-25) — quedan así porque describen la magnitud
+del problema que motivó cada fix, no el estado actual (que está en la
+tabla resumen al final, con la columna "actual").
 
 ### 1. `binaryOp`'s `+` string-concat — 126 allocations (63 pares) — ✅ ARREGLADO
 
@@ -245,7 +268,10 @@ declaración estática, ya explicado en el código.
 
 ---
 
-## Leaks sin backtrace ("empty stack trace") — 50 allocations, 10 tests
+## Leaks sin backtrace ("empty stack trace")
+
+**Lista ORIGINAL (2026-07-25, 50 allocations, 10 tests)**, antes de las
+3 rondas de fixes:
 
 ```
 14  async_generator_test.test.async generator method on a class sees the right `this` and private fields
@@ -260,46 +286,61 @@ declaración estática, ya explicado en el código.
  1  symbol_test.test.a generator is its own iterable via Symbol.iterator
 ```
 
-Zig's `DebugAllocator` no pudo capturar el backtrace de estas
-allocations en absoluto (`(empty stack trace)`, sin ni un frame). La
-mayoría son de tests que ejecutan generadores/`async`/`await` — código
-que corre sobre las stacks propias de los fibers (`std.Io.fiber`, ver
-`project-zjs-async-runtime-design`), y el unwinder de Zig no puede
-recorrer esas stacks alternas. `constructors_test`'s "new Function..."
-(16, el mayor de este grupo) es la excepción — no es código async, así
-que su falta de backtrace probablemente tiene otra causa (posiblemente
-inlining agresivo incluso en Debug para ese path recursivo de parseo).
+**Lista ACTUAL (2026-07-26, re-verificada, 18 allocations, solo 3
+tests)** — la mayoría de las entradas de arriba desaparecieron sin
+haber sido diagnosticadas directamente: compartían la causa raíz #1 o
+#3 (arreglados esta sesión), solo que ocurriendo dentro de un contexto
+de fiber donde Zig nunca pudo capturar el backtrace para que la
+auditoría original las agrupara ahí:
 
-**No investigado a fondo en esta auditoría** — necesitaría un enfoque
-distinto (tracking explícito envolviendo el allocator en esos puntos
-específicos, o bisección comentando código) en vez de leer backtraces.
-Queda como trabajo pendiente, no descartado.
+```
+16  constructors_test.test.new Function parses and closes over globals
+ 1  private_test.test.delete of a private member is a SyntaxError
+ 1  async_generator_test.test.async generator method on a class sees the right `this` and private fields
+```
+
+Zig's `DebugAllocator` no puede capturar el backtrace de estas
+allocations en absoluto (`(empty stack trace)`, sin ni un frame).
+`constructors_test`'s "new Function..." (16, el mayor con diferencia,
+sin cambios entre las dos corridas) no es código async — su falta de
+backtrace probablemente tiene otra causa (posiblemente inlining
+agresivo incluso en Debug para ese path recursivo de parseo). Los otros
+2 sí son contextos de fiber (`std.Io.fiber`, ver
+`project-zjs-async-runtime-design`), donde el unwinder de Zig no puede
+recorrer la stack alterna.
+
+**No investigado a fondo** — necesitaría un enfoque distinto (tracking
+explícito envolviendo el allocator en esos puntos específicos, o
+bisección comentando código) en vez de leer backtraces. Queda como
+trabajo pendiente, no descartado.
 
 ---
 
 ## Resumen de qué hacer
 
-| # | Causa | Allocations (original) | Tipo | Estado |
-|---|---|---|---|---|
-| 1 | `+`-concat sin GC-track | 126 | Bug real, ya documentado | ✅ **ARREGLADO** (2026-07-25) |
-| 2 | `encodePrivateKey` en Get/Set/Has | ~19 | Bug real, NUEVO hallazgo | ✅ **ARREGLADO** (2026-07-25) |
-| 2b | `encodePrivateKey` en evalClass | 11 | Documentado, deliberado | Sin tocar |
-| 3 | `iterableItems`/`drainIterator` ownership | 17 | Bug real | ✅ **ARREGLADO** (2026-07-26) |
-| 4 | `evalModuleBody`'s 2 ArrayLists | 6 | Bug real, NUEVO hallazgo | ✅ **ARREGLADO** (2026-07-25) |
-| 5 | `boundCall`'s args array | 1 | Bug real, NUEVO hallazgo | ✅ **ARREGLADO** (2026-07-25) |
-| 6 | `makeRegex`'s error paths | 1-2 | Bug real, NUEVO hallazgo | ✅ **ARREGLADO** (2026-07-25) |
-| 7 | `globalThis[computed]=x` key dupe | 1 | Documentado, difícil de arreglar limpio | Sin tocar |
-| 8 | `evalClass`'s computed key | 1 | Documentado, deliberado | Sin tocar |
-| — | Empty-stack-trace (fibers, `new Function`) | 50 → 18 | Sin diagnosticar | Investigación futura, distinto enfoque |
+| # | Causa | Allocations (original, 2026-07-25) | Allocations (actual, 2026-07-26) | Tipo | Estado |
+|---|---|---|---|---|---|
+| 1 | `+`-concat sin GC-track | 126 | 0 | Bug real, ya documentado | ✅ **ARREGLADO** (2026-07-25) |
+| 2 | `encodePrivateKey` en Get/Set/Has | ~19 | 0 | Bug real, NUEVO hallazgo | ✅ **ARREGLADO** (2026-07-25) |
+| 2b | `encodePrivateKey` en evalClass | 11 | 9 | Documentado, deliberado | Sin tocar |
+| 3 | `iterableItems`/`drainIterator` ownership | 17 | 0 | Bug real | ✅ **ARREGLADO** (2026-07-26) |
+| 4 | `evalModuleBody`'s 2 ArrayLists | 6 | 0 | Bug real, NUEVO hallazgo | ✅ **ARREGLADO** (2026-07-25) |
+| 5 | `boundCall`'s args array | 1 | 0 | Bug real, NUEVO hallazgo | ✅ **ARREGLADO** (2026-07-25) |
+| 6 | `makeRegex`'s error paths | 1-2 | 0 | Bug real, NUEVO hallazgo | ✅ **ARREGLADO** (2026-07-25) |
+| 7 | `globalThis[computed]=x` key dupe | 1 | 1 | Documentado, difícil de arreglar limpio | Sin tocar |
+| 8 | `evalClass`'s computed key | 1 | 1 | Documentado, deliberado | Sin tocar |
+| — | Empty-stack-trace (fibers, `new Function`) | 50 | 18 | Sin diagnosticar | Investigación futura, distinto enfoque |
+| | **Total** | **239** | **~29-31** | | |
 
-**Resultado final de las 3 rondas de fixes**: 239 → 30 allocations
-leaked (-209, **-87%**), 446/446 tests siguen pasando, sin regresiones
-en ninguna ronda (cada una verificada con un sweep completo de
-Test262). Solo quedan sin tocar los ítems ya documentados como
-deliberados (#2b, #7, #8) — todos pequeños, acotados por forma del
-código fuente (no por ejecución), y ya razonados en sus propios
-comentarios en el código. El audit queda cerrado: no queda ningún bug
-real con backtrace disponible sin atender.
+**Resultado final de las 3 rondas de fixes**: 239 → ~30 allocations
+leaked (**-87%**), 446/446 tests siguen pasando, sin regresiones en
+ninguna ronda (cada una verificada con un sweep completo de Test262).
+Solo quedan sin tocar los ítems ya documentados como deliberados (#2b,
+#7, #8) — todos pequeños, acotados por forma del código fuente (no por
+ejecución), y ya razonados en sus propios comentarios en el código,
+más el bucket sin backtrace (18, sin diagnosticar). El audit queda
+cerrado: no queda ningún bug real con backtrace disponible sin
+atender.
 
 ## Nota sobre por qué esto solo se ve en Debug
 
