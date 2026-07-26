@@ -25,6 +25,7 @@ const zsymbol = @import("zsymbol");
 const zstring = @import("zstring");
 const zdate = @import("zdate");
 const zbigint = @import("zbigint");
+const zbuffer = @import("zbuffer");
 
 /// The materialized builtin prototype objects (see `Interpreter.protos`).
 /// Each is a real `.object` JSValue; `.undefined` until setupGlobals runs.
@@ -43,6 +44,8 @@ pub const Protos = struct {
     symbol: JSValue = JSValue.UNDEFINED,
     promise: JSValue = JSValue.UNDEFINED,
     bigint: JSValue = JSValue.UNDEFINED,
+    array_buffer: JSValue = JSValue.UNDEFINED,
+    data_view: JSValue = JSValue.UNDEFINED,
 };
 
 /// JS-level state a RegExp object carries beyond its compiled bytecode.
@@ -516,6 +519,12 @@ const GcNode = union(enum) {
     /// trace/sweep like array/object/map/set/error/function/promise
     /// above.
     proxy: *zvalue.Rc(zvalue.Proxy),
+    /// `.array_buffer` is a leaf like symbol/string/date/bigint below
+    /// (owns raw bytes, no JSValue children); `.data_view` is NOT --
+    /// it holds an `owner: JSValue` (the `.array_buffer` it reads/writes
+    /// through), same non-leaf category as proxy above.
+    array_buffer: *zvalue.Rc(zvalue.ArrayBuffer),
+    data_view: *zvalue.Rc(zvalue.DataViewBox),
     /// Symbols and strings are leaves (hold no JSValue children, can't
     /// cycle) but are STILL registered: a value that's created and
     /// immediately retained for storage elsewhere (every well-known
@@ -598,6 +607,8 @@ const Marker = struct {
             .date => |box| @intFromPtr(box),
             .bigint => |box| @intFromPtr(box),
             .proxy => |box| @intFromPtr(box),
+            .array_buffer => |box| @intFromPtr(box),
+            .data_view => |box| @intFromPtr(box),
         };
         const gop = self.reached.getOrPut(self.interp.gc_allocator, addr) catch return;
         if (gop.found_existing) return;
@@ -653,6 +664,8 @@ const Sweeper = struct {
             .function => |box| @intFromPtr(box),
             .promise => |box| @intFromPtr(box),
             .proxy => |box| @intFromPtr(box),
+            .array_buffer => |box| @intFromPtr(box),
+            .data_view => |box| @intFromPtr(box),
         };
         if (self.garbage.contains(addr)) return;
         v.deinit();
@@ -917,6 +930,8 @@ pub const Interpreter = struct {
             .date => |box| .{ .date = box },
             .bigint => |box| .{ .bigint = box },
             .proxy => |box| .{ .proxy = box },
+            .array_buffer => |box| .{ .array_buffer = box },
+            .data_view => |box| .{ .data_view = box },
             else => return,
         };
         v.setGcHook(self, gcOnBoxDestroyed);
@@ -1073,6 +1088,29 @@ pub const Interpreter = struct {
         try self.gcTrack(v);
         return v;
     }
+    pub fn gcNewArrayBuffer(self: *Interpreter, byte_length: usize) !JSValue {
+        const v = try JSValue.newArrayBuffer(self.gc_allocator, byte_length);
+        try self.gcTrack(v);
+        return v;
+    }
+    /// For an `ArrayBuffer` already computed by an operation (e.g.
+    /// `ArrayBuffer.prototype.slice`'s copy), not freshly zero-allocated
+    /// -- same shape as `gcNewBigIntValue` for an already-computed
+    /// `ZBigInt`.
+    pub fn gcNewArrayBufferFromValue(self: *Interpreter, v: zbuffer.ArrayBuffer) !JSValue {
+        const jv: JSValue = .{ .array_buffer = try zvalue.Rc(zvalue.ArrayBuffer).create(self.gc_allocator, v) };
+        try self.gcTrack(jv);
+        return jv;
+    }
+    /// `owner` must already be a retained `.array_buffer` JSValue handed
+    /// off to this call (see `JSValue.newDataView`'s doc comment) --
+    /// callers pass `owner.retain()` at the call site, not a bare
+    /// `owner`.
+    pub fn gcNewDataView(self: *Interpreter, owner: JSValue, byte_offset: usize, byte_length: ?usize) zbuffer.BufferError!JSValue {
+        const v = try JSValue.newDataView(self.gc_allocator, owner, byte_offset, byte_length);
+        try self.gcTrack(v);
+        return v;
+    }
 
     /// GC prep (phase 4): visits every JSValue directly held by a
     /// container-shaped box, mirroring `JSValue.deinit()`'s own recursive
@@ -1083,7 +1121,7 @@ pub const Interpreter = struct {
     /// (or anything else untracked) just miss the lookup and stop there.
     fn traceValueChildren(self: *Interpreter, v: JSValue, visitor: anytype) void {
         switch (v) {
-            .@"undefined", .@"null", .boolean, .number, .string, .regex, .symbol, .date, .bigint => {},
+            .@"undefined", .@"null", .boolean, .number, .string, .regex, .symbol, .date, .bigint, .array_buffer => {},
             .array => |box| for (box.value.toSliceMut()) |*child| visitor.value(child.*),
             .object => |box| for (box.value.properties.values()) |prop| {
                 visitor.value(prop.value);
@@ -1135,6 +1173,7 @@ pub const Interpreter = struct {
                 visitor.value(box.value.target);
                 visitor.value(box.value.handler);
             },
+            .data_view => |box| visitor.value(box.value.owner),
         }
     }
 
@@ -1279,6 +1318,14 @@ pub const Interpreter = struct {
             .proxy => |box| {
                 sweeper.value(box.value.target);
                 sweeper.value(box.value.handler);
+                box.destroy();
+            },
+            .array_buffer => |box| {
+                box.value.deinit();
+                box.destroy();
+            },
+            .data_view => |box| {
+                sweeper.value(box.value.owner);
                 box.destroy();
             },
             .environment => |e| {
@@ -3769,6 +3816,25 @@ pub const Interpreter = struct {
                 if (try self.getFromProto(obj, self.protos.set, key)) |m| break :blk m;
                 break :blk JSValue.UNDEFINED;
             },
+            // `.byteLength` is a real spec ACCESSOR property (no parens),
+            // computed here rather than stored -- same category as
+            // array/string's own special-cased `.length`.
+            .array_buffer => |box| blk: {
+                if (std.mem.eql(u8, key, "byteLength")) break :blk JSValue.fromNumber(@floatFromInt(box.value.byteLength()));
+                if (try self.getFromProto(obj, self.protos.array_buffer, key)) |m| break :blk m;
+                break :blk JSValue.UNDEFINED;
+            },
+            // `.buffer`/`.byteOffset`/`.byteLength` are all real spec
+            // accessor properties. `.buffer` returns the SAME `.array_buffer`
+            // JSValue this view was constructed over (retained) -- real JS:
+            // `dv.buffer === buf`.
+            .data_view => |box| blk: {
+                if (std.mem.eql(u8, key, "buffer")) break :blk box.value.owner.retain();
+                if (std.mem.eql(u8, key, "byteOffset")) break :blk JSValue.fromNumber(@floatFromInt(box.value.view.byte_offset));
+                if (std.mem.eql(u8, key, "byteLength")) break :blk JSValue.fromNumber(@floatFromInt(box.value.view.byte_length));
+                if (try self.getFromProto(obj, self.protos.data_view, key)) |m| break :blk m;
+                break :blk JSValue.UNDEFINED;
+            },
             .symbol => |box| blk: {
                 if (std.mem.eql(u8, key, "description")) {
                     break :blk if (box.value.description) |d| try self.gcNewString(d) else JSValue.UNDEFINED;
@@ -3848,7 +3914,7 @@ pub const Interpreter = struct {
                 }
                 break :blk try self.evalIn(l, box.value.target);
             },
-            .function, .regex, .symbol, .map, .set, .@"error", .date, .promise, .bigint => error.NotImplemented,
+            .function, .regex, .symbol, .map, .set, .@"error", .date, .promise, .bigint, .array_buffer, .data_view => error.NotImplemented,
         };
     }
 
@@ -4148,6 +4214,8 @@ pub const Interpreter = struct {
             .{ "number", "Number", builtins.number_methods },
             .{ "boolean", "Boolean", builtins.boolean_methods },
             .{ "bigint", "BigInt", builtins.bigint_methods },
+            .{ "array_buffer", "ArrayBuffer", builtins.array_buffer_methods },
+            .{ "data_view", "DataView", builtins.dataview_methods },
         }) |e| {
             const ctor = g.get(e[1]).?;
             const proto = try self.functionPrototype(ctor);
@@ -4263,6 +4331,18 @@ pub const Interpreter = struct {
             error.NegativeExponent => self.throwError(.range_error, "Exponent must be positive", .{}),
             error.OutOfMemory => error.OutOfMemory,
             error.InvalidDigits => unreachable, // arithmetic ops never parse text
+        };
+    }
+
+    /// Converts a `zbuffer.BufferError` into a real, catchable
+    /// `RangeError` -- matches real JS: both an out-of-range byte
+    /// offset/length AND a misaligned TypedArray byte_offset are
+    /// RangeErrors, not TypeErrors.
+    pub fn bufferErr(self: *Interpreter, e: zbuffer.BufferError) anyerror!JSValue {
+        return switch (e) {
+            error.OutOfBounds => self.throwError(.range_error, "Offset is outside the bounds of the buffer", .{}),
+            error.Misaligned => self.throwError(.range_error, "byte_offset is not a multiple of the element size", .{}),
+            error.OutOfMemory => error.OutOfMemory,
         };
     }
 
@@ -4626,7 +4706,7 @@ pub const Interpreter = struct {
         defer self.construct_target = prev_target;
         const result = try callee.function.value.call(callee.function.value.ctx, self.gc_allocator, instance, args);
         return switch (result) {
-            .object, .array, .function, .regex, .map, .set, .@"error", .date, .promise, .proxy => result,
+            .object, .array, .function, .regex, .map, .set, .@"error", .date, .promise, .proxy, .array_buffer, .data_view => result,
             else => instance,
         };
     }

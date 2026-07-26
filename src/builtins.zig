@@ -22,6 +22,7 @@ const zstring = @import("zstring");
 const zdate = @import("zdate");
 const zfunctions = @import("zfunctions");
 const zbigint = @import("zbigint");
+const zbuffer = @import("zbuffer");
 const JSValue = zvalue.JSValue;
 
 const interpreter_mod = @import("interpreter.zig");
@@ -201,6 +202,33 @@ pub const bigint_methods = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "toString", bigintToString },
     .{ "toLocaleString", bigintToString },
     .{ "valueOf", bigintValueOf },
+});
+
+pub const array_buffer_methods = std.StaticStringMap(NativeFn).initComptime(.{
+    .{ "slice", arrayBufferSlice },
+});
+
+pub const dataview_methods = std.StaticStringMap(NativeFn).initComptime(.{
+    .{ "getInt8", dataViewGetInt8 },
+    .{ "getUint8", dataViewGetUint8 },
+    .{ "setInt8", dataViewSetInt8 },
+    .{ "setUint8", dataViewSetUint8 },
+    .{ "getInt16", dataViewGetInt16 },
+    .{ "getUint16", dataViewGetUint16 },
+    .{ "setInt16", dataViewSetInt16 },
+    .{ "setUint16", dataViewSetUint16 },
+    .{ "getInt32", dataViewGetInt32 },
+    .{ "getUint32", dataViewGetUint32 },
+    .{ "setInt32", dataViewSetInt32 },
+    .{ "setUint32", dataViewSetUint32 },
+    .{ "getFloat32", dataViewGetFloat32 },
+    .{ "setFloat32", dataViewSetFloat32 },
+    .{ "getFloat64", dataViewGetFloat64 },
+    .{ "setFloat64", dataViewSetFloat64 },
+    .{ "getBigInt64", dataViewGetBigInt64 },
+    .{ "getBigUint64", dataViewGetBigUint64 },
+    .{ "setBigInt64", dataViewSetBigInt64 },
+    .{ "setBigUint64", dataViewSetBigUint64 },
 });
 
 /// Object.prototype methods every plain object answers to (dispatched on
@@ -392,6 +420,28 @@ pub fn setupGlobals(self: *Interpreter) !void {
         .constructable = true,
     });
     try g.define(arena, "Proxy", proxy_ctor);
+
+    // `new ArrayBuffer(byteLength)` / `new DataView(buffer, byteOffset,
+    // byteLength)` -- both reject a bare (non-new) call, same pattern as
+    // Proxy above. TypedArray constructors are a separate, not-yet-
+    // started follow-up phase.
+    const array_buffer_ctor = try self.gcNewFunction(.{
+        .ctx = self,
+        .name = "ArrayBuffer",
+        .arity = 1,
+        .call = arrayBufferConstructor,
+        .constructable = true,
+    });
+    try g.define(arena, "ArrayBuffer", array_buffer_ctor);
+
+    const data_view_ctor = try self.gcNewFunction(.{
+        .ctx = self,
+        .name = "DataView",
+        .arity = 1,
+        .call = dataViewConstructor,
+        .constructable = true,
+    });
+    try g.define(arena, "DataView", data_view_ctor);
 
     // Error constructors -- `new Error('msg')` (and `Error('msg')`, which
     // real JS also allows) produce catchable/throwable .error values of
@@ -1715,6 +1765,312 @@ fn bigintAsIntN(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     return self.gcNewBigIntValue(try unsigned_val.clone());
 }
 
+// ===== ArrayBuffer / DataView (roadmap item 19, phase 1) =====
+//
+// TypedArray construction and `%TypedArray%.prototype` are a separate,
+// not-yet-started follow-up phase (see the durable plan). Only
+// ArrayBuffer + DataView are wired here.
+
+/// ECMA-262 ToIndex, narrowed: this engine's constructors/DataView
+/// methods only ever pass an already-`.number` JSValue through here
+/// (no ToNumber coercion of strings/objects) -- matches the existing
+/// narrowing `arrayConstructor` uses for its own length argument.
+fn toByteIndexArg(self: *Interpreter, v: JSValue, what: []const u8) anyerror!usize {
+    if (v != .number) return self.throwError(.type_error, "{s} must be a number", .{what});
+    const n = v.number;
+    // Real ToIndex's own defined upper bound (2^53 - 1) -- checked
+    // BEFORE @intFromFloat, which panics (not an error) on a magnitude
+    // that doesn't fit in the target type (e.g. Number.MAX_VALUE).
+    const max_index: f64 = 9007199254740991.0;
+    if (std.math.isNan(n) or n < 0 or n != @trunc(n) or n > max_index) {
+        return self.throwError(.range_error, "Invalid {s}: must be a non-negative safe integer", .{what});
+    }
+    return @intFromFloat(n);
+}
+
+fn arrayBufferConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const self = interp(ctx);
+    if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor ArrayBuffer requires 'new'", .{});
+    const len_arg = arg(args, 0);
+    const byte_length: usize = if (len_arg == .@"undefined") 0 else try toByteIndexArg(self, len_arg, "length");
+    return self.gcNewArrayBuffer(byte_length);
+}
+
+fn arrayBufferSlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    if (this_value != .array_buffer) return self.throwError(.type_error, "ArrayBuffer.prototype.slice called on incompatible receiver", .{});
+    const src = &this_value.array_buffer.value;
+    const len = src.byteLength();
+    const start_arg = arg(args, 0);
+    const end_arg = arg(args, 1);
+    const start: usize = if (start_arg == .@"undefined") 0 else try toByteIndexArg(self, start_arg, "start");
+    const end: usize = if (end_arg == .@"undefined") len else try toByteIndexArg(self, end_arg, "end");
+    // Real ToIntegerOrInfinity clamping (negative/over-length indices
+    // wrap/clamp instead of erroring) is not implemented -- narrowed to
+    // already-in-range indices, matching this repo's existing ToIndex
+    // narrowing elsewhere; out-of-range is a real RangeError here rather
+    // than a silent clamp.
+    const copy = src.slice(self.gc_allocator, @min(start, len), @min(end, len)) catch |e| return self.bufferErr(e);
+    return self.gcNewArrayBufferFromValue(copy);
+}
+
+fn dataViewConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const self = interp(ctx);
+    if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor DataView requires 'new'", .{});
+    const buffer_arg = arg(args, 0);
+    if (buffer_arg != .array_buffer) {
+        return self.throwError(.type_error, "First argument to DataView constructor must be an ArrayBuffer", .{});
+    }
+    const offset_arg = arg(args, 1);
+    const byte_offset: usize = if (offset_arg == .@"undefined") 0 else try toByteIndexArg(self, offset_arg, "byteOffset");
+    const length_arg = arg(args, 2);
+    const byte_length: ?usize = if (length_arg == .@"undefined") null else try toByteIndexArg(self, length_arg, "byteLength");
+    return self.gcNewDataView(buffer_arg.retain(), byte_offset, byte_length) catch |e| self.bufferErr(e);
+}
+
+/// ECMA-262 ToInt8/ToUint8/ToInt16/ToUint16: same modulo-2^n wraparound
+/// technique as `coercion.toInt32`/`toUint32` (NOT saturating, NOT
+/// clamping -- `DataView` has no "clamped" variant, that's
+/// `Uint8ClampedArray`-only and belongs to the future TypedArray phase).
+fn toUint8Wrap(v: JSValue) anyerror!u8 {
+    return @truncate(try coercion.toUint32(v));
+}
+fn toInt8Wrap(v: JSValue) anyerror!i8 {
+    return @bitCast(try toUint8Wrap(v));
+}
+fn toUint16Wrap(v: JSValue) anyerror!u16 {
+    return @truncate(try coercion.toUint32(v));
+}
+fn toInt16Wrap(v: JSValue) anyerror!i16 {
+    return @bitCast(try toUint16Wrap(v));
+}
+
+fn requireDataView(self: *Interpreter, v: JSValue, method: []const u8) anyerror!zbuffer.DataView {
+    if (v != .data_view) return self.throwError(.type_error, "DataView.prototype.{s} called on incompatible receiver", .{method});
+    return v.data_view.value.view;
+}
+
+/// ToBigInt64/ToBigUint64 (ECMA-262 7.1.20/7.1.21): wraps an arbitrary
+/// ZBigInt into the low 64 bits, two's complement -- matches real
+/// `DataView.setBigInt64`/`setBigUint64` exactly, including values
+/// outside the i64/u64 range (real JS wraps rather than throws). Reuses
+/// the same mask-via-bitAnd technique `BigInt.asUintN`/`asIntN` already
+/// use above, fixed at 64 bits.
+fn toU64Wrapped(self: *Interpreter, big: zbigint.ZBigInt) anyerror!u64 {
+    var one = try zbigint.ZBigInt.fromInt(self.gc_allocator, 1);
+    defer one.deinit();
+    var shifted = try zbigint.ZBigInt.shiftLeft(self.gc_allocator, one, 64);
+    defer shifted.deinit();
+    var mask = try zbigint.ZBigInt.sub(self.gc_allocator, shifted, one);
+    defer mask.deinit();
+    var masked = try zbigint.ZBigInt.bitAnd(self.gc_allocator, big, mask);
+    defer masked.deinit();
+    // Guaranteed to fit: masked into [0, 2^64) by construction above.
+    return masked.value.toInt(u64) catch unreachable;
+}
+
+fn toI64Wrapped(self: *Interpreter, big: zbigint.ZBigInt) anyerror!i64 {
+    return @bitCast(try toU64Wrapped(self, big));
+}
+
+fn dataViewGetInt8(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const dv = try requireDataView(self, this_value, "getInt8");
+    const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
+    const v = dv.getInt8(offset) catch |e| return self.bufferErr(e);
+    return JSValue.fromNumber(@floatFromInt(v));
+}
+fn dataViewGetUint8(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const dv = try requireDataView(self, this_value, "getUint8");
+    const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
+    const v = dv.getUint8(offset) catch |e| return self.bufferErr(e);
+    return JSValue.fromNumber(@floatFromInt(v));
+}
+fn dataViewSetInt8(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const dv = try requireDataView(self, this_value, "setInt8");
+    const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
+    const value = try toInt8Wrap(arg(args, 1));
+    dv.setInt8(offset, value) catch |e| return self.bufferErr(e);
+    return JSValue.UNDEFINED;
+}
+fn dataViewSetUint8(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const dv = try requireDataView(self, this_value, "setUint8");
+    const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
+    const value = try toUint8Wrap(arg(args, 1));
+    dv.setUint8(offset, value) catch |e| return self.bufferErr(e);
+    return JSValue.UNDEFINED;
+}
+
+fn dataViewGetInt16(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const dv = try requireDataView(self, this_value, "getInt16");
+    const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
+    const v = dv.getInt16(offset, coercion.isTruthy(arg(args, 1))) catch |e| return self.bufferErr(e);
+    return JSValue.fromNumber(@floatFromInt(v));
+}
+fn dataViewGetUint16(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const dv = try requireDataView(self, this_value, "getUint16");
+    const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
+    const v = dv.getUint16(offset, coercion.isTruthy(arg(args, 1))) catch |e| return self.bufferErr(e);
+    return JSValue.fromNumber(@floatFromInt(v));
+}
+fn dataViewSetInt16(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const dv = try requireDataView(self, this_value, "setInt16");
+    const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
+    const value = try toInt16Wrap(arg(args, 1));
+    dv.setInt16(offset, value, coercion.isTruthy(arg(args, 2))) catch |e| return self.bufferErr(e);
+    return JSValue.UNDEFINED;
+}
+fn dataViewSetUint16(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const dv = try requireDataView(self, this_value, "setUint16");
+    const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
+    const value = try toUint16Wrap(arg(args, 1));
+    dv.setUint16(offset, value, coercion.isTruthy(arg(args, 2))) catch |e| return self.bufferErr(e);
+    return JSValue.UNDEFINED;
+}
+
+fn dataViewGetInt32(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const dv = try requireDataView(self, this_value, "getInt32");
+    const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
+    const v = dv.getInt32(offset, coercion.isTruthy(arg(args, 1))) catch |e| return self.bufferErr(e);
+    return JSValue.fromNumber(@floatFromInt(v));
+}
+fn dataViewGetUint32(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const dv = try requireDataView(self, this_value, "getUint32");
+    const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
+    const v = dv.getUint32(offset, coercion.isTruthy(arg(args, 1))) catch |e| return self.bufferErr(e);
+    return JSValue.fromNumber(@floatFromInt(v));
+}
+fn dataViewSetInt32(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const dv = try requireDataView(self, this_value, "setInt32");
+    const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
+    const value: i32 = try coercion.toInt32(arg(args, 1));
+    dv.setInt32(offset, value, coercion.isTruthy(arg(args, 2))) catch |e| return self.bufferErr(e);
+    return JSValue.UNDEFINED;
+}
+fn dataViewSetUint32(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const dv = try requireDataView(self, this_value, "setUint32");
+    const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
+    const value: u32 = try coercion.toUint32(arg(args, 1));
+    dv.setUint32(offset, value, coercion.isTruthy(arg(args, 2))) catch |e| return self.bufferErr(e);
+    return JSValue.UNDEFINED;
+}
+
+fn dataViewGetFloat32(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const dv = try requireDataView(self, this_value, "getFloat32");
+    const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
+    const v = dv.getFloat32(offset, coercion.isTruthy(arg(args, 1))) catch |e| return self.bufferErr(e);
+    return JSValue.fromNumber(v);
+}
+fn dataViewSetFloat32(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const dv = try requireDataView(self, this_value, "setFloat32");
+    const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
+    const value: f32 = @floatCast(try coercion.toNumber(arg(args, 1)));
+    dv.setFloat32(offset, value, coercion.isTruthy(arg(args, 2))) catch |e| return self.bufferErr(e);
+    return JSValue.UNDEFINED;
+}
+
+fn dataViewGetFloat64(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const dv = try requireDataView(self, this_value, "getFloat64");
+    const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
+    const v = dv.getFloat64(offset, coercion.isTruthy(arg(args, 1))) catch |e| return self.bufferErr(e);
+    return JSValue.fromNumber(v);
+}
+fn dataViewSetFloat64(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const dv = try requireDataView(self, this_value, "setFloat64");
+    const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
+    const value: f64 = try coercion.toNumber(arg(args, 1));
+    dv.setFloat64(offset, value, coercion.isTruthy(arg(args, 2))) catch |e| return self.bufferErr(e);
+    return JSValue.UNDEFINED;
+}
+
+fn dataViewGetBigInt64(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const dv = try requireDataView(self, this_value, "getBigInt64");
+    const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
+    const v = dv.getBigInt64(offset, coercion.isTruthy(arg(args, 1))) catch |e| return self.bufferErr(e);
+    return self.gcNewBigIntValue(try zbigint.ZBigInt.fromInt(self.gc_allocator, v));
+}
+fn dataViewGetBigUint64(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const dv = try requireDataView(self, this_value, "getBigUint64");
+    const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
+    const v = dv.getBigUint64(offset, coercion.isTruthy(arg(args, 1))) catch |e| return self.bufferErr(e);
+    // fromInt takes i64 -- a u64 above i64's max reinterprets as negative
+    // there, so route through the same bit pattern deliberately (u64 ->
+    // i64 bit-for-bit) and let ZBigInt.fromInt's sign be corrected by
+    // adding 2^64 when negative (the value is conceptually unsigned).
+    if (v <= std.math.maxInt(i64)) {
+        return self.gcNewBigIntValue(try zbigint.ZBigInt.fromInt(self.gc_allocator, @intCast(v)));
+    }
+    var lo = try zbigint.ZBigInt.fromInt(self.gc_allocator, @bitCast(v));
+    defer lo.deinit();
+    var two_64 = try zbigint.ZBigInt.fromInt(self.gc_allocator, 1);
+    defer two_64.deinit();
+    var shifted = try zbigint.ZBigInt.shiftLeft(self.gc_allocator, two_64, 64);
+    defer shifted.deinit();
+    return self.gcNewBigIntValue(try zbigint.ZBigInt.add(self.gc_allocator, lo, shifted));
+}
+fn dataViewSetBigInt64(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const dv = try requireDataView(self, this_value, "setBigInt64");
+    const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
+    const x = try toBigIntValue(self, self.gc_allocator, arg(args, 1));
+    defer x.deinit();
+    const value = try toI64Wrapped(self, x.bigint.value);
+    dv.setBigInt64(offset, value, coercion.isTruthy(arg(args, 2))) catch |e| return self.bufferErr(e);
+    return JSValue.UNDEFINED;
+}
+fn dataViewSetBigUint64(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const dv = try requireDataView(self, this_value, "setBigUint64");
+    const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
+    const x = try toBigIntValue(self, self.gc_allocator, arg(args, 1));
+    defer x.deinit();
+    const value = try toU64Wrapped(self, x.bigint.value);
+    dv.setBigUint64(offset, value, coercion.isTruthy(arg(args, 2))) catch |e| return self.bufferErr(e);
+    return JSValue.UNDEFINED;
+}
+
 // ===== Promise =====
 
 /// The pair of capabilities `new Promise(executor)` hands the executor.
@@ -2612,6 +2968,8 @@ fn objectGetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
         .symbol => self.protos.symbol.retain(),
         .promise => self.protos.promise.retain(),
         .bigint => self.protos.bigint.retain(),
+        .array_buffer => self.protos.array_buffer.retain(),
+        .data_view => self.protos.data_view.retain(),
         // No getPrototypeOf trap dispatch yet (Proxy plan, later phase)
         // -- delegates transparently to target, correct for the
         // no-trap case.

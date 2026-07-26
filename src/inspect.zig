@@ -86,6 +86,11 @@ pub fn inspect(allocator: Allocator, buf: *std.ArrayList(u8), v: JSValue) !void 
         },
         .map => try buf.appendSlice(allocator, "[Map]"),
         .set => try buf.appendSlice(allocator, "[Set]"),
+        // Placeholders, same minimal-approximation convention as Map/Set
+        // above -- not Node's real `ArrayBuffer { ... byteLength: N }`
+        // rendering.
+        .array_buffer => try buf.appendSlice(allocator, "[ArrayBuffer]"),
+        .data_view => try buf.appendSlice(allocator, "[DataView]"),
         // Placeholder until trap dispatch exists (Proxy plan, later
         // phases) -- real Node renders through the target transparently.
         .proxy => try buf.appendSlice(allocator, "[Proxy]"),
