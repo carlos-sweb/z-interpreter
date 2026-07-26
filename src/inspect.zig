@@ -91,6 +91,7 @@ pub fn inspect(allocator: Allocator, buf: *std.ArrayList(u8), v: JSValue) !void 
         // rendering.
         .array_buffer => try buf.appendSlice(allocator, "[ArrayBuffer]"),
         .data_view => try buf.appendSlice(allocator, "[DataView]"),
+        .typed_array => try buf.appendSlice(allocator, "[TypedArray]"),
         // Placeholder until trap dispatch exists (Proxy plan, later
         // phases) -- real Node renders through the target transparently.
         .proxy => try buf.appendSlice(allocator, "[Proxy]"),

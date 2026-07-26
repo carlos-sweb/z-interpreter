@@ -443,6 +443,39 @@ pub fn setupGlobals(self: *Interpreter) !void {
     });
     try g.define(arena, "DataView", data_view_ctor);
 
+    // The 10 JS-visible TypedArray constructors (roadmap item 19, phase
+    // 2) -- one shared native, one small per-instance ctx (`interp` +
+    // which `TypedKind` this particular global is) allocated once here
+    // and living forever (bulk-freed with the AST arena at shutdown,
+    // same "persistent setup-time ctx" convention z-run's `RunCtx`
+    // already uses -- not a per-call ctx like `BoundCtx`).
+    // `%TypedArray%.prototype`'s real method surface is a separate,
+    // not-yet-started follow-up phase.
+    inline for (.{
+        .{ "Int8Array", zvalue.TypedKind.i8 },
+        .{ "Uint8Array", zvalue.TypedKind.u8 },
+        .{ "Uint8ClampedArray", zvalue.TypedKind.u8_clamped },
+        .{ "Int16Array", zvalue.TypedKind.i16 },
+        .{ "Uint16Array", zvalue.TypedKind.u16 },
+        .{ "Int32Array", zvalue.TypedKind.i32 },
+        .{ "Uint32Array", zvalue.TypedKind.u32 },
+        .{ "Float32Array", zvalue.TypedKind.f32 },
+        .{ "Float64Array", zvalue.TypedKind.f64 },
+        .{ "BigInt64Array", zvalue.TypedKind.i64 },
+        .{ "BigUint64Array", zvalue.TypedKind.u64 },
+    }) |e| {
+        const cctx = try self.arena_state.allocator().create(TypedArrayCtorCtx);
+        cctx.* = .{ .interp = self, .kind = e[1], .name = e[0] };
+        const ctor = try self.gcNewFunction(.{
+            .ctx = cctx,
+            .name = e[0],
+            .arity = 1,
+            .call = typedArrayConstructor,
+            .constructable = true,
+        });
+        try g.define(arena, e[0], ctor);
+    }
+
     // Error constructors -- `new Error('msg')` (and `Error('msg')`, which
     // real JS also allows) produce catchable/throwable .error values of
     // the right kind.
@@ -2027,16 +2060,11 @@ fn dataViewGetBigInt64(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
     const v = dv.getBigInt64(offset, coercion.isTruthy(arg(args, 1))) catch |e| return self.bufferErr(e);
     return self.gcNewBigIntValue(try zbigint.ZBigInt.fromInt(self.gc_allocator, v));
 }
-fn dataViewGetBigUint64(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    const self = interp(ctx);
-    const dv = try requireDataView(self, this_value, "getBigUint64");
-    const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
-    const v = dv.getBigUint64(offset, coercion.isTruthy(arg(args, 1))) catch |e| return self.bufferErr(e);
-    // fromInt takes i64 -- a u64 above i64's max reinterprets as negative
-    // there, so route through the same bit pattern deliberately (u64 ->
-    // i64 bit-for-bit) and let ZBigInt.fromInt's sign be corrected by
-    // adding 2^64 when negative (the value is conceptually unsigned).
+/// Boxes a raw `u64` as a real (conceptually unsigned) BigInt.
+/// `ZBigInt.fromInt` takes `i64` -- a u64 above i64's max reinterprets
+/// as negative there, so route through the same bit pattern deliberately
+/// (u64 -> i64 bit-for-bit) and correct the sign by adding 2^64.
+fn bigIntFromU64(self: *Interpreter, v: u64) anyerror!JSValue {
     if (v <= std.math.maxInt(i64)) {
         return self.gcNewBigIntValue(try zbigint.ZBigInt.fromInt(self.gc_allocator, @intCast(v)));
     }
@@ -2047,6 +2075,15 @@ fn dataViewGetBigUint64(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     var shifted = try zbigint.ZBigInt.shiftLeft(self.gc_allocator, two_64, 64);
     defer shifted.deinit();
     return self.gcNewBigIntValue(try zbigint.ZBigInt.add(self.gc_allocator, lo, shifted));
+}
+
+fn dataViewGetBigUint64(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const dv = try requireDataView(self, this_value, "getBigUint64");
+    const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
+    const v = dv.getBigUint64(offset, coercion.isTruthy(arg(args, 1))) catch |e| return self.bufferErr(e);
+    return bigIntFromU64(self, v);
 }
 fn dataViewSetBigInt64(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
@@ -2069,6 +2106,186 @@ fn dataViewSetBigUint64(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     const value = try toU64Wrapped(self, x.bigint.value);
     dv.setBigUint64(offset, value, coercion.isTruthy(arg(args, 2))) catch |e| return self.bufferErr(e);
     return JSValue.UNDEFINED;
+}
+
+// ===== TypedArray (roadmap item 19, phase 2) =====
+//
+// Construction + integer-indexed element access + the
+// length/byteLength/byteOffset/buffer accessors only.
+// `%TypedArray%.prototype`'s real method surface (map/filter/forEach/
+// slice/set/subarray/...) is a separate, not-yet-started follow-up
+// phase.
+
+fn typedView(comptime T: type, buffer: *zbuffer.ArrayBuffer, byte_offset: usize, len: usize) zbuffer.TypedArrayView(T) {
+    return .{ .buffer = buffer, .byte_offset = byte_offset, .len = len };
+}
+
+/// ECMA-262 ToUint8Clamp: NaN -> 0, clamped to [0,255], round-half-to-
+/// EVEN at the .5 boundary (2.5 -> 2, 3.5 -> 4) -- the one JS-specific
+/// numeric conversion `Uint8ClampedArray` needs that nothing else in
+/// this engine has built yet (plain `Uint8Array` WRAPS modulo 256 via
+/// `toUint8Wrap` above; `Uint8ClampedArray` CLAMPS -- two genuinely
+/// different algorithms sharing the same 1-byte storage).
+fn toUint8Clamp(v: JSValue) anyerror!u8 {
+    const n = try coercion.toNumber(v);
+    if (std.math.isNan(n) or n <= 0) return 0;
+    if (n >= 255) return 255;
+    const f = @floor(n);
+    if (f + 0.5 < n) return @intFromFloat(f + 1);
+    if (n < f + 0.5) return @intFromFloat(f);
+    const fi: u8 = @intFromFloat(f);
+    return if (fi % 2 == 0) fi else fi + 1;
+}
+
+/// Reads element `index` (already bounds-checked by the caller against
+/// `len` -- `BufferError.OutOfBounds` here would be an internal-
+/// invariant violation, not a JS-facing condition, since real spec
+/// out-of-range reads are `undefined` handled entirely at the
+/// getProperty call site, never reaching this far).
+pub fn typedElemGet(self: *Interpreter, kind: zvalue.TypedKind, buffer: *zbuffer.ArrayBuffer, byte_offset: usize, len: usize, index: usize) anyerror!JSValue {
+    return switch (kind) {
+        .i8 => JSValue.fromNumber(@floatFromInt(typedView(i8, buffer, byte_offset, len).get(index) catch unreachable)),
+        .u8, .u8_clamped => JSValue.fromNumber(@floatFromInt(typedView(u8, buffer, byte_offset, len).get(index) catch unreachable)),
+        .i16 => JSValue.fromNumber(@floatFromInt(typedView(i16, buffer, byte_offset, len).get(index) catch unreachable)),
+        .u16 => JSValue.fromNumber(@floatFromInt(typedView(u16, buffer, byte_offset, len).get(index) catch unreachable)),
+        .i32 => JSValue.fromNumber(@floatFromInt(typedView(i32, buffer, byte_offset, len).get(index) catch unreachable)),
+        .u32 => JSValue.fromNumber(@floatFromInt(typedView(u32, buffer, byte_offset, len).get(index) catch unreachable)),
+        .f32 => JSValue.fromNumber(typedView(f32, buffer, byte_offset, len).get(index) catch unreachable),
+        .f64 => JSValue.fromNumber(typedView(f64, buffer, byte_offset, len).get(index) catch unreachable),
+        .i64 => self.gcNewBigIntValue(try zbigint.ZBigInt.fromInt(self.gc_allocator, typedView(i64, buffer, byte_offset, len).get(index) catch unreachable)),
+        .u64 => bigIntFromU64(self, typedView(u64, buffer, byte_offset, len).get(index) catch unreachable),
+    };
+}
+
+/// Writes element `index` -- unlike `typedElemGet`, the CALLER does NOT
+/// pre-check bounds: `value` is coerced UNCONDITIONALLY first (real
+/// spec: `IntegerIndexedElementSet` converts the value before checking
+/// the index, so a conversion that throws does so even for an out-of-
+/// range index -- verified against real Node), and an out-of-range
+/// index is then a silent no-op (never a throw, matches spec exactly).
+pub fn typedElemSet(self: *Interpreter, kind: zvalue.TypedKind, buffer: *zbuffer.ArrayBuffer, byte_offset: usize, len: usize, index: usize, value: JSValue) anyerror!void {
+    switch (kind) {
+        .i8 => {
+            const v = try toInt8Wrap(value);
+            typedView(i8, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
+        },
+        .u8 => {
+            const v = try toUint8Wrap(value);
+            typedView(u8, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
+        },
+        .u8_clamped => {
+            const v = try toUint8Clamp(value);
+            typedView(u8, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
+        },
+        .i16 => {
+            const v = try toInt16Wrap(value);
+            typedView(i16, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
+        },
+        .u16 => {
+            const v = try toUint16Wrap(value);
+            typedView(u16, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
+        },
+        .i32 => {
+            const v = try coercion.toInt32(value);
+            typedView(i32, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
+        },
+        .u32 => {
+            const v = try coercion.toUint32(value);
+            typedView(u32, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
+        },
+        .f32 => {
+            const v: f32 = @floatCast(try coercion.toNumber(value));
+            typedView(f32, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
+        },
+        .f64 => {
+            const v = try coercion.toNumber(value);
+            typedView(f64, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
+        },
+        .i64 => {
+            const x = try toBigIntValue(self, self.gc_allocator, value);
+            defer x.deinit();
+            const v = try toI64Wrapped(self, x.bigint.value);
+            typedView(i64, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
+        },
+        .u64 => {
+            const x = try toBigIntValue(self, self.gc_allocator, value);
+            defer x.deinit();
+            const v = try toU64Wrapped(self, x.bigint.value);
+            typedView(u64, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
+        },
+    }
+}
+
+/// `zbuffer`'s `.set()` only ever fails with `OutOfBounds` on an
+/// already-validly-constructed view (never `Misaligned`/`OutOfMemory` --
+/// those are init-time-only concerns) -- and per real spec, an
+/// out-of-range indexed TypedArray write is a silent no-op, never a
+/// throw.
+fn oobIsNoop(e: zbuffer.BufferError) anyerror!void {
+    return switch (e) {
+        error.OutOfBounds => {},
+        error.Misaligned, error.OutOfMemory => unreachable,
+    };
+}
+
+/// One instance per named global (`Int8Array`, `Uint8Array`, ...),
+/// allocated once at `setupGlobals` time -- see the registration loop's
+/// own comment for why this isn't GC-tracked like `BoundCtx`/etc.
+const TypedArrayCtorCtx = struct { interp: *Interpreter, kind: zvalue.TypedKind, name: []const u8 };
+
+fn typedArrayCtx(ctx: *anyopaque) *TypedArrayCtorCtx {
+    return @ptrCast(@alignCast(ctx));
+}
+
+/// The 3 real constructor overloads: `new XArray(length)`, `new
+/// XArray(buffer, byteOffset?, length?)`, `new XArray(iterableOrArray
+/// Like)`. Non-iterable array-likes (`{length: 3, 0: 1, ...}` with no
+/// `Symbol.iterator`) are a documented gap -- `iterableItems` doesn't
+/// cover them today, same narrowing `Array.from` already has.
+fn typedArrayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const cctx = typedArrayCtx(ctx);
+    const self = cctx.interp;
+    const kind = cctx.kind;
+    if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor {s} requires 'new'", .{cctx.name});
+    const elem_size = kind.elemSize();
+    const first = arg(args, 0);
+
+    if (first == .array_buffer) {
+        const byte_offset: usize = if (arg(args, 1) == .@"undefined") 0 else try toByteIndexArg(self, arg(args, 1), "byteOffset");
+        const length_arg = arg(args, 2);
+        const len: ?usize = if (length_arg == .@"undefined") null else try toByteIndexArg(self, length_arg, "length");
+        return self.gcNewTypedArray(first.retain(), byte_offset, len, kind) catch |e| self.bufferErr(e);
+    }
+
+    if (first == .@"undefined" or first == .number) {
+        const n: usize = if (first == .@"undefined") 0 else try toByteIndexArg(self, first, "length");
+        const buf = try self.gcNewArrayBuffer(n * elem_size);
+        return self.gcNewTypedArray(buf, 0, n, kind) catch |e| {
+            buf.deinit();
+            return self.bufferErr(e);
+        };
+    }
+
+    // Iterable/array-like: copy element VALUES (coerced per kind, going
+    // through the exact same conversion writes do), never a raw byte
+    // reinterpretation -- `new Int32Array(new Uint8Array([1,2,3]))` is
+    // `[1,2,3]`, not an empty/aliased view.
+    const items = try self.iterableItems(first);
+    defer self.gc_allocator.free(items);
+    const buf = try self.gcNewArrayBuffer(items.len * elem_size);
+    const ta = self.gcNewTypedArray(buf, 0, items.len, kind) catch |e| {
+        buf.deinit();
+        return self.bufferErr(e);
+    };
+    for (items, 0..) |item, i| {
+        typedElemSet(self, kind, &buf.array_buffer.value, 0, items.len, i, item) catch |e| {
+            ta.deinit();
+            return e;
+        };
+    }
+    return ta;
 }
 
 // ===== Promise =====
@@ -2970,6 +3187,7 @@ fn objectGetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
         .bigint => self.protos.bigint.retain(),
         .array_buffer => self.protos.array_buffer.retain(),
         .data_view => self.protos.data_view.retain(),
+        .typed_array => |box| self.typedArrayProto(box.value.kind).retain(),
         // No getPrototypeOf trap dispatch yet (Proxy plan, later phase)
         // -- delegates transparently to target, correct for the
         // no-trap case.

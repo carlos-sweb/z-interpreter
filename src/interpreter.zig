@@ -46,6 +46,23 @@ pub const Protos = struct {
     bigint: JSValue = JSValue.UNDEFINED,
     array_buffer: JSValue = JSValue.UNDEFINED,
     data_view: JSValue = JSValue.UNDEFINED,
+    /// The abstract, non-exposed `%TypedArray%.prototype` every concrete
+    /// kind's own prototype chains to (real spec: `Int8Array.prototype
+    /// .__proto__ === %TypedArray%.prototype`). Carries no methods this
+    /// phase (phase 3's job) -- exists purely so `instanceof`/
+    /// `getPrototypeOf` chain identity is already correct.
+    typed_array_base: JSValue = JSValue.UNDEFINED,
+    int8_array: JSValue = JSValue.UNDEFINED,
+    uint8_array: JSValue = JSValue.UNDEFINED,
+    uint8_clamped_array: JSValue = JSValue.UNDEFINED,
+    int16_array: JSValue = JSValue.UNDEFINED,
+    uint16_array: JSValue = JSValue.UNDEFINED,
+    int32_array: JSValue = JSValue.UNDEFINED,
+    uint32_array: JSValue = JSValue.UNDEFINED,
+    float32_array: JSValue = JSValue.UNDEFINED,
+    float64_array: JSValue = JSValue.UNDEFINED,
+    bigint64_array: JSValue = JSValue.UNDEFINED,
+    biguint64_array: JSValue = JSValue.UNDEFINED,
 };
 
 /// JS-level state a RegExp object carries beyond its compiled bytecode.
@@ -525,6 +542,9 @@ const GcNode = union(enum) {
     /// through), same non-leaf category as proxy above.
     array_buffer: *zvalue.Rc(zvalue.ArrayBuffer),
     data_view: *zvalue.Rc(zvalue.DataViewBox),
+    /// Same non-leaf category as `.data_view` -- holds an `owner`
+    /// JSValue (the `.array_buffer` it reads/writes through).
+    typed_array: *zvalue.Rc(zvalue.TypedArrayBox),
     /// Symbols and strings are leaves (hold no JSValue children, can't
     /// cycle) but are STILL registered: a value that's created and
     /// immediately retained for storage elsewhere (every well-known
@@ -609,6 +629,7 @@ const Marker = struct {
             .proxy => |box| @intFromPtr(box),
             .array_buffer => |box| @intFromPtr(box),
             .data_view => |box| @intFromPtr(box),
+            .typed_array => |box| @intFromPtr(box),
         };
         const gop = self.reached.getOrPut(self.interp.gc_allocator, addr) catch return;
         if (gop.found_existing) return;
@@ -666,6 +687,7 @@ const Sweeper = struct {
             .proxy => |box| @intFromPtr(box),
             .array_buffer => |box| @intFromPtr(box),
             .data_view => |box| @intFromPtr(box),
+            .typed_array => |box| @intFromPtr(box),
         };
         if (self.garbage.contains(addr)) return;
         v.deinit();
@@ -932,6 +954,7 @@ pub const Interpreter = struct {
             .proxy => |box| .{ .proxy = box },
             .array_buffer => |box| .{ .array_buffer = box },
             .data_view => |box| .{ .data_view = box },
+            .typed_array => |box| .{ .typed_array = box },
             else => return,
         };
         v.setGcHook(self, gcOnBoxDestroyed);
@@ -1111,6 +1134,13 @@ pub const Interpreter = struct {
         try self.gcTrack(v);
         return v;
     }
+    /// `owner` must already be a retained `.array_buffer` JSValue (see
+    /// `gcNewDataView`'s doc comment -- same convention).
+    pub fn gcNewTypedArray(self: *Interpreter, owner: JSValue, byte_offset: usize, len: ?usize, kind: zvalue.TypedKind) zbuffer.BufferError!JSValue {
+        const v = try JSValue.newTypedArray(self.gc_allocator, owner, byte_offset, len, kind);
+        try self.gcTrack(v);
+        return v;
+    }
 
     /// GC prep (phase 4): visits every JSValue directly held by a
     /// container-shaped box, mirroring `JSValue.deinit()`'s own recursive
@@ -1174,6 +1204,7 @@ pub const Interpreter = struct {
                 visitor.value(box.value.handler);
             },
             .data_view => |box| visitor.value(box.value.owner),
+            .typed_array => |box| visitor.value(box.value.owner),
         }
     }
 
@@ -1325,6 +1356,10 @@ pub const Interpreter = struct {
                 box.destroy();
             },
             .data_view => |box| {
+                sweeper.value(box.value.owner);
+                box.destroy();
+            },
+            .typed_array => |box| {
                 sweeper.value(box.value.owner);
                 box.destroy();
             },
@@ -2770,6 +2805,19 @@ pub const Interpreter = struct {
                 }
                 break :blk try out.toOwnedSlice(arena);
             },
+            // Structurally recognized like array/set/map above (no
+            // Symbol.iterator lookup) -- needed for `[...ta]`/`for...of`/
+            // `Array.from(ta)` AND for this engine's own TypedArray
+            // constructors' iterable-source overload
+            // (`new Int32Array(new Uint8Array([1,2,3]))`).
+            .typed_array => |box| blk: {
+                const out = try arena.alloc(JSValue, box.value.len);
+                var i: usize = 0;
+                while (i < box.value.len) : (i += 1) {
+                    out[i] = try builtins.typedElemGet(self, box.value.kind, &box.value.owner.array_buffer.value, box.value.byte_offset, box.value.len, i);
+                }
+                break :blk out;
+            },
             else => self.throwError(.type_error, "{s} is not iterable", .{value.typeOf()}),
         };
     }
@@ -3835,6 +3883,22 @@ pub const Interpreter = struct {
                 if (try self.getFromProto(obj, self.protos.data_view, key)) |m| break :blk m;
                 break :blk JSValue.UNDEFINED;
             },
+            // Integer-indexed exotic access: a canonical numeric index
+            // out of `[0,len)` reads as `undefined` (real spec) --
+            // NEVER falls through to the prototype chain like a plain
+            // object's missing numeric-string key would.
+            .typed_array => |box| blk: {
+                if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.len));
+                if (std.mem.eql(u8, key, "buffer")) break :blk box.value.owner.retain();
+                if (std.mem.eql(u8, key, "byteOffset")) break :blk JSValue.fromNumber(@floatFromInt(box.value.byte_offset));
+                if (std.mem.eql(u8, key, "byteLength")) break :blk JSValue.fromNumber(@floatFromInt(box.value.len * box.value.kind.elemSize()));
+                if (std.fmt.parseInt(usize, key, 10)) |idx| {
+                    if (idx >= box.value.len) break :blk JSValue.UNDEFINED;
+                    break :blk try builtins.typedElemGet(self, box.value.kind, &box.value.owner.array_buffer.value, box.value.byte_offset, box.value.len, idx);
+                } else |_| {}
+                if (try self.getFromProto(obj, self.typedArrayProto(box.value.kind), key)) |m| break :blk m;
+                break :blk JSValue.UNDEFINED;
+            },
             .symbol => |box| blk: {
                 if (std.mem.eql(u8, key, "description")) {
                     break :blk if (box.value.description) |d| try self.gcNewString(d) else JSValue.UNDEFINED;
@@ -3878,8 +3942,15 @@ pub const Interpreter = struct {
         // constructed anything -- nothing can be an instance of it.
         const proto = r.function.value.prototype orelse return JSValue.fromBool(false);
         if (proto != .object) return JSValue.fromBool(false);
-        if (l != .object) return JSValue.fromBool(false); // primitives are never instances
-        var current = l.object.value.getPrototype();
+        // TypedArray instances have no ZObject of their own -- the chain
+        // walk starts directly at their (kind-specific) prototype object
+        // instead of "the instance's own prototype" like the `.object`
+        // case below.
+        var current: ?*const zobject.ZObject(JSValue) = switch (l) {
+            .object => l.object.value.getPrototype(),
+            .typed_array => |box| &self.typedArrayProto(box.value.kind).object.value,
+            else => return JSValue.fromBool(false), // primitives are never instances
+        };
         while (current) |p| : (current = p.getPrototype()) {
             if (p == &proto.object.value) return JSValue.fromBool(true);
         }
@@ -3914,7 +3985,7 @@ pub const Interpreter = struct {
                 }
                 break :blk try self.evalIn(l, box.value.target);
             },
-            .function, .regex, .symbol, .map, .set, .@"error", .date, .promise, .bigint, .array_buffer, .data_view => error.NotImplemented,
+            .function, .regex, .symbol, .map, .set, .@"error", .date, .promise, .bigint, .array_buffer, .data_view, .typed_array => error.NotImplemented,
         };
     }
 
@@ -3949,6 +4020,18 @@ pub const Interpreter = struct {
             while (i < idx) : (i += 1) _ = try arr.push(JSValue.UNDEFINED);
             _ = try arr.push(value.retain());
         }
+    }
+
+    /// Integer-indexed exotic [[Set]]: a canonical numeric index writes
+    /// through `typedElemSet` (which itself coerces the value BEFORE
+    /// checking bounds and silently no-ops if out of range -- matches
+    /// real spec exactly, verified against real Node). Any other key is
+    /// `error.NotImplemented`, same narrowing `setArrayProperty` already
+    /// has for arrays (no general property bag).
+    pub fn setTypedArrayProperty(self: *Interpreter, obj: JSValue, key: []const u8, value: JSValue) anyerror!void {
+        const box = obj.typed_array;
+        const idx = std.fmt.parseInt(usize, key, 10) catch return error.NotImplemented;
+        try builtins.typedElemSet(self, box.value.kind, &box.value.owner.array_buffer.value, box.value.byte_offset, box.value.len, idx, value);
     }
 
     /// [[Set]] on an `.object` JSValue with accessor dispatch: a setter
@@ -4038,6 +4121,7 @@ pub const Interpreter = struct {
             return self.setObjectProperty(bag, key, value);
         }
         if (obj == .array) return self.setArrayProperty(obj, key, value);
+        if (obj == .typed_array) return self.setTypedArrayProperty(obj, key, value);
         if (obj == .regex) {
             if (std.mem.eql(u8, key, "lastIndex")) {
                 const n = try coercion.toNumber(value);
@@ -4155,6 +4239,26 @@ pub const Interpreter = struct {
         return obj;
     }
 
+    /// The specific `XArray.prototype` for a given `TypedKind` -- `u8`
+    /// and `u8_clamped` deliberately resolve to DIFFERENT prototypes
+    /// despite sharing storage (real JS: `Uint8Array.prototype !==
+    /// Uint8ClampedArray.prototype`).
+    pub fn typedArrayProto(self: *Interpreter, kind: zvalue.TypedKind) JSValue {
+        return switch (kind) {
+            .i8 => self.protos.int8_array,
+            .u8 => self.protos.uint8_array,
+            .u8_clamped => self.protos.uint8_clamped_array,
+            .i16 => self.protos.int16_array,
+            .u16 => self.protos.uint16_array,
+            .i32 => self.protos.int32_array,
+            .u32 => self.protos.uint32_array,
+            .f32 => self.protos.float32_array,
+            .f64 => self.protos.float64_array,
+            .i64 => self.protos.bigint64_array,
+            .u64 => self.protos.biguint64_array,
+        };
+    }
+
     /// Walk a builtin prototype object's own->chain records for `key`,
     /// dispatching an accessor's getter with `this = receiver`. Returns null
     /// on a full miss. This is how the primitive types (array/string/date/...)
@@ -4231,6 +4335,37 @@ pub const Interpreter = struct {
             const ctor = g.get(e[1]).?;
             const proto = try self.functionPrototype(ctor);
             try proto.object.value.setPrototype(&object_proto.object.value);
+            try proto.object.value.defineProperty("constructor", ctor.retain(), proto_attrs);
+            @field(self.protos, e[0]) = proto;
+        }
+
+        // %TypedArray%.prototype: abstract, not itself exposed as a
+        // global (no constructor of its own) -- every concrete
+        // `XArray.prototype` below chains to THIS instead of directly to
+        // Object.prototype (real spec: `Int8Array.prototype.__proto__
+        // === %TypedArray%.prototype`). Carries no methods this phase
+        // (phase 3's job); exists purely for `instanceof`/
+        // `getPrototypeOf` chain-identity correctness.
+        const typed_array_base = try self.ordinaryObject();
+        self.protos.typed_array_base = typed_array_base;
+        inline for (.{
+            .{ "int8_array", "Int8Array" },
+            .{ "uint8_array", "Uint8Array" },
+            .{ "uint8_clamped_array", "Uint8ClampedArray" },
+            .{ "int16_array", "Int16Array" },
+            .{ "uint16_array", "Uint16Array" },
+            .{ "int32_array", "Int32Array" },
+            .{ "uint32_array", "Uint32Array" },
+            .{ "float32_array", "Float32Array" },
+            .{ "float64_array", "Float64Array" },
+            .{ "bigint64_array", "BigInt64Array" },
+            .{ "biguint64_array", "BigUint64Array" },
+        }) |e| {
+            const ctor = g.get(e[1]).?;
+            const proto = try self.functionPrototype(ctor);
+            // functionPrototype() defaulted this to Object.prototype --
+            // re-parent to the shared base instead.
+            try proto.object.value.setPrototype(&typed_array_base.object.value);
             try proto.object.value.defineProperty("constructor", ctor.retain(), proto_attrs);
             @field(self.protos, e[0]) = proto;
         }
@@ -4706,7 +4841,7 @@ pub const Interpreter = struct {
         defer self.construct_target = prev_target;
         const result = try callee.function.value.call(callee.function.value.ctx, self.gc_allocator, instance, args);
         return switch (result) {
-            .object, .array, .function, .regex, .map, .set, .@"error", .date, .promise, .proxy, .array_buffer, .data_view => result,
+            .object, .array, .function, .regex, .map, .set, .@"error", .date, .promise, .proxy, .array_buffer, .data_view, .typed_array => result,
             else => instance,
         };
     }

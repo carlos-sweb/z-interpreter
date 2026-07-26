@@ -17,7 +17,7 @@ pub fn isTruthy(v: JSValue) bool {
         // Falsy only for 0n -- the one variant here that isn't
         // unconditionally true, matching real JS ToBoolean(BigInt).
         .bigint => |box| !box.value.isZero(),
-        .array, .object, .regex, .symbol, .map, .set, .@"error", .function, .date, .promise, .proxy, .array_buffer, .data_view => true,
+        .array, .object, .regex, .symbol, .map, .set, .@"error", .function, .date, .promise, .proxy, .array_buffer, .data_view, .typed_array => true,
     };
 }
 
@@ -45,7 +45,7 @@ pub fn toNumber(v: JSValue) !f64 {
         // 18, phase 4 -- not yet wired, so implicit arithmetic mixing
         // is temporarily silently permitted rather than a TypeError).
         .bigint => |box| box.value.toFloat(),
-        .array, .object, .regex, .symbol, .map, .set, .@"error", .function, .promise, .proxy, .array_buffer, .data_view => error.NotImplemented,
+        .array, .object, .regex, .symbol, .map, .set, .@"error", .function, .promise, .proxy, .array_buffer, .data_view, .typed_array => error.NotImplemented,
     };
 }
 
@@ -103,7 +103,7 @@ pub fn toDisplayString(allocator: Allocator, v: JSValue) ![]u8 {
         // inspect-only display convention (see inspect.zig's own .bigint
         // case), not part of ToString: `${1n}` === "1", not "1n".
         .bigint => |box| try box.value.toString(allocator, 10),
-        .object, .symbol, .map, .set, .@"error", .function, .proxy, .array_buffer, .data_view => error.NotImplemented,
+        .object, .symbol, .map, .set, .@"error", .function, .proxy, .array_buffer, .data_view, .typed_array => error.NotImplemented,
     };
 }
 
