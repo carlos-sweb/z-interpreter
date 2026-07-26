@@ -3533,6 +3533,16 @@ pub const Interpreter = struct {
         return fn_val;
     }
 
+    /// Builds a real JS array from a native args slice -- the shape the
+    /// `apply`/`construct` traps' `argumentsList` parameter needs (a
+    /// real Array, not a raw Zig slice). Retains each item, matching
+    /// every other array-building site.
+    fn argsToArray(self: *Interpreter, args: []const JSValue) anyerror!JSValue {
+        var arr = try self.gcNewArray();
+        for (args) |a| _ = try arr.array.value.push(a.retain());
+        return arr;
+    }
+
     pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!JSValue {
         return switch (obj) {
             // Own-then-chain walk over property *records* (not values), so
@@ -3702,6 +3712,10 @@ pub const Interpreter = struct {
     /// Symbol.hasInstance): walk the LHS object's prototype chain looking
     /// for the RHS function's prototype object, by pointer identity.
     fn evalInstanceof(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
+        // Best-effort unwrap, not a real Symbol.hasInstance trap dispatch
+        // (that protocol doesn't exist in this engine at all yet, for
+        // plain functions either -- pre-existing narrowing, not new).
+        if (r == .proxy) return self.evalInstanceof(l, r.proxy.value.target);
         if (r != .function) {
             return self.throwError(.type_error, "Right-hand side of 'instanceof' is not callable", .{});
         }
@@ -4234,14 +4248,16 @@ pub const Interpreter = struct {
             callee_val = try self.evalExpression(env, c.callee);
         }
         if (c.optional and (callee_val == .@"undefined" or callee_val == .@"null")) return JSValue.UNDEFINED;
-        if (callee_val != .function) {
-            // Best-effort callee name for the message -- no expression
-            // printer, just the two cheap cases.
-            const callee_name: []const u8 = switch (c.callee.data) {
-                .identifier => |name| name,
-                .member => |m| if (!m.computed and m.property.data == .identifier) m.property.data.identifier else "expression",
-                else => "expression",
-            };
+        // Best-effort callee name for the "is not a function" message --
+        // no expression printer, just the two cheap cases. Needed both
+        // for the immediate check below AND (a no-trap proxy chain whose
+        // target still isn't callable) inside callValue's own recursion.
+        const callee_name: []const u8 = switch (c.callee.data) {
+            .identifier => |name| name,
+            .member => |m| if (!m.computed and m.property.data == .identifier) m.property.data.identifier else "expression",
+            else => "expression",
+        };
+        if (callee_val != .function and callee_val != .proxy) {
             return self.throwError(.type_error, "{s} is not a function", .{callee_name});
         }
 
@@ -4251,15 +4267,42 @@ pub const Interpreter = struct {
         // still refers to the intrinsic runs its string argument in the
         // CURRENT scope (always-strict -> a child of it). Any other reference
         // to eval (aliased, member access) is indirect and runs the global
-        // native below.
-        if (self.eval_fn) |ev| {
-            if (c.callee.data == .identifier and std.mem.eql(u8, c.callee.data.identifier, "eval") and callee_val.function == ev.function) {
-                if (args.len == 0) return JSValue.UNDEFINED;
-                if (args[0] != .string) return args[0].retain();
-                return self.evalSource(env, args[0].string.value.data);
+        // native below. Guarded on .function first -- callee_val.function
+        // is a union field access, unsafe to touch when callee_val is
+        // actually .proxy (a proxy is never literally the eval intrinsic).
+        if (callee_val == .function) {
+            if (self.eval_fn) |ev| {
+                if (c.callee.data == .identifier and std.mem.eql(u8, c.callee.data.identifier, "eval") and callee_val.function == ev.function) {
+                    if (args.len == 0) return JSValue.UNDEFINED;
+                    if (args[0] != .string) return args[0].retain();
+                    return self.evalSource(env, args[0].string.value.data);
+                }
             }
         }
-        return try callee_val.function.value.call(callee_val.function.value.ctx, arena, this_value, args);
+        return try self.callValue(callee_val, this_value, args, callee_name);
+    }
+
+    /// Invokes `callee` (`.function` or `.proxy`, recursively unwrapping
+    /// nested proxies) with `this_value`/`args` -- the tail of every
+    /// plain function call, and a Proxy's `apply` trap dispatch (or its
+    /// no-trap fallback: delegate to target directly). Only ever called
+    /// with a callee already confirmed to be one of those two tags.
+    /// `callee_name` is only used for the "is not a function" message a
+    /// no-trap proxy chain can still hit if its target (transitively)
+    /// isn't callable -- e.g. `(new Proxy({}, {}))()`.
+    fn callValue(self: *Interpreter, callee: JSValue, this_value: JSValue, args: []const JSValue, callee_name: []const u8) anyerror!JSValue {
+        if (callee == .proxy) {
+            const box = callee.proxy;
+            if (try self.proxyTrap(box, "apply")) |trap_fn| {
+                defer trap_fn.deinit();
+                const args_array = try self.argsToArray(args);
+                defer args_array.deinit();
+                return try trap_fn.function.value.call(trap_fn.function.value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, this_value, args_array });
+            }
+            return self.callValue(box.value.target, this_value, args, callee_name);
+        }
+        if (callee != .function) return self.throwError(.type_error, "{s} is not a function", .{callee_name});
+        return try callee.function.value.call(callee.function.value.ctx, self.gc_allocator, this_value, args);
     }
 
     fn evalArgs(self: *Interpreter, env: *Environment, arg_nodes: []const *zparser.Node) anyerror![]const JSValue {
@@ -4279,29 +4322,45 @@ pub const Interpreter = struct {
     /// ECMA-262 10.2.2 [[Construct]], narrowed: fresh object wired to
     /// F.prototype, constructor called with it as `this`, and an
     /// object-like return value overrides the instance (a primitive
-    /// return is ignored -- the real rule).
+    /// return is ignored -- the real rule). Delegates entirely to
+    /// `constructValue` (below), which also handles a Proxy `construct`
+    /// trap (or its no-trap fallback: delegate to target's own
+    /// [[Construct]]) recursively through nested proxies.
     fn evalNew(self: *Interpreter, env: *Environment, n: anytype) anyerror!JSValue {
-        const arena = self.gc_allocator;
         const callee = try self.evalExpression(env, n.callee);
         const callee_name: []const u8 = switch (n.callee.data) {
             .identifier => |name| name,
             else => "expression",
         };
+        // `new Foo` with no parens at all (args == null) is `new Foo()`.
+        const args = try self.evalArgs(env, n.args orelse &.{});
+        defer self.gc_allocator.free(args);
+        return self.constructValue(callee, args, callee_name);
+    }
+
+    fn constructValue(self: *Interpreter, callee: JSValue, args: []const JSValue, callee_name: []const u8) anyerror!JSValue {
+        if (callee == .proxy) {
+            const box = callee.proxy;
+            if (try self.proxyTrap(box, "construct")) |trap_fn| {
+                defer trap_fn.deinit();
+                const args_array = try self.argsToArray(args);
+                defer args_array.deinit();
+                return try trap_fn.function.value.call(trap_fn.function.value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, args_array, callee });
+            }
+            return self.constructValue(box.value.target, args, callee_name);
+        }
         if (callee != .function or !callee.function.value.constructable) {
             return self.throwError(.type_error, "{s} is not a constructor", .{callee_name});
         }
         const proto = try self.functionPrototype(callee);
         var instance = try self.gcNewObject();
         try instance.object.value.setPrototype(&proto.object.value);
-        // `new Foo` with no parens at all (args == null) is `new Foo()`.
-        const args = try self.evalArgs(env, n.args orelse &.{});
-            defer self.gc_allocator.free(args);
         // Arm the construct token for exactly this call -- see the field
         // doc on `construct_target`.
         const prev_target = self.construct_target;
         self.construct_target = callee.function.value.ctx;
         defer self.construct_target = prev_target;
-        const result = try callee.function.value.call(callee.function.value.ctx, arena, instance, args);
+        const result = try callee.function.value.call(callee.function.value.ctx, self.gc_allocator, instance, args);
         return switch (result) {
             .object, .array, .function, .regex, .map, .set, .@"error", .date, .promise, .proxy => result,
             else => instance,

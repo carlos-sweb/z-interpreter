@@ -114,6 +114,35 @@ test "a falsy `set` trap result is a real TypeError (always-strict engine, match
     try helpers.expectUncaught("const p = new Proxy({}, { set() { return false; } }); p.x = 1;", .type_error, "'set' on proxy: trap returned falsish for property 'x'");
 }
 
+test "apply trap fires on a proxy-wrapped callable target, and no-trap delegates transparently" {
+    try helpers.expectStdout(
+        \\function f(a, b) { return a + b; }
+        \\const p = new Proxy(f, {
+        \\  apply(target, thisArg, args) { console.log('apply', args.length, args.join(',')); return target.apply(thisArg, args) * 2; }
+        \\});
+        \\console.log(p(3, 4));
+        \\const p2 = new Proxy(f, {});
+        \\console.log(p2(1, 2));
+    , "apply 2 3,4\n14\n3\n");
+}
+
+test "construct trap fires on `new proxy(...)`, and no-trap delegates transparently" {
+    try helpers.expectStdout(
+        \\class C { constructor(x) { this.x = x; } }
+        \\const p3 = new Proxy(C, {
+        \\  construct(target, args, newTarget) { console.log('construct', args.length, args.join(',')); return new target(...args); }
+        \\});
+        \\console.log(new p3(5).x);
+        \\const p4 = new Proxy(C, {});
+        \\console.log(new p4(9).x);
+    , "construct 1 5\n5\n9\n");
+}
+
+test "calling or constructing a proxy over a non-callable target is a real TypeError" {
+    try helpers.expectUncaught("const p = new Proxy({}, {}); p();", .type_error, "p is not a function");
+    try helpers.expectUncaught("const p = new Proxy({}, {}); new p();", .type_error, "p is not a constructor");
+}
+
 test "'in' with no `has` trap delegates transparently to the target" {
     var ctx = try Ctx.init();
     defer ctx.deinit();
