@@ -1279,7 +1279,7 @@ fn requireObject(ctx: *anyopaque, v: JSValue, what: []const u8) anyerror!JSValue
 /// dupe too even though they technically could borrow, purely so every
 /// caller can free the same uniform way (see `freeOwnedKeys`) instead of
 /// needing to special-case one variant.
-fn ownEnumerableKeys(ctx: *anyopaque, allocator: Allocator, v: JSValue) anyerror![][]const u8 {
+pub fn ownEnumerableKeys(ctx: *anyopaque, allocator: Allocator, v: JSValue) anyerror![][]const u8 {
     const borrowed: [][]const u8 = switch (v) {
         .object => |box| try box.value.keys(allocator),
         .function => |box| if (box.value.statics) |bag| try bag.object.value.keys(allocator) else try allocator.alloc([]const u8, 0),
@@ -1318,7 +1318,7 @@ fn ownEnumerableKeys(ctx: *anyopaque, allocator: Allocator, v: JSValue) anyerror
 
 /// Pairs with `ownEnumerableKeys`' now-uniform "every key is a fresh,
 /// owned copy" contract -- frees each string, then the container.
-fn freeOwnedKeys(allocator: Allocator, ks: [][]const u8) void {
+pub fn freeOwnedKeys(allocator: Allocator, ks: [][]const u8) void {
     for (ks) |k| allocator.free(k);
     allocator.free(ks);
 }
@@ -3894,8 +3894,16 @@ fn reflectConstruct(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
         .array => |box| box.value.toSlice(),
         else => return self.throwError(.type_error, "CreateListFromArrayLike called on non-object", .{}),
     };
-    // Narrowing: the optional 3rd `newTarget` arg (a distinct prototype
-    // source for subclassing scenarios) is ignored -- constructValue
-    // always uses `target`'s own prototype, matching plain `new target`.
+    if (!self.isConstructor(target)) {
+        return self.throwError(.type_error, "target is not a constructor", .{});
+    }
+    const new_target_arg = arg(args, 2);
+    const new_target: JSValue = if (new_target_arg == .@"undefined") target else new_target_arg;
+    if (!self.isConstructor(new_target)) {
+        return self.throwError(.type_error, "newTarget is not a constructor", .{});
+    }
+    // Narrowing: newTarget's distinct-prototype-source subclassing
+    // behavior is not modeled -- constructValue always uses `target`'s
+    // own prototype, matching plain `new target`.
     return self.constructValue(target, call_args, "target");
 }

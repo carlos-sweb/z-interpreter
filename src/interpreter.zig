@@ -2873,7 +2873,17 @@ pub const Interpreter = struct {
                     // object (narrowed -- real JS copies own enumerable
                     // props of the coerced object).
                     var rest_obj = try self.ordinaryObject();
-                    if (value == .object) {
+                    if (value == .proxy) {
+                        const ks = try builtins.ownEnumerableKeys(self, arena, value);
+                        defer builtins.freeOwnedKeys(arena, ks);
+                        outer_p: for (ks) |k| {
+                            if (isSymbolKey(k)) continue;
+                            for (obj_pat.properties) |prop| {
+                                if (std.mem.eql(u8, prop.key, k)) continue :outer_p;
+                            }
+                            try rest_obj.object.value.set(k, try self.getProperty(value, k));
+                        }
+                    } else if (value == .object) {
                         const keys = try value.object.value.keys(arena);
                         defer arena.free(keys);
                         outer: for (keys) |k| {
@@ -2967,7 +2977,17 @@ pub const Interpreter = struct {
                             // actual target.
                             const arg = sp.data.spread;
                             var rest_obj = try self.ordinaryObject();
-                            if (value == .object) {
+                            if (value == .proxy) {
+                                const ks = try builtins.ownEnumerableKeys(self, arena, value);
+                                defer builtins.freeOwnedKeys(arena, ks);
+                                outer_p: for (ks) |k| {
+                                    if (isSymbolKey(k)) continue;
+                                    for (consumed.items) |c| {
+                                        if (std.mem.eql(u8, c.key, k)) continue :outer_p;
+                                    }
+                                    try rest_obj.object.value.set(k, try self.getProperty(value, k));
+                                }
+                            } else if (value == .object) {
                                 const keys = try value.object.value.keys(arena);
                                 defer arena.free(keys);
                                 outer: for (keys) |k| {
@@ -3211,6 +3231,21 @@ pub const Interpreter = struct {
                     if (try self.forIterationStep(env, head.binding, kv, body, labels)) |c| return c;
                 }
             },
+            // Narrowing: only the proxy's own (trap-aware) keys -- unlike
+            // the .object case above, this does NOT continue walking a
+            // prototype chain past the proxy (real for-in would need a
+            // getPrototypeOf-trap-aware walk on top of this), matching
+            // this engine's already-established "no invariant checking"
+            // scope boundary for Proxy.
+            .proxy => {
+                const ks = try builtins.ownEnumerableKeys(self, arena, target);
+                defer builtins.freeOwnedKeys(arena, ks);
+                for (ks) |k| {
+                    if (isSymbolKey(k)) continue;
+                    const kv = try self.gcNewString(k);
+                    if (try self.forIterationStep(env, head.binding, kv, body, labels)) |c| return c;
+                }
+            },
             else => {}, // incl. null/undefined: zero iterations, no error (spec)
         }
         return .{};
@@ -3309,11 +3344,26 @@ pub const Interpreter = struct {
                         },
                         .spread => |spread_node| {
                             const spread_val = try self.evalExpression(env, spread_node.data.spread);
-                            if (spread_val != .object) return error.NotImplemented;
-                            const keys = try spread_val.object.value.keys(arena);
-                            defer arena.free(keys);
-                            for (keys) |k| {
-                                try obj.object.value.set(k, spread_val.object.value.get(k).?.retain());
+                            if (spread_val == .proxy) {
+                                // ownKeys trap (or delegate) for the key
+                                // list, `get` trap (or delegate) per key
+                                // for the value -- same narrowing as
+                                // every other trap site (no per-key
+                                // enumerability re-check via
+                                // getOwnPropertyDescriptor).
+                                const ks = try builtins.ownEnumerableKeys(self, arena, spread_val);
+                                defer builtins.freeOwnedKeys(arena, ks);
+                                for (ks) |k| {
+                                    if (isSymbolKey(k)) continue;
+                                    try obj.object.value.set(k, try self.getProperty(spread_val, k));
+                                }
+                            } else {
+                                if (spread_val != .object) return error.NotImplemented;
+                                const keys = try spread_val.object.value.keys(arena);
+                                defer arena.free(keys);
+                                for (keys) |k| {
+                                    try obj.object.value.set(k, spread_val.object.value.get(k).?.retain());
+                                }
                             }
                         },
                     }
@@ -4348,6 +4398,17 @@ pub const Interpreter = struct {
         const args = try self.evalArgs(env, n.args orelse &.{});
         defer self.gc_allocator.free(args);
         return self.constructValue(callee, args, callee_name);
+    }
+
+    /// ECMA-262 IsConstructor: does `v` implement [[Construct]]? Unwraps
+    /// proxies to their target (a Proxy is a constructor iff its target
+    /// is, regardless of whether a `construct` trap is present).
+    pub fn isConstructor(self: *Interpreter, v: JSValue) bool {
+        return switch (v) {
+            .function => |f| f.value.constructable,
+            .proxy => |p| self.isConstructor(p.value.target),
+            else => false,
+        };
     }
 
     pub fn constructValue(self: *Interpreter, callee: JSValue, args: []const JSValue, callee_name: []const u8) anyerror!JSValue {

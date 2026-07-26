@@ -182,6 +182,22 @@ test "every Reflect.* method, matching Node" {
     , "1\ntrue 3\ntrue false\ntrue undefined\na,b\ntrue\ntrue 4\n1\n3\n9\n");
 }
 
+test "object-literal spread, destructuring rest (binding and assignment), and for-in all see a proxy's keys" {
+    try helpers.expectStdout(
+        \\const target = { a: 1, b: 2, c: 3 };
+        \\const p = new Proxy(target, {});
+        \\console.log(JSON.stringify({...p}));
+        \\const { a, ...rest } = p;
+        \\console.log(a, JSON.stringify(rest));
+        \\let x, rest2;
+        \\({ a: x, ...rest2 } = p);
+        \\console.log(x, JSON.stringify(rest2));
+        \\const seen = [];
+        \\for (const k in p) seen.push(k);
+        \\console.log(seen.join(','));
+    , "{\"a\":1,\"b\":2,\"c\":3}\n1 {\"b\":2,\"c\":3}\n1 {\"b\":2,\"c\":3}\na,b,c\n");
+}
+
 test "'in' with no `has` trap delegates transparently to the target" {
     var ctx = try Ctx.init();
     defer ctx.deinit();
