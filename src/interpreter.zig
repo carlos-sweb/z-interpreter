@@ -4122,6 +4122,23 @@ pub const Interpreter = struct {
         }
         if (obj == .array) return self.setArrayProperty(obj, key, value);
         if (obj == .typed_array) return self.setTypedArrayProperty(obj, key, value);
+        if (obj == .@"error") {
+            // No general property bag (same narrowing as arrays/regex),
+            // but `.message` specifically must be writable: the extremely
+            // common test262 harness idiom `catch(e){ e.message += "...";
+            // throw e; }` needs it, and without this it was an uncatchable
+            // NotImplemented that silently poisoned huge swaths of
+            // otherwise-passing tests across many areas.
+            if (std.mem.eql(u8, key, "message")) {
+                const s = try coercion.toDisplayString(self.gc_allocator, value);
+                defer self.gc_allocator.free(s);
+                const box = obj.@"error";
+                box.value.allocator.free(box.value.message);
+                box.value.message = try box.value.allocator.dupe(u8, s);
+                return;
+            }
+            return error.NotImplemented;
+        }
         if (obj == .regex) {
             if (std.mem.eql(u8, key, "lastIndex")) {
                 const n = try coercion.toNumber(value);
@@ -4348,18 +4365,28 @@ pub const Interpreter = struct {
         // `getPrototypeOf` chain-identity correctness.
         const typed_array_base = try self.ordinaryObject();
         self.protos.typed_array_base = typed_array_base;
+        // Phase 3: the real method surface (map/filter/forEach/slice/set/
+        // subarray/...) lives ONCE here, not per concrete prototype --
+        // every `XArray.prototype` below chains to this object, so
+        // `getFromProto`'s existing chain walk gives every kind these
+        // methods for free (matches real spec structure exactly).
+        for (builtins.typed_array_methods.keys()) |k| {
+            const f = try self.nativeMethod("typed_array", k, builtins.typed_array_methods.get(k).?);
+            try typed_array_base.object.value.defineProperty(k, f, proto_attrs);
+        }
+        const bpe_attrs = zvalue.PropertyDescriptor{ .writable = false, .enumerable = false, .configurable = false };
         inline for (.{
-            .{ "int8_array", "Int8Array" },
-            .{ "uint8_array", "Uint8Array" },
-            .{ "uint8_clamped_array", "Uint8ClampedArray" },
-            .{ "int16_array", "Int16Array" },
-            .{ "uint16_array", "Uint16Array" },
-            .{ "int32_array", "Int32Array" },
-            .{ "uint32_array", "Uint32Array" },
-            .{ "float32_array", "Float32Array" },
-            .{ "float64_array", "Float64Array" },
-            .{ "bigint64_array", "BigInt64Array" },
-            .{ "biguint64_array", "BigUint64Array" },
+            .{ "int8_array", "Int8Array", 1 },
+            .{ "uint8_array", "Uint8Array", 1 },
+            .{ "uint8_clamped_array", "Uint8ClampedArray", 1 },
+            .{ "int16_array", "Int16Array", 2 },
+            .{ "uint16_array", "Uint16Array", 2 },
+            .{ "int32_array", "Int32Array", 4 },
+            .{ "uint32_array", "Uint32Array", 4 },
+            .{ "float32_array", "Float32Array", 4 },
+            .{ "float64_array", "Float64Array", 8 },
+            .{ "bigint64_array", "BigInt64Array", 8 },
+            .{ "biguint64_array", "BigUint64Array", 8 },
         }) |e| {
             const ctor = g.get(e[1]).?;
             const proto = try self.functionPrototype(ctor);
@@ -4367,6 +4394,7 @@ pub const Interpreter = struct {
             // re-parent to the shared base instead.
             try proto.object.value.setPrototype(&typed_array_base.object.value);
             try proto.object.value.defineProperty("constructor", ctor.retain(), proto_attrs);
+            try proto.object.value.defineProperty("BYTES_PER_ELEMENT", JSValue.fromNumber(@floatFromInt(e[2])), bpe_attrs);
             @field(self.protos, e[0]) = proto;
         }
     }

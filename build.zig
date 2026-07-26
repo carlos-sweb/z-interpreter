@@ -127,6 +127,7 @@ pub fn build(b: *std.Build) void {
         "tests/proxy_test.zig",
         "tests/buffer_test.zig",
         "tests/typed_array_test.zig",
+        "tests/typed_array_methods_test.zig",
     };
 
     inline for (test_files) |test_file| {
