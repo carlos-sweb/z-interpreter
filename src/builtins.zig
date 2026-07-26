@@ -315,6 +315,19 @@ pub fn setupGlobals(self: *Interpreter) !void {
     try dneMethod(math_obj, "random", try native(self, "random", mathRandom));
     try g.define(arena, "Math", math_obj);
 
+    const reflect_obj = try self.ordinaryObject();
+    try dneMethod(reflect_obj, "get", try native(self, "get", reflectGet));
+    try dneMethod(reflect_obj, "set", try native(self, "set", reflectSet));
+    try dneMethod(reflect_obj, "has", try native(self, "has", reflectHas));
+    try dneMethod(reflect_obj, "deleteProperty", try native(self, "deleteProperty", reflectDeleteProperty));
+    try dneMethod(reflect_obj, "ownKeys", try native(self, "ownKeys", reflectOwnKeys));
+    try dneMethod(reflect_obj, "getPrototypeOf", try native(self, "getPrototypeOf", reflectGetPrototypeOf));
+    try dneMethod(reflect_obj, "defineProperty", try native(self, "defineProperty", reflectDefineProperty));
+    try dneMethod(reflect_obj, "getOwnPropertyDescriptor", try native(self, "getOwnPropertyDescriptor", reflectGetOwnPropertyDescriptor));
+    try dneMethod(reflect_obj, "apply", try native(self, "apply", reflectApply));
+    try dneMethod(reflect_obj, "construct", try native(self, "construct", reflectConstruct));
+    try g.define(arena, "Reflect", reflect_obj);
+
     const json_obj = try self.ordinaryObject();
     try dneMethod(json_obj, "stringify", try native(self, "stringify", jsonStringify));
     try dneMethod(json_obj, "parse", try native(self, "parse", jsonParse));
@@ -1258,21 +1271,63 @@ fn requireObject(ctx: *anyopaque, v: JSValue, what: []const u8) anyerror!JSValue
 /// Functions expose the enumerable entries of their statics bag (builtin
 /// statics are non-enumerable, so `Object.keys(Date)` is empty); null/
 /// undefined throw; other primitives yield nothing (narrowed -- real JS
-/// coerces strings to index keys). Caller frees the slice.
+/// coerces strings to index keys). Every returned key is a fresh,
+/// caller-owned copy (unlike `ZObject.keys()`'s own borrowed-pointer
+/// contract) -- required for the `.proxy` case, whose keys come from a
+/// trap-returned array that gets torn down before this function
+/// returns, so nothing else could safely borrow from it. The other arms
+/// dupe too even though they technically could borrow, purely so every
+/// caller can free the same uniform way (see `freeOwnedKeys`) instead of
+/// needing to special-case one variant.
 fn ownEnumerableKeys(ctx: *anyopaque, allocator: Allocator, v: JSValue) anyerror![][]const u8 {
-    return switch (v) {
-        .object => |box| box.value.keys(allocator),
-        .function => |box| if (box.value.statics) |bag| bag.object.value.keys(allocator) else allocator.alloc([]const u8, 0),
-        .@"undefined", .@"null" => interp(ctx).throwError(.type_error, "Cannot convert undefined or null to object", .{}),
-        else => allocator.alloc([]const u8, 0),
+    const borrowed: [][]const u8 = switch (v) {
+        .object => |box| try box.value.keys(allocator),
+        .function => |box| if (box.value.statics) |bag| try bag.object.value.keys(allocator) else try allocator.alloc([]const u8, 0),
+        .@"undefined", .@"null" => return interp(ctx).throwError(.type_error, "Cannot convert undefined or null to object", .{}),
+        // ownKeys(target) -- narrowed: every trap-returned key is treated
+        // as enumerable (real spec would filter via a
+        // getOwnPropertyDescriptor call per key), matching this
+        // engine's already-established "no invariant checking" scope
+        // boundary for Proxy.
+        .proxy => |box| {
+            if (try interp(ctx).proxyTrap(box, "ownKeys")) |trap_fn| {
+                defer trap_fn.deinit();
+                const trap_result = try trap_fn.function.value.call(trap_fn.function.value.ctx, allocator, box.value.handler, &.{box.value.target});
+                defer trap_result.deinit();
+                if (trap_result != .array) return &.{};
+                var keys: std.ArrayList([]const u8) = .empty;
+                defer keys.deinit(allocator);
+                for (trap_result.array.value.toSlice()) |item| {
+                    if (item == .string) try keys.append(allocator, try allocator.dupe(u8, item.string.value.data));
+                }
+                return keys.toOwnedSlice(allocator);
+            }
+            return ownEnumerableKeys(ctx, allocator, box.value.target);
+        },
+        else => try allocator.alloc([]const u8, 0),
     };
+    defer allocator.free(borrowed);
+    var owned: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (owned.items) |k| allocator.free(k);
+        owned.deinit(allocator);
+    }
+    for (borrowed) |k| try owned.append(allocator, try allocator.dupe(u8, k));
+    return owned.toOwnedSlice(allocator);
+}
+
+/// Pairs with `ownEnumerableKeys`' now-uniform "every key is a fresh,
+/// owned copy" contract -- frees each string, then the container.
+fn freeOwnedKeys(allocator: Allocator, ks: [][]const u8) void {
+    for (ks) |k| allocator.free(k);
+    allocator.free(ks);
 }
 
 fn objectKeys(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
     const o = arg(args, 0);
     const ks = try ownEnumerableKeys(ctx, allocator, o);
-    defer allocator.free(ks);
+    defer freeOwnedKeys(allocator, ks);
     var result = try interp(ctx).gcNewArray();
     for (ks) |k| {
         if (isSymbolKey(k)) continue;
@@ -1285,7 +1340,7 @@ fn objectValues(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     _ = this_value;
     const o = arg(args, 0);
     const ks = try ownEnumerableKeys(ctx, allocator, o);
-    defer allocator.free(ks);
+    defer freeOwnedKeys(allocator, ks);
     var result = try interp(ctx).gcNewArray();
     // Per-key getProperty (not ZObject.values) so accessor properties
     // invoke their getters, like real Object.values.
@@ -1300,7 +1355,7 @@ fn objectEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     _ = this_value;
     const o = arg(args, 0);
     const ks = try ownEnumerableKeys(ctx, allocator, o);
-    defer allocator.free(ks);
+    defer freeOwnedKeys(allocator, ks);
     var result = try interp(ctx).gcNewArray();
     for (ks) |k| {
         if (isSymbolKey(k)) continue;
@@ -2029,6 +2084,20 @@ fn definePropertyOn(self: *Interpreter, what: []const u8, obj: JSValue, key: []c
         .object => try definePropertyFromJs(self, obj, key, desc),
         .function => try definePropertyFromJs(self, try self.functionStatics(obj), key, desc),
         .array => try arrayDefineProperty(self, obj, key, desc),
+        .proxy => |box| {
+            if (try self.proxyTrap(box, "defineProperty")) |trap_fn| {
+                defer trap_fn.deinit();
+                const key_val = try self.gcNewString(key);
+                defer key_val.deinit();
+                const result = try trap_fn.function.value.call(trap_fn.function.value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, key_val, desc });
+                defer result.deinit();
+                if (!coercion.isTruthy(result)) {
+                    return self.throwError(.type_error, "'defineProperty' on proxy: trap returned falsish for property '{s}'", .{key});
+                }
+                return;
+            }
+            return definePropertyOn(self, what, box.value.target, key, desc);
+        },
         else => return self.throwError(.type_error, "Object.{s} called on non-object", .{what}),
     }
 }
@@ -2104,7 +2173,6 @@ fn descFromRecord(self: *Interpreter, rec: anytype) !JSValue {
 }
 
 fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = this_value;
     const self = interp(ctx);
     const obj = arg(args, 0);
     const key = try coercion.toDisplayString(allocator, arg(args, 1));
@@ -2137,6 +2205,15 @@ fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, this_va
             return dataDescObj(self, box.value.get(idx).retain(), true, true, true);
         },
         .@"undefined", .@"null" => return self.throwError(.type_error, "Cannot convert undefined or null to object", .{}),
+        .proxy => |box| {
+            if (try self.proxyTrap(box, "getOwnPropertyDescriptor")) |trap_fn| {
+                defer trap_fn.deinit();
+                const key_val = try self.gcNewString(key);
+                defer key_val.deinit();
+                return try trap_fn.function.value.call(trap_fn.function.value.ctx, allocator, box.value.handler, &.{ box.value.target, key_val });
+            }
+            return objectGetOwnPropertyDescriptor(ctx, allocator, this_value, &.{ box.value.target, arg(args, 1) });
+        },
         // Other object-likes (date/regex/map/...) have no string-keyed own
         // data properties in this model yet.
         else => return JSValue.UNDEFINED,
@@ -2144,7 +2221,6 @@ fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, this_va
 }
 
 fn objectGetOwnPropertyNames(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = this_value;
     const self = interp(ctx);
     const o = arg(args, 0);
     var result = try interp(ctx).gcNewArray();
@@ -2183,6 +2259,22 @@ fn objectGetOwnPropertyNames(ctx: *anyopaque, allocator: Allocator, this_value: 
             }
         },
         .@"undefined", .@"null" => return self.throwError(.type_error, "Cannot convert undefined or null to object", .{}),
+        .proxy => |box| {
+            if (try self.proxyTrap(box, "ownKeys")) |trap_fn| {
+                defer trap_fn.deinit();
+                const trap_result = try trap_fn.function.value.call(trap_fn.function.value.ctx, allocator, box.value.handler, &.{box.value.target});
+                defer trap_result.deinit();
+                if (trap_result == .array) {
+                    for (trap_result.array.value.toSlice()) |item| {
+                        if (item == .string) _ = try result.array.value.push(item.retain());
+                    }
+                }
+            } else {
+                const delegated = try objectGetOwnPropertyNames(ctx, allocator, this_value, &.{box.value.target});
+                defer delegated.deinit();
+                for (delegated.array.value.toSlice()) |item| _ = try result.array.value.push(item.retain());
+            }
+        },
         else => {},
     }
     return result;
@@ -3693,4 +3785,117 @@ fn regexSplit(self: *Interpreter, allocator: Allocator, data: []const u8, re: JS
     }
     _ = try result.array.value.push(try self.gcNewString(data[last..]));
     return result;
+}
+
+// ===== Reflect =====
+//
+// A plain non-constructable object (Math's pattern), each static a thin
+// wrapper around the same interpreter internals every Proxy trap above
+// dispatches through -- these take already-evaluated JSValue arguments,
+// not AST nodes, so they're simpler than the trap dispatch itself.
+
+fn reflectRequireObject(ctx: *anyopaque, what: []const u8, v: JSValue) anyerror!JSValue {
+    if (!isObjectLike(v)) return interp(ctx).throwError(.type_error, "Reflect.{s} called on non-object", .{what});
+    return v;
+}
+
+fn reflectGet(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const target = try reflectRequireObject(ctx, "get", arg(args, 0));
+    const key = try coercion.toDisplayString(allocator, arg(args, 1));
+    defer allocator.free(key);
+    return self.getProperty(target, key);
+}
+
+fn reflectSet(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const target = try reflectRequireObject(ctx, "set", arg(args, 0));
+    const key = try coercion.toDisplayString(allocator, arg(args, 1));
+    defer allocator.free(key);
+    try self.setPropertyOnValue(target, key, arg(args, 2));
+    return JSValue.fromBool(true);
+}
+
+fn reflectHas(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const self = interp(ctx);
+    const target = try reflectRequireObject(ctx, "has", arg(args, 0));
+    return self.evalIn(arg(args, 1), target);
+}
+
+fn reflectDeleteProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const target = try reflectRequireObject(ctx, "deleteProperty", arg(args, 0));
+    const key = try coercion.toDisplayString(allocator, arg(args, 1));
+    defer allocator.free(key);
+    return JSValue.fromBool(try self.deletePropertyOnValue(target, key));
+}
+
+/// Narrowing: excludes symbol-keyed properties, same as
+/// `objectGetOwnPropertyNames` it delegates to (real `Reflect.ownKeys`
+/// includes both string and symbol keys).
+fn reflectOwnKeys(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = try reflectRequireObject(ctx, "ownKeys", arg(args, 0));
+    return objectGetOwnPropertyNames(ctx, allocator, this_value, args);
+}
+
+fn reflectGetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = try reflectRequireObject(ctx, "getPrototypeOf", arg(args, 0));
+    return objectGetPrototypeOf(ctx, allocator, this_value, args);
+}
+
+fn reflectDefineProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const self = interp(ctx);
+    const target = try reflectRequireObject(ctx, "defineProperty", arg(args, 0));
+    const key = try coercion.toDisplayString(self.gc_allocator, arg(args, 1));
+    defer self.gc_allocator.free(key);
+    // Narrowing: this engine's definePropertyOn throws on failure rather
+    // than returning false for every real spec failure mode -- Reflect's
+    // "return false instead of throwing" contract only actually applies
+    // to the cases that don't already throw here.
+    try definePropertyOn(self, "defineProperty", target, key, arg(args, 2));
+    return JSValue.fromBool(true);
+}
+
+fn reflectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = try reflectRequireObject(ctx, "getOwnPropertyDescriptor", arg(args, 0));
+    return objectGetOwnPropertyDescriptor(ctx, allocator, this_value, args);
+}
+
+fn reflectApply(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const self = interp(ctx);
+    const target = arg(args, 0);
+    const this_arg = arg(args, 1);
+    const arg_list = arg(args, 2);
+    const call_args: []const JSValue = switch (arg_list) {
+        .@"undefined", .@"null" => &.{},
+        .array => |box| box.value.toSlice(),
+        else => return self.throwError(.type_error, "CreateListFromArrayLike called on non-object", .{}),
+    };
+    return self.callValue(target, this_arg, call_args, "target");
+}
+
+fn reflectConstruct(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const self = interp(ctx);
+    const target = arg(args, 0);
+    const arg_list = arg(args, 1);
+    const call_args: []const JSValue = switch (arg_list) {
+        .@"undefined", .@"null" => &.{},
+        .array => |box| box.value.toSlice(),
+        else => return self.throwError(.type_error, "CreateListFromArrayLike called on non-object", .{}),
+    };
+    // Narrowing: the optional 3rd `newTarget` arg (a distinct prototype
+    // source for subclassing scenarios) is ignored -- constructValue
+    // always uses `target`'s own prototype, matching plain `new target`.
+    return self.constructValue(target, call_args, "target");
 }

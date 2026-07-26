@@ -3523,7 +3523,7 @@ pub const Interpreter = struct {
     /// returns an owned (retained) value; callers of this function own
     /// the returned function and must `.deinit()` it when done (a
     /// `null` result has already released it).
-    fn proxyTrap(self: *Interpreter, proxy: *zvalue.Rc(zvalue.Proxy), trap_name: []const u8) anyerror!?JSValue {
+    pub fn proxyTrap(self: *Interpreter, proxy: *zvalue.Rc(zvalue.Proxy), trap_name: []const u8) anyerror!?JSValue {
         if (proxy.value.handler != .object) return null;
         const fn_val = try self.getProperty(proxy.value.handler, trap_name);
         if (fn_val != .function) {
@@ -3537,7 +3537,7 @@ pub const Interpreter = struct {
     /// `apply`/`construct` traps' `argumentsList` parameter needs (a
     /// real Array, not a raw Zig slice). Retains each item, matching
     /// every other array-building site.
-    fn argsToArray(self: *Interpreter, args: []const JSValue) anyerror!JSValue {
+    pub fn argsToArray(self: *Interpreter, args: []const JSValue) anyerror!JSValue {
         var arr = try self.gcNewArray();
         for (args) |a| _ = try arr.array.value.push(a.retain());
         return arr;
@@ -3735,7 +3735,7 @@ pub const Interpreter = struct {
     /// (ZObject.has already walks it). Arrays support numeric indices and
     /// "length"; primitives are a real spec TypeError; map/set/etc are
     /// objects in real JS but have no property model here yet.
-    fn evalIn(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
+    pub fn evalIn(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
         const arena = self.gc_allocator;
         const key = try coercion.toDisplayString(arena, l);
         defer arena.free(key);
@@ -3801,7 +3801,7 @@ pub const Interpreter = struct {
     /// getter-only accessor swallows the write silently (sloppy-mode
     /// [[Set]]); the first *data* record found stops the walk and the
     /// write shadows it as an own property, exactly like real JS.
-    fn setObjectProperty(self: *Interpreter, obj: JSValue, key: []const u8, value: JSValue) anyerror!void {
+    pub fn setObjectProperty(self: *Interpreter, obj: JSValue, key: []const u8, value: JSValue) anyerror!void {
         var current: ?*const @TypeOf(obj.object.value) = &obj.object.value;
         while (current) |o| : (current = o.getPrototype()) {
             const rec = o.getOwnRecord(key) orelse continue;
@@ -3839,7 +3839,7 @@ pub const Interpreter = struct {
     /// frozen) throws instead of returning false, same as before this
     /// was factored out of `evalUnary`'s `.delete` case (now shared with
     /// a Proxy's `deleteProperty` trap fallback, when absent).
-    fn deleteObjectProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!bool {
+    pub fn deleteObjectProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!bool {
         const old_rec = obj.object.value.getOwnRecord(key);
         const old_value = if (old_rec) |r| r.value else null;
         const old_getter = if (old_rec) |r| r.getter else null;
@@ -3854,6 +3854,118 @@ pub const Interpreter = struct {
             if (old_setter) |s| s.deinit();
         }
         return true;
+    }
+
+    /// Full `obj[key] = value` dispatch by receiver type -- factored out
+    /// of `assignTo`'s `.member` case (which now just resolves `obj`/
+    /// `key` from the AST and delegates here) so `Reflect.set` can reuse
+    /// the exact same logic. Split, not a blanket conversion:
+    /// null/undefined is a real spec TypeError, but every other
+    /// non-object receiver this doesn't special-case (arrays/strings/
+    /// numbers already have their own arms above) is a genuine feature
+    /// gap -- NotImplemented is the honest answer, and a JS `catch` must
+    /// never swallow it.
+    pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, value: JSValue) anyerror!void {
+        if (obj == .@"undefined" or obj == .@"null") {
+            return self.throwError(.type_error, "Cannot set properties of {s} (setting '{s}')", .{ if (obj == .@"null") "null" else "undefined", key });
+        }
+        if (obj == .function) {
+            // `F.prototype = {...}` overwrites the callable's slot;
+            // everything else goes into the statics bag (class statics,
+            // F.myProp = 1 -- the old "functions have no property bag"
+            // gap is gone).
+            if (std.mem.eql(u8, key, "prototype")) {
+                if (value != .object) return error.NotImplemented;
+                obj.function.value.prototype = value.retain();
+                return;
+            }
+            const bag = try self.functionStatics(obj);
+            return self.setObjectProperty(bag, key, value);
+        }
+        if (obj == .array) return self.setArrayProperty(obj, key, value);
+        if (obj == .regex) {
+            if (std.mem.eql(u8, key, "lastIndex")) {
+                const n = try coercion.toNumber(value);
+                // `lastIndex` may be set to any Number, including
+                // Infinity, Number.MAX_VALUE or values beyond usize
+                // (Test262 exercises exactly these). A bare
+                // @intFromFloat would panic on an out-of-range float, so
+                // saturate: anything at/above usize's range (and NaN,
+                // which fails both comparisons) is stored as the max,
+                // which always exceeds the subject length, so exec/test
+                // correctly find no match and reset it to 0.
+                const max_usize_f: f64 = @floatFromInt(std.math.maxInt(usize));
+                self.regexState(obj).last_index = if (n >= max_usize_f)
+                    std.math.maxInt(usize)
+                else if (n > 0)
+                    @intFromFloat(n)
+                else
+                    0;
+                return;
+            }
+            return error.NotImplemented;
+        }
+        if (obj == .proxy) {
+            const box = obj.proxy;
+            if (try self.proxyTrap(box, "set")) |trap_fn| {
+                defer trap_fn.deinit();
+                const key_val = try self.gcNewString(key);
+                defer key_val.deinit();
+                const result = try trap_fn.function.value.call(trap_fn.function.value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, key_val, value, obj });
+                defer result.deinit();
+                // Always-strict engine: a falsy trap result is a real
+                // TypeError, not a silent no-op.
+                if (!coercion.isTruthy(result)) {
+                    return self.throwError(.type_error, "'set' on proxy: trap returned falsish for property '{s}'", .{key});
+                }
+                return;
+            }
+            // No trap: set directly on target, matching the narrow set
+            // of receiver kinds this function already special-cases
+            // above (function/array/regex/object).
+            if (box.value.target == .object) return self.setObjectProperty(box.value.target, key, value);
+            if (box.value.target == .array) return self.setArrayProperty(box.value.target, key, value);
+            return error.NotImplemented;
+        }
+        if (obj != .object) return error.NotImplemented;
+        // Writing a property on `globalThis` creates/updates a global
+        // binding (`globalThis.foo = 1` makes `foo` a global).
+        if (self.global_object) |go| {
+            if (obj.object == go.object) {
+                // `Environment.define` stores `key` BY REFERENCE (never
+                // dupes -- every other call site passes an AST-borrowed,
+                // forever-valid name). `key` here can be a caller-owned
+                // slice (`globalThis[computed] = x`, or any Reflect.set
+                // caller's own buffer) -- dupe defensively so the new
+                // global binding's name always outlives it.
+                try self.global_env.define(self.gc_allocator, try self.gc_allocator.dupe(u8, key), value.retain());
+                return;
+            }
+        }
+        try self.setObjectProperty(obj, key, value);
+    }
+
+    /// Full `delete obj[key]` dispatch by receiver type (proxy's
+    /// `deleteProperty` trap or no-trap delegation, plain object via
+    /// `deleteObjectProperty`, anything else a spec-matching no-op
+    /// `true`) -- factored out of `evalUnary`'s `.delete` case so
+    /// `Reflect.deleteProperty` can reuse the exact same logic.
+    pub fn deletePropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!bool {
+        if (obj == .proxy) {
+            const box = obj.proxy;
+            if (try self.proxyTrap(box, "deleteProperty")) |trap_fn| {
+                defer trap_fn.deinit();
+                const key_val = try self.gcNewString(key);
+                defer key_val.deinit();
+                const result = try trap_fn.function.value.call(trap_fn.function.value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, key_val });
+                defer result.deinit();
+                return coercion.isTruthy(result);
+            }
+            if (box.value.target == .object) return self.deleteObjectProperty(box.value.target, key);
+            return true;
+        }
+        if (obj != .object) return true;
+        return self.deleteObjectProperty(obj, key);
     }
 
     /// The function's statics/property bag, created lazily on first touch
@@ -4024,24 +4136,7 @@ pub const Interpreter = struct {
                     const obj = try self.evalExpression(env, m.object);
                     const pk = try self.memberKeyString(env, m);
                     defer pk.free(self.gc_allocator);
-                    const key = pk.key;
-                    if (obj == .proxy) {
-                        const box = obj.proxy;
-                        if (try self.proxyTrap(box, "deleteProperty")) |trap_fn| {
-                            defer trap_fn.deinit();
-                            const key_val = try self.gcNewString(key);
-                            defer key_val.deinit();
-                            const result = try trap_fn.function.value.call(trap_fn.function.value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, key_val });
-                            defer result.deinit();
-                            return JSValue.fromBool(coercion.isTruthy(result));
-                        }
-                        if (box.value.target == .object) {
-                            return JSValue.fromBool(try self.deleteObjectProperty(box.value.target, key));
-                        }
-                        return JSValue.fromBool(true);
-                    }
-                    if (obj != .object) return JSValue.fromBool(true);
-                    return JSValue.fromBool(try self.deleteObjectProperty(obj, key));
+                    return JSValue.fromBool(try self.deletePropertyOnValue(obj, pk.key));
                 }
                 _ = try self.evalExpression(env, u.operand);
                 return JSValue.fromBool(true);
@@ -4099,90 +4194,7 @@ pub const Interpreter = struct {
                 if (privateMemberName(m)) |pn| return self.privateSet(env, obj, pn, value);
                 const pk = try self.memberKeyString(env, m);
                 defer pk.free(self.gc_allocator);
-                const key = pk.key;
-                // Split, not a blanket conversion: null/undefined is a real
-                // spec TypeError, but every other non-object receiver
-                // (arrays, strings, numbers) is a genuine feature gap --
-                // NotImplemented is the honest answer, and a JS `catch`
-                // must never swallow it.
-                if (obj == .@"undefined" or obj == .@"null") {
-                    return self.throwError(.type_error, "Cannot set properties of {s} (setting '{s}')", .{ if (obj == .@"null") "null" else "undefined", key });
-                }
-                if (obj == .function) {
-                    // `F.prototype = {...}` overwrites the callable's
-                    // slot; everything else goes into the statics bag
-                    // (class statics, F.myProp = 1 -- the old "functions
-                    // have no property bag" gap is gone).
-                    if (std.mem.eql(u8, key, "prototype")) {
-                        if (value != .object) return error.NotImplemented;
-                        obj.function.value.prototype = value.retain();
-                        return;
-                    }
-                    const bag = try self.functionStatics(obj);
-                    return self.setObjectProperty(bag, key, value);
-                }
-                if (obj == .array) return self.setArrayProperty(obj, key, value);
-                if (obj == .regex) {
-                    if (std.mem.eql(u8, key, "lastIndex")) {
-                        const n = try coercion.toNumber(value);
-                        // `lastIndex` may be set to any Number, including
-                        // Infinity, Number.MAX_VALUE or values beyond usize
-                        // (Test262 exercises exactly these). A bare
-                        // @intFromFloat would panic on an out-of-range float,
-                        // so saturate: anything at/above usize's range (and
-                        // NaN, which fails both comparisons) is stored as the
-                        // max, which always exceeds the subject length, so
-                        // exec/test correctly find no match and reset it to 0.
-                        const max_usize_f: f64 = @floatFromInt(std.math.maxInt(usize));
-                        self.regexState(obj).last_index = if (n >= max_usize_f)
-                            std.math.maxInt(usize)
-                        else if (n > 0)
-                            @intFromFloat(n)
-                        else
-                            0;
-                        return;
-                    }
-                    return error.NotImplemented;
-                }
-                if (obj == .proxy) {
-                    const box = obj.proxy;
-                    if (try self.proxyTrap(box, "set")) |trap_fn| {
-                        defer trap_fn.deinit();
-                        const key_val = try self.gcNewString(key);
-                        defer key_val.deinit();
-                        const result = try trap_fn.function.value.call(trap_fn.function.value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, key_val, value, obj });
-                        defer result.deinit();
-                        // Always-strict engine: a falsy trap result is a
-                        // real TypeError, not a silent no-op.
-                        if (!coercion.isTruthy(result)) {
-                            return self.throwError(.type_error, "'set' on proxy: trap returned falsish for property '{s}'", .{key});
-                        }
-                        return;
-                    }
-                    // No trap: set directly on target, matching the
-                    // narrow set of receiver kinds this function already
-                    // special-cases above (function/array/regex/object).
-                    if (box.value.target == .object) return self.setObjectProperty(box.value.target, key, value);
-                    if (box.value.target == .array) return self.setArrayProperty(box.value.target, key, value);
-                    return error.NotImplemented;
-                }
-                if (obj != .object) return error.NotImplemented;
-                // Writing a property on `globalThis` creates/updates a global
-                // binding (`globalThis.foo = 1` makes `foo` a global).
-                if (self.global_object) |go| {
-                    if (obj.object == go.object) {
-                        // `Environment.define` stores `key` BY REFERENCE
-                        // (never dupes -- every other call site passes an
-                        // AST-borrowed, forever-valid name). `key` here can
-                        // be the PropKey-owned case (`globalThis[computed]
-                        // = x`), which `pk.free()` reclaims once this
-                        // function returns -- dupe defensively so the new
-                        // global binding's name always outlives that.
-                        try self.global_env.define(self.gc_allocator, try self.gc_allocator.dupe(u8, key), value.retain());
-                        return;
-                    }
-                }
-                try self.setObjectProperty(obj, key, value);
+                return self.setPropertyOnValue(obj, pk.key, value);
             },
             else => return error.NotImplemented,
         }
@@ -4290,7 +4302,7 @@ pub const Interpreter = struct {
     /// `callee_name` is only used for the "is not a function" message a
     /// no-trap proxy chain can still hit if its target (transitively)
     /// isn't callable -- e.g. `(new Proxy({}, {}))()`.
-    fn callValue(self: *Interpreter, callee: JSValue, this_value: JSValue, args: []const JSValue, callee_name: []const u8) anyerror!JSValue {
+    pub fn callValue(self: *Interpreter, callee: JSValue, this_value: JSValue, args: []const JSValue, callee_name: []const u8) anyerror!JSValue {
         if (callee == .proxy) {
             const box = callee.proxy;
             if (try self.proxyTrap(box, "apply")) |trap_fn| {
@@ -4338,7 +4350,7 @@ pub const Interpreter = struct {
         return self.constructValue(callee, args, callee_name);
     }
 
-    fn constructValue(self: *Interpreter, callee: JSValue, args: []const JSValue, callee_name: []const u8) anyerror!JSValue {
+    pub fn constructValue(self: *Interpreter, callee: JSValue, args: []const JSValue, callee_name: []const u8) anyerror!JSValue {
         if (callee == .proxy) {
             const box = callee.proxy;
             if (try self.proxyTrap(box, "construct")) |trap_fn| {

@@ -143,6 +143,45 @@ test "calling or constructing a proxy over a non-callable target is a real TypeE
     try helpers.expectUncaught("const p = new Proxy({}, {}); new p();", .type_error, "p is not a constructor");
 }
 
+test "ownKeys/getOwnPropertyDescriptor/defineProperty traps fire, matching Node" {
+    try helpers.expectStdout(
+        \\const target = { a: 1, b: 2 };
+        \\const p = new Proxy(target, {
+        \\  ownKeys(t) { console.log('ownKeys'); return Reflect.ownKeys(t); }
+        \\});
+        \\console.log(Object.keys(p).join(','));
+        \\
+        \\const p2 = new Proxy(target, {
+        \\  getOwnPropertyDescriptor(t, k) { console.log('gopd', k); return Reflect.getOwnPropertyDescriptor(t, k); }
+        \\});
+        \\console.log(Object.getOwnPropertyDescriptor(p2, 'a').value);
+        \\
+        \\const p3 = new Proxy({}, {
+        \\  defineProperty(t, k, d) { console.log('defineProperty', k); return Reflect.defineProperty(t, k, d); }
+        \\});
+        \\Object.defineProperty(p3, 'x', { value: 42, enumerable: true, writable: true, configurable: true });
+        \\console.log(p3.x);
+    , "ownKeys\na,b\ngopd a\n1\ndefineProperty x\n42\n");
+}
+
+test "every Reflect.* method, matching Node" {
+    try helpers.expectStdout(
+        \\const target = { a: 1, b: 2 };
+        \\console.log(Reflect.get(target, 'a'));
+        \\console.log(Reflect.set(target, 'c', 3), target.c);
+        \\console.log(Reflect.has(target, 'a'), Reflect.has(target, 'zzz'));
+        \\console.log(Reflect.deleteProperty(target, 'c'), target.c);
+        \\console.log(Reflect.ownKeys(target).join(','));
+        \\console.log(Reflect.getPrototypeOf(target) === Object.prototype);
+        \\console.log(Reflect.defineProperty(target, 'd', { value: 4, enumerable: true, writable: true, configurable: true }), target.d);
+        \\console.log(Reflect.getOwnPropertyDescriptor(target, 'a').value);
+        \\function add(a, b) { return a + b; }
+        \\console.log(Reflect.apply(add, null, [1, 2]));
+        \\class C { constructor(x) { this.x = x; } }
+        \\console.log(Reflect.construct(C, [9]).x);
+    , "1\ntrue 3\ntrue false\ntrue undefined\na,b\ntrue\ntrue 4\n1\n3\n9\n");
+}
+
 test "'in' with no `has` trap delegates transparently to the target" {
     var ctx = try Ctx.init();
     defer ctx.deinit();
