@@ -1336,8 +1336,21 @@ fn mathRandom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 
 fn jsonStringify(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
-    const out = zjson.stringify(allocator, arg(args, 0)) catch |err| switch (err) {
+    const v = arg(args, 0);
+    // Real spec: JSON.stringify(undefined | function | symbol) at the TOP
+    // LEVEL returns the JS value `undefined` (not the string "undefined"),
+    // it does NOT throw -- z-json's stringify() surfaces this same case as
+    // JSONError.Unserializable (there's no []u8 to return), so it must be
+    // special-cased BEFORE calling it, or the interpreter can't tell it
+    // apart from the BigInt case below (which DOES throw).
+    if (v == .@"undefined" or v == .function or v == .symbol) return JSValue.UNDEFINED;
+    const out = zjson.stringify(allocator, v) catch |err| switch (err) {
         error.CircularStructure => return interp(ctx).throwError(.type_error, "Converting circular structure to JSON", .{}),
+        // Real Node: JSON.stringify(5n) (BigInt anywhere in the tree, not
+        // just top-level) throws a catchable TypeError, not an uncaught
+        // engine error -- was falling through to `else => return err`,
+        // propagating a raw Zig error instead of a real JS exception.
+        error.Unserializable => return interp(ctx).throwError(.type_error, "Do not know how to serialize a BigInt", .{}),
         else => return err,
     };
     defer allocator.free(out);
