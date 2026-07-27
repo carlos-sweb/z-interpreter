@@ -2177,6 +2177,16 @@ pub fn typedElemGet(self: *Interpreter, kind: zvalue.TypedKind, buffer: *zbuffer
 /// range index -- verified against real Node), and an out-of-range
 /// index is then a silent no-op (never a throw, matches spec exactly).
 pub fn typedElemSet(self: *Interpreter, kind: zvalue.TypedKind, buffer: *zbuffer.ArrayBuffer, byte_offset: usize, len: usize, index: usize, value: JSValue) anyerror!void {
+    // Real spec: ToNumber(Symbol) (or ToBigInt(Symbol) for the i64/u64
+    // kinds) is a TypeError, e.g. `ta[0] = Symbol()` -- pre-existing gap
+    // found while verifying array-like TypedArray construction (which
+    // newly reaches this coercion for element values read off a plain
+    // object): every per-kind branch below bottoms out in
+    // `coercion.toNumber`/`toBigIntValue`, neither of which has a
+    // catchable throw for Symbol today (`error.NotImplemented`, which
+    // is uncatchable from JS). Guarded once here rather than in each of
+    // the 8 branches.
+    if (value == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a {s}", .{if (kind.isBigInt()) "BigInt" else "number"});
     switch (kind) {
         .i8 => {
             const v = try toInt8Wrap(value);
@@ -2256,7 +2266,6 @@ fn typedArrayCtx(ctx: *anyopaque) *TypedArrayCtorCtx {
 /// `Symbol.iterator`) are a documented gap -- `iterableItems` doesn't
 /// cover them today, same narrowing `Array.from` already has.
 fn typedArrayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
     _ = this_value;
     const cctx = typedArrayCtx(ctx);
     const self = cctx.interp;
@@ -2281,8 +2290,45 @@ fn typedArrayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
         };
     }
 
-    // Iterable/array-like: copy element VALUES (coerced per kind, going
-    // through the exact same conversion writes do), never a raw byte
+    // Non-iterable array-like (`{length:3, 0:1, ...}`, no @@iterator):
+    // allocate the buffer FIRST, matching real spec order
+    // (AllocateTypedArrayBuffer happens before InitializeTypedArray-
+    // FromArrayLike's per-index Get loop) -- an absurd `length`
+    // (`new Int32Array({length: 2**53})`) then fails fast via the
+    // allocator itself refusing an impossible byte request, instead of
+    // looping `length` times BEFORE ever attempting the allocation
+    // (which would time out for any length past a few million).
+    if (first == .object and !(try hasIteratorMethod(self, first))) {
+        const len_v = try self.getProperty(first, "length");
+        defer len_v.deinit();
+        const len = try toLength(self, len_v);
+        // Real spec (AllocateArrayBuffer): "If it is not possible to
+        // create a Data Block of size byteLength bytes, throw a
+        // RangeError" -- an allocation failure here is exactly that
+        // case (`toLength` already clamped `len` to 2^53-1, so
+        // `len * elem_size` can legitimately be an impossible request),
+        // not an unrecoverable engine error.
+        const buf = self.gcNewArrayBuffer(len * elem_size) catch return self.throwError(.range_error, "Invalid typed array length: {d}", .{len});
+        const ta = self.gcNewTypedArray(buf, 0, len, kind) catch |e| {
+            buf.deinit();
+            return self.bufferErr(e);
+        };
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            const key = try std.fmt.allocPrint(allocator, "{d}", .{i});
+            defer allocator.free(key);
+            const v = try self.getProperty(first, key);
+            defer v.deinit();
+            typedElemSet(self, kind, &buf.array_buffer.value, 0, len, i, v) catch |e| {
+                ta.deinit();
+                return e;
+            };
+        }
+        return ta;
+    }
+
+    // Iterable: copy element VALUES (coerced per kind, going through
+    // the exact same conversion writes do), never a raw byte
     // reinterpretation -- `new Int32Array(new Uint8Array([1,2,3]))` is
     // `[1,2,3]`, not an empty/aliased view.
     const items = try self.iterableItems(first);
@@ -3281,23 +3327,30 @@ fn arrayFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
             }
         },
         .object => {
-            // Array-like fallback (has numeric `length` but is not
-            // iterable) OR the iterator protocol (Symbol.iterator /
-            // duck-typed next).
-            const len_v = try self.getProperty(src, "length");
-            const iter_key = if (self.symbol_iterator) |sym| try self.encodeKey(sym) else "";
-            defer if (iter_key.len > 0) allocator.free(iter_key);
-            const has_iter = iter_key.len > 0 and (try self.getProperty(src, iter_key)) == .function;
-            if (!has_iter and (try self.getProperty(src, "next")) != .function and len_v == .number) {
-                const n: usize = @intCast(@max(0, toIntSat(len_v.number)));
-                var i: usize = 0;
-                while (i < n) : (i += 1) {
-                    const key = try std.fmt.allocPrint(allocator, "{d}", .{i});
-                    defer allocator.free(key);
-                    try push_mapped(self, allocator, &result, map_fn, try self.getProperty(src, key), index);
+            // Real @@iterator-presence-first, array-like fallback --
+            // the array-like helper is shared with the TypedArray
+            // constructor's equivalent overload (also fixes the
+            // previous inline version's two spec inaccuracies: string
+            // `length` now coerces, and a bare `{next(){...}}` object
+            // with no `Symbol.iterator` is now correctly treated as
+            // array-like, matching real Node).
+            if (!(try hasIteratorMethod(self, src))) {
+                const items = try arrayLikeToList(self, allocator, src);
+                defer {
+                    for (items) |it| it.deinit();
+                    allocator.free(items);
+                }
+                for (items) |item| {
+                    try push_mapped(self, allocator, &result, map_fn, item, index);
                     index += 1;
                 }
             } else {
+                // Manual per-step drain (NOT `iterableItems`, which
+                // eagerly drains to completion before any caller code
+                // runs) -- `mapFn` must be applied INLINE per `next()`
+                // step so an infinite iterator combined with an
+                // early-throwing `mapFn` still terminates (a real,
+                // tested pattern: Array.from(infiniteIter, fnThatThrows)).
                 const iter = try self.resolveIterator(src);
                 const next_fn = try self.getProperty(iter, "next");
                 while (true) {
@@ -3459,6 +3512,59 @@ fn symbolKeyFor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 }
 
 // ===== Array.prototype (extended coverage) =====
+
+/// ECMA-262 7.1.20 ToLength: ToNumber then clamp to [0, 2^53-1], floor.
+/// Distinct from `toIntSat` (no ToNumber coercion, isize range, no
+/// 2^53-1 cap) and `toByteIndexArg` (throws instead of clamping) --
+/// this one matches how a real `length` read behaves: a
+/// string/undefined/negative/fractional length never throws. A Symbol
+/// `length` DOES throw in real JS (`ToNumber(Symbol)` is a TypeError,
+/// e.g. `new Int32Array({length: Symbol()})`) -- `coercion.toNumber`
+/// only has an uncatchable `error.NotImplemented` for that today, so it
+/// must be mapped to a real, catchable TypeError here.
+fn toLength(self: *Interpreter, v: JSValue) anyerror!usize {
+    const n = coercion.toNumber(v) catch return self.throwError(.type_error, "Cannot convert a {s} value to a number", .{v.typeOf()});
+    if (std.math.isNan(n) or n <= 0) return 0;
+    return @intFromFloat(@min(@floor(n), 9007199254740991.0));
+}
+
+/// `GetMethod(value, @@iterator)` narrowed to "does @@iterator resolve
+/// to a callable" -- the real spec's iterator-vs-array-like decision
+/// point for Array.from / the TypedArray constructor. Properly
+/// `.deinit()`s the probed value (getProperty always returns owned).
+fn hasIteratorMethod(self: *Interpreter, value: JSValue) anyerror!bool {
+    const sym = self.symbol_iterator orelse return false;
+    const key = try self.encodeKey(sym);
+    defer self.gc_allocator.free(key);
+    const m = try self.getProperty(value, key);
+    defer m.deinit();
+    return m == .function;
+}
+
+/// ECMA-262 LengthOfArrayLike + per-index Get -- the array-like
+/// fallback used when `value` has no @@iterator. Returns an OWNED
+/// slice of OWNED/retained items (unlike `iterableItems`'s
+/// borrowed-items convention): `getProperty` always returns owned
+/// values (an accessor getter can fabricate a brand-new one with no
+/// other owner), so treating these as borrowed would risk a stale
+/// reference. Caller must `.deinit()` each item AND free the slice.
+fn arrayLikeToList(self: *Interpreter, allocator: Allocator, value: JSValue) anyerror![]JSValue {
+    const len_v = try self.getProperty(value, "length");
+    defer len_v.deinit();
+    const len = try toLength(self, len_v);
+    var out: std.ArrayList(JSValue) = .empty;
+    errdefer {
+        for (out.items) |it| it.deinit();
+        out.deinit(allocator);
+    }
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        const key = try std.fmt.allocPrint(allocator, "{d}", .{i});
+        defer allocator.free(key);
+        try out.append(allocator, try self.getProperty(value, key));
+    }
+    return out.toOwnedSlice(allocator);
+}
 
 /// ECMA ToIntegerOrInfinity saturated into isize, so `@intFromFloat` can't
 /// panic on NaN / +/-Infinity / out-of-i64-range floats (NaN -> 0). Callers

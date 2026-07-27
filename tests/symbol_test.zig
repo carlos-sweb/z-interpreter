@@ -65,3 +65,28 @@ test "Array.from over an array-like object (length + indices, no iterator)" {
         \\console.log(Array.from({ length: 3, 0: 'a', 1: 'b', 2: 'c' }).join(','));
     , "a,b,c\n");
 }
+
+test "Array.from array-like: no length -> empty, string length coerces, negative/fractional clamp" {
+    try helpers.expectStdout("console.log(Array.from({}).length);", "0\n");
+    try helpers.expectStdout(
+        \\console.log(Array.from({ length: '3', 0: 'a', 1: 'b', 2: 'c' }).join(','));
+    , "a,b,c\n");
+    try helpers.expectStdout("console.log(Array.from({ length: -1 }).length);", "0\n");
+    try helpers.expectStdout(
+        \\console.log(Array.from({ length: 2.9, 0: 5, 1: 6 }).join(','));
+    , "5,6\n");
+}
+
+test "Array.from array-like: Symbol.iterator takes priority over length when both present" {
+    try helpers.expectStdout(
+        \\const weird = { length: 5, 0: 'x', [Symbol.iterator]() { let i = 0; return { next: () => i < 2 ? { value: i++ * 10, done: false } : { value: undefined, done: true } }; } };
+        \\console.log(Array.from(weird).join(','));
+    , "0,10\n");
+}
+
+test "Array.from over a bare next()-only object (no Symbol.iterator) is array-like, not drained as an iterator" {
+    try helpers.expectStdout(
+        \\const bareIter = { next() { return { value: 1, done: false }; } };
+        \\console.log(Array.from(bareIter).length);
+    , "0\n");
+}

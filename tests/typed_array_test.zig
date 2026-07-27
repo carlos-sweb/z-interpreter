@@ -34,6 +34,27 @@ test "new XArray(iterable) copies element VALUES, cross-kind included" {
     );
 }
 
+test "new XArray(arrayLike) -- non-iterable array-like construction (no Symbol.iterator)" {
+    try helpers.expectStdout(
+        \\console.log([...new Int32Array({ length: 3, 0: 1, 1: 2, 2: 3 })]);
+        \\console.log(new Int32Array({}).length);
+        \\console.log(new Int32Array({ length: '3', 0: 1, 1: 2, 2: 3 }).length);
+        \\console.log(new Int32Array({ length: -1 }).length);
+        \\console.log(new Int32Array({ length: 2.9, 0: 5, 1: 6 }).length);
+    ,
+        "[1, 2, 3]\n0\n3\n0\n2\n",
+    );
+}
+
+test "new XArray(arrayLike): Symbol.iterator takes priority over length when both present" {
+    try helpers.expectStdout(
+        \\const weird = { length: 5, 0: 'x', [Symbol.iterator]() { let i = 0; return { next: () => i < 2 ? { value: i++ * 10, done: false } : { value: undefined, done: true } }; } };
+        \\console.log([...new Int32Array(weird)]);
+    ,
+        "[0, 10]\n",
+    );
+}
+
 test "reading out of range is undefined, writing out of range is a silent no-op (real spec, not a throw)" {
     try helpers.expectStdout(
         \\const t = new Int8Array(2);
