@@ -2967,7 +2967,16 @@ fn descFromRecord(self: *Interpreter, rec: anytype) !JSValue {
 fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const self = interp(ctx);
     const obj = arg(args, 0);
-    const key = try coercion.toDisplayString(allocator, arg(args, 1));
+    // ToPropertyKey, not ToString: a Symbol argument must resolve to the
+    // exact same encoded key `arr[Symbol.iterator]`/`defineProperty`'s own
+    // computed-key path already produces (`encodeKey`) -- ToString(symbol)
+    // throws in real JS, but ToPropertyKey never stringifies a symbol at
+    // all. Found via this session's own new Array/Map/Set/TypedArray
+    // `[Symbol.iterator]` properties: `Object.getOwnPropertyDescriptor(arr,
+    // Symbol.iterator)` (the natural way to introspect them, and test262's
+    // own `verifyProperty` helper's exact call shape) previously threw an
+    // uncatchable error instead of returning a real descriptor.
+    const key = try self.encodeKey(arg(args, 1));
     defer allocator.free(key);
     switch (obj) {
         .object => {

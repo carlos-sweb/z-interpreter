@@ -4309,6 +4309,22 @@ pub const Interpreter = struct {
         try proto.object.value.defineProperty("constructor", ctor.retain(), attrs);
     }
 
+    /// Installs `proto[Symbol.iterator]` as an alias for an already-
+    /// installed method -- real spec: `Array.prototype[Symbol.iterator]
+    /// === Array.prototype.values` (SAME identity, not just same
+    /// behavior; ditto `Map.prototype`/entries, `Set.prototype`/values,
+    /// `%TypedArray%.prototype`/values). Reuses `nativeMethod`'s cache
+    /// (the same (type_prefix, name) key `installProto` used for the
+    /// string-named method), so this returns the identical JSValue.
+    fn aliasSymbolIterator(self: *Interpreter, proto: JSValue, comptime type_prefix: []const u8, methods: std.StaticStringMap(builtins.NativeFn), method_name: []const u8) !void {
+        const sym = self.symbol_iterator orelse return;
+        const key = try self.encodeKey(sym);
+        defer self.gc_allocator.free(key);
+        const f = try self.nativeMethod(type_prefix, method_name, methods.get(method_name).?);
+        const attrs = zvalue.PropertyDescriptor{ .writable = true, .enumerable = false, .configurable = true };
+        try proto.object.value.defineProperty(key, f, attrs);
+    }
+
     /// Materialize the real builtin prototype objects (Object.prototype,
     /// Array.prototype, ...) from the method tables in builtins.zig. Called
     /// once at the end of setupGlobals, after every constructor exists.
@@ -4345,6 +4361,18 @@ pub const Interpreter = struct {
             @field(self.protos, e[0]) = proto;
         }
 
+        // Real spec: Array.prototype/Map.prototype/Set.prototype's
+        // [Symbol.iterator] own property aliases an already-installed
+        // string-named method (verified via real Node identity checks) --
+        // structural iteration (spread/for-of/Array.from, iterableItems in
+        // this file) never consulted this property and still doesn't need
+        // to; this only fixes explicit `arr[Symbol.iterator]` access and
+        // any user/harness code (e.g. test262's own testTypedArray.js
+        // `makeIterable`) that does the same.
+        try self.aliasSymbolIterator(self.protos.array, "array", builtins.array_methods, "values");
+        try self.aliasSymbolIterator(self.protos.map, "map", builtins.map_methods, "entries");
+        try self.aliasSymbolIterator(self.protos.set, "set", builtins.set_methods, "values");
+
         // Types without a method table today: real (near-empty) prototypes so
         // getPrototypeOf / reflection still work and instances chain correctly.
         const proto_attrs = zvalue.PropertyDescriptor{ .writable = true, .enumerable = false, .configurable = true };
@@ -4374,6 +4402,8 @@ pub const Interpreter = struct {
             const f = try self.nativeMethod("typed_array", k, builtins.typed_array_methods.get(k).?);
             try typed_array_base.object.value.defineProperty(k, f, proto_attrs);
         }
+        // Real spec: %TypedArray%.prototype[Symbol.iterator] === %TypedArray%.prototype.values.
+        try self.aliasSymbolIterator(typed_array_base, "typed_array", builtins.typed_array_methods, "values");
         const bpe_attrs = zvalue.PropertyDescriptor{ .writable = false, .enumerable = false, .configurable = false };
         inline for (.{
             .{ "int8_array", "Int8Array", 1 },

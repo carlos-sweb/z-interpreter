@@ -90,3 +90,25 @@ test "Array.from over a bare next()-only object (no Symbol.iterator) is array-li
         \\console.log(Array.from(bareIter).length);
     , "0\n");
 }
+
+test "Array.prototype/Map.prototype/Set.prototype[Symbol.iterator] are real own properties aliasing values/entries" {
+    try helpers.expectStdout(
+        \\console.log(Array.prototype[Symbol.iterator] === Array.prototype.values);
+        \\console.log(Map.prototype[Symbol.iterator] === Map.prototype.entries);
+        \\console.log(Set.prototype[Symbol.iterator] === Set.prototype.values);
+        \\const d = Object.getOwnPropertyDescriptor(Array.prototype, Symbol.iterator);
+        \\console.log(d.writable, d.enumerable, d.configurable);
+        \\console.log(Object.keys(Array.prototype).length, Object.getOwnPropertySymbols(Array.prototype).includes(Symbol.iterator));
+        \\console.log(typeof [1, 2, 3][Symbol.iterator]().next);
+    , "true\ntrue\ntrue\ntrue false true\n0 true\nfunction\n");
+}
+
+test "%TypedArray%.prototype[Symbol.iterator] === %TypedArray%.prototype.values, shared across kinds" {
+    try helpers.expectStdout(
+        \\const base = Object.getPrototypeOf(Int32Array.prototype);
+        \\console.log(base[Symbol.iterator] === base.values);
+        \\console.log(Object.getPrototypeOf(Float64Array.prototype)[Symbol.iterator] === base[Symbol.iterator]);
+        \\const it = new Int32Array([1, 2, 3])[Symbol.iterator]();
+        \\console.log(it.next().value, it.next().value, it.next().value, it.next().done);
+    , "true\ntrue\n1 2 3 true\n");
+}
