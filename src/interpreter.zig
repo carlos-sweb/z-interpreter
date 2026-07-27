@@ -3963,7 +3963,11 @@ pub const Interpreter = struct {
     /// objects in real JS but have no property model here yet.
     pub fn evalIn(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
         const arena = self.gc_allocator;
-        const key = try coercion.toDisplayString(arena, l);
+        // ToPropertyKey, not ToDisplayString: `Symbol.iterator in arr` must
+        // resolve the same key encoding `arr[Symbol.iterator]` would (see
+        // `encodeKey`) -- a Symbol left-hand side isn't stringified at all
+        // in real spec.
+        const key = try self.encodeKey(l);
         defer arena.free(key);
         return switch (r) {
             .object => |box| JSValue.fromBool(box.value.has(key)),
@@ -3972,7 +3976,13 @@ pub const Interpreter = struct {
                 const idx = std.fmt.parseInt(usize, key, 10) catch break :blk JSValue.fromBool(false);
                 break :blk JSValue.fromBool(idx < box.value.length());
             },
-            .@"undefined", .@"null", .boolean, .number, .string => self.throwError(.type_error, "Cannot use 'in' operator to search for '{s}'", .{key}),
+            // `key` is the raw `\x00S<ptr>` encoding when `l` is a symbol --
+            // display the real "Symbol(desc)" form in the message instead
+            // of leaking that internal encoding to user-visible text.
+            .@"undefined", .@"null", .boolean, .number, .string => if (l == .symbol)
+                self.throwError(.type_error, "Cannot use 'in' operator to search for 'Symbol({s})'", .{l.symbol.value.description orelse ""})
+            else
+                self.throwError(.type_error, "Cannot use 'in' operator to search for '{s}'", .{key}),
             // has(target, property) -- ToBoolean-coerced.
             .proxy => |box| blk: {
                 if (try self.proxyTrap(box, "has")) |trap_fn| {

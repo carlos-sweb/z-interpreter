@@ -2725,7 +2725,7 @@ fn requirePlainObject(ctx: *anyopaque, v: JSValue, what: []const u8) anyerror!JS
 }
 
 fn objHasOwnProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    const key = try coercion.toDisplayString(allocator, arg(args, 0));
+    const key = try interp(ctx).encodeKey(arg(args, 0));
     defer allocator.free(key);
     return switch (this_value) {
         .object => |box| JSValue.fromBool(box.value.hasOwnProperty(key)),
@@ -2747,9 +2747,8 @@ fn objHasOwnProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
 }
 
 fn objPropertyIsEnumerable(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
     if (this_value != .object) return JSValue.fromBool(false);
-    const key = try coercion.toDisplayString(allocator, arg(args, 0));
+    const key = try interp(ctx).encodeKey(arg(args, 0));
     defer allocator.free(key);
     return JSValue.fromBool(this_value.object.value.propertyIsEnumerable(key));
 }
@@ -2916,7 +2915,7 @@ fn objectDefineProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     _ = this_value;
     const self = interp(ctx);
     const obj = arg(args, 0);
-    const key = try coercion.toDisplayString(allocator, arg(args, 1));
+    const key = try self.encodeKey(arg(args, 1));
     defer allocator.free(key);
     try definePropertyOn(self, "defineProperty", obj, key, arg(args, 2));
     return obj.retain();
@@ -5192,7 +5191,7 @@ fn reflectGet(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     _ = this_value;
     const self = interp(ctx);
     const target = try reflectRequireObject(ctx, "get", arg(args, 0));
-    const key = try coercion.toDisplayString(allocator, arg(args, 1));
+    const key = try self.encodeKey(arg(args, 1));
     defer allocator.free(key);
     return self.getProperty(target, key);
 }
@@ -5201,7 +5200,7 @@ fn reflectSet(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     _ = this_value;
     const self = interp(ctx);
     const target = try reflectRequireObject(ctx, "set", arg(args, 0));
-    const key = try coercion.toDisplayString(allocator, arg(args, 1));
+    const key = try self.encodeKey(arg(args, 1));
     defer allocator.free(key);
     try self.setPropertyOnValue(target, key, arg(args, 2));
     return JSValue.fromBool(true);
@@ -5219,7 +5218,7 @@ fn reflectDeleteProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
     _ = this_value;
     const self = interp(ctx);
     const target = try reflectRequireObject(ctx, "deleteProperty", arg(args, 0));
-    const key = try coercion.toDisplayString(allocator, arg(args, 1));
+    const key = try self.encodeKey(arg(args, 1));
     defer allocator.free(key);
     return JSValue.fromBool(try self.deletePropertyOnValue(target, key));
 }
@@ -5242,7 +5241,7 @@ fn reflectDefineProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
     _ = this_value;
     const self = interp(ctx);
     const target = try reflectRequireObject(ctx, "defineProperty", arg(args, 0));
-    const key = try coercion.toDisplayString(self.gc_allocator, arg(args, 1));
+    const key = try self.encodeKey(arg(args, 1));
     defer self.gc_allocator.free(key);
     // Narrowing: this engine's definePropertyOn throws on failure rather
     // than returning false for every real spec failure mode -- Reflect's
