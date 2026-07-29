@@ -1534,6 +1534,7 @@ pub const Interpreter = struct {
         // creates goes through gc_allocator.
         const ast_arena = self.arena_state.allocator();
         const parser = try zfunctions.Parser.init(ast_arena, source);
+        parser.setStackLimit(self.stack_limit);
         const program = try parser.parseProgram();
         const c = self.evalBody(self.script_env.?, program) catch |err| {
             if (err != error.JsThrow) return err;
@@ -1554,8 +1555,20 @@ pub const Interpreter = struct {
         const ast_arena = self.arena_state.allocator();
         const parser = zfunctions.Parser.init(ast_arena, src) catch
             return self.throwError(.syntax_error, "Invalid or unexpected token in eval", .{});
-        const program = parser.parseProgram() catch
-            return self.throwError(.syntax_error, "Invalid or unexpected token in eval", .{});
+        // Reuse whatever budget is already active for the current
+        // execution context (main-thread `run()`, or the fiber-scoped
+        // value `resumeFiber` swaps in) -- `eval()` can be called from
+        // deep inside an already-recursed script, so a freshly-computed
+        // budget here would over-allow (see z-parser-improve.md).
+        parser.setStackLimit(self.stack_limit);
+        const program = parser.parseProgram() catch |err| switch (err) {
+            // Same message as `evalExpression`'s own stack guard (line
+            // ~3387) -- deeply nested source text and deeply nested
+            // evaluation now report the identical RangeError, whichever
+            // phase actually trips.
+            error.MaxNestingDepthExceeded => return self.throwError(.range_error, "Maximum call stack size exceeded", .{}),
+            else => return self.throwError(.syntax_error, "Invalid or unexpected token in eval", .{}),
+        };
         const eval_scope = try self.gcChildEnv(scope);
         const c = try self.evalBody(eval_scope, program);
         return c.value;
@@ -1850,6 +1863,7 @@ pub const Interpreter = struct {
         try self.modules.put(gc, loaded.path, rec);
 
         const parser = try zfunctions.Parser.init(ast_arena, loaded.source);
+        parser.setStackLimit(self.stack_limit);
         const program = try parser.parseProgram();
         const module_env = try self.gcChildEnv(self.global_env);
 
