@@ -29,5 +29,6 @@
         .zsymbol = .{ .path = "../z-symbol" },
         .zbigint = .{ .path = "../z-bigint" },
         .zbuffer = .{ .path = "../z-buffer" },
+        .ztemporal = .{ .path = "../z-temporal" },
     },
 }

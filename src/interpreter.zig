@@ -63,6 +63,36 @@ pub const Protos = struct {
     float64_array: JSValue = JSValue.UNDEFINED,
     bigint64_array: JSValue = JSValue.UNDEFINED,
     biguint64_array: JSValue = JSValue.UNDEFINED,
+    // Temporal (TC39, see /home/sweb/.plans -- z-temporal wiring): one
+    // prototype per wrapped type, dispatched by `TemporalValue`'s inner
+    // tag (see `temporalProtoFor` in temporal_builtins.zig). ZonedDateTime
+    // is deliberately not wired yet (needs real I/O for tzdata, unlike
+    // every other Temporal type here).
+    temporal_plain_date: JSValue = JSValue.UNDEFINED,
+    temporal_plain_time: JSValue = JSValue.UNDEFINED,
+    temporal_plain_date_time: JSValue = JSValue.UNDEFINED,
+    temporal_plain_year_month: JSValue = JSValue.UNDEFINED,
+    temporal_plain_month_day: JSValue = JSValue.UNDEFINED,
+    temporal_instant: JSValue = JSValue.UNDEFINED,
+    temporal_duration: JSValue = JSValue.UNDEFINED,
+
+    /// Picks the right one of the 7 prototypes above for a given
+    /// `TemporalValue`'s inner tag -- the single dispatch point every
+    /// `.temporal` case elsewhere (`getProperty`, `objectGetPrototypeOf`,
+    /// ...) goes through, so the tag-to-prototype mapping lives in exactly
+    /// one place.
+    pub fn temporalProtoFor(self: *const Protos, tv: zvalue.TemporalValue) JSValue {
+        return switch (tv) {
+            .plain_date => self.temporal_plain_date,
+            .plain_time => self.temporal_plain_time,
+            .plain_date_time => self.temporal_plain_date_time,
+            .plain_year_month => self.temporal_plain_year_month,
+            .plain_month_day => self.temporal_plain_month_day,
+            .instant => self.temporal_instant,
+            .duration => self.temporal_duration,
+            .zoned_date_time => JSValue.UNDEFINED, // not wired yet
+        };
+    }
 };
 
 /// JS-level state a RegExp object carries beyond its compiled bytecode.
@@ -563,6 +593,10 @@ const GcNode = union(enum) {
     /// storage elsewhere, hitting the same "declaration leaves refcount
     /// 2, not 1" quirk.
     bigint: *zvalue.Rc(zbigint.ZBigInt),
+    /// Same "leaf, but still registered" rationale as symbol/string/date/
+    /// bigint above -- every z-temporal type is a pure value with no
+    /// JSValue children.
+    temporal: *zvalue.Rc(zvalue.TemporalValue),
     environment: *Environment,
     closure_ctx: *ClosureCtx,
     fiber_state: *FiberState,
@@ -630,6 +664,7 @@ const Marker = struct {
             .array_buffer => |box| @intFromPtr(box),
             .data_view => |box| @intFromPtr(box),
             .typed_array => |box| @intFromPtr(box),
+            .temporal => |box| @intFromPtr(box),
         };
         const gop = self.reached.getOrPut(self.interp.gc_allocator, addr) catch return;
         if (gop.found_existing) return;
@@ -688,6 +723,7 @@ const Sweeper = struct {
             .array_buffer => |box| @intFromPtr(box),
             .data_view => |box| @intFromPtr(box),
             .typed_array => |box| @intFromPtr(box),
+            .temporal => |box| @intFromPtr(box),
         };
         if (self.garbage.contains(addr)) return;
         v.deinit();
@@ -955,6 +991,7 @@ pub const Interpreter = struct {
             .array_buffer => |box| .{ .array_buffer = box },
             .data_view => |box| .{ .data_view = box },
             .typed_array => |box| .{ .typed_array = box },
+            .temporal => |box| .{ .temporal = box },
             else => return,
         };
         v.setGcHook(self, gcOnBoxDestroyed);
@@ -1094,6 +1131,11 @@ pub const Interpreter = struct {
         try self.gcTrack(v);
         return v;
     }
+    pub fn gcNewTemporal(self: *Interpreter, value: zvalue.TemporalValue) !JSValue {
+        const v = try JSValue.newTemporal(self.gc_allocator, value);
+        try self.gcTrack(v);
+        return v;
+    }
     pub fn gcNewBigInt(self: *Interpreter, raw_digit_text: []const u8) !JSValue {
         const v = try JSValue.newBigInt(self.gc_allocator, raw_digit_text);
         try self.gcTrack(v);
@@ -1151,7 +1193,7 @@ pub const Interpreter = struct {
     /// (or anything else untracked) just miss the lookup and stop there.
     fn traceValueChildren(self: *Interpreter, v: JSValue, visitor: anytype) void {
         switch (v) {
-            .@"undefined", .@"null", .boolean, .number, .string, .regex, .symbol, .date, .bigint, .array_buffer => {},
+            .@"undefined", .@"null", .boolean, .number, .string, .regex, .symbol, .date, .bigint, .array_buffer, .temporal => {},
             .array => |box| for (box.value.toSliceMut()) |*child| visitor.value(child.*),
             .object => |box| for (box.value.properties.values()) |prop| {
                 visitor.value(prop.value);
@@ -1340,6 +1382,10 @@ pub const Interpreter = struct {
                 // ZDate is a pure value with no allocator of its own --
                 // only the box itself needs freeing (matches
                 // JSValue.deinit()'s own `.date` arm).
+                box.destroy();
+            },
+            .temporal => |box| {
+                // Every z-temporal type is a pure value, same as .date.
                 box.destroy();
             },
             .bigint => |box| {
@@ -3849,6 +3895,11 @@ pub const Interpreter = struct {
                 if (try self.getFromProto(obj, self.protos.bigint, key)) |m| break :blk m;
                 break :blk JSValue.UNDEFINED;
             },
+            .temporal => |box| blk: {
+                const proto = self.protos.temporalProtoFor(box.value);
+                if (try self.getFromProto(obj, proto, key)) |m| break :blk m;
+                break :blk JSValue.UNDEFINED;
+            },
             // get(target, property, receiver) -- receiver is the proxy
             // itself, not the target (matters when the trap forwards via
             // Reflect.get(target, property, receiver) for correct `this`
@@ -4009,7 +4060,7 @@ pub const Interpreter = struct {
                 }
                 break :blk try self.evalIn(l, box.value.target);
             },
-            .function, .regex, .symbol, .map, .set, .@"error", .date, .promise, .bigint, .array_buffer, .data_view, .typed_array => error.NotImplemented,
+            .function, .regex, .symbol, .map, .set, .@"error", .date, .promise, .bigint, .array_buffer, .data_view, .typed_array, .temporal => error.NotImplemented,
         };
     }
 
@@ -4923,7 +4974,7 @@ pub const Interpreter = struct {
         defer self.construct_target = prev_target;
         const result = try callee.function.value.call(callee.function.value.ctx, self.gc_allocator, instance, args);
         return switch (result) {
-            .object, .array, .function, .regex, .map, .set, .@"error", .date, .promise, .proxy, .array_buffer, .data_view, .typed_array => result,
+            .object, .array, .function, .regex, .map, .set, .@"error", .date, .promise, .proxy, .array_buffer, .data_view, .typed_array, .temporal => result,
             else => instance,
         };
     }

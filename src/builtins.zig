@@ -26,6 +26,7 @@ const zbuffer = @import("zbuffer");
 const JSValue = zvalue.JSValue;
 
 const interpreter_mod = @import("interpreter.zig");
+const temporal_builtins = @import("temporal_builtins.zig");
 const Interpreter = interpreter_mod.Interpreter;
 const coercion = @import("coercion.zig");
 const inspect = @import("inspect.zig");
@@ -409,6 +410,8 @@ pub fn setupGlobals(self: *Interpreter) !void {
     try dneMethod(date_statics, "parse", try native(self, "parse", dateParse));
     try dneMethod(date_statics, "UTC", try native(self, "UTC", dateUTC));
     try g.define(arena, "Date", date_ctor);
+
+    try temporal_builtins.install(self);
 
     // `new Proxy(target, handler)` -- unlike Date, MUST reject a bare
     // (non-new) call (proxyConstructor's own construct_target check).
@@ -2782,7 +2785,7 @@ fn objectConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     const v = arg(args, 0);
     return switch (v) {
         // Object(x) on object-likes returns x; on nothing, a fresh {}.
-        .object, .array, .function, .@"error", .date, .promise, .map, .set, .regex => v.retain(),
+        .object, .array, .function, .@"error", .date, .promise, .map, .set, .regex, .temporal => v.retain(),
         else => try interp(ctx).ordinaryObject(),
     };
 }
@@ -3255,6 +3258,7 @@ fn objectGetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
         .array_buffer => self.protos.array_buffer.retain(),
         .data_view => self.protos.data_view.retain(),
         .typed_array => |box| self.typedArrayProto(box.value.kind).retain(),
+        .temporal => |box| self.protos.temporalProtoFor(box.value).retain(),
         // No getPrototypeOf trap dispatch yet (Proxy plan, later phase)
         // -- delegates transparently to target, correct for the
         // no-trap case.

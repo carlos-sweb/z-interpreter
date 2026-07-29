@@ -58,6 +58,9 @@ pub fn build(b: *std.Build) void {
     const zbuffer_dep = b.dependency("zbuffer", .{ .target = target, .optimize = optimize });
     const zbuffer_module = zbuffer_dep.module("zbuffer");
 
+    const ztemporal_dep = b.dependency("ztemporal", .{ .target = target, .optimize = optimize });
+    const ztemporal_module = ztemporal_dep.module("ztemporal");
+
     const zinterpreter_module = b.addModule("zinterpreter", .{
         .root_source_file = b.path("src/zinterpreter.zig"),
     });
@@ -79,6 +82,7 @@ pub fn build(b: *std.Build) void {
     zinterpreter_module.addImport("zsymbol", zsymbol_module);
     zinterpreter_module.addImport("zbigint", zbigint_module);
     zinterpreter_module.addImport("zbuffer", zbuffer_module);
+    zinterpreter_module.addImport("ztemporal", ztemporal_module);
 
     const test_step = b.step("test", "Run all tests");
 
@@ -128,6 +132,7 @@ pub fn build(b: *std.Build) void {
         "tests/buffer_test.zig",
         "tests/typed_array_test.zig",
         "tests/typed_array_methods_test.zig",
+        "tests/temporal_test.zig",
     };
 
     inline for (test_files) |test_file| {
@@ -150,6 +155,7 @@ pub fn build(b: *std.Build) void {
         unit_tests.root_module.addImport("zstring", zstring_module);
         unit_tests.root_module.addImport("zdate", zdate_module);
         unit_tests.root_module.addImport("zregex", zregex_module);
+        unit_tests.root_module.addImport("ztemporal", ztemporal_module);
 
         const run_unit_tests = b.addRunArtifact(unit_tests);
         test_step.dependOn(&run_unit_tests.step);
@@ -180,6 +186,7 @@ pub fn build(b: *std.Build) void {
     src_tests.root_module.addImport("zsymbol", zsymbol_module);
     src_tests.root_module.addImport("zbigint", zbigint_module);
     src_tests.root_module.addImport("zbuffer", zbuffer_module);
+    src_tests.root_module.addImport("ztemporal", ztemporal_module);
     const run_src_tests = b.addRunArtifact(src_tests);
     test_step.dependOn(&run_src_tests.step);
 

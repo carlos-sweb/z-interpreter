@@ -2,7 +2,20 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const zvalue = @import("zvalue");
 const znumber = @import("znumber");
+const ztemporal = @import("ztemporal");
 const JSValue = zvalue.JSValue;
+
+/// Appends a Temporal `toIsoString` result, freeing the allocation and
+/// falling back to a placeholder on error (out-of-range values etc.) --
+/// console.log must never crash on a value it's merely displaying.
+fn appendIso(allocator: Allocator, buf: *std.ArrayList(u8), result: anyerror![]u8) !void {
+    const s = result catch {
+        try buf.appendSlice(allocator, "<invalid>");
+        return;
+    };
+    defer allocator.free(s);
+    try buf.appendSlice(allocator, s);
+}
 
 /// A small, standalone `console.log`-style renderer -- deliberately NOT
 /// `z-json`'s `stringify()`: JSON.stringify's rules (omits undefined/
@@ -95,6 +108,21 @@ pub fn inspect(allocator: Allocator, buf: *std.ArrayList(u8), v: JSValue) !void 
         // Placeholder until trap dispatch exists (Proxy plan, later
         // phases) -- real Node renders through the target transparently.
         .proxy => try buf.appendSlice(allocator, "[Proxy]"),
+        // Node renders each Temporal type as `KindName <isoString>`.
+        .temporal => |box| {
+            try buf.appendSlice(allocator, box.value.kindName());
+            try buf.append(allocator, ' ');
+            switch (box.value) {
+                .plain_date => |tv| try appendIso(allocator, buf, tv.toIsoString(allocator, false)),
+                .plain_time => |tv| try appendIso(allocator, buf, tv.toIsoString(allocator)),
+                .plain_date_time => |tv| try appendIso(allocator, buf, tv.toIsoString(allocator, false)),
+                .plain_year_month => |tv| try appendIso(allocator, buf, tv.toIsoString(allocator, false)),
+                .plain_month_day => |tv| try appendIso(allocator, buf, tv.toIsoString(allocator, false)),
+                .instant => |tv| try appendIso(allocator, buf, tv.toIsoString(allocator)),
+                .duration => |tv| try appendIso(allocator, buf, tv.toIsoString(allocator)),
+                .zoned_date_time => try buf.appendSlice(allocator, "<unsupported>"), // not wired yet
+            }
+        },
         .bigint => |box| {
             // Trailing `n` is a console.log/inspect-only convention --
             // coercion.zig's ToString (toDisplayString) deliberately
