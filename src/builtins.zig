@@ -663,12 +663,51 @@ fn globalPrint(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     return JSValue.UNDEFINED;
 }
 
+// ===== Generic receiver guards (z-interpreter-refactor.md, Step 3) =====
+//
+// 16 requireX functions existed here, each independently re-implementing
+// "check this_value's tag, throw a TypeError naming `method` if wrong,
+// return something". Re-reading every one against current source (not
+// trusting the plan's original guess) found two clean, truly-identical
+// shapes -- requireTag below (9 functions: no unwrapping, returns the
+// whole JSValue or void) and requirePrimitive (3 functions: unwraps a
+// `new String()`/`new Number()`/`new Boolean()` primitive wrapper first,
+// returns an inner scalar field) -- plus 4 genuinely divergent ones that
+// stay hand-written because they don't fit either shape: requireCallback
+// (checks args[0], not this_value), requireObject/requirePlainObject
+// (caller supplies the whole message prefix, not just a method name --
+// near-duplicates of EACH OTHER, not of this group), and requireDataView
+// (takes `*Interpreter` directly instead of `*anyopaque`, and returns an
+// extracted `.view` rather than the JSValue itself).
+//
+// The exact message template of every migrated function is preserved
+// verbatim (passed as a comptime format string) -- this is a pure
+// dedup, not a message-wording change.
+
+fn requireTag(ctx: *anyopaque, this_value: JSValue, comptime tag: std.meta.Tag(JSValue), comptime message: []const u8, method: []const u8) anyerror!JSValue {
+    if (this_value != tag) {
+        return interp(ctx).throwError(.type_error, message, .{method});
+    }
+    return this_value;
+}
+
+/// Same shape as `requireTag`, but first unwraps a `new String()`/
+/// `new Number()`/`new Boolean()` primitive-wrapper object (see
+/// `Interpreter.unboxPrimitiveWrapper`'s doc) before checking the tag --
+/// shared by the 3 primitive-prototype guards that need to accept both
+/// `"x".toUpperCase()` and `new String("x").toUpperCase()`.
+fn requirePrimitive(ctx: *anyopaque, this_value: JSValue, comptime tag: std.meta.Tag(JSValue), comptime message: []const u8, method: []const u8) anyerror!JSValue {
+    const v: JSValue = if (this_value == tag) this_value else interp(ctx).unboxPrimitiveWrapper(this_value) orelse this_value;
+    if (v != tag) {
+        return interp(ctx).throwError(.type_error, message, .{method});
+    }
+    return v;
+}
+
 // ===== Array.prototype =====
 
 fn requireArray(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!void {
-    if (this_value != .array) {
-        return interp(ctx).throwError(.type_error, "Array.prototype.{s} called on a non-array", .{method});
-    }
+    _ = try requireTag(ctx, this_value, .array, "Array.prototype.{s} called on a non-array", method);
 }
 
 fn requireCallback(ctx: *anyopaque, args: []const JSValue) anyerror!JSValue {
@@ -915,13 +954,7 @@ fn arrayIsArray(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 // modules, all operating on ([]const u8, allocator)) =====
 
 fn requireString(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror![]const u8 {
-    // Unwrap a `new String(...)` object (primitive_wrapper_data side
-    // table) before rejecting -- see boxPrimitiveIfConstructed's doc.
-    const v: JSValue = if (this_value == .string) this_value else interp(ctx).unboxPrimitiveWrapper(this_value) orelse this_value;
-    if (v != .string) {
-        return interp(ctx).throwError(.type_error, "String.prototype.{s} called on a non-string", .{method});
-    }
-    return v.string.value.data;
+    return (try requirePrimitive(ctx, this_value, .string, "String.prototype.{s} called on a non-string", method)).string.value.data;
 }
 
 fn argString(allocator: Allocator, args: []const JSValue, i: usize) ![]u8 {
@@ -1130,10 +1163,7 @@ fn dateUTC(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
 }
 
 fn requireDate(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {
-    if (this_value != .date) {
-        return interp(ctx).throwError(.type_error, "Date.prototype.{s} called on a non-date", .{method});
-    }
-    return this_value;
+    return requireTag(ctx, this_value, .date, "Date.prototype.{s} called on a non-date", method);
 }
 
 /// A raw millisecond timestamp as a JS Number, mapping z-date's Invalid Date
@@ -1580,9 +1610,7 @@ fn globalEval(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 // wrapper objects have no [[NumberData]] here -- documented narrowing) =====
 
 fn requireNumber(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!f64 {
-    const v: JSValue = if (this_value == .number) this_value else interp(ctx).unboxPrimitiveWrapper(this_value) orelse this_value;
-    if (v != .number) return interp(ctx).throwError(.type_error, "Number.prototype.{s} called on a non-number", .{method});
-    return v.number;
+    return (try requirePrimitive(ctx, this_value, .number, "Number.prototype.{s} called on a non-number", method)).number;
 }
 
 /// `n.toString(radix?)` / `toLocaleString` -- radix 2..36 (default 10).
@@ -1648,9 +1676,7 @@ fn numberToPrecision(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
 // ===== Boolean.prototype =====
 
 fn requireBoolean(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!bool {
-    const v: JSValue = if (this_value == .boolean) this_value else interp(ctx).unboxPrimitiveWrapper(this_value) orelse this_value;
-    if (v != .boolean) return interp(ctx).throwError(.type_error, "Boolean.prototype.{s} called on a non-boolean", .{method});
-    return v.boolean;
+    return (try requirePrimitive(ctx, this_value, .boolean, "Boolean.prototype.{s} called on a non-boolean", method)).boolean;
 }
 
 fn booleanToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1725,8 +1751,7 @@ fn globalBigInt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 }
 
 fn requireBigInt(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {
-    if (this_value == .bigint) return this_value;
-    return interp(ctx).throwError(.type_error, "BigInt.prototype.{s} called on a non-BigInt", .{method});
+    return requireTag(ctx, this_value, .bigint, "BigInt.prototype.{s} called on a non-BigInt", method);
 }
 
 /// `n.toString(radix?)` -- radix 2..36 (default 10), same contract as
@@ -2400,10 +2425,7 @@ fn promiseConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
 }
 
 fn requirePromise(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {
-    if (this_value != .promise) {
-        return interp(ctx).throwError(.type_error, "Promise.prototype.{s} called on a non-promise", .{method});
-    }
-    return this_value;
+    return requireTag(ctx, this_value, .promise, "Promise.prototype.{s} called on a non-promise", method);
 }
 
 /// Non-callable handlers are the spec's pass-through (then(null, f) etc).
@@ -2638,10 +2660,7 @@ fn errorConstructor(comptime kind: zvalue.ErrorKind) NativeFn {
 // ===== Function.prototype.call / apply / bind =====
 
 fn requireFunction(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {
-    if (this_value != .function) {
-        return interp(ctx).throwError(.type_error, "Function.prototype.{s} called on a non-function", .{method});
-    }
-    return this_value;
+    return requireTag(ctx, this_value, .function, "Function.prototype.{s} called on a non-function", method);
 }
 
 fn fnCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -3931,9 +3950,7 @@ fn arrayEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 // none of the functions below `.retain()` what `taGet` hands them. =====
 
 fn requireTypedArray(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!void {
-    if (this_value != .typed_array) {
-        return interp(ctx).throwError(.type_error, "Method TypedArray.prototype.{s} called on incompatible receiver", .{method});
-    }
+    _ = try requireTag(ctx, this_value, .typed_array, "Method TypedArray.prototype.{s} called on incompatible receiver", method);
 }
 
 fn taLen(this_value: JSValue) usize {
@@ -4630,13 +4647,11 @@ fn stringFromCodePoint(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
 // ===== Map / Set =====
 
 fn requireMap(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {
-    if (this_value != .map) return interp(ctx).throwError(.type_error, "Method Map.prototype.{s} called on incompatible receiver", .{method});
-    return this_value;
+    return requireTag(ctx, this_value, .map, "Method Map.prototype.{s} called on incompatible receiver", method);
 }
 
 fn requireSet(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {
-    if (this_value != .set) return interp(ctx).throwError(.type_error, "Method Set.prototype.{s} called on incompatible receiver", .{method});
-    return this_value;
+    return requireTag(ctx, this_value, .set, "Method Set.prototype.{s} called on incompatible receiver", method);
 }
 
 fn mapConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -4859,8 +4874,7 @@ fn setEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 const zregex = @import("zregex");
 
 fn requireRegex(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {
-    if (this_value != .regex) return interp(ctx).throwError(.type_error, "Method RegExp.prototype.{s} called on incompatible receiver", .{method});
-    return this_value;
+    return requireTag(ctx, this_value, .regex, "Method RegExp.prototype.{s} called on incompatible receiver", method);
 }
 
 /// `new RegExp(pattern, flags?)` / `RegExp(...)`. A RegExp source argument
