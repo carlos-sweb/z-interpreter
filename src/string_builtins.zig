@@ -1,0 +1,543 @@
+//! `String.prototype` (basic + extended coverage + RegExp-pattern
+//! methods: match/matchAll/search/replace/replaceAll) and the `String`
+//! constructor + statics (fromCharCode/fromCodePoint). `argString` is
+//! `pub` here -- `globalParseInt`/`globalParseFloat` (still in
+//! builtins.zig, "Loose globals", not yet its own domain) reach it via
+//! `builtins.argString`. `stringFromCodePoint` physically lived inside
+//! the old "String.prototype (extended coverage)" section in
+//! builtins.zig (should have been next to stringFromCharCode, a
+//! static) -- same recurring interleaving shape found in earlier
+//! batches (globalBoolean/globalNumber), fixed here by grouping it with
+//! the other static instead of transcribing the misplacement forward.
+//! z-interpreter-refactor.md, Step 5 Phase A batch 6.
+
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const znumber = @import("znumber");
+const zstring = @import("zstring");
+const zvalue = @import("zvalue");
+const JSValue = zvalue.JSValue;
+
+const interpreter_mod = @import("interpreter.zig");
+const Interpreter = interpreter_mod.Interpreter;
+const coercion = @import("coercion.zig");
+const native_helpers = @import("native_helpers.zig");
+const builtin_helpers = @import("builtin_helpers.zig");
+const regex_builtins = @import("regex_builtins.zig");
+
+pub const NativeFn = native_helpers.NativeFn;
+const interp = native_helpers.interp;
+const arg = native_helpers.arg;
+const native = native_helpers.native;
+const installBuiltin = builtin_helpers.installBuiltin;
+const requirePrimitive = builtin_helpers.requirePrimitive;
+const toIntSat = builtin_helpers.toIntSat;
+const makeArrayIterator = builtin_helpers.makeArrayIterator;
+const regexFindFrom = regex_builtins.regexFindFrom;
+const makeMatchArray = regex_builtins.makeMatchArray;
+const regexSplit = regex_builtins.regexSplit;
+
+pub const string_methods = std.StaticStringMap(NativeFn).initComptime(.{
+    .{ "toUpperCase", stringToUpperCase },
+    .{ "toLowerCase", stringToLowerCase },
+    .{ "charAt", stringCharAt },
+    .{ "indexOf", stringIndexOf },
+    .{ "includes", stringIncludes },
+    .{ "startsWith", stringStartsWith },
+    .{ "endsWith", stringEndsWith },
+    .{ "slice", stringSlice },
+    .{ "repeat", stringRepeat },
+    .{ "split", stringSplit },
+    .{ "trim", stringTrim },
+    .{ "trimStart", stringTrimStart },
+    .{ "trimEnd", stringTrimEnd },
+    .{ "charCodeAt", stringCharCodeAt },
+    .{ "codePointAt", stringCodePointAt },
+    .{ "at", stringAt },
+    .{ "padStart", stringPadStart },
+    .{ "padEnd", stringPadEnd },
+    .{ "substring", stringSubstring },
+    .{ "substr", stringSubstr },
+    .{ "lastIndexOf", stringLastIndexOf },
+    .{ "concat", stringConcat },
+    .{ "replace", stringReplace },
+    .{ "replaceAll", stringReplaceAll },
+    .{ "match", stringMatch },
+    .{ "matchAll", stringMatchAll },
+    .{ "search", stringSearch },
+    .{ "localeCompare", stringLocaleCompare },
+    .{ "toString", stringToStringMethod },
+    .{ "valueOf", stringToStringMethod },
+});
+
+// ===== String.prototype (direct reuse of z-string's standalone method
+// modules, all operating on ([]const u8, allocator)) =====
+
+fn requireString(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror![]const u8 {
+    return (try requirePrimitive(ctx, this_value, .string, "String.prototype.{s} called on a non-string", method)).string.value.data;
+}
+
+pub fn argString(allocator: Allocator, args: []const JSValue, i: usize) ![]u8 {
+    return coercion.toDisplayString(allocator, arg(args, i));
+}
+
+fn stringToUpperCase(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const data = try requireString(ctx, this_value, "toUpperCase");
+    const out = try zstring.case.toUpperCase(allocator, data);
+    defer allocator.free(out);
+    return interp(ctx).gcNewString(out);
+}
+
+fn stringToLowerCase(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const data = try requireString(ctx, this_value, "toLowerCase");
+    const out = try zstring.case.toLowerCase(allocator, data);
+    defer allocator.free(out);
+    return interp(ctx).gcNewString(out);
+}
+
+fn stringCharAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const data = try requireString(ctx, this_value, "charAt");
+    const idx: isize = toIntSat(if (arg(args, 0) == .undefined) 0 else try coercion.toNumber(arg(args, 0)));
+    const out = try zstring.access.charAt(allocator, data, idx);
+    defer allocator.free(out);
+    return interp(ctx).gcNewString(out);
+}
+
+fn stringIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const data = try requireString(ctx, this_value, "indexOf");
+    const search = try argString(allocator, args, 0);
+    defer allocator.free(search);
+    return JSValue.fromNumber(@floatFromInt(zstring.search.indexOf(data, search, null)));
+}
+
+fn stringIncludes(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const data = try requireString(ctx, this_value, "includes");
+    const search = try argString(allocator, args, 0);
+    defer allocator.free(search);
+    return JSValue.fromBool(zstring.search.includes(data, search, null));
+}
+
+fn stringStartsWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const data = try requireString(ctx, this_value, "startsWith");
+    const search = try argString(allocator, args, 0);
+    defer allocator.free(search);
+    return JSValue.fromBool(zstring.search.startsWith(data, search, null));
+}
+
+fn stringEndsWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const data = try requireString(ctx, this_value, "endsWith");
+    const search = try argString(allocator, args, 0);
+    defer allocator.free(search);
+    return JSValue.fromBool(zstring.search.endsWith(data, search, null));
+}
+
+fn stringSlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const data = try requireString(ctx, this_value, "slice");
+    const start: isize = toIntSat(if (arg(args, 0) == .undefined) 0 else try coercion.toNumber(arg(args, 0)));
+    const end: ?isize = if (arg(args, 1) == .undefined) null else toIntSat(try coercion.toNumber(arg(args, 1)));
+    const out = try zstring.transform.slice(allocator, data, start, end);
+    defer allocator.free(out);
+    return interp(ctx).gcNewString(out);
+}
+
+fn stringRepeat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const data = try requireString(ctx, this_value, "repeat");
+    const nf = if (arg(args, 0) == .undefined) 0 else try coercion.toNumber(arg(args, 0));
+    // A negative or infinite count is a RangeError (before any saturation).
+    if (nf < 0 or std.math.isInf(nf)) return interp(ctx).throwError(.range_error, "Invalid count value: {d}", .{nf});
+    const count: isize = toIntSat(nf);
+    const out = try zstring.transform.repeat(allocator, data, count);
+    defer allocator.free(out);
+    return interp(ctx).gcNewString(out);
+}
+
+fn stringSplit(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const data = try requireString(ctx, this_value, "split");
+    if (arg(args, 0) == .regex) return regexSplit(interp(ctx), allocator, data, arg(args, 0));
+    const sep: ?[]const u8 = if (arg(args, 0) == .string) arg(args, 0).string.value.data else null;
+    const parts = try zstring.split.split(allocator, data, sep, null);
+    defer {
+        for (parts) |p| allocator.free(p);
+        allocator.free(parts);
+    }
+    var result = try interp(ctx).gcNewArray();
+    for (parts) |p| {
+        _ = try result.array.value.push(try interp(ctx).gcNewString(p));
+    }
+    return result;
+}
+
+fn stringTrim(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const data = try requireString(ctx, this_value, "trim");
+    const out = try zstring.trimming.trim(allocator, data);
+    defer allocator.free(out);
+    return interp(ctx).gcNewString(out);
+}
+
+// ===== String.prototype (extended coverage) =====
+
+fn stringTrimStart(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const data = try requireString(ctx, this_value, "trimStart");
+    const out = try zstring.trimming.trimStart(allocator, data);
+    defer allocator.free(out);
+    return interp(ctx).gcNewString(out);
+}
+
+fn stringTrimEnd(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const data = try requireString(ctx, this_value, "trimEnd");
+    const out = try zstring.trimming.trimEnd(allocator, data);
+    defer allocator.free(out);
+    return interp(ctx).gcNewString(out);
+}
+
+fn stringCharCodeAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const data = try requireString(ctx, this_value, "charCodeAt");
+    const idx: isize = toIntSat(if (arg(args, 0) == .undefined) 0 else try coercion.toNumber(arg(args, 0)));
+    return if (zstring.access.charCodeAt(data, idx)) |c| JSValue.fromNumber(@floatFromInt(c)) else JSValue.fromNumber(std.math.nan(f64));
+}
+
+fn stringCodePointAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const data = try requireString(ctx, this_value, "codePointAt");
+    const idx: isize = toIntSat(if (arg(args, 0) == .undefined) 0 else try coercion.toNumber(arg(args, 0)));
+    return if (zstring.access.codePointAt(data, idx)) |c| JSValue.fromNumber(@floatFromInt(c)) else JSValue.UNDEFINED;
+}
+
+fn stringAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const data = try requireString(ctx, this_value, "at");
+    const idx: isize = toIntSat(if (arg(args, 0) == .undefined) 0 else try coercion.toNumber(arg(args, 0)));
+    const out = (try zstring.access.at(allocator, data, idx)) orelse return JSValue.UNDEFINED;
+    defer allocator.free(out);
+    return interp(ctx).gcNewString(out);
+}
+
+fn stringPadStart(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const data = try requireString(ctx, this_value, "padStart");
+    const target: isize = toIntSat(try coercion.toNumber(arg(args, 0)));
+    const pad: ?[]const u8 = if (arg(args, 1) == .string) arg(args, 1).string.value.data else null;
+    const out = try zstring.padding.padStart(allocator, data, target, pad);
+    defer allocator.free(out);
+    return interp(ctx).gcNewString(out);
+}
+
+fn stringPadEnd(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const data = try requireString(ctx, this_value, "padEnd");
+    const target: isize = toIntSat(try coercion.toNumber(arg(args, 0)));
+    const pad: ?[]const u8 = if (arg(args, 1) == .string) arg(args, 1).string.value.data else null;
+    const out = try zstring.padding.padEnd(allocator, data, target, pad);
+    defer allocator.free(out);
+    return interp(ctx).gcNewString(out);
+}
+
+fn stringSubstring(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const data = try requireString(ctx, this_value, "substring");
+    const start: isize = toIntSat(if (arg(args, 0) == .undefined) 0 else try coercion.toNumber(arg(args, 0)));
+    const end: ?isize = if (arg(args, 1) == .undefined) null else toIntSat(try coercion.toNumber(arg(args, 1)));
+    const out = try zstring.transform.substring(allocator, data, start, end);
+    defer allocator.free(out);
+    return interp(ctx).gcNewString(out);
+}
+
+/// Legacy substr(start, length) -- start can be negative (from end).
+fn stringSubstr(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const data = try requireString(ctx, this_value, "substr");
+    const total: isize = @intCast(zstring.utf16.lengthUtf16(data));
+    var start: isize = toIntSat(if (arg(args, 0) == .undefined) 0 else try coercion.toNumber(arg(args, 0)));
+    if (start < 0) start = @max(total + start, 0);
+    const length: isize = if (arg(args, 1) == .undefined) total else toIntSat(try coercion.toNumber(arg(args, 1)));
+    const end = @min(start + @max(length, 0), total);
+    const out = try zstring.transform.substring(allocator, data, start, end);
+    defer allocator.free(out);
+    return interp(ctx).gcNewString(out);
+}
+
+fn stringLastIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const data = try requireString(ctx, this_value, "lastIndexOf");
+    if (arg(args, 0) != .string) return JSValue.fromNumber(-1);
+    return JSValue.fromNumber(@floatFromInt(zstring.search.lastIndexOf(data, arg(args, 0).string.value.data, null)));
+}
+
+fn stringConcat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const data = try requireString(ctx, this_value, "concat");
+    var pieces: std.ArrayList([]const u8) = .empty;
+    defer pieces.deinit(allocator);
+    var owned: std.ArrayList([]u8) = .empty;
+    defer {
+        for (owned.items) |o| allocator.free(o);
+        owned.deinit(allocator);
+    }
+    for (args) |a| {
+        if (a == .string) {
+            try pieces.append(allocator, a.string.value.data);
+        } else {
+            const s = try coercion.toDisplayString(allocator, a);
+            try owned.append(allocator, s);
+            try pieces.append(allocator, s);
+        }
+    }
+    const out = try zstring.transform.concat(allocator, data, pieces.items);
+    defer allocator.free(out);
+    return interp(ctx).gcNewString(out);
+}
+
+/// replace/replaceAll -- string OR regex patterns; string OR function
+/// replacements ($-substitution via z-regex for the string case).
+fn stringReplaceImpl(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue, all: bool) anyerror!JSValue {
+    const data = try requireString(ctx, this_value, if (all) "replaceAll" else "replace");
+    const self = interp(ctx);
+    if (arg(args, 0) == .regex) return regexReplace(self, allocator, data, arg(args, 0), arg(args, 1), all);
+    if (arg(args, 0) != .string) return self.throwError(.type_error, "string replace with a non-string pattern is not supported", .{});
+    const pattern = arg(args, 0).string.value.data;
+    // The replacement: a string, or a function called (match, offset, whole).
+    const repl_fn = arg(args, 1);
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var i: usize = 0;
+    var replaced = false;
+    while (i < data.len) {
+        if ((!replaced or all) and pattern.len > 0 and i + pattern.len <= data.len and std.mem.eql(u8, data[i .. i + pattern.len], pattern)) {
+            if (repl_fn == .function) {
+                const r = try repl_fn.function.value.call(repl_fn.function.value.ctx, allocator, JSValue.UNDEFINED, &.{
+                    arg(args, 0), JSValue.fromNumber(@floatFromInt(i)), this_value,
+                });
+                const rs = try coercion.toDisplayString(allocator, r);
+                defer allocator.free(rs);
+                try buf.appendSlice(allocator, rs);
+            } else if (repl_fn == .string) {
+                try buf.appendSlice(allocator, repl_fn.string.value.data);
+            }
+            i += pattern.len;
+            replaced = true;
+            continue;
+        }
+        try buf.append(allocator, data[i]);
+        i += 1;
+    }
+    return interp(ctx).gcNewString(buf.items);
+}
+
+fn stringReplace(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    return stringReplaceImpl(ctx, allocator, this_value, args, false);
+}
+
+fn stringReplaceAll(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    return stringReplaceImpl(ctx, allocator, this_value, args, true);
+}
+
+fn stringLocaleCompare(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const data = try requireString(ctx, this_value, "localeCompare");
+    const other: []const u8 = if (arg(args, 0) == .string) arg(args, 0).string.value.data else "";
+    return JSValue.fromNumber(switch (std.mem.order(u8, data, other)) {
+        .lt => -1,
+        .eq => 0,
+        .gt => 1,
+    });
+}
+
+fn stringToStringMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = args;
+    const data = try requireString(ctx, this_value, "toString");
+    return interp(ctx).gcNewString(data);
+}
+
+// ===== String methods with RegExp patterns =====
+
+/// str.match(re): non-global -> a match array (or null); global -> an
+/// array of all whole-match strings (or null).
+fn stringMatch(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const data = try requireString(ctx, this_value, "match");
+    const self = interp(ctx);
+    const re = try coerceToRegex(self, allocator, arg(args, 0));
+    const st = self.regexState(re);
+    if (!st.global) {
+        const hit = try regexFindFrom(re, data, 0);
+        if (hit) |h| {
+            defer h.match.deinit();
+            return makeMatchArray(self, allocator, h);
+        }
+        return JSValue.NULL;
+    }
+    var all = try re.regex.value.findAll(data);
+    defer {
+        for (all.items) |*mm| mm.deinit();
+        all.deinit(allocator);
+    }
+    if (all.items.len == 0) return JSValue.NULL;
+    var result = try interp(ctx).gcNewArray();
+    for (all.items) |match| _ = try result.array.value.push(try interp(ctx).gcNewString(match.group(data)));
+    return result;
+}
+
+/// str.matchAll(re): an iterator of match arrays.
+fn stringMatchAll(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const data = try requireString(ctx, this_value, "matchAll");
+    const self = interp(ctx);
+    const re = try coerceToRegex(self, allocator, arg(args, 0));
+    var all = try re.regex.value.findAll(data);
+    defer {
+        for (all.items) |*mm| mm.deinit();
+        all.deinit(allocator);
+    }
+    var arr = try interp(ctx).gcNewArray();
+    for (all.items) |match| {
+        _ = try arr.array.value.push(try makeMatchArray(self, allocator, .{ .match = match, .sub = data, .base = 0, .full = data, .group_count = re.regex.value.compiled.group_count }));
+    }
+    return makeArrayIterator(self, allocator, arr, .values);
+}
+
+fn stringSearch(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const data = try requireString(ctx, this_value, "search");
+    const self = interp(ctx);
+    const re = try coerceToRegex(self, allocator, arg(args, 0));
+    const m = try re.regex.value.find(data);
+    if (m) |match| {
+        defer match.deinit();
+        return JSValue.fromNumber(@floatFromInt(match.start));
+    }
+    return JSValue.fromNumber(-1);
+}
+
+/// Coerce a match/replace/search/split argument to a `.regex` (a plain
+/// string becomes a source-literal regex, real JS behavior).
+fn coerceToRegex(self: *Interpreter, allocator: Allocator, v: JSValue) anyerror!JSValue {
+    if (v == .regex) return v;
+    const has_src = v != .undefined;
+    const source = if (has_src) try coercion.toDisplayString(allocator, v) else "";
+    defer if (has_src) allocator.free(source);
+    return self.makeRegex(source, "");
+}
+
+/// String.prototype.replace/replaceAll with a regex pattern. Delegates
+/// string replacements to z-regex (JS `$` substitution included);
+/// function replacements loop the matches.
+fn regexReplace(self: *Interpreter, allocator: Allocator, data: []const u8, re: JSValue, repl: JSValue, all_flag: bool) anyerror!JSValue {
+    const st = self.regexState(re);
+    const replace_all = st.global or all_flag;
+    if (repl != .function) {
+        const has_repl = repl != .undefined;
+        const rs = if (has_repl) try coercion.toDisplayString(allocator, repl) else "undefined";
+        defer if (has_repl) allocator.free(rs);
+        const out = if (replace_all)
+            try re.regex.value.replaceAll(allocator, data, rs)
+        else
+            try re.regex.value.replace(allocator, data, rs);
+        defer allocator.free(out);
+        return self.gcNewString(out);
+    }
+    // Function replacement: build the result splicing each match's
+    // fn(match, ...captures, offset, input) result.
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var pos: usize = 0;
+    while (pos <= data.len) {
+        const m = try re.regex.value.findAt(data, pos);
+        const match = m orelse break;
+        defer match.deinit();
+        try buf.appendSlice(allocator, data[pos..match.start]);
+        // callback args: (match, cap1, cap2, ..., offset, input)
+        var call_args: std.ArrayList(JSValue) = .empty;
+        defer {
+            for (call_args.items) |a| a.deinit();
+            call_args.deinit(allocator);
+        }
+        try call_args.append(allocator, try self.gcNewString(match.group(data)));
+        var i: usize = 1;
+        while (i <= re.regex.value.compiled.group_count) : (i += 1) {
+            const cap = if (match.getCapture(i, data)) |c| try self.gcNewString(c) else JSValue.UNDEFINED;
+            try call_args.append(allocator, cap);
+        }
+        try call_args.append(allocator, JSValue.fromNumber(@floatFromInt(match.start)));
+        try call_args.append(allocator, try self.gcNewString(data));
+        const r = try repl.function.value.call(repl.function.value.ctx, allocator, JSValue.UNDEFINED, call_args.items);
+        defer r.deinit();
+        const rs = try coercion.toDisplayString(allocator, r);
+        defer allocator.free(rs);
+        try buf.appendSlice(allocator, rs);
+        // advance past the match (empty match -> step one to avoid a loop)
+        pos = if (match.end > match.start) match.end else match.end + 1;
+        if (!replace_all) {
+            try buf.appendSlice(allocator, data[match.end..]);
+            return self.gcNewString(buf.items);
+        }
+    }
+    if (pos < data.len) try buf.appendSlice(allocator, data[pos..]);
+    return self.gcNewString(buf.items);
+}
+
+// ===== String statics (fromCharCode/fromCodePoint) =====
+
+fn stringFromCharCode(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    for (args) |a| {
+        // ToUint16: wrap into [0, 65536) (NaN/Infinity -> 0), never panicking.
+        const num = try coercion.toNumber(a);
+        const wrapped: f64 = if (std.math.isFinite(num)) @mod(@trunc(num), 65536.0) else 0;
+        const code: u21 = @intFromFloat(wrapped);
+        var tmp: [4]u8 = undefined;
+        const n = std.unicode.utf8Encode(code, &tmp) catch continue;
+        try buf.appendSlice(allocator, tmp[0..n]);
+    }
+    return interp(ctx).gcNewString(buf.items);
+}
+
+fn stringFromCodePoint(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    for (args) |a| {
+        // Each argument must be an integer code point in [0, 0x10FFFF].
+        const num = try coercion.toNumber(a);
+        if (!std.math.isFinite(num) or num != @trunc(num) or num < 0 or num > 0x10FFFF)
+            return interp(ctx).throwError(.range_error, "Invalid code point {d}", .{num});
+        const cp: u21 = @intFromFloat(num);
+        var tmp: [4]u8 = undefined;
+        const n = std.unicode.utf8Encode(cp, &tmp) catch continue;
+        try buf.appendSlice(allocator, tmp[0..n]);
+    }
+    return interp(ctx).gcNewString(buf.items);
+}
+
+// ===== String constructor callable (String(x) / new String(x)) =====
+
+fn globalString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self = interp(ctx);
+    // String(symbol) is the one explicit coercion the spec allows --
+    // "Symbol(desc)" -- unlike implicit `sym + ''` which throws.
+    if (arg(args, 0) == .symbol) {
+        const s = try arg(args, 0).symbol.value.toString(allocator);
+        defer allocator.free(s);
+        return self.boxPrimitiveIfConstructed(ctx, this_value, try self.gcNewString(s));
+    }
+    // String(regex) is regex.toString() -- /source/flags (with flags).
+    if (arg(args, 0) == .regex) {
+        const st = self.regexState(arg(args, 0));
+        const s = try std.fmt.allocPrint(allocator, "/{s}/{s}", .{ st.source, st.flags });
+        defer allocator.free(s);
+        return self.boxPrimitiveIfConstructed(ctx, this_value, try self.gcNewString(s));
+    }
+    const s = try coercion.toDisplayString(allocator, arg(args, 0));
+    defer allocator.free(s);
+    return self.boxPrimitiveIfConstructed(ctx, this_value, try self.gcNewString(s));
+}
+
+/// Installs the `String` constructor + statics.
+pub fn install(self: *Interpreter) !void {
+    // String/Number/Boolean: callable = coercion (as before);
+    // constructable = evalNew keeps the hollow instance (typeof "object",
+    // no [[PrimitiveValue]] -- documented narrowing). Statics via bags.
+    _ = try installBuiltin(self, .{ .name = "String", .ctor = .{ .arity = 1, .call = globalString, .constructable = true }, .statics = &.{
+        .{ .name = "fromCharCode", .value = .{ .method = stringFromCharCode } },
+        .{ .name = "fromCodePoint", .value = .{ .method = stringFromCodePoint } },
+    } });
+}
