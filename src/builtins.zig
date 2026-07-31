@@ -30,16 +30,17 @@ const temporal_builtins = @import("temporal_builtins.zig");
 const Interpreter = interpreter_mod.Interpreter;
 const coercion = @import("coercion.zig");
 const inspect = @import("inspect.zig");
+const native_helpers = @import("native_helpers.zig");
 
-pub const NativeFn = *const fn (ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue;
-
-fn interp(ctx: *anyopaque) *Interpreter {
-    return @ptrCast(@alignCast(ctx));
-}
-
-fn arg(args: []const JSValue, i: usize) JSValue {
-    return if (i < args.len) args[i] else JSValue.UNDEFINED;
-}
+// z-interpreter-refactor.md, Step 2: interp/arg/native/NativeFn now live in
+// native_helpers.zig (a leaf module, no dependency on this file), shared
+// with temporal_builtins.zig instead of each independently redefining
+// them. Local aliases keep every existing call site in this file
+// unchanged.
+pub const NativeFn = native_helpers.NativeFn;
+const interp = native_helpers.interp;
+const arg = native_helpers.arg;
+const native = native_helpers.native;
 
 /// The reserved symbol-key encoding (`\x00S<ptr>`) -- invisible to
 /// string-keyed reflection (keys/values/entries/getOwnPropertyNames).
@@ -613,14 +614,6 @@ pub fn setupGlobals(self: *Interpreter) !void {
     // `globalThis` global binding.
     self.global_object = global_this.retain();
     try g.define(arena, "globalThis", global_this);
-}
-
-fn native(self: *Interpreter, name: []const u8, call_fn: NativeFn) !JSValue {
-    return self.gcNewFunction(.{
-        .ctx = self,
-        .name = name,
-        .call = call_fn,
-    });
 }
 
 /// Define a builtin method/namespace property: NON-enumerable, writable,

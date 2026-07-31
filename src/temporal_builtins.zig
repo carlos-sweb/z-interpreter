@@ -22,6 +22,7 @@ const ztemporal = @import("ztemporal");
 const JSValue = zvalue.JSValue;
 const TemporalValue = zvalue.TemporalValue;
 const Interpreter = @import("interpreter.zig").Interpreter;
+const native_helpers = @import("native_helpers.zig");
 
 const Overflow = ztemporal.Overflow;
 const Unit = ztemporal.Unit;
@@ -29,23 +30,13 @@ const RoundingMode = ztemporal.RoundingMode;
 const RoundingOptions = ztemporal.RoundingOptions;
 const RoundOptions = ztemporal.RoundOptions;
 
-// ===== Shared native-function plumbing (mirrors builtins.zig's own,
-// duplicated locally since those helpers are file-private there -- same
-// pattern z-run's crypto_globals.zig/yaml_globals.zig already use). =====
-
-const NativeFn = *const fn (ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue;
-
-fn interp(ctx: *anyopaque) *Interpreter {
-    return @ptrCast(@alignCast(ctx));
-}
-
-fn arg(args: []const JSValue, i: usize) JSValue {
-    return if (i < args.len) args[i] else JSValue.UNDEFINED;
-}
-
-fn native(self: *Interpreter, name: []const u8, call_fn: NativeFn) !JSValue {
-    return self.gcNewFunction(.{ .ctx = self, .name = name, .call = call_fn });
-}
+// z-interpreter-refactor.md, Step 2: interp/arg/native/NativeFn used to be
+// duplicated here byte-identical to builtins.zig's own copies -- now both
+// files share native_helpers.zig instead.
+const NativeFn = native_helpers.NativeFn;
+const interp = native_helpers.interp;
+const arg = native_helpers.arg;
+const native = native_helpers.native;
 
 fn dneMethod(obj: JSValue, name: []const u8, value: JSValue) !void {
     var v = value;

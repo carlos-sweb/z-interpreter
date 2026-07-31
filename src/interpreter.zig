@@ -14,6 +14,7 @@ pub const Completion = completion_mod.Completion;
 const coercion = @import("coercion.zig");
 const inspect = @import("inspect.zig");
 const builtins = @import("builtins.zig");
+const native_helpers = @import("native_helpers.zig");
 const fiber_mod = @import("fiber.zig");
 const zregex = @import("zregex");
 const zarray = @import("zarray");
@@ -635,6 +636,37 @@ const GcNode = union(enum) {
 /// that have no other teardown path at all).
 const GcRegistry = std.AutoHashMapUnmanaged(usize, GcNode);
 
+/// The box address of a heap-boxed JSValue, or null for the 4 inline/leaf
+/// variants (undefined/null/boolean/number) that never enter the GC
+/// registry at all. Shared by `Marker.value`/`Sweeper.value`, which
+/// otherwise independently re-enumerated the exact same 17-variant list
+/// (z-interpreter-refactor.md, Step 1b) -- `gcTrack` keeps its own
+/// separate switch (Step 1c uses this one as a gate on that one, rather
+/// than merging them, since gcTrack needs a typed `GcNode`, not just an
+/// address).
+fn heapBoxAddress(v: JSValue) ?usize {
+    return switch (v) {
+        .undefined, .null, .boolean, .number => null,
+        .array => |box| @intFromPtr(box),
+        .object => |box| @intFromPtr(box),
+        .regex => |box| @intFromPtr(box),
+        .map => |box| @intFromPtr(box),
+        .set => |box| @intFromPtr(box),
+        .@"error" => |box| @intFromPtr(box),
+        .function => |box| @intFromPtr(box),
+        .promise => |box| @intFromPtr(box),
+        .symbol => |box| @intFromPtr(box),
+        .string => |box| @intFromPtr(box),
+        .date => |box| @intFromPtr(box),
+        .bigint => |box| @intFromPtr(box),
+        .proxy => |box| @intFromPtr(box),
+        .array_buffer => |box| @intFromPtr(box),
+        .data_view => |box| @intFromPtr(box),
+        .typed_array => |box| @intFromPtr(box),
+        .temporal => |box| @intFromPtr(box),
+    };
+}
+
 /// The concrete mark-phase visitor (satisfies the `visitor: anytype`
 /// contract every `traceChildren` expects: `.value(JSValue)` and
 /// `.environment(*Environment)`). `reached` records every address
@@ -646,26 +678,7 @@ const Marker = struct {
     reached: std.AutoHashMapUnmanaged(usize, void) = .empty,
 
     pub fn value(self: *Marker, v: JSValue) void {
-        const addr: usize = switch (v) {
-            .@"undefined", .@"null", .boolean, .number => return,
-            .array => |box| @intFromPtr(box),
-            .object => |box| @intFromPtr(box),
-            .regex => |box| @intFromPtr(box),
-            .map => |box| @intFromPtr(box),
-            .set => |box| @intFromPtr(box),
-            .@"error" => |box| @intFromPtr(box),
-            .function => |box| @intFromPtr(box),
-            .promise => |box| @intFromPtr(box),
-            .symbol => |box| @intFromPtr(box),
-            .string => |box| @intFromPtr(box),
-            .date => |box| @intFromPtr(box),
-            .bigint => |box| @intFromPtr(box),
-            .proxy => |box| @intFromPtr(box),
-            .array_buffer => |box| @intFromPtr(box),
-            .data_view => |box| @intFromPtr(box),
-            .typed_array => |box| @intFromPtr(box),
-            .temporal => |box| @intFromPtr(box),
-        };
+        const addr = heapBoxAddress(v) orelse return;
         const gop = self.reached.getOrPut(self.interp.gc_allocator, addr) catch return;
         if (gop.found_existing) return;
         self.interp.traceValueChildren(v, self);
@@ -705,26 +718,7 @@ const Sweeper = struct {
     garbage: *const std.AutoHashMapUnmanaged(usize, void),
 
     pub fn value(self: *Sweeper, v: JSValue) void {
-        const addr: usize = switch (v) {
-            .@"undefined", .@"null", .boolean, .number => return,
-            .string => |box| @intFromPtr(box),
-            .regex => |box| @intFromPtr(box),
-            .symbol => |box| @intFromPtr(box),
-            .date => |box| @intFromPtr(box),
-            .bigint => |box| @intFromPtr(box),
-            .array => |box| @intFromPtr(box),
-            .object => |box| @intFromPtr(box),
-            .map => |box| @intFromPtr(box),
-            .set => |box| @intFromPtr(box),
-            .@"error" => |box| @intFromPtr(box),
-            .function => |box| @intFromPtr(box),
-            .promise => |box| @intFromPtr(box),
-            .proxy => |box| @intFromPtr(box),
-            .array_buffer => |box| @intFromPtr(box),
-            .data_view => |box| @intFromPtr(box),
-            .typed_array => |box| @intFromPtr(box),
-            .temporal => |box| @intFromPtr(box),
-        };
+        const addr = heapBoxAddress(v) orelse return;
         if (self.garbage.contains(addr)) return;
         v.deinit();
     }
@@ -992,7 +986,19 @@ pub const Interpreter = struct {
             .data_view => |box| .{ .data_view = box },
             .typed_array => |box| .{ .typed_array = box },
             .temporal => |box| .{ .temporal = box },
-            else => return,
+            else => {
+                // heapBoxAddress is the source of truth for "does this
+                // variant need tracking at all" -- if it says yes but the
+                // switch above (which independently lists every boxed
+                // variant, since it builds a *typed* GcNode heapBoxAddress
+                // can't construct) has no case for it, that's exactly the
+                // silent-miss bug class that let `.temporal` leak
+                // permanently before this was caught (z-interpreter-refactor.md,
+                // Step 1c). Fail loud immediately instead of silently
+                // dropping the value from the GC registry.
+                if (heapBoxAddress(v) != null) unreachable;
+                return;
+            },
         };
         v.setGcHook(self, gcOnBoxDestroyed);
         try self.gc_registry.put(self.gc_allocator, node.address(), node);
@@ -1193,6 +1199,23 @@ pub const Interpreter = struct {
     /// (or anything else untracked) just miss the lookup and stop there.
     fn traceValueChildren(self: *Interpreter, v: JSValue, visitor: anytype) void {
         switch (v) {
+            // "No children" here is a DIFFERENT axis than heapBoxAddress's
+            // leaf/boxed split (Step 1b/1c) -- don't expect the two lists to
+            // match. heapBoxAddress asks "does this variant live in the GC
+            // registry at all" (4 inline variants: no); this switch asks
+            // "does this variant hold any JSValue to recurse into" (11
+            // variants: no) -- string/regex/symbol/date/bigint/array_buffer/
+            // temporal ARE heap-boxed and DO need registry tracking, they
+            // just have no JSValue children to trace. This switch has no
+            // `else`, so Zig already forces a case for any newly-added
+            // JSValue variant (unlike gcTrack's old bug) -- the audit here
+            // (z-interpreter-refactor.md, Step 1d) is confirming *this*
+            // leaf group is genuinely correct, not just present: every
+            // sibling library backing these 7 types (z-string/z-regex/
+            // z-symbol/z-date/z-bigint/z-buffer/z-temporal) has zero
+            // dependency on z-value, so none of them can hold a JSValue even
+            // in principle -- verified via each one's build.zig.zon, not
+            // assumed.
             .@"undefined", .@"null", .boolean, .number, .string, .regex, .symbol, .date, .bigint, .array_buffer, .temporal => {},
             .array => |box| for (box.value.toSliceMut()) |*child| visitor.value(child.*),
             .object => |box| for (box.value.properties.values()) |prop| {
@@ -3739,7 +3762,7 @@ pub const Interpreter = struct {
 
     /// A shared native-method JSValue for a (type, name) pair, cached so
     /// `a.push === b.push` holds like real JS prototype methods.
-    pub fn nativeMethod(self: *Interpreter, comptime type_prefix: []const u8, name: []const u8, call_fn: builtins.NativeFn) anyerror!JSValue {
+    pub fn nativeMethod(self: *Interpreter, comptime type_prefix: []const u8, name: []const u8, call_fn: native_helpers.NativeFn) anyerror!JSValue {
         const arena = self.gc_allocator;
         const cache_key = try std.fmt.allocPrint(arena, type_prefix ++ ".{s}", .{name});
         // Ownership: method_cache holds its OWN retained reference,
@@ -4375,7 +4398,7 @@ pub const Interpreter = struct {
     /// (writable, NON-enumerable, configurable), plus a non-enumerable
     /// `constructor` back-reference. The functions come from `nativeMethod`,
     /// which caches by identity so `[].push === Array.prototype.push` holds.
-    fn installProto(self: *Interpreter, proto: JSValue, comptime type_prefix: []const u8, methods: std.StaticStringMap(builtins.NativeFn), ctor: JSValue) !void {
+    fn installProto(self: *Interpreter, proto: JSValue, comptime type_prefix: []const u8, methods: std.StaticStringMap(native_helpers.NativeFn), ctor: JSValue) !void {
         const attrs = zvalue.PropertyDescriptor{ .writable = true, .enumerable = false, .configurable = true };
         for (methods.keys()) |k| {
             const f = try self.nativeMethod(type_prefix, k, methods.get(k).?);
@@ -4391,7 +4414,7 @@ pub const Interpreter = struct {
     /// `%TypedArray%.prototype`/values). Reuses `nativeMethod`'s cache
     /// (the same (type_prefix, name) key `installProto` used for the
     /// string-named method), so this returns the identical JSValue.
-    fn aliasSymbolIterator(self: *Interpreter, proto: JSValue, comptime type_prefix: []const u8, methods: std.StaticStringMap(builtins.NativeFn), method_name: []const u8) !void {
+    fn aliasSymbolIterator(self: *Interpreter, proto: JSValue, comptime type_prefix: []const u8, methods: std.StaticStringMap(native_helpers.NativeFn), method_name: []const u8) !void {
         const sym = self.symbol_iterator orelse return;
         const key = try self.encodeKey(sym);
         defer self.gc_allocator.free(key);

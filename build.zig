@@ -133,6 +133,7 @@ pub fn build(b: *std.Build) void {
         "tests/typed_array_test.zig",
         "tests/typed_array_methods_test.zig",
         "tests/temporal_test.zig",
+        "tests/gc_variant_coverage_test.zig",
     };
 
     inline for (test_files) |test_file| {
