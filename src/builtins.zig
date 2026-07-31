@@ -279,6 +279,83 @@ pub const string_methods = std.StaticStringMap(NativeFn).initComptime(.{
 
 // ===== Globals =====
 
+/// z-interpreter-refactor.md, Step 4: `setupGlobals` calls `gcNewFunction`
+/// ~30 times, each usually followed by the same ceremony --
+/// `functionStatics` + a loop of `dneMethod`/`dneConst`, then `g.define`.
+/// `BuiltinSpec`/`installBuiltin` below turn that ceremony into data for
+/// the shapes that are genuinely uniform across types:
+///   - a statics-only namespace object with no constructor at all
+///     (console/Math/JSON/Reflect: `ctor = null`)
+///   - a constructor with no statics (Function/ArrayBuffer/Proxy/...)
+///   - a constructor with a flat list of static methods/constants
+///     (Array/Promise/String/Number/BigInt/Symbol's `for`/`keyFor`)
+///
+/// Phase A finding (validated against the hardest real cases before
+/// writing this, not guessed): forcing EVERY setupGlobals entry through
+/// one schema would be the wrong kind of generic. Left hand-written,
+/// deliberately, because they don't fit this shape without distorting
+/// it:
+///   - **TypedArray** (11 constructors): each needs its own freshly
+///     allocated `ctx` (a `{interp, kind, name}` struct), not the shared
+///     `self` every other constructor uses -- `BuiltinSpec` has no slot
+///     for a per-entry ctx factory, and adding one just for this single
+///     caller wouldn't be a net simplification.
+///   - **Error family** (7 constructors): `call` is itself a function
+///     *generator* (`errorConstructor(kind)`), not a plain `NativeFn` --
+///     already about as declarative as it needs to be via its own small
+///     inline-for tuple list.
+///   - **Object**: its constructor and prototype must exist BEFORE
+///     anything else in `setupGlobals` runs (every other ordinary object
+///     chains to `Object.prototype`) -- a real ordering dependency, not
+///     ceremony.
+///   - **Symbol**: installing its well-known-symbol statics has a real
+///     side effect on two `Interpreter` fields (`symbol_iterator`/
+///     `symbol_async_iterator`), which a generic static-value entry
+///     can't express without adding an escape hatch just for one caller.
+///   - **eval**: not a constructor at all (a plain global function via
+///     `native()`), with its own `self.eval_fn` retain -- outside this
+///     schema's scope entirely.
+const BuiltinSpec = struct {
+    name: []const u8,
+    /// `null` = a statics-only namespace object (no constructor function
+    /// at all) -- the statics list below installs directly onto it.
+    ctor: ?struct {
+        arity: usize = 0,
+        call: NativeFn,
+        constructable: bool = false,
+    } = null,
+    statics: []const StaticEntry = &.{},
+
+    const StaticEntry = struct {
+        name: []const u8,
+        value: union(enum) { method: NativeFn, constant: JSValue },
+    };
+};
+
+/// Builds `spec.name` (a namespace object or a constructor function, per
+/// `spec.ctor`), installs every static, and defines it as a global.
+/// Returns the value in case a caller needs it for something beyond this
+/// (e.g. capturing a constructor to read its `.prototype` back later) --
+/// most callers just `try installBuiltin(self, ...)` and discard it.
+fn installBuiltin(self: *Interpreter, comptime spec: BuiltinSpec) !JSValue {
+    const value: JSValue = if (spec.ctor) |c|
+        try self.gcNewFunction(.{ .ctx = self, .name = spec.name, .arity = c.arity, .call = c.call, .constructable = c.constructable })
+    else
+        try self.ordinaryObject();
+
+    if (spec.statics.len > 0) {
+        const bag = if (spec.ctor != null) try self.functionStatics(value) else value;
+        inline for (spec.statics) |s| {
+            switch (s.value) {
+                .method => |fptr| try dneMethod(bag, s.name, try native(self, s.name, fptr)),
+                .constant => |v| try dneConst(bag, s.name, v),
+            }
+        }
+    }
+    try self.global_env.define(self.gc_allocator, spec.name, value);
+    return value;
+}
+
 /// Installs every global binding. Called lazily from `run()` (never from
 /// init) so `self: *Interpreter` is a stable address for native ctx.
 pub fn setupGlobals(self: *Interpreter) !void {
@@ -324,128 +401,86 @@ pub fn setupGlobals(self: *Interpreter) !void {
     self.protos.object = try self.functionPrototype(object_ctor);
     try g.define(arena, "Object", object_ctor);
 
-    const console_obj = try self.ordinaryObject();
     // Real Node: log/info/debug -> stdout, error/warn -> stderr (verified
     // against actual Node, not assumed) -- same rendering either way,
     // only the destination writer differs. See consoleLog/consoleError.
-    try dneMethod(console_obj, "log", try native(self, "log", consoleLog));
-    try dneMethod(console_obj, "info", try native(self, "info", consoleLog));
-    try dneMethod(console_obj, "debug", try native(self, "debug", consoleLog));
-    try dneMethod(console_obj, "error", try native(self, "error", consoleError));
-    try dneMethod(console_obj, "warn", try native(self, "warn", consoleError));
-    try g.define(arena, "console", console_obj);
+    _ = try installBuiltin(self, .{ .name = "console", .statics = &.{
+        .{ .name = "log", .value = .{ .method = consoleLog } },
+        .{ .name = "info", .value = .{ .method = consoleLog } },
+        .{ .name = "debug", .value = .{ .method = consoleLog } },
+        .{ .name = "error", .value = .{ .method = consoleError } },
+        .{ .name = "warn", .value = .{ .method = consoleError } },
+    } });
     try g.define(arena, "print", try native(self, "print", globalPrint));
 
-    const math_obj = try self.ordinaryObject();
-    try dneConst(math_obj, "PI", JSValue.fromNumber(zmath.PI));
-    try dneConst(math_obj, "E", JSValue.fromNumber(zmath.E));
-    try dneMethod(math_obj, "floor", try native(self, "floor", mathFloor));
-    try dneMethod(math_obj, "ceil", try native(self, "ceil", mathCeil));
-    try dneMethod(math_obj, "round", try native(self, "round", mathRound));
-    try dneMethod(math_obj, "trunc", try native(self, "trunc", mathTrunc));
-    try dneMethod(math_obj, "abs", try native(self, "abs", mathAbs));
-    try dneMethod(math_obj, "sign", try native(self, "sign", mathSign));
-    try dneMethod(math_obj, "sqrt", try native(self, "sqrt", mathSqrt));
-    try dneMethod(math_obj, "pow", try native(self, "pow", mathPow));
-    try dneMethod(math_obj, "min", try native(self, "min", mathMin));
-    try dneMethod(math_obj, "max", try native(self, "max", mathMax));
-    try dneMethod(math_obj, "random", try native(self, "random", mathRandom));
-    try g.define(arena, "Math", math_obj);
+    _ = try installBuiltin(self, .{ .name = "Math", .statics = &.{
+        .{ .name = "PI", .value = .{ .constant = JSValue.fromNumber(zmath.PI) } },
+        .{ .name = "E", .value = .{ .constant = JSValue.fromNumber(zmath.E) } },
+        .{ .name = "floor", .value = .{ .method = mathFloor } },
+        .{ .name = "ceil", .value = .{ .method = mathCeil } },
+        .{ .name = "round", .value = .{ .method = mathRound } },
+        .{ .name = "trunc", .value = .{ .method = mathTrunc } },
+        .{ .name = "abs", .value = .{ .method = mathAbs } },
+        .{ .name = "sign", .value = .{ .method = mathSign } },
+        .{ .name = "sqrt", .value = .{ .method = mathSqrt } },
+        .{ .name = "pow", .value = .{ .method = mathPow } },
+        .{ .name = "min", .value = .{ .method = mathMin } },
+        .{ .name = "max", .value = .{ .method = mathMax } },
+        .{ .name = "random", .value = .{ .method = mathRandom } },
+    } });
 
-    const reflect_obj = try self.ordinaryObject();
-    try dneMethod(reflect_obj, "get", try native(self, "get", reflectGet));
-    try dneMethod(reflect_obj, "set", try native(self, "set", reflectSet));
-    try dneMethod(reflect_obj, "has", try native(self, "has", reflectHas));
-    try dneMethod(reflect_obj, "deleteProperty", try native(self, "deleteProperty", reflectDeleteProperty));
-    try dneMethod(reflect_obj, "ownKeys", try native(self, "ownKeys", reflectOwnKeys));
-    try dneMethod(reflect_obj, "getPrototypeOf", try native(self, "getPrototypeOf", reflectGetPrototypeOf));
-    try dneMethod(reflect_obj, "defineProperty", try native(self, "defineProperty", reflectDefineProperty));
-    try dneMethod(reflect_obj, "getOwnPropertyDescriptor", try native(self, "getOwnPropertyDescriptor", reflectGetOwnPropertyDescriptor));
-    try dneMethod(reflect_obj, "apply", try native(self, "apply", reflectApply));
-    try dneMethod(reflect_obj, "construct", try native(self, "construct", reflectConstruct));
-    try g.define(arena, "Reflect", reflect_obj);
+    _ = try installBuiltin(self, .{ .name = "Reflect", .statics = &.{
+        .{ .name = "get", .value = .{ .method = reflectGet } },
+        .{ .name = "set", .value = .{ .method = reflectSet } },
+        .{ .name = "has", .value = .{ .method = reflectHas } },
+        .{ .name = "deleteProperty", .value = .{ .method = reflectDeleteProperty } },
+        .{ .name = "ownKeys", .value = .{ .method = reflectOwnKeys } },
+        .{ .name = "getPrototypeOf", .value = .{ .method = reflectGetPrototypeOf } },
+        .{ .name = "defineProperty", .value = .{ .method = reflectDefineProperty } },
+        .{ .name = "getOwnPropertyDescriptor", .value = .{ .method = reflectGetOwnPropertyDescriptor } },
+        .{ .name = "apply", .value = .{ .method = reflectApply } },
+        .{ .name = "construct", .value = .{ .method = reflectConstruct } },
+    } });
 
-    const json_obj = try self.ordinaryObject();
-    try dneMethod(json_obj, "stringify", try native(self, "stringify", jsonStringify));
-    try dneMethod(json_obj, "parse", try native(self, "parse", jsonParse));
-    try g.define(arena, "JSON", json_obj);
+    _ = try installBuiltin(self, .{ .name = "JSON", .statics = &.{
+        .{ .name = "stringify", .value = .{ .method = jsonStringify } },
+        .{ .name = "parse", .value = .{ .method = jsonParse } },
+    } });
 
     // Array: constructable (new Array(n) / Array(a, b, c)) + statics.
-    const array_ctor = try self.gcNewFunction(.{
-        .ctx = self,
-        .name = "Array",
-        .arity = 1,
-        .call = arrayConstructor,
-        .constructable = true,
-    });
-    const array_statics = try self.functionStatics(array_ctor);
-    try dneMethod(array_statics, "isArray", try native(self, "isArray", arrayIsArray));
-    try dneMethod(array_statics, "of", try native(self, "of", arrayOf));
-    try dneMethod(array_statics, "from", try native(self, "from", arrayFrom));
-    try g.define(arena, "Array", array_ctor);
+    _ = try installBuiltin(self, .{ .name = "Array", .ctor = .{ .arity = 1, .call = arrayConstructor, .constructable = true }, .statics = &.{
+        .{ .name = "isArray", .value = .{ .method = arrayIsArray } },
+        .{ .name = "of", .value = .{ .method = arrayOf } },
+        .{ .name = "from", .value = .{ .method = arrayFrom } },
+    } });
 
     // Function: a constructor that PARSES -- new Function('a', 'return a')
     // composes and compiles a real closure (a bounded eval). Its
     // .prototype carries the cached call/apply/bind for the detached
     // harness pattern.
-    const function_ctor = try self.gcNewFunction(.{
-        .ctx = self,
-        .name = "Function",
-        .arity = 1,
-        .call = functionConstructor,
-        .constructable = true,
-    });
-    try g.define(arena, "Function", function_ctor);
+    _ = try installBuiltin(self, .{ .name = "Function", .ctor = .{ .arity = 1, .call = functionConstructor, .constructable = true } });
 
     // A real constructable native: `new Date(...)` works through evalNew's
     // object-like-return-overrides rule (a .date return replaces the plain
     // instance). Static methods live in its property bag (like Number's).
-    const date_ctor = try self.gcNewFunction(.{
-        .ctx = self,
-        .name = "Date",
-        .call = dateConstructor,
-        .constructable = true,
-    });
-    const date_statics = try self.functionStatics(date_ctor);
-    try dneMethod(date_statics, "now", try native(self, "now", dateNow));
-    try dneMethod(date_statics, "parse", try native(self, "parse", dateParse));
-    try dneMethod(date_statics, "UTC", try native(self, "UTC", dateUTC));
-    try g.define(arena, "Date", date_ctor);
+    _ = try installBuiltin(self, .{ .name = "Date", .ctor = .{ .call = dateConstructor, .constructable = true }, .statics = &.{
+        .{ .name = "now", .value = .{ .method = dateNow } },
+        .{ .name = "parse", .value = .{ .method = dateParse } },
+        .{ .name = "UTC", .value = .{ .method = dateUTC } },
+    } });
 
     try temporal_builtins.install(self);
 
     // `new Proxy(target, handler)` -- unlike Date, MUST reject a bare
     // (non-new) call (proxyConstructor's own construct_target check).
-    const proxy_ctor = try self.gcNewFunction(.{
-        .ctx = self,
-        .name = "Proxy",
-        .arity = 2,
-        .call = proxyConstructor,
-        .constructable = true,
-    });
-    try g.define(arena, "Proxy", proxy_ctor);
+    _ = try installBuiltin(self, .{ .name = "Proxy", .ctor = .{ .arity = 2, .call = proxyConstructor, .constructable = true } });
 
     // `new ArrayBuffer(byteLength)` / `new DataView(buffer, byteOffset,
     // byteLength)` -- both reject a bare (non-new) call, same pattern as
     // Proxy above. TypedArray constructors are a separate, not-yet-
     // started follow-up phase.
-    const array_buffer_ctor = try self.gcNewFunction(.{
-        .ctx = self,
-        .name = "ArrayBuffer",
-        .arity = 1,
-        .call = arrayBufferConstructor,
-        .constructable = true,
-    });
-    try g.define(arena, "ArrayBuffer", array_buffer_ctor);
-
-    const data_view_ctor = try self.gcNewFunction(.{
-        .ctx = self,
-        .name = "DataView",
-        .arity = 1,
-        .call = dataViewConstructor,
-        .constructable = true,
-    });
-    try g.define(arena, "DataView", data_view_ctor);
+    _ = try installBuiltin(self, .{ .name = "ArrayBuffer", .ctor = .{ .arity = 1, .call = arrayBufferConstructor, .constructable = true } });
+    _ = try installBuiltin(self, .{ .name = "DataView", .ctor = .{ .arity = 1, .call = dataViewConstructor, .constructable = true } });
 
     // The 10 JS-visible TypedArray constructors (roadmap item 19, phase
     // 2) -- one shared native, one small per-instance ctx (`interp` +
@@ -504,19 +539,12 @@ pub fn setupGlobals(self: *Interpreter) !void {
 
     // Promise: constructable native; the statics (resolve/reject/all/
     // race) ride the phase-10 property bag.
-    const promise_ctor = try self.gcNewFunction(.{
-        .ctx = self,
-        .name = "Promise",
-        .arity = 1,
-        .call = promiseConstructor,
-        .constructable = true,
-    });
-    const promise_statics = try self.functionStatics(promise_ctor);
-    try dneMethod(promise_statics, "resolve", try native(self, "resolve", promiseResolveStatic));
-    try dneMethod(promise_statics, "reject", try native(self, "reject", promiseRejectStatic));
-    try dneMethod(promise_statics, "all", try native(self, "all", promiseAll));
-    try dneMethod(promise_statics, "race", try native(self, "race", promiseRace));
-    try g.define(arena, "Promise", promise_ctor);
+    _ = try installBuiltin(self, .{ .name = "Promise", .ctor = .{ .arity = 1, .call = promiseConstructor, .constructable = true }, .statics = &.{
+        .{ .name = "resolve", .value = .{ .method = promiseResolveStatic } },
+        .{ .name = "reject", .value = .{ .method = promiseRejectStatic } },
+        .{ .name = "all", .value = .{ .method = promiseAll } },
+        .{ .name = "race", .value = .{ .method = promiseRace } },
+    } });
 
     // Symbol: callable but NOT constructable (`new Symbol()` throws).
     // The well-known symbols and the for()/keyFor() registry are JSValue
@@ -541,9 +569,9 @@ pub fn setupGlobals(self: *Interpreter) !void {
 
     // Map / Set: constructable natives (require `new`); the .map/.set
     // return is preserved by evalNew's object-like-override rule.
-    try g.define(arena, "RegExp", try self.gcNewFunction(.{ .ctx = self, .name = "RegExp", .arity = 2, .call = regexpConstructor, .constructable = true }));
-    try g.define(arena, "Map", try self.gcNewFunction(.{ .ctx = self, .name = "Map", .arity = 0, .call = mapConstructor, .constructable = true }));
-    try g.define(arena, "Set", try self.gcNewFunction(.{ .ctx = self, .name = "Set", .arity = 0, .call = setConstructor, .constructable = true }));
+    _ = try installBuiltin(self, .{ .name = "RegExp", .ctor = .{ .arity = 2, .call = regexpConstructor, .constructable = true } });
+    _ = try installBuiltin(self, .{ .name = "Map", .ctor = .{ .call = mapConstructor, .constructable = true } });
+    _ = try installBuiltin(self, .{ .name = "Set", .ctor = .{ .call = setConstructor, .constructable = true } });
 
     try g.define(arena, "setTimeout", try native(self, "setTimeout", globalSetTimeout));
     try g.define(arena, "clearTimeout", try native(self, "clearTimeout", globalClearTimeout));
@@ -563,42 +591,38 @@ pub fn setupGlobals(self: *Interpreter) !void {
     // String/Number/Boolean: callable = coercion (as before);
     // constructable = evalNew keeps the hollow instance (typeof "object",
     // no [[PrimitiveValue]] -- documented narrowing). Statics via bags.
-    const string_ctor = try self.gcNewFunction(.{ .ctx = self, .name = "String", .arity = 1, .call = globalString, .constructable = true });
-    const string_statics = try self.functionStatics(string_ctor);
-    try dneMethod(string_statics, "fromCharCode", try native(self, "fromCharCode", stringFromCharCode));
-    try dneMethod(string_statics, "fromCodePoint", try native(self, "fromCodePoint", stringFromCodePoint));
-    try g.define(arena, "String", string_ctor);
+    _ = try installBuiltin(self, .{ .name = "String", .ctor = .{ .arity = 1, .call = globalString, .constructable = true }, .statics = &.{
+        .{ .name = "fromCharCode", .value = .{ .method = stringFromCharCode } },
+        .{ .name = "fromCodePoint", .value = .{ .method = stringFromCodePoint } },
+    } });
 
-    const number_ctor = try self.gcNewFunction(.{ .ctx = self, .name = "Number", .arity = 1, .call = globalNumber, .constructable = true });
-    const number_statics = try self.functionStatics(number_ctor);
-    try dneMethod(number_statics, "isNaN", try native(self, "isNaN", numberIsNaN));
-    try dneMethod(number_statics, "isFinite", try native(self, "isFinite", numberIsFinite));
-    try dneMethod(number_statics, "isInteger", try native(self, "isInteger", numberIsInteger));
-    try dneMethod(number_statics, "parseFloat", try native(self, "parseFloat", globalParseFloat));
-    try dneMethod(number_statics, "parseInt", try native(self, "parseInt", globalParseInt));
-    try dneConst(number_statics, "MAX_SAFE_INTEGER", JSValue.fromNumber(9007199254740991.0));
-    try dneConst(number_statics, "MIN_SAFE_INTEGER", JSValue.fromNumber(-9007199254740991.0));
-    try dneConst(number_statics, "EPSILON", JSValue.fromNumber(std.math.floatEps(f64)));
-    try dneConst(number_statics, "NaN", JSValue.fromNumber(std.math.nan(f64)));
-    try dneConst(number_statics, "MAX_VALUE", JSValue.fromNumber(std.math.floatMax(f64)));
-    try dneConst(number_statics, "MIN_VALUE", JSValue.fromNumber(std.math.floatTrueMin(f64)));
-    try dneConst(number_statics, "POSITIVE_INFINITY", JSValue.fromNumber(std.math.inf(f64)));
-    try dneConst(number_statics, "NEGATIVE_INFINITY", JSValue.fromNumber(-std.math.inf(f64)));
-    try g.define(arena, "Number", number_ctor);
+    _ = try installBuiltin(self, .{ .name = "Number", .ctor = .{ .arity = 1, .call = globalNumber, .constructable = true }, .statics = &.{
+        .{ .name = "isNaN", .value = .{ .method = numberIsNaN } },
+        .{ .name = "isFinite", .value = .{ .method = numberIsFinite } },
+        .{ .name = "isInteger", .value = .{ .method = numberIsInteger } },
+        .{ .name = "parseFloat", .value = .{ .method = globalParseFloat } },
+        .{ .name = "parseInt", .value = .{ .method = globalParseInt } },
+        .{ .name = "MAX_SAFE_INTEGER", .value = .{ .constant = JSValue.fromNumber(9007199254740991.0) } },
+        .{ .name = "MIN_SAFE_INTEGER", .value = .{ .constant = JSValue.fromNumber(-9007199254740991.0) } },
+        .{ .name = "EPSILON", .value = .{ .constant = JSValue.fromNumber(std.math.floatEps(f64)) } },
+        .{ .name = "NaN", .value = .{ .constant = JSValue.fromNumber(std.math.nan(f64)) } },
+        .{ .name = "MAX_VALUE", .value = .{ .constant = JSValue.fromNumber(std.math.floatMax(f64)) } },
+        .{ .name = "MIN_VALUE", .value = .{ .constant = JSValue.fromNumber(std.math.floatTrueMin(f64)) } },
+        .{ .name = "POSITIVE_INFINITY", .value = .{ .constant = JSValue.fromNumber(std.math.inf(f64)) } },
+        .{ .name = "NEGATIVE_INFINITY", .value = .{ .constant = JSValue.fromNumber(-std.math.inf(f64)) } },
+    } });
 
-    const boolean_ctor = try self.gcNewFunction(.{ .ctx = self, .name = "Boolean", .arity = 1, .call = globalBoolean, .constructable = true });
-    try g.define(arena, "Boolean", boolean_ctor);
+    _ = try installBuiltin(self, .{ .name = "Boolean", .ctor = .{ .arity = 1, .call = globalBoolean, .constructable = true } });
 
     // Unlike String/Number/Boolean, BigInt is NEVER constructable --
     // `new BigInt(5)` is a real TypeError in real JS (there's no
     // [[BigIntData]] wrapper object at all), which `constructValue`'s
     // existing generic `!callee.function.value.constructable` guard
     // already produces for free by just leaving this false.
-    const bigint_ctor = try self.gcNewFunction(.{ .ctx = self, .name = "BigInt", .arity = 1, .call = globalBigInt, .constructable = false });
-    const bigint_statics = try self.functionStatics(bigint_ctor);
-    try dneMethod(bigint_statics, "asIntN", try native(self, "asIntN", bigintAsIntN));
-    try dneMethod(bigint_statics, "asUintN", try native(self, "asUintN", bigintAsUintN));
-    try g.define(arena, "BigInt", bigint_ctor);
+    _ = try installBuiltin(self, .{ .name = "BigInt", .ctor = .{ .arity = 1, .call = globalBigInt, .constructable = false }, .statics = &.{
+        .{ .name = "asIntN", .value = .{ .method = bigintAsIntN } },
+        .{ .name = "asUintN", .value = .{ .method = bigintAsUintN } },
+    } });
 
     // Materialize every builtin prototype as a real object (own methods with
     // descriptors, chained to Object.prototype) now that all constructors
