@@ -42,11 +42,72 @@ const interp = native_helpers.interp;
 const arg = native_helpers.arg;
 const native = native_helpers.native;
 
-/// The reserved symbol-key encoding (`\x00S<ptr>`) -- invisible to
-/// string-keyed reflection (keys/values/entries/getOwnPropertyNames).
-fn isSymbolKey(k: []const u8) bool {
-    return k.len > 0 and k[0] == 0;
-}
+// z-interpreter-refactor.md, Step 5 Phase A prep: the cross-domain shared
+// guards/coercion helpers/BuiltinSpec now live in builtin_helpers.zig, a
+// leaf module (imports only native_helpers.zig, interpreter.zig,
+// coercion.zig). Local aliases keep every existing call site in this file
+// unchanged; future per-domain files import builtin_helpers.zig directly
+// instead of reaching into builtins.zig.
+const builtin_helpers = @import("builtin_helpers.zig");
+const isSymbolKey = builtin_helpers.isSymbolKey;
+const BuiltinSpec = builtin_helpers.BuiltinSpec;
+const installBuiltin = builtin_helpers.installBuiltin;
+const dneMethod = builtin_helpers.dneMethod;
+const dneConst = builtin_helpers.dneConst;
+const requireTag = builtin_helpers.requireTag;
+const requirePrimitive = builtin_helpers.requirePrimitive;
+const requireCallback = builtin_helpers.requireCallback;
+const callCallback = builtin_helpers.callCallback;
+const toIntSat = builtin_helpers.toIntSat;
+const toBigIntValue = builtin_helpers.toBigIntValue;
+const toByteIndexArg = builtin_helpers.toByteIndexArg;
+const toUint8Wrap = builtin_helpers.toUint8Wrap;
+const toInt8Wrap = builtin_helpers.toInt8Wrap;
+const toUint16Wrap = builtin_helpers.toUint16Wrap;
+const toInt16Wrap = builtin_helpers.toInt16Wrap;
+const toUint8Clamp = builtin_helpers.toUint8Clamp;
+const toU64Wrapped = builtin_helpers.toU64Wrapped;
+const toI64Wrapped = builtin_helpers.toI64Wrapped;
+const bigIntFromU64 = builtin_helpers.bigIntFromU64;
+const typedView = builtin_helpers.typedView;
+pub const typedElemGet = builtin_helpers.typedElemGet;
+pub const typedElemSet = builtin_helpers.typedElemSet;
+const oobIsNoop = builtin_helpers.oobIsNoop;
+const toLength = builtin_helpers.toLength;
+const hasIteratorMethod = builtin_helpers.hasIteratorMethod;
+const arrayLikeToList = builtin_helpers.arrayLikeToList;
+pub const ArrayIterCtx = builtin_helpers.ArrayIterCtx;
+const arrayIterNext = builtin_helpers.arrayIterNext;
+const makeArrayIterator = builtin_helpers.makeArrayIterator;
+const iteratorSelfBuiltin = builtin_helpers.iteratorSelfBuiltin;
+const isObjectLike = builtin_helpers.isObjectLike;
+
+// z-interpreter-refactor.md, Step 5 Phase A: first domain-file batch
+// (smallest/cleanest per the plan -- Promise+Timers, Function, Symbol,
+// RegExp). Method tables and any pub type interpreter.zig reaches into
+// via `builtins.X` are re-exported here so every existing external call
+// site (interpreter.zig's materializeProtos/gcTrack*/typedElem*) keeps
+// working unchanged. `regexFindFrom`/`makeMatchArray`/`regexSplit` are
+// re-aliased too: String.prototype's regex-pattern methods (still living
+// in this file until String's own extraction pass) call them by bare
+// name.
+const promise_builtins = @import("promise_builtins.zig");
+const function_builtins = @import("function_builtins.zig");
+const symbol_builtins = @import("symbol_builtins.zig");
+const regex_builtins = @import("regex_builtins.zig");
+pub const promise_methods = promise_builtins.promise_methods;
+pub const function_methods = function_builtins.function_methods;
+pub const symbol_methods = symbol_builtins.symbol_methods;
+pub const regex_methods = regex_builtins.regex_methods;
+pub const PromiseCapCtx = promise_builtins.PromiseCapCtx;
+pub const FinallyCtx = promise_builtins.FinallyCtx;
+pub const AllCtx = promise_builtins.AllCtx;
+pub const AllElemCtx = promise_builtins.AllElemCtx;
+pub const RaceCtx = promise_builtins.RaceCtx;
+pub const BoundCtx = function_builtins.BoundCtx;
+const regexFindFrom = regex_builtins.regexFindFrom;
+const makeMatchArray = regex_builtins.makeMatchArray;
+const regexSplit = regex_builtins.regexSplit;
 
 // ===== Method tables (consulted by the interpreter's getProperty) =====
 
@@ -138,29 +199,6 @@ pub const date_methods = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "toLocaleString", dateLocale("toLocaleString") },
     .{ "toLocaleDateString", dateLocale("toLocaleDateString") },
     .{ "toLocaleTimeString", dateLocale("toLocaleTimeString") },
-});
-
-pub const promise_methods = std.StaticStringMap(NativeFn).initComptime(.{
-    .{ "then", promiseThen },
-    .{ "catch", promiseCatch },
-    .{ "finally", promiseFinally },
-});
-
-pub const function_methods = std.StaticStringMap(NativeFn).initComptime(.{
-    .{ "call", fnCall },
-    .{ "apply", fnApply },
-    .{ "bind", fnBind },
-});
-
-pub const symbol_methods = std.StaticStringMap(NativeFn).initComptime(.{
-    .{ "toString", symbolToString },
-    .{ "valueOf", symbolValueOf },
-});
-
-pub const regex_methods = std.StaticStringMap(NativeFn).initComptime(.{
-    .{ "test", regexTest },
-    .{ "exec", regexExec },
-    .{ "toString", regexToString },
 });
 
 pub const map_methods = std.StaticStringMap(NativeFn).initComptime(.{
@@ -279,83 +317,6 @@ pub const string_methods = std.StaticStringMap(NativeFn).initComptime(.{
 
 // ===== Globals =====
 
-/// z-interpreter-refactor.md, Step 4: `setupGlobals` calls `gcNewFunction`
-/// ~30 times, each usually followed by the same ceremony --
-/// `functionStatics` + a loop of `dneMethod`/`dneConst`, then `g.define`.
-/// `BuiltinSpec`/`installBuiltin` below turn that ceremony into data for
-/// the shapes that are genuinely uniform across types:
-///   - a statics-only namespace object with no constructor at all
-///     (console/Math/JSON/Reflect: `ctor = null`)
-///   - a constructor with no statics (Function/ArrayBuffer/Proxy/...)
-///   - a constructor with a flat list of static methods/constants
-///     (Array/Promise/String/Number/BigInt/Symbol's `for`/`keyFor`)
-///
-/// Phase A finding (validated against the hardest real cases before
-/// writing this, not guessed): forcing EVERY setupGlobals entry through
-/// one schema would be the wrong kind of generic. Left hand-written,
-/// deliberately, because they don't fit this shape without distorting
-/// it:
-///   - **TypedArray** (11 constructors): each needs its own freshly
-///     allocated `ctx` (a `{interp, kind, name}` struct), not the shared
-///     `self` every other constructor uses -- `BuiltinSpec` has no slot
-///     for a per-entry ctx factory, and adding one just for this single
-///     caller wouldn't be a net simplification.
-///   - **Error family** (7 constructors): `call` is itself a function
-///     *generator* (`errorConstructor(kind)`), not a plain `NativeFn` --
-///     already about as declarative as it needs to be via its own small
-///     inline-for tuple list.
-///   - **Object**: its constructor and prototype must exist BEFORE
-///     anything else in `setupGlobals` runs (every other ordinary object
-///     chains to `Object.prototype`) -- a real ordering dependency, not
-///     ceremony.
-///   - **Symbol**: installing its well-known-symbol statics has a real
-///     side effect on two `Interpreter` fields (`symbol_iterator`/
-///     `symbol_async_iterator`), which a generic static-value entry
-///     can't express without adding an escape hatch just for one caller.
-///   - **eval**: not a constructor at all (a plain global function via
-///     `native()`), with its own `self.eval_fn` retain -- outside this
-///     schema's scope entirely.
-const BuiltinSpec = struct {
-    name: []const u8,
-    /// `null` = a statics-only namespace object (no constructor function
-    /// at all) -- the statics list below installs directly onto it.
-    ctor: ?struct {
-        arity: usize = 0,
-        call: NativeFn,
-        constructable: bool = false,
-    } = null,
-    statics: []const StaticEntry = &.{},
-
-    const StaticEntry = struct {
-        name: []const u8,
-        value: union(enum) { method: NativeFn, constant: JSValue },
-    };
-};
-
-/// Builds `spec.name` (a namespace object or a constructor function, per
-/// `spec.ctor`), installs every static, and defines it as a global.
-/// Returns the value in case a caller needs it for something beyond this
-/// (e.g. capturing a constructor to read its `.prototype` back later) --
-/// most callers just `try installBuiltin(self, ...)` and discard it.
-fn installBuiltin(self: *Interpreter, comptime spec: BuiltinSpec) !JSValue {
-    const value: JSValue = if (spec.ctor) |c|
-        try self.gcNewFunction(.{ .ctx = self, .name = spec.name, .arity = c.arity, .call = c.call, .constructable = c.constructable })
-    else
-        try self.ordinaryObject();
-
-    if (spec.statics.len > 0) {
-        const bag = if (spec.ctor != null) try self.functionStatics(value) else value;
-        inline for (spec.statics) |s| {
-            switch (s.value) {
-                .method => |fptr| try dneMethod(bag, s.name, try native(self, s.name, fptr)),
-                .constant => |v| try dneConst(bag, s.name, v),
-            }
-        }
-    }
-    try self.global_env.define(self.gc_allocator, spec.name, value);
-    return value;
-}
-
 /// Installs every global binding. Called lazily from `run()` (never from
 /// init) so `self: *Interpreter` is a stable address for native ctx.
 pub fn setupGlobals(self: *Interpreter) !void {
@@ -454,11 +415,7 @@ pub fn setupGlobals(self: *Interpreter) !void {
         .{ .name = "from", .value = .{ .method = arrayFrom } },
     } });
 
-    // Function: a constructor that PARSES -- new Function('a', 'return a')
-    // composes and compiles a real closure (a bounded eval). Its
-    // .prototype carries the cached call/apply/bind for the detached
-    // harness pattern.
-    _ = try installBuiltin(self, .{ .name = "Function", .ctor = .{ .arity = 1, .call = functionConstructor, .constructable = true } });
+    try function_builtins.install(self);
 
     // A real constructable native: `new Date(...)` works through evalNew's
     // object-like-return-overrides rule (a .date return replaces the plain
@@ -537,44 +494,14 @@ pub fn setupGlobals(self: *Interpreter) !void {
         try g.define(arena, entry[0], ctor);
     }
 
-    // Promise: constructable native; the statics (resolve/reject/all/
-    // race) ride the phase-10 property bag.
-    _ = try installBuiltin(self, .{ .name = "Promise", .ctor = .{ .arity = 1, .call = promiseConstructor, .constructable = true }, .statics = &.{
-        .{ .name = "resolve", .value = .{ .method = promiseResolveStatic } },
-        .{ .name = "reject", .value = .{ .method = promiseRejectStatic } },
-        .{ .name = "all", .value = .{ .method = promiseAll } },
-        .{ .name = "race", .value = .{ .method = promiseRace } },
-    } });
-
-    // Symbol: callable but NOT constructable (`new Symbol()` throws).
-    // The well-known symbols and the for()/keyFor() registry are JSValue
-    // symbols owned by the interpreter (identity = Rc box).
-    const symbol_ctor = try self.gcNewFunction(.{ .ctx = self, .name = "Symbol", .arity = 0, .call = symbolConstructor });
-    const symbol_statics = try self.functionStatics(symbol_ctor);
-    inline for (.{ "iterator", "asyncIterator", "hasInstance", "toPrimitive", "toStringTag", "species", "isConcatSpreadable", "match", "replace", "search", "split", "unscopables" }) |wk| {
-        const sym = try self.gcNewSymbol("Symbol." ++ wk);
-        try dneConst(symbol_statics, wk, sym.retain());
-        // These interpreter fields need their OWN retained reference --
-        // they must not be an unretained alias of whatever else holds
-        // `sym` (the Symbol.<wk> static property here), since that other
-        // holder can independently release its copy (e.g. a reassignable
-        // global binding losing its old value -- see the identical fix
-        // for eval_fn/global_object just below).
-        if (comptime std.mem.eql(u8, wk, "iterator")) self.symbol_iterator = sym.retain();
-        if (comptime std.mem.eql(u8, wk, "asyncIterator")) self.symbol_async_iterator = sym.retain();
-    }
-    try dneMethod(symbol_statics, "for", try native(self, "for", symbolFor));
-    try dneMethod(symbol_statics, "keyFor", try native(self, "keyFor", symbolKeyFor));
-    try g.define(arena, "Symbol", symbol_ctor);
+    try promise_builtins.install(self);
+    try symbol_builtins.install(self);
 
     // Map / Set: constructable natives (require `new`); the .map/.set
     // return is preserved by evalNew's object-like-override rule.
-    _ = try installBuiltin(self, .{ .name = "RegExp", .ctor = .{ .arity = 2, .call = regexpConstructor, .constructable = true } });
+    try regex_builtins.install(self);
     _ = try installBuiltin(self, .{ .name = "Map", .ctor = .{ .call = mapConstructor, .constructable = true } });
     _ = try installBuiltin(self, .{ .name = "Set", .ctor = .{ .call = setConstructor, .constructable = true } });
-
-    try g.define(arena, "setTimeout", try native(self, "setTimeout", globalSetTimeout));
-    try g.define(arena, "clearTimeout", try native(self, "clearTimeout", globalClearTimeout));
 
     const eval_fn = try native(self, "eval", globalEval);
     // self.eval_fn needs its OWN retained reference -- see the same fix
@@ -640,20 +567,6 @@ pub fn setupGlobals(self: *Interpreter) !void {
     try g.define(arena, "globalThis", global_this);
 }
 
-/// Define a builtin method/namespace property: NON-enumerable, writable,
-/// configurable -- the spec attributes for e.g. Object.keys, Date.now,
-/// Math.floor, Array.prototype.* (so `Object.keys(Date)` is empty and
-/// verifyProperty sees enumerable:false).
-fn dneMethod(obj: JSValue, name: []const u8, value: JSValue) !void {
-    try obj.object.value.defineProperty(name, value, .{ .writable = true, .enumerable = false, .configurable = true });
-}
-
-/// Define a builtin constant: NON-enumerable, NON-writable, NON-configurable
-/// (Number.MAX_SAFE_INTEGER, Math.PI, the well-known Symbols, ...).
-fn dneConst(obj: JSValue, name: []const u8, value: JSValue) !void {
-    try obj.object.value.defineProperty(name, value, .{ .writable = false, .enumerable = false, .configurable = false });
-}
-
 // ===== console =====
 
 fn consoleLog(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -708,42 +621,10 @@ fn globalPrint(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
 // verbatim (passed as a comptime format string) -- this is a pure
 // dedup, not a message-wording change.
 
-fn requireTag(ctx: *anyopaque, this_value: JSValue, comptime tag: std.meta.Tag(JSValue), comptime message: []const u8, method: []const u8) anyerror!JSValue {
-    if (this_value != tag) {
-        return interp(ctx).throwError(.type_error, message, .{method});
-    }
-    return this_value;
-}
-
-/// Same shape as `requireTag`, but first unwraps a `new String()`/
-/// `new Number()`/`new Boolean()` primitive-wrapper object (see
-/// `Interpreter.unboxPrimitiveWrapper`'s doc) before checking the tag --
-/// shared by the 3 primitive-prototype guards that need to accept both
-/// `"x".toUpperCase()` and `new String("x").toUpperCase()`.
-fn requirePrimitive(ctx: *anyopaque, this_value: JSValue, comptime tag: std.meta.Tag(JSValue), comptime message: []const u8, method: []const u8) anyerror!JSValue {
-    const v: JSValue = if (this_value == tag) this_value else interp(ctx).unboxPrimitiveWrapper(this_value) orelse this_value;
-    if (v != tag) {
-        return interp(ctx).throwError(.type_error, message, .{method});
-    }
-    return v;
-}
-
 // ===== Array.prototype =====
 
 fn requireArray(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!void {
     _ = try requireTag(ctx, this_value, .array, "Array.prototype.{s} called on a non-array", method);
-}
-
-fn requireCallback(ctx: *anyopaque, args: []const JSValue) anyerror!JSValue {
-    const cb = arg(args, 0);
-    if (cb != .function) return interp(ctx).throwError(.type_error, "callback is not a function", .{});
-    return cb;
-}
-
-fn callCallback(cb: JSValue, allocator: Allocator, item: JSValue, index: usize, receiver: JSValue) anyerror!JSValue {
-    return cb.function.value.call(cb.function.value.ctx, allocator, JSValue.UNDEFINED, &.{
-        item, JSValue.fromNumber(@floatFromInt(index)), receiver,
-    });
 }
 
 fn arrayPush(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1718,42 +1599,6 @@ fn booleanValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
 
 // ===== BigInt =====
 
-/// `BigInt(value)` -- unlike String/Number/Boolean, never reached via
-/// `new` (the constructor isn't `constructable` at all, see its
-/// registration), so there's no hollow-wrapper case to handle here.
-/// ECMA-262 ToBigInt -- used by `BigInt.asIntN`/`asUintN`'s own
-/// `bigint` parameter, and by everything the `BigInt(value)` global
-/// itself doesn't special-case. Real ToBigInt REJECTS Number with a
-/// TypeError (`BigInt.asUintN(8, 5)` really does throw in Node) --
-/// Number only converts via the DIFFERENT NumberToBigInt algorithm the
-/// `BigInt(value)` constructor call runs instead, never through this.
-fn toBigIntValue(self: *Interpreter, allocator: Allocator, a: JSValue) anyerror!JSValue {
-    return switch (a) {
-        .bigint => a.retain(),
-        .boolean => |b| self.gcNewBigIntValue(try zbigint.ZBigInt.fromInt(self.gc_allocator, if (b) 1 else 0)),
-        .string => |box| {
-            const trimmed = std.mem.trim(u8, box.value.data, " \t\n\r");
-            const text = if (trimmed.len == 0) "0" else trimmed;
-            const v = zbigint.ZBigInt.fromDigitText(self.gc_allocator, text) catch
-                return self.throwError(.syntax_error, "Cannot convert {s} to a BigInt", .{box.value.data});
-            return self.gcNewBigIntValue(v);
-        },
-        .@"undefined" => self.throwError(.type_error, "Cannot convert undefined to a BigInt", .{}),
-        .@"null" => self.throwError(.type_error, "Cannot convert null to a BigInt", .{}),
-        .number => {
-            const shown = try coercion.toDisplayString(allocator, a);
-            defer allocator.free(shown);
-            return self.throwError(.type_error, "Cannot convert {s} to a BigInt", .{shown});
-        },
-        // Real ToPrimitive for array/object (valueOf/toString/
-        // Symbol.toPrimitive) doesn't exist in this ecosystem yet --
-        // same narrowing as coercion.toNumber's own object arm -- so
-        // every non-primitive collapses to one generic TypeError rather
-        // than real JS's more specific per-shape SyntaxError.
-        else => self.throwError(.type_error, "Cannot convert an object to a BigInt", .{}),
-    };
-}
-
 /// `BigInt(value)`'s own algorithm: Number gets a special conversion
 /// (NumberToBigInt, integer-only, RangeError otherwise) that plain
 /// ToBigInt does NOT have -- everything else (including the "not an
@@ -1862,23 +1707,6 @@ fn bigintAsIntN(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 // not-yet-started follow-up phase (see the durable plan). Only
 // ArrayBuffer + DataView are wired here.
 
-/// ECMA-262 ToIndex, narrowed: this engine's constructors/DataView
-/// methods only ever pass an already-`.number` JSValue through here
-/// (no ToNumber coercion of strings/objects) -- matches the existing
-/// narrowing `arrayConstructor` uses for its own length argument.
-fn toByteIndexArg(self: *Interpreter, v: JSValue, what: []const u8) anyerror!usize {
-    if (v != .number) return self.throwError(.type_error, "{s} must be a number", .{what});
-    const n = v.number;
-    // Real ToIndex's own defined upper bound (2^53 - 1) -- checked
-    // BEFORE @intFromFloat, which panics (not an error) on a magnitude
-    // that doesn't fit in the target type (e.g. Number.MAX_VALUE).
-    const max_index: f64 = 9007199254740991.0;
-    if (std.math.isNan(n) or n < 0 or n != @trunc(n) or n > max_index) {
-        return self.throwError(.range_error, "Invalid {s}: must be a non-negative safe integer", .{what});
-    }
-    return @intFromFloat(n);
-}
-
 fn arrayBufferConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     _ = this_value;
@@ -1924,49 +1752,9 @@ fn dataViewConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
     return self.gcNewDataView(buffer_arg.retain(), byte_offset, byte_length) catch |e| self.bufferErr(e);
 }
 
-/// ECMA-262 ToInt8/ToUint8/ToInt16/ToUint16: same modulo-2^n wraparound
-/// technique as `coercion.toInt32`/`toUint32` (NOT saturating, NOT
-/// clamping -- `DataView` has no "clamped" variant, that's
-/// `Uint8ClampedArray`-only and belongs to the future TypedArray phase).
-fn toUint8Wrap(v: JSValue) anyerror!u8 {
-    return @truncate(try coercion.toUint32(v));
-}
-fn toInt8Wrap(v: JSValue) anyerror!i8 {
-    return @bitCast(try toUint8Wrap(v));
-}
-fn toUint16Wrap(v: JSValue) anyerror!u16 {
-    return @truncate(try coercion.toUint32(v));
-}
-fn toInt16Wrap(v: JSValue) anyerror!i16 {
-    return @bitCast(try toUint16Wrap(v));
-}
-
 fn requireDataView(self: *Interpreter, v: JSValue, method: []const u8) anyerror!zbuffer.DataView {
     if (v != .data_view) return self.throwError(.type_error, "DataView.prototype.{s} called on incompatible receiver", .{method});
     return v.data_view.value.view;
-}
-
-/// ToBigInt64/ToBigUint64 (ECMA-262 7.1.20/7.1.21): wraps an arbitrary
-/// ZBigInt into the low 64 bits, two's complement -- matches real
-/// `DataView.setBigInt64`/`setBigUint64` exactly, including values
-/// outside the i64/u64 range (real JS wraps rather than throws). Reuses
-/// the same mask-via-bitAnd technique `BigInt.asUintN`/`asIntN` already
-/// use above, fixed at 64 bits.
-fn toU64Wrapped(self: *Interpreter, big: zbigint.ZBigInt) anyerror!u64 {
-    var one = try zbigint.ZBigInt.fromInt(self.gc_allocator, 1);
-    defer one.deinit();
-    var shifted = try zbigint.ZBigInt.shiftLeft(self.gc_allocator, one, 64);
-    defer shifted.deinit();
-    var mask = try zbigint.ZBigInt.sub(self.gc_allocator, shifted, one);
-    defer mask.deinit();
-    var masked = try zbigint.ZBigInt.bitAnd(self.gc_allocator, big, mask);
-    defer masked.deinit();
-    // Guaranteed to fit: masked into [0, 2^64) by construction above.
-    return masked.value.toInt(u64) catch unreachable;
-}
-
-fn toI64Wrapped(self: *Interpreter, big: zbigint.ZBigInt) anyerror!i64 {
-    return @bitCast(try toU64Wrapped(self, big));
 }
 
 fn dataViewGetInt8(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -2118,22 +1906,6 @@ fn dataViewGetBigInt64(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
     const v = dv.getBigInt64(offset, coercion.isTruthy(arg(args, 1))) catch |e| return self.bufferErr(e);
     return self.gcNewBigIntValue(try zbigint.ZBigInt.fromInt(self.gc_allocator, v));
 }
-/// Boxes a raw `u64` as a real (conceptually unsigned) BigInt.
-/// `ZBigInt.fromInt` takes `i64` -- a u64 above i64's max reinterprets
-/// as negative there, so route through the same bit pattern deliberately
-/// (u64 -> i64 bit-for-bit) and correct the sign by adding 2^64.
-fn bigIntFromU64(self: *Interpreter, v: u64) anyerror!JSValue {
-    if (v <= std.math.maxInt(i64)) {
-        return self.gcNewBigIntValue(try zbigint.ZBigInt.fromInt(self.gc_allocator, @intCast(v)));
-    }
-    var lo = try zbigint.ZBigInt.fromInt(self.gc_allocator, @bitCast(v));
-    defer lo.deinit();
-    var two_64 = try zbigint.ZBigInt.fromInt(self.gc_allocator, 1);
-    defer two_64.deinit();
-    var shifted = try zbigint.ZBigInt.shiftLeft(self.gc_allocator, two_64, 64);
-    defer shifted.deinit();
-    return self.gcNewBigIntValue(try zbigint.ZBigInt.add(self.gc_allocator, lo, shifted));
-}
 
 fn dataViewGetBigUint64(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
@@ -2173,128 +1945,6 @@ fn dataViewSetBigUint64(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
 // `%TypedArray%.prototype`'s real method surface (map/filter/forEach/
 // slice/set/subarray/...) is a separate, not-yet-started follow-up
 // phase.
-
-fn typedView(comptime T: type, buffer: *zbuffer.ArrayBuffer, byte_offset: usize, len: usize) zbuffer.TypedArrayView(T) {
-    return .{ .buffer = buffer, .byte_offset = byte_offset, .len = len };
-}
-
-/// ECMA-262 ToUint8Clamp: NaN -> 0, clamped to [0,255], round-half-to-
-/// EVEN at the .5 boundary (2.5 -> 2, 3.5 -> 4) -- the one JS-specific
-/// numeric conversion `Uint8ClampedArray` needs that nothing else in
-/// this engine has built yet (plain `Uint8Array` WRAPS modulo 256 via
-/// `toUint8Wrap` above; `Uint8ClampedArray` CLAMPS -- two genuinely
-/// different algorithms sharing the same 1-byte storage).
-fn toUint8Clamp(v: JSValue) anyerror!u8 {
-    const n = try coercion.toNumber(v);
-    if (std.math.isNan(n) or n <= 0) return 0;
-    if (n >= 255) return 255;
-    const f = @floor(n);
-    if (f + 0.5 < n) return @intFromFloat(f + 1);
-    if (n < f + 0.5) return @intFromFloat(f);
-    const fi: u8 = @intFromFloat(f);
-    return if (fi % 2 == 0) fi else fi + 1;
-}
-
-/// Reads element `index` (already bounds-checked by the caller against
-/// `len` -- `BufferError.OutOfBounds` here would be an internal-
-/// invariant violation, not a JS-facing condition, since real spec
-/// out-of-range reads are `undefined` handled entirely at the
-/// getProperty call site, never reaching this far).
-pub fn typedElemGet(self: *Interpreter, kind: zvalue.TypedKind, buffer: *zbuffer.ArrayBuffer, byte_offset: usize, len: usize, index: usize) anyerror!JSValue {
-    return switch (kind) {
-        .i8 => JSValue.fromNumber(@floatFromInt(typedView(i8, buffer, byte_offset, len).get(index) catch unreachable)),
-        .u8, .u8_clamped => JSValue.fromNumber(@floatFromInt(typedView(u8, buffer, byte_offset, len).get(index) catch unreachable)),
-        .i16 => JSValue.fromNumber(@floatFromInt(typedView(i16, buffer, byte_offset, len).get(index) catch unreachable)),
-        .u16 => JSValue.fromNumber(@floatFromInt(typedView(u16, buffer, byte_offset, len).get(index) catch unreachable)),
-        .i32 => JSValue.fromNumber(@floatFromInt(typedView(i32, buffer, byte_offset, len).get(index) catch unreachable)),
-        .u32 => JSValue.fromNumber(@floatFromInt(typedView(u32, buffer, byte_offset, len).get(index) catch unreachable)),
-        .f32 => JSValue.fromNumber(typedView(f32, buffer, byte_offset, len).get(index) catch unreachable),
-        .f64 => JSValue.fromNumber(typedView(f64, buffer, byte_offset, len).get(index) catch unreachable),
-        .i64 => self.gcNewBigIntValue(try zbigint.ZBigInt.fromInt(self.gc_allocator, typedView(i64, buffer, byte_offset, len).get(index) catch unreachable)),
-        .u64 => bigIntFromU64(self, typedView(u64, buffer, byte_offset, len).get(index) catch unreachable),
-    };
-}
-
-/// Writes element `index` -- unlike `typedElemGet`, the CALLER does NOT
-/// pre-check bounds: `value` is coerced UNCONDITIONALLY first (real
-/// spec: `IntegerIndexedElementSet` converts the value before checking
-/// the index, so a conversion that throws does so even for an out-of-
-/// range index -- verified against real Node), and an out-of-range
-/// index is then a silent no-op (never a throw, matches spec exactly).
-pub fn typedElemSet(self: *Interpreter, kind: zvalue.TypedKind, buffer: *zbuffer.ArrayBuffer, byte_offset: usize, len: usize, index: usize, value: JSValue) anyerror!void {
-    // Real spec: ToNumber(Symbol) (or ToBigInt(Symbol) for the i64/u64
-    // kinds) is a TypeError, e.g. `ta[0] = Symbol()` -- pre-existing gap
-    // found while verifying array-like TypedArray construction (which
-    // newly reaches this coercion for element values read off a plain
-    // object): every per-kind branch below bottoms out in
-    // `coercion.toNumber`/`toBigIntValue`, neither of which has a
-    // catchable throw for Symbol today (`error.NotImplemented`, which
-    // is uncatchable from JS). Guarded once here rather than in each of
-    // the 8 branches.
-    if (value == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a {s}", .{if (kind.isBigInt()) "BigInt" else "number"});
-    switch (kind) {
-        .i8 => {
-            const v = try toInt8Wrap(value);
-            typedView(i8, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
-        },
-        .u8 => {
-            const v = try toUint8Wrap(value);
-            typedView(u8, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
-        },
-        .u8_clamped => {
-            const v = try toUint8Clamp(value);
-            typedView(u8, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
-        },
-        .i16 => {
-            const v = try toInt16Wrap(value);
-            typedView(i16, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
-        },
-        .u16 => {
-            const v = try toUint16Wrap(value);
-            typedView(u16, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
-        },
-        .i32 => {
-            const v = try coercion.toInt32(value);
-            typedView(i32, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
-        },
-        .u32 => {
-            const v = try coercion.toUint32(value);
-            typedView(u32, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
-        },
-        .f32 => {
-            const v: f32 = @floatCast(try coercion.toNumber(value));
-            typedView(f32, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
-        },
-        .f64 => {
-            const v = try coercion.toNumber(value);
-            typedView(f64, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
-        },
-        .i64 => {
-            const x = try toBigIntValue(self, self.gc_allocator, value);
-            defer x.deinit();
-            const v = try toI64Wrapped(self, x.bigint.value);
-            typedView(i64, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
-        },
-        .u64 => {
-            const x = try toBigIntValue(self, self.gc_allocator, value);
-            defer x.deinit();
-            const v = try toU64Wrapped(self, x.bigint.value);
-            typedView(u64, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
-        },
-    }
-}
-
-/// `zbuffer`'s `.set()` only ever fails with `OutOfBounds` on an
-/// already-validly-constructed view (never `Misaligned`/`OutOfMemory` --
-/// those are init-time-only concerns) -- and per real spec, an
-/// out-of-range indexed TypedArray write is a silent no-op, never a
-/// throw.
-fn oobIsNoop(e: zbuffer.BufferError) anyerror!void {
-    return switch (e) {
-        error.OutOfBounds => {},
-        error.Misaligned, error.OutOfMemory => unreachable,
-    };
-}
 
 /// One instance per named global (`Int8Array`, `Uint8Array`, ...),
 /// allocated once at `setupGlobals` time -- see the registration loop's
@@ -2392,278 +2042,6 @@ fn typedArrayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
     return ta;
 }
 
-// ===== Promise =====
-
-/// The pair of capabilities `new Promise(executor)` hands the executor.
-pub const PromiseCapCtx = struct {
-    interp: *Interpreter,
-    promise: JSValue,
-};
-
-fn capCtx(ctx: *anyopaque) *PromiseCapCtx {
-    return @ptrCast(@alignCast(ctx));
-}
-
-fn capResolve(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = this_value;
-    const c = capCtx(ctx);
-    try c.interp.resolvePromise(c.promise, arg(args, 0));
-    return JSValue.UNDEFINED;
-}
-
-fn capReject(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = this_value;
-    const c = capCtx(ctx);
-    try c.interp.rejectPromiseValue(c.promise, arg(args, 0));
-    return JSValue.UNDEFINED;
-}
-
-/// `new Promise(executor)`: executor runs SYNCHRONOUSLY (real spec
-/// behavior -- logs inside it appear before the line after `new`); its
-/// throw rejects. Calling Promise without `new` also works here (real JS
-/// requires new -- documented narrowing).
-fn promiseConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = this_value;
-    const self = interp(ctx);
-    const executor = arg(args, 0);
-    if (executor != .function) {
-        return self.throwError(.type_error, "Promise resolver {s} is not a function", .{executor.typeOf()});
-    }
-    const p = try interp(ctx).gcNewPromise();
-
-    const cap = try allocator.create(PromiseCapCtx);
-    cap.* = .{ .interp = self, .promise = p };
-    try self.gcTrackPromiseCapCtx(cap);
-    const resolve_fn = try interp(ctx).gcNewFunction(.{ .ctx = cap, .name = "resolve", .arity = 1, .call = capResolve });
-    const reject_fn = try interp(ctx).gcNewFunction(.{ .ctx = cap, .name = "reject", .arity = 1, .call = capReject });
-
-    _ = executor.function.value.call(executor.function.value.ctx, allocator, JSValue.UNDEFINED, &.{ resolve_fn, reject_fn }) catch |err| {
-        if (err != error.JsThrow) return err;
-        const ex = self.pending_exception.?;
-        self.pending_exception = null;
-        try self.rejectPromiseValue(p, ex);
-    };
-    return p;
-}
-
-fn requirePromise(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {
-    return requireTag(ctx, this_value, .promise, "Promise.prototype.{s} called on a non-promise", method);
-}
-
-/// Non-callable handlers are the spec's pass-through (then(null, f) etc).
-fn handlerOrNull(v: JSValue) ?JSValue {
-    return if (v == .function) v else null;
-}
-
-fn promiseThen(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    const p = try requirePromise(ctx, this_value, "then");
-    return interp(ctx).promiseThen(p, handlerOrNull(arg(args, 0)), handlerOrNull(arg(args, 1)));
-}
-
-fn promiseCatch(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    const p = try requirePromise(ctx, this_value, "catch");
-    return interp(ctx).promiseThen(p, null, handlerOrNull(arg(args, 0)));
-}
-
-/// finally(f) = then(wrapper, wrapper) where each wrapper calls f() with
-/// no arguments and passes the original settlement through -- the
-/// rejection side by re-throwing the original reason. f's own throw
-/// replaces the settlement (both spec behaviors), for free, because the
-/// job runner already turns a handler throw into a derived rejection.
-pub const FinallyCtx = struct {
-    interp: *Interpreter,
-    handler: JSValue,
-};
-
-fn finallyCtx(ctx: *anyopaque) *FinallyCtx {
-    return @ptrCast(@alignCast(ctx));
-}
-
-fn finallyOnFulfilled(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = this_value;
-    const c = finallyCtx(ctx);
-    _ = try c.handler.function.value.call(c.handler.function.value.ctx, allocator, JSValue.UNDEFINED, &.{});
-    return arg(args, 0);
-}
-
-fn finallyOnRejected(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = this_value;
-    const c = finallyCtx(ctx);
-    _ = try c.handler.function.value.call(c.handler.function.value.ctx, allocator, JSValue.UNDEFINED, &.{});
-    return c.interp.throwValue(arg(args, 0).retain());
-}
-
-fn promiseFinally(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    const p = try requirePromise(ctx, this_value, "finally");
-    const self = interp(ctx);
-    const handler = handlerOrNull(arg(args, 0)) orelse return self.promiseThen(p, null, null);
-
-    const c = try allocator.create(FinallyCtx);
-    c.* = .{ .interp = self, .handler = handler.retain() };
-    try self.gcTrackFinallyCtx(c);
-    const on_f = try interp(ctx).gcNewFunction(.{ .ctx = c, .name = "", .call = finallyOnFulfilled });
-    const on_r = try interp(ctx).gcNewFunction(.{ .ctx = c, .name = "", .call = finallyOnRejected });
-    return self.promiseThen(p, on_f, on_r);
-}
-
-fn promiseResolveStatic(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = this_value;
-    const v = arg(args, 0);
-    // Promise.resolve(promise) returns it unchanged (real behavior).
-    if (v == .promise) return v;
-    return interp(ctx).fulfilledPromise(v);
-}
-
-fn promiseRejectStatic(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = this_value;
-    return interp(ctx).rejectedPromise(arg(args, 0));
-}
-
-/// Shared bookkeeping for one Promise.all call.
-pub const AllCtx = struct {
-    interp: *Interpreter,
-    remaining: usize,
-    results: []JSValue,
-    derived: JSValue,
-
-    fn completeIfDone(c: *AllCtx) anyerror!void {
-        if (c.remaining != 0) return;
-        var array = try c.interp.gcNewArray();
-        for (c.results) |r| _ = try array.array.value.push(r.retain());
-        try c.interp.resolvePromise(c.derived, array);
-    }
-};
-
-/// Per-element fulfillment handler: stores at its index, resolves the
-/// derived array when the last one lands.
-pub const AllElemCtx = struct {
-    all: *AllCtx,
-    index: usize,
-};
-
-fn allElemFulfilled(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = this_value;
-    const c: *AllElemCtx = @ptrCast(@alignCast(ctx));
-    c.all.results[c.index] = arg(args, 0).retain();
-    c.all.remaining -= 1;
-    try c.all.completeIfDone();
-    return JSValue.UNDEFINED;
-}
-
-fn allRejected(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = this_value;
-    const c: *AllCtx = @ptrCast(@alignCast(ctx));
-    // First rejection wins; settle idempotence makes later ones no-ops.
-    try c.interp.rejectPromiseValue(c.derived, arg(args, 0));
-    return JSValue.UNDEFINED;
-}
-
-/// Promise.all over an ARRAY (narrowed -- general iterables need the
-/// Symbol.iterator protocol this ecosystem doesn't have). Order is
-/// preserved by index; rejection is fail-fast.
-fn promiseAll(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = this_value;
-    const self = interp(ctx);
-    const input = arg(args, 0);
-    if (input != .array) return self.throwError(.type_error, "{s} is not iterable", .{input.typeOf()});
-    const items = input.array.value.toSlice();
-
-    const derived = try interp(ctx).gcNewPromise();
-    const all = try allocator.create(AllCtx);
-    all.* = .{
-        .interp = self,
-        .remaining = items.len,
-        .results = try allocator.alloc(JSValue, items.len),
-        .derived = derived,
-    };
-    try self.gcTrackAllCtx(all);
-    for (all.results) |*r| r.* = JSValue.UNDEFINED;
-    if (items.len == 0) {
-        try all.completeIfDone();
-        return derived;
-    }
-
-    const on_r = try interp(ctx).gcNewFunction(.{ .ctx = all, .name = "", .call = allRejected });
-    for (items, 0..) |item, i| {
-        const elem = try allocator.create(AllElemCtx);
-        elem.* = .{ .all = all, .index = i };
-        try self.gcTrackAllElemCtx(elem);
-        const on_f = try interp(ctx).gcNewFunction(.{ .ctx = elem, .name = "", .call = allElemFulfilled });
-        const p = if (item == .promise) item else try self.fulfilledPromise(item);
-        _ = try self.promiseThen(p, on_f, on_r);
-    }
-    return derived;
-}
-
-/// Per-race resolution handler: first settle of ANY element settles the
-/// derived promise; the rest are silent no-ops via settle idempotence.
-pub const RaceCtx = struct {
-    interp: *Interpreter,
-    derived: JSValue,
-};
-
-fn raceFulfilled(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = this_value;
-    const c: *RaceCtx = @ptrCast(@alignCast(ctx));
-    try c.interp.resolvePromise(c.derived, arg(args, 0));
-    return JSValue.UNDEFINED;
-}
-
-fn raceRejected(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = this_value;
-    const c: *RaceCtx = @ptrCast(@alignCast(ctx));
-    try c.interp.rejectPromiseValue(c.derived, arg(args, 0));
-    return JSValue.UNDEFINED;
-}
-
-fn promiseRace(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = this_value;
-    const self = interp(ctx);
-    const input = arg(args, 0);
-    if (input != .array) return self.throwError(.type_error, "{s} is not iterable", .{input.typeOf()});
-
-    const derived = try interp(ctx).gcNewPromise();
-    const rc = try allocator.create(RaceCtx);
-    rc.* = .{ .interp = self, .derived = derived };
-    try self.gcTrackRaceCtx(rc);
-    const on_f = try interp(ctx).gcNewFunction(.{ .ctx = rc, .name = "", .call = raceFulfilled });
-    const on_r = try interp(ctx).gcNewFunction(.{ .ctx = rc, .name = "", .call = raceRejected });
-    for (input.array.value.toSlice()) |item| {
-        const p = if (item == .promise) item else try self.fulfilledPromise(item);
-        _ = try self.promiseThen(p, on_f, on_r);
-    }
-    return derived;
-}
-
-// ===== Timers =====
-
-fn globalSetTimeout(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = this_value;
-    const self = interp(ctx);
-    const cb = arg(args, 0);
-    if (cb != .function) return self.throwError(.type_error, "The \"callback\" argument must be of type function", .{});
-    const delay = if (arg(args, 1) == .number) arg(args, 1).number else 0;
-    return JSValue.fromNumber(try self.addTimer(cb, delay));
-}
-
-fn globalClearTimeout(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = this_value;
-    if (arg(args, 0) == .number) interp(ctx).clearTimer(arg(args, 0).number);
-    return JSValue.UNDEFINED;
-}
-
 // ===== Error constructors =====
 
 /// Comptime factory: one native per ErrorKind. The message argument is
@@ -2679,81 +2057,6 @@ fn errorConstructor(comptime kind: zvalue.ErrorKind) NativeFn {
             return interp(ctx).gcNewError(kind, msg);
         }
     }.call;
-}
-
-// ===== Function.prototype.call / apply / bind =====
-
-fn requireFunction(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {
-    return requireTag(ctx, this_value, .function, "Function.prototype.{s} called on a non-function", method);
-}
-
-fn fnCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    const target = try requireFunction(ctx, this_value, "call");
-    const this_arg = arg(args, 0);
-    const rest = if (args.len > 1) args[1..] else &[_]JSValue{};
-    return target.function.value.call(target.function.value.ctx, allocator, this_arg, rest);
-}
-
-fn fnApply(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    const target = try requireFunction(ctx, this_value, "apply");
-    const this_arg = arg(args, 0);
-    const arg_list = arg(args, 1);
-    const call_args: []const JSValue = switch (arg_list) {
-        .@"undefined", .@"null" => &.{},
-        .array => |box| box.value.toSlice(),
-        else => return interp(ctx).throwError(.type_error, "CreateListFromArrayLike called on non-object", .{}),
-    };
-    return target.function.value.call(target.function.value.ctx, allocator, this_arg, call_args);
-}
-
-/// ctx for one bound function: the target, the fixed this, and any
-/// pre-applied arguments.
-pub const BoundCtx = struct {
-    target: JSValue,
-    bound_this: JSValue,
-    pre_args: []const JSValue,
-    /// Owned (formatted fresh per `.bind()` call -- "bound " ++ target's
-    /// name); freed alongside the ctx itself, see freeGarbageNode's
-    /// `.bound_ctx` case. Unlike every other `Callable.name` in this file
-    /// (always a string literal or AST-borrowed slice), this one is real
-    /// heap memory that needs an owner.
-    name: []const u8,
-};
-
-fn boundCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = this_value; // a bound function ignores its call-site this (spec)
-    const bc: *BoundCtx = @ptrCast(@alignCast(ctx));
-    const total = try allocator.alloc(JSValue, bc.pre_args.len + args.len);
-    defer allocator.free(total);
-    @memcpy(total[0..bc.pre_args.len], bc.pre_args);
-    @memcpy(total[bc.pre_args.len..], args);
-    return bc.target.function.value.call(bc.target.function.value.ctx, allocator, bc.bound_this, total);
-}
-
-/// Narrowed [[Bind]]: the bound function is NOT constructable (real
-/// bound functions are; `new (f.bind(x))()` is a documented gap).
-fn fnBind(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    const target = try requireFunction(ctx, this_value, "bind");
-    const bc = try allocator.create(BoundCtx);
-    const pre = if (args.len > 1) args[1..] else &[_]JSValue{};
-    const pre_copy = try allocator.alloc(JSValue, pre.len);
-    for (pre, 0..) |a, i| pre_copy[i] = a.retain();
-    const name = try std.fmt.allocPrint(allocator, "bound {s}", .{target.function.value.name});
-    bc.* = .{
-        .target = target.retain(),
-        .bound_this = arg(args, 0).retain(),
-        .pre_args = pre_copy,
-        .name = name,
-    };
-    try interp(ctx).gcTrackBoundCtx(bc);
-    const target_arity = target.function.value.arity;
-    const bound_arity = if (target_arity > pre.len) target_arity - pre.len else 0;
-    return interp(ctx).gcNewFunction(.{
-        .ctx = bc,
-        .name = name,
-        .arity = bound_arity,
-        .call = boundCall,
-    });
 }
 
 // ===== Object.prototype methods (object_methods table) =====
@@ -3415,45 +2718,6 @@ fn arrayFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     return result;
 }
 
-/// `new Function('a', 'b', 'return a + b')` -- compose, parse with the
-/// real parser, close over the global env. A bounded eval.
-fn functionConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = this_value;
-    const self = interp(ctx);
-    var src: std.ArrayList(u8) = .empty;
-    try src.appendSlice(allocator, "(function anonymous(");
-    if (args.len > 1) {
-        for (args[0 .. args.len - 1], 0..) |a, i| {
-            if (i != 0) try src.appendSlice(allocator, ", ");
-            const s = try coercion.toDisplayString(allocator, a);
-            defer allocator.free(s);
-            try src.appendSlice(allocator, s);
-        }
-    }
-    try src.appendSlice(allocator, "\n) {\n");
-    if (args.len > 0) {
-        const body = try coercion.toDisplayString(allocator, args[args.len - 1]);
-        defer allocator.free(body);
-        try src.appendSlice(allocator, body);
-    }
-    try src.appendSlice(allocator, "\n})");
-
-    const parser = zfunctions.Parser.init(allocator, src.items) catch {
-        return self.throwError(.syntax_error, "Invalid function source", .{});
-    };
-    const node = parser.parseExpression() catch |err| {
-        return self.throwError(.syntax_error, "Function constructor: {s}", .{@errorName(err)});
-    };
-    const fnode_ptr = switch (node.data) {
-        .paren => |inner| switch (inner.data) {
-            .function_like => |ptr| ptr,
-            else => return self.throwError(.syntax_error, "Invalid function source", .{}),
-        },
-        else => return self.throwError(.syntax_error, "Invalid function source", .{}),
-    };
-    return self.makeClosure(self.global_env, zfunctions.asFunctionNode(fnode_ptr));
-}
-
 // ===== Number / String statics =====
 
 fn numberIsNaN(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -3496,135 +2760,7 @@ fn stringFromCharCode(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     return interp(ctx).gcNewString(buf.items);
 }
 
-// ===== Symbol =====
-
-fn symbolConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = this_value;
-    const self = interp(ctx);
-    // `new Symbol()` is a real TypeError -- Symbol is not a constructor.
-    if (self.construct_target == ctx) {
-        return self.throwError(.type_error, "Symbol is not a constructor", .{});
-    }
-    const desc: ?[]const u8 = switch (arg(args, 0)) {
-        .@"undefined" => null,
-        else => |v| try coercion.toDisplayString(allocator, v),
-    };
-    defer if (desc) |d| allocator.free(d);
-    return self.gcNewSymbol(desc);
-}
-
-fn symbolToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = args;
-    if (this_value != .symbol) return interp(ctx).throwError(.type_error, "Symbol.prototype.toString requires a symbol", .{});
-    const s = try this_value.symbol.value.toString(allocator);
-    defer allocator.free(s);
-    return interp(ctx).gcNewString(s);
-}
-
-fn symbolValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
-    _ = allocator;
-    _ = args;
-    return this_value.retain();
-}
-
-fn symbolFor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = this_value;
-    const self = interp(ctx);
-    const key = try coercion.toDisplayString(allocator, arg(args, 0));
-    if (self.symbol_registry.get(key)) |sym| {
-        allocator.free(key);
-        return sym.retain();
-    }
-    // Not found: `key`'s ownership transfers to symbol_registry as its
-    // own hashmap key (no separate free -- matches self.symbol_keys'
-    // established convention elsewhere).
-    const sym = try self.gcNewSymbol(key);
-    try self.symbol_registry.put(self.gc_allocator, key, sym.retain());
-    return sym;
-}
-
-fn symbolKeyFor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = this_value;
-    const self = interp(ctx);
-    const target = arg(args, 0);
-    if (target != .symbol) return self.throwError(.type_error, "Symbol.keyFor requires a symbol", .{});
-    var it = self.symbol_registry.iterator();
-    while (it.next()) |entry| {
-        if (entry.value_ptr.* == .symbol and entry.value_ptr.symbol == target.symbol) {
-            return interp(ctx).gcNewString(entry.key_ptr.*);
-        }
-    }
-    return JSValue.UNDEFINED;
-}
-
 // ===== Array.prototype (extended coverage) =====
-
-/// ECMA-262 7.1.20 ToLength: ToNumber then clamp to [0, 2^53-1], floor.
-/// Distinct from `toIntSat` (no ToNumber coercion, isize range, no
-/// 2^53-1 cap) and `toByteIndexArg` (throws instead of clamping) --
-/// this one matches how a real `length` read behaves: a
-/// string/undefined/negative/fractional length never throws. A Symbol
-/// `length` DOES throw in real JS (`ToNumber(Symbol)` is a TypeError,
-/// e.g. `new Int32Array({length: Symbol()})`) -- `coercion.toNumber`
-/// only has an uncatchable `error.NotImplemented` for that today, so it
-/// must be mapped to a real, catchable TypeError here.
-fn toLength(self: *Interpreter, v: JSValue) anyerror!usize {
-    const n = coercion.toNumber(v) catch return self.throwError(.type_error, "Cannot convert a {s} value to a number", .{v.typeOf()});
-    if (std.math.isNan(n) or n <= 0) return 0;
-    return @intFromFloat(@min(@floor(n), 9007199254740991.0));
-}
-
-/// `GetMethod(value, @@iterator)` narrowed to "does @@iterator resolve
-/// to a callable" -- the real spec's iterator-vs-array-like decision
-/// point for Array.from / the TypedArray constructor. Properly
-/// `.deinit()`s the probed value (getProperty always returns owned).
-fn hasIteratorMethod(self: *Interpreter, value: JSValue) anyerror!bool {
-    const sym = self.symbol_iterator orelse return false;
-    const key = try self.encodeKey(sym);
-    defer self.gc_allocator.free(key);
-    const m = try self.getProperty(value, key);
-    defer m.deinit();
-    return m == .function;
-}
-
-/// ECMA-262 LengthOfArrayLike + per-index Get -- the array-like
-/// fallback used when `value` has no @@iterator. Returns an OWNED
-/// slice of OWNED/retained items (unlike `iterableItems`'s
-/// borrowed-items convention): `getProperty` always returns owned
-/// values (an accessor getter can fabricate a brand-new one with no
-/// other owner), so treating these as borrowed would risk a stale
-/// reference. Caller must `.deinit()` each item AND free the slice.
-fn arrayLikeToList(self: *Interpreter, allocator: Allocator, value: JSValue) anyerror![]JSValue {
-    const len_v = try self.getProperty(value, "length");
-    defer len_v.deinit();
-    const len = try toLength(self, len_v);
-    var out: std.ArrayList(JSValue) = .empty;
-    errdefer {
-        for (out.items) |it| it.deinit();
-        out.deinit(allocator);
-    }
-    var i: usize = 0;
-    while (i < len) : (i += 1) {
-        const key = try std.fmt.allocPrint(allocator, "{d}", .{i});
-        defer allocator.free(key);
-        try out.append(allocator, try self.getProperty(value, key));
-    }
-    return out.toOwnedSlice(allocator);
-}
-
-/// ECMA ToIntegerOrInfinity saturated into isize, so `@intFromFloat` can't
-/// panic on NaN / +/-Infinity / out-of-i64-range floats (NaN -> 0). Callers
-/// that need a length clamp non-negative afterwards.
-fn toIntSat(n: f64) isize {
-    if (std.math.isNan(n)) return 0;
-    const maxf: f64 = @floatFromInt(std.math.maxInt(isize));
-    const minf: f64 = @floatFromInt(std.math.minInt(isize));
-    if (n >= maxf) return std.math.maxInt(isize);
-    if (n <= minf) return std.math.minInt(isize);
-    return @intFromFloat(@trunc(n));
-}
 
 fn normIndex(raw: f64, len: usize) usize {
     const i = toIntSat(raw); // NaN/Infinity-safe
@@ -3881,69 +3017,6 @@ fn arrayToStringMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
     const s = try coercion.toDisplayString(allocator, this_value);
     defer allocator.free(s);
     return interp(ctx).gcNewString(s);
-}
-
-/// keys()/values()/entries() -- iterator objects with `next` and a
-/// Symbol.iterator returning self. A snapshot over the current elements.
-pub const ArrayIterCtx = struct {
-    interp: *Interpreter,
-    items: []const JSValue, // retained snapshot
-    index: usize = 0,
-    kind: enum { keys, values, entries },
-};
-
-fn arrayIterNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = this_value;
-    _ = args;
-    const ic: *ArrayIterCtx = @ptrCast(@alignCast(ctx));
-    var result = try ic.interp.gcNewObject();
-    if (ic.index >= ic.items.len) {
-        try result.object.value.set("value", JSValue.UNDEFINED);
-        try result.object.value.set("done", JSValue.fromBool(true));
-        return result;
-    }
-    const i = ic.index;
-    ic.index += 1;
-    const value: JSValue = switch (ic.kind) {
-        .keys => JSValue.fromNumber(@floatFromInt(i)),
-        .values => ic.items[i].retain(),
-        .entries => blk: {
-            var pair = try ic.interp.gcNewArray();
-            _ = try pair.array.value.push(JSValue.fromNumber(@floatFromInt(i)));
-            _ = try pair.array.value.push(ic.items[i].retain());
-            break :blk pair;
-        },
-    };
-    try result.object.value.set("value", value);
-    try result.object.value.set("done", JSValue.fromBool(false));
-    return result;
-}
-
-pub fn makeArrayIterator(self: *Interpreter, allocator: Allocator, this_value: JSValue, kind: @FieldType(ArrayIterCtx, "kind")) anyerror!JSValue {
-    const src = this_value.array.value.toSlice();
-    const snapshot = try allocator.alloc(JSValue, src.len);
-    for (src, 0..) |item, i| snapshot[i] = item.retain();
-    const ic = try allocator.create(ArrayIterCtx);
-    ic.* = .{ .interp = self, .items = snapshot, .kind = kind };
-    try self.gcTrackArrayIterCtx(ic);
-    var obj = try self.gcNewObject();
-    try obj.object.value.set("next", try self.gcNewFunction(.{ .ctx = ic, .name = "next", .call = arrayIterNext }));
-    if (self.symbol_iterator) |sym| {
-        const key = try self.encodeKey(sym);
-        defer allocator.free(key);
-        try obj.object.value.set(key, try self.nativeMethod("iterator", "self", iteratorSelfBuiltin));
-    }
-    return obj;
-}
-
-/// A `[Symbol.iterator]()` returning the receiver -- for builtin iterator
-/// objects (mirrors the interpreter's own iteratorSelf).
-fn iteratorSelfBuiltin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
-    _ = allocator;
-    _ = args;
-    return this_value.retain();
 }
 
 fn arrayKeys(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -4893,147 +3966,6 @@ fn setEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     return iteratorFromValues(interp(ctx), allocator, pairs.items);
 }
 
-// ===== RegExp =====
-
-const zregex = @import("zregex");
-
-fn requireRegex(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {
-    return requireTag(ctx, this_value, .regex, "Method RegExp.prototype.{s} called on incompatible receiver", method);
-}
-
-/// `new RegExp(pattern, flags?)` / `RegExp(...)`. A RegExp source argument
-/// is copied (its own flags unless new ones are given).
-fn regexpConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = this_value;
-    const self = interp(ctx);
-    const pat_arg = arg(args, 0);
-    var source: []const u8 = "";
-    var flags: []const u8 = "";
-    var owned_source: ?[]const u8 = null;
-    var owned_flags: ?[]const u8 = null;
-    defer if (owned_source) |s| allocator.free(s);
-    defer if (owned_flags) |f| allocator.free(f);
-    if (pat_arg == .regex) {
-        const st = self.regexState(pat_arg);
-        source = st.source;
-        flags = st.flags;
-    } else if (pat_arg != .@"undefined") {
-        owned_source = try coercion.toDisplayString(allocator, pat_arg);
-        source = owned_source.?;
-    }
-    if (arg(args, 1) != .@"undefined") {
-        owned_flags = try coercion.toDisplayString(allocator, arg(args, 1));
-        flags = owned_flags.?;
-    }
-    return self.makeRegex(source, flags);
-}
-
-/// Match at-or-after `start`: z-regex's `find` scans (respecting the
-/// compiled sticky flag), so searching from a position means searching
-/// within the suffix `input[start..]`. Returns the match (relative to
-/// that suffix) and the suffix, so callers add `start` for absolute
-/// offsets. `full` is the whole string (for the match array's `.input`).
-const RegexHit = struct { match: zregex.MatchResult, sub: []const u8, base: usize, full: []const u8, group_count: usize };
-
-fn regexFindFrom(re: JSValue, input: []const u8, start: usize) anyerror!?RegexHit {
-    if (start > input.len) return null;
-    const sub = input[start..];
-    const m = try re.regex.value.find(sub);
-    return if (m) |match| RegexHit{ .match = match, .sub = sub, .base = start, .full = input, .group_count = re.regex.value.compiled.group_count } else null;
-}
-
-/// The JS match-result array: [0]=whole match, [i]=capture i (undefined
-/// if it didn't participate), plus own `index`, `input`, and `groups`.
-/// All strings come from `hit.sub`; the absolute `.index` adds `hit.base`.
-fn makeMatchArray(self: *Interpreter, allocator: Allocator, hit: RegexHit) anyerror!JSValue {
-    _ = allocator;
-    const match = hit.match;
-    const input = hit.sub;
-    var result = try self.gcNewArray();
-    _ = try result.array.value.push(try self.gcNewString(match.group(input)));
-    var i: usize = 1;
-    while (i <= hit.group_count) : (i += 1) {
-        if (match.getCapture(i, input)) |cap| {
-            _ = try result.array.value.push(try self.gcNewString(cap));
-        } else {
-            _ = try result.array.value.push(JSValue.UNDEFINED);
-        }
-    }
-    // exec/match arrays carry extra own properties.
-    try setArrayOwn(self, result, "index", JSValue.fromNumber(@floatFromInt(hit.base + match.start)));
-    try setArrayOwn(self, result, "input", try self.gcNewString(hit.full));
-    if (match.named_groups.len > 0) {
-        var groups = try self.gcNewObject();
-        for (match.named_groups) |ng| {
-            const v = if (match.getNamedCapture(ng.name, input)) |c| try self.gcNewString(c) else JSValue.UNDEFINED;
-            try groups.object.value.set(ng.name, v);
-        }
-        try setArrayOwn(self, result, "groups", groups);
-    } else {
-        try setArrayOwn(self, result, "groups", JSValue.UNDEFINED);
-    }
-    return result;
-}
-
-/// Set a named own property on an array value (arrays here have no
-/// general property bag, so exec-result extras go through the array's
-/// object-ish set -- but ZArray is index-keyed; we stash these on a
-/// parallel object). Simplest faithful approach: since our arrays can't
-/// hold named props, we accept that match.index/.input/.groups live only
-/// if the array were an object. To keep it working, store them via the
-/// array's own retained slots is impossible -- so we wrap: not needed for
-/// the common `m[0]`/`m[1]` access. We DO support .index/.input/.groups
-/// by special-casing in getProperty? Simpler: attach via a side map.
-fn setArrayOwn(self: *Interpreter, array: JSValue, key: []const u8, value: JSValue) anyerror!void {
-    try self.setArrayExtra(array, key, value);
-}
-
-fn regexTest(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    const re = try requireRegex(ctx, this_value, "test");
-    const self = interp(ctx);
-    const is_str = arg(args, 0) == .string;
-    const input = if (is_str) arg(args, 0).string.value.data else try coercion.toDisplayString(allocator, arg(args, 0));
-    defer if (!is_str) allocator.free(input);
-    const st = self.regexState(re);
-    const stateful = st.global or st.sticky;
-    const hit = try regexFindFrom(re, input, if (stateful) st.last_index else 0);
-    if (hit) |h| {
-        defer h.match.deinit();
-        if (stateful) st.last_index = h.base + h.match.end;
-        return JSValue.fromBool(true);
-    }
-    if (stateful) st.last_index = 0;
-    return JSValue.fromBool(false);
-}
-
-fn regexExec(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    const re = try requireRegex(ctx, this_value, "exec");
-    const self = interp(ctx);
-    const is_str = arg(args, 0) == .string;
-    const input = if (is_str) arg(args, 0).string.value.data else try coercion.toDisplayString(allocator, arg(args, 0));
-    defer if (!is_str) allocator.free(input);
-    const st = self.regexState(re);
-    const stateful = st.global or st.sticky;
-    const hit = try regexFindFrom(re, input, if (stateful) st.last_index else 0);
-    if (hit) |h| {
-        defer h.match.deinit();
-        const abs_end = h.base + h.match.end;
-        if (stateful) st.last_index = if (h.match.end > h.match.start) abs_end else abs_end + 1;
-        return makeMatchArray(self, allocator, h);
-    }
-    if (stateful) st.last_index = 0;
-    return JSValue.NULL;
-}
-
-fn regexToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = args;
-    const re = try requireRegex(ctx, this_value, "toString");
-    const st = interp(ctx).regexState(re);
-    const s = try std.fmt.allocPrint(allocator, "/{s}/{s}", .{ st.source, st.flags });
-    defer allocator.free(s);
-    return interp(ctx).gcNewString(s);
-}
-
 // ===== String methods with RegExp patterns =====
 
 /// str.match(re): non-global -> a match array (or null); global -> an
@@ -5160,17 +4092,6 @@ fn regexReplace(self: *Interpreter, allocator: Allocator, data: []const u8, re: 
 
 // ===== Proxy =====
 
-/// Real `new Proxy(target, handler)` requires BOTH to be "an Object" in
-/// spec terms -- which spans every non-primitive JSValue tag in this
-/// engine (plain objects, arrays, functions, regexes, maps, sets,
-/// errors, dates, promises, even another proxy), not just `.object`.
-fn isObjectLike(v: JSValue) bool {
-    return switch (v) {
-        .@"undefined", .@"null", .boolean, .number, .string, .symbol, .bigint => false,
-        else => true,
-    };
-}
-
 fn proxyConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     _ = this_value;
@@ -5184,30 +4105,6 @@ fn proxyConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
         return self.throwError(.type_error, "Cannot create proxy with a non-object as target or handler", .{});
     }
     return self.gcNewProxy(target.retain(), handler.retain());
-}
-
-/// String.prototype.split with a regex separator. Splits at each match;
-/// the separator's capture groups are interleaved (real JS behavior).
-fn regexSplit(self: *Interpreter, allocator: Allocator, data: []const u8, re: JSValue) anyerror!JSValue {
-    var result = try self.gcNewArray();
-    var all = try re.regex.value.findAll(data);
-    defer {
-        for (all.items) |*mm| mm.deinit();
-        all.deinit(allocator);
-    }
-    var last: usize = 0;
-    for (all.items) |match| {
-        if (match.end == match.start and match.start == last) continue; // skip empty at boundary
-        _ = try result.array.value.push(try self.gcNewString(data[last..match.start]));
-        var gi: usize = 1;
-        while (gi <= re.regex.value.compiled.group_count) : (gi += 1) {
-            const cap = if (match.getCapture(gi, data)) |c| try self.gcNewString(c) else JSValue.UNDEFINED;
-            _ = try result.array.value.push(cap);
-        }
-        last = match.end;
-    }
-    _ = try result.array.value.push(try self.gcNewString(data[last..]));
-    return result;
 }
 
 // ===== Reflect =====
