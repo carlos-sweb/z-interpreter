@@ -122,6 +122,23 @@ const proxy_builtins = @import("proxy_builtins.zig");
 pub const boolean_methods = boolean_builtins.boolean_methods;
 pub const bigint_methods = bigint_builtins.bigint_methods;
 
+// z-interpreter-refactor.md, Step 5 Phase A batch 3: Date, Number (another
+// surgical pull -- `globalNumber` physically lived in the old "Loose
+// globals" grab-bag section, and `numberIsNaN`/`isFinite`/`isInteger` in a
+// mixed "Number / String statics" section whose `stringFromCharCode` half
+// stays behind for String's own extraction), Map/Set (grouped together --
+// they share `iteratorFromValues` and install back-to-back). `nowMs` is
+// re-exported since interpreter.zig's setTimeout/setInterval machinery
+// calls it as `builtins.nowMs`.
+const date_builtins = @import("date_builtins.zig");
+const number_builtins = @import("number_builtins.zig");
+const mapset_builtins = @import("mapset_builtins.zig");
+pub const date_methods = date_builtins.date_methods;
+pub const number_methods = number_builtins.number_methods;
+pub const map_methods = mapset_builtins.map_methods;
+pub const set_methods = mapset_builtins.set_methods;
+pub const nowMs = date_builtins.nowMs;
+
 // ===== Method tables (consulted by the interpreter's getProperty) =====
 
 pub const array_methods = std.StaticStringMap(NativeFn).initComptime(.{
@@ -158,92 +175,6 @@ pub const array_methods = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "keys", arrayKeys },
     .{ "values", arrayValues },
     .{ "entries", arrayEntries },
-});
-
-pub const date_methods = std.StaticStringMap(NativeFn).initComptime(.{
-    // Local-time getters
-    .{ "getTime", dateGetTime },
-    .{ "valueOf", dateGetTime },
-    .{ "getFullYear", dateGetter("getFullYear") },
-    .{ "getMonth", dateGetter("getMonth") },
-    .{ "getDate", dateGetter("getDate") },
-    .{ "getDay", dateGetter("getDay") },
-    .{ "getHours", dateGetter("getHours") },
-    .{ "getMinutes", dateGetter("getMinutes") },
-    .{ "getSeconds", dateGetter("getSeconds") },
-    .{ "getMilliseconds", dateGetter("getMilliseconds") },
-    .{ "getTimezoneOffset", dateGetter("getTimezoneOffset") },
-    .{ "getYear", dateGetter("getYear") }, // Annex B
-    // UTC getters
-    .{ "getUTCFullYear", dateGetter("getUTCFullYear") },
-    .{ "getUTCMonth", dateGetter("getUTCMonth") },
-    .{ "getUTCDate", dateGetter("getUTCDate") },
-    .{ "getUTCDay", dateGetter("getUTCDay") },
-    .{ "getUTCHours", dateGetter("getUTCHours") },
-    .{ "getUTCMinutes", dateGetter("getUTCMinutes") },
-    .{ "getUTCSeconds", dateGetter("getUTCSeconds") },
-    .{ "getUTCMilliseconds", dateGetter("getUTCMilliseconds") },
-    // Local-time setters (n_optional trailing components default to current)
-    .{ "setTime", dateSetTime },
-    .{ "setMilliseconds", dateSetter("setMilliseconds", 0) },
-    .{ "setSeconds", dateSetter("setSeconds", 1) },
-    .{ "setMinutes", dateSetter("setMinutes", 2) },
-    .{ "setHours", dateSetter("setHours", 3) },
-    .{ "setDate", dateSetter("setDate", 0) },
-    .{ "setMonth", dateSetter("setMonth", 1) },
-    .{ "setFullYear", dateSetter("setFullYear", 2) },
-    .{ "setYear", dateSetter("setYear", 0) }, // Annex B
-    // UTC setters
-    .{ "setUTCMilliseconds", dateSetter("setUTCMilliseconds", 0) },
-    .{ "setUTCSeconds", dateSetter("setUTCSeconds", 1) },
-    .{ "setUTCMinutes", dateSetter("setUTCMinutes", 2) },
-    .{ "setUTCHours", dateSetter("setUTCHours", 3) },
-    .{ "setUTCDate", dateSetter("setUTCDate", 0) },
-    .{ "setUTCMonth", dateSetter("setUTCMonth", 1) },
-    .{ "setUTCFullYear", dateSetter("setUTCFullYear", 2) },
-    // Formatting / conversion
-    .{ "toISOString", dateToISOString },
-    .{ "toJSON", dateToJSON },
-    .{ "toString", dateFormatter("toString") },
-    .{ "toDateString", dateFormatter("toDateString") },
-    .{ "toTimeString", dateFormatter("toTimeString") },
-    .{ "toUTCString", dateFormatter("toUTCString") },
-    .{ "toGMTString", dateFormatter("toUTCString") }, // Annex B alias of toUTCString
-    .{ "toLocaleString", dateLocale("toLocaleString") },
-    .{ "toLocaleDateString", dateLocale("toLocaleDateString") },
-    .{ "toLocaleTimeString", dateLocale("toLocaleTimeString") },
-});
-
-pub const map_methods = std.StaticStringMap(NativeFn).initComptime(.{
-    .{ "get", mapGet },
-    .{ "set", mapSet },
-    .{ "has", mapHas },
-    .{ "delete", mapDelete },
-    .{ "clear", mapClear },
-    .{ "forEach", mapForEach },
-    .{ "keys", mapKeys },
-    .{ "values", mapValues },
-    .{ "entries", mapEntries },
-});
-
-pub const set_methods = std.StaticStringMap(NativeFn).initComptime(.{
-    .{ "add", setAdd },
-    .{ "has", setHas },
-    .{ "delete", setDelete },
-    .{ "clear", setClear },
-    .{ "forEach", setForEach },
-    .{ "keys", setValues },
-    .{ "values", setValues },
-    .{ "entries", setEntries },
-});
-
-pub const number_methods = std.StaticStringMap(NativeFn).initComptime(.{
-    .{ "toString", numberToString },
-    .{ "toLocaleString", numberToString },
-    .{ "valueOf", numberValueOf },
-    .{ "toFixed", numberToFixed },
-    .{ "toExponential", numberToExponential },
-    .{ "toPrecision", numberToPrecision },
 });
 
 pub const array_buffer_methods = std.StaticStringMap(NativeFn).initComptime(.{
@@ -402,14 +333,7 @@ pub fn setupGlobals(self: *Interpreter) !void {
 
     try function_builtins.install(self);
 
-    // A real constructable native: `new Date(...)` works through evalNew's
-    // object-like-return-overrides rule (a .date return replaces the plain
-    // instance). Static methods live in its property bag (like Number's).
-    _ = try installBuiltin(self, .{ .name = "Date", .ctor = .{ .call = dateConstructor, .constructable = true }, .statics = &.{
-        .{ .name = "now", .value = .{ .method = dateNow } },
-        .{ .name = "parse", .value = .{ .method = dateParse } },
-        .{ .name = "UTC", .value = .{ .method = dateUTC } },
-    } });
+    try date_builtins.install(self);
 
     try temporal_builtins.install(self);
 
@@ -480,11 +404,8 @@ pub fn setupGlobals(self: *Interpreter) !void {
     try promise_builtins.install(self);
     try symbol_builtins.install(self);
 
-    // Map / Set: constructable natives (require `new`); the .map/.set
-    // return is preserved by evalNew's object-like-override rule.
     try regex_builtins.install(self);
-    _ = try installBuiltin(self, .{ .name = "Map", .ctor = .{ .call = mapConstructor, .constructable = true } });
-    _ = try installBuiltin(self, .{ .name = "Set", .ctor = .{ .call = setConstructor, .constructable = true } });
+    try mapset_builtins.install(self);
 
     const eval_fn = try native(self, "eval", globalEval);
     // self.eval_fn needs its OWN retained reference -- see the same fix
@@ -506,21 +427,7 @@ pub fn setupGlobals(self: *Interpreter) !void {
         .{ .name = "fromCodePoint", .value = .{ .method = stringFromCodePoint } },
     } });
 
-    _ = try installBuiltin(self, .{ .name = "Number", .ctor = .{ .arity = 1, .call = globalNumber, .constructable = true }, .statics = &.{
-        .{ .name = "isNaN", .value = .{ .method = numberIsNaN } },
-        .{ .name = "isFinite", .value = .{ .method = numberIsFinite } },
-        .{ .name = "isInteger", .value = .{ .method = numberIsInteger } },
-        .{ .name = "parseFloat", .value = .{ .method = globalParseFloat } },
-        .{ .name = "parseInt", .value = .{ .method = globalParseInt } },
-        .{ .name = "MAX_SAFE_INTEGER", .value = .{ .constant = JSValue.fromNumber(9007199254740991.0) } },
-        .{ .name = "MIN_SAFE_INTEGER", .value = .{ .constant = JSValue.fromNumber(-9007199254740991.0) } },
-        .{ .name = "EPSILON", .value = .{ .constant = JSValue.fromNumber(std.math.floatEps(f64)) } },
-        .{ .name = "NaN", .value = .{ .constant = JSValue.fromNumber(std.math.nan(f64)) } },
-        .{ .name = "MAX_VALUE", .value = .{ .constant = JSValue.fromNumber(std.math.floatMax(f64)) } },
-        .{ .name = "MIN_VALUE", .value = .{ .constant = JSValue.fromNumber(std.math.floatTrueMin(f64)) } },
-        .{ .name = "POSITIVE_INFINITY", .value = .{ .constant = JSValue.fromNumber(std.math.inf(f64)) } },
-        .{ .name = "NEGATIVE_INFINITY", .value = .{ .constant = JSValue.fromNumber(-std.math.inf(f64)) } },
-    } });
+    try number_builtins.install(self);
 
     try boolean_builtins.install(self);
     try bigint_builtins.install(self);
@@ -936,244 +843,6 @@ fn stringTrim(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     return interp(ctx).gcNewString(out);
 }
 
-// ===== Date =====
-
-/// Milliseconds since the Unix epoch via the raw Linux syscall -- this
-/// Zig version's portable clock API needs an std.Io instance, which the
-/// interpreter doesn't thread (Linux-only for now, like the dev setup).
-pub fn nowMs() i64 {
-    var ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(.REALTIME, &ts);
-    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
-}
-
-/// z-date's Invalid Date sentinel (`Constants.INVALID_TIME`). `newDate`/
-/// `fromTimestamp` map any out-of-range timestamp to it.
-const INVALID_DATE_MS: i64 = std.math.maxInt(i64);
-
-/// Coerce a JS value to an integer Date field (year/month/day/...). Returns
-/// null when the value is NaN/±Infinity or outside i32, so the caller can
-/// produce an Invalid Date instead of `@intFromFloat` panicking on an
-/// out-of-range float (matching TimeClip ultimately yielding NaN).
-fn dateField(v: JSValue) !?i32 {
-    const n = try coercion.toNumber(v);
-    if (!std.math.isFinite(n)) return null;
-    const t = @trunc(n);
-    if (t > @as(f64, std.math.maxInt(i32)) or t < @as(f64, std.math.minInt(i32))) return null;
-    return @intFromFloat(t);
-}
-
-/// ECMA-262 TimeClip on a Number: non-finite or |t| > 8.64e15 ms becomes
-/// Invalid Date. Also avoids `@intFromFloat` overflowing on a huge float.
-fn timeClip(n: f64) i64 {
-    if (!std.math.isFinite(n)) return INVALID_DATE_MS;
-    const t = @trunc(n);
-    if (t > 8.64e15 or t < -8.64e15) return INVALID_DATE_MS;
-    return @intFromFloat(t);
-}
-
-/// `new Date()` -> now; `new Date(ms)` -> timestamp (TimeClip'd); `new
-/// Date(str)` -> parsed; `new Date(dateValue)` -> copy; `new Date(y, m, d?,
-/// h?, min?, s?, ms?)` -> from local components. Any non-finite / out-of-range
-/// field yields an Invalid Date rather than crashing. Called without `new` it
-/// still returns a .date (real JS returns a string there -- documented).
-fn dateConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = this_value;
-    if (args.len == 0) return interp(ctx).gcNewDate(nowMs());
-    if (args.len == 1) {
-        const first = args[0];
-        if (first == .string) {
-            return interp(ctx).gcNewDate(zvalue.ZDate.fromString(first.string.value.data).timestamp);
-        }
-        if (first == .date) return interp(ctx).gcNewDate(first.date.value.getTime());
-        return interp(ctx).gcNewDate(timeClip(try coercion.toNumber(first)));
-    }
-    // Multi-arg form: read up to 7 fields; a present-but-invalid field (NaN,
-    // Infinity, out of i32) makes the whole Date Invalid.
-    var fields: [7]?i32 = .{ null, null, null, null, null, null, null };
-    var i: usize = 0;
-    while (i < args.len and i < 7) : (i += 1) {
-        fields[i] = (try dateField(args[i])) orelse return interp(ctx).gcNewDate(INVALID_DATE_MS);
-    }
-    // year and month are always present here (args.len >= 2).
-    const d = zvalue.ZDate.fromComponents(fields[0].?, fields[1].?, fields[2], fields[3], fields[4], fields[5], fields[6]);
-    return interp(ctx).gcNewDate(d.timestamp);
-}
-
-/// `Date.now()` -> current time in ms.
-fn dateNow(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
-    _ = allocator;
-    _ = this_value;
-    _ = args;
-    return JSValue.fromNumber(@floatFromInt(nowMs()));
-}
-
-/// `Date.parse(str)` -> ms since epoch, or NaN if unparseable.
-fn dateParse(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
-    _ = allocator;
-    _ = this_value;
-    const s = arg(args, 0);
-    if (s != .string) return JSValue.fromNumber(std.math.nan(f64));
-    const ms = zvalue.ZDate.parse(s.string.value.data);
-    if (ms == INVALID_DATE_MS) return JSValue.fromNumber(std.math.nan(f64));
-    return JSValue.fromNumber(@floatFromInt(ms));
-}
-
-/// `Date.UTC(y, m, d?, h?, min?, s?, ms?)` -> ms from UTC components, or NaN
-/// if any provided field is non-finite / out of range.
-fn dateUTC(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
-    _ = allocator;
-    _ = this_value;
-    // `Date.UTC()` with no args, and a NaN year, are both NaN.
-    var fields: [7]?i32 = .{ null, null, null, null, null, null, null };
-    var i: usize = 0;
-    while (i < args.len and i < 7) : (i += 1) {
-        fields[i] = (try dateField(args[i])) orelse return JSValue.fromNumber(std.math.nan(f64));
-    }
-    if (fields[0] == null) return JSValue.fromNumber(std.math.nan(f64));
-    // Month defaults to 0 when only the year is given.
-    const ms = zvalue.ZDate.UTC(fields[0].?, fields[1] orelse 0, fields[2], fields[3], fields[4], fields[5], fields[6]);
-    if (ms == INVALID_DATE_MS) return JSValue.fromNumber(std.math.nan(f64));
-    return JSValue.fromNumber(@floatFromInt(ms));
-}
-
-fn requireDate(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {
-    return requireTag(ctx, this_value, .date, "Date.prototype.{s} called on a non-date", method);
-}
-
-/// A raw millisecond timestamp as a JS Number, mapping z-date's Invalid Date
-/// (and any out-of-range value) to NaN -- what `getTime`/`valueOf`/the setters
-/// must return for an Invalid Date (the ?i32 getters already yield NaN on
-/// their own via z-date returning null).
-fn msToNumber(ms: i64) JSValue {
-    if (ms > 8_640_000_000_000_000 or ms < -8_640_000_000_000_000)
-        return JSValue.fromNumber(std.math.nan(f64));
-    return JSValue.fromNumber(@floatFromInt(ms));
-}
-
-fn dateGetTime(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = args;
-    const d = try requireDate(ctx, this_value, "getTime");
-    return msToNumber(d.date.value.getTime());
-}
-
-/// ?i32-returning ZDate getters (null = Invalid Date -> NaN, real JS).
-fn dateGetter(comptime method: []const u8) NativeFn {
-    return struct {
-        fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-            _ = allocator;
-            _ = args;
-            const d = try requireDate(ctx, this_value, method);
-            const v = @field(zvalue.ZDate, method)(d.date.value) orelse return JSValue.fromNumber(std.math.nan(f64));
-            return JSValue.fromNumber(@floatFromInt(v));
-        }
-    }.call;
-}
-
-fn dateToISOString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = args;
-    const d = try requireDate(ctx, this_value, "toISOString");
-    const iso = d.date.value.toISOString(allocator) catch
-        return interp(ctx).throwError(.range_error, "Invalid time value", .{});
-    defer allocator.free(iso);
-    return interp(ctx).gcNewString(iso);
-}
-
-/// `toJSON` -> ISO string, or `null` for an Invalid Date (real JS: it calls
-/// toISOString only when the time is finite).
-fn dateToJSON(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = args;
-    const d = try requireDate(ctx, this_value, "toJSON");
-    const s = (d.date.value.toJSON(allocator) catch null) orelse return JSValue.NULL;
-    defer allocator.free(s);
-    return interp(ctx).gcNewString(s);
-}
-
-/// String-returning ZDate formatters (`toString`/`toDateString`/... ). These
-/// render "Invalid Date" for an invalid time rather than throwing (unlike
-/// toISOString), matching real JS.
-fn dateFormatter(comptime method: []const u8) NativeFn {
-    return struct {
-        fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-            _ = args;
-            const d = try requireDate(ctx, this_value, method);
-            const s = @field(zvalue.ZDate, method)(d.date.value, allocator) catch
-                return interp(ctx).gcNewString("Invalid Date");
-            defer allocator.free(s);
-            return interp(ctx).gcNewString(s);
-        }
-    }.call;
-}
-
-/// `toLocale*` formatters take an optional Locale (we pass null -> z-date's
-/// default en-US locale; Intl options are out of scope).
-fn dateLocale(comptime method: []const u8) NativeFn {
-    return struct {
-        fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-            _ = args;
-            const d = try requireDate(ctx, this_value, method);
-            const s = @field(zvalue.ZDate, method)(d.date.value, allocator, null) catch
-                return interp(ctx).gcNewString("Invalid Date");
-            defer allocator.free(s);
-            return interp(ctx).gcNewString(s);
-        }
-    }.call;
-}
-
-/// `setTime(ms)` -- replace the timestamp wholesale (TimeClip'd; NaN/huge ->
-/// Invalid Date). Returns the new time.
-fn dateSetTime(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    const d = try requireDate(ctx, this_value, "setTime");
-    _ = d.date.value.setTime(timeClip(try coercion.toNumber(arg(args, 0))));
-    return msToNumber(d.date.value.getTime());
-}
-
-/// Component setters (local and UTC). The first arg is required; `n_optional`
-/// trailing args default to the current component when omitted. A present arg
-/// that isn't a finite in-range integer makes the Date Invalid (returns NaN),
-/// never panicking. Mutates the shared boxed ZDate in place (Date is mutable).
-fn dateSetter(comptime method: []const u8, comptime n_optional: usize) NativeFn {
-    return struct {
-        fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-            _ = allocator;
-            const d = try requireDate(ctx, this_value, method);
-            const p = &d.date.value;
-            const first = (try dateField(arg(args, 0))) orelse {
-                p.* = zvalue.ZDate.fromTimestamp(INVALID_DATE_MS);
-                return JSValue.fromNumber(std.math.nan(f64));
-            };
-            var opt: [n_optional]?i32 = undefined;
-            inline for (0..n_optional) |k| {
-                const a = arg(args, k + 1);
-                if (a == .@"undefined") {
-                    opt[k] = null;
-                } else {
-                    opt[k] = (try dateField(a)) orelse {
-                        p.* = zvalue.ZDate.fromTimestamp(INVALID_DATE_MS);
-                        return JSValue.fromNumber(std.math.nan(f64));
-                    };
-                }
-            }
-            const f = @field(zvalue.ZDate, method);
-            const new_ts = if (n_optional == 0)
-                f(p, first)
-            else if (n_optional == 1)
-                f(p, first, opt[0])
-            else if (n_optional == 2)
-                f(p, first, opt[0], opt[1])
-            else
-                f(p, first, opt[0], opt[1], opt[2]);
-            return msToNumber(new_ts);
-        }
-    }.call;
-}
-
 // ===== Object statics =====
 
 fn requireObject(ctx: *anyopaque, v: JSValue, what: []const u8) anyerror!JSValue {
@@ -1298,7 +967,7 @@ fn objectAssign(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 
 // ===== Loose globals =====
 
-fn globalParseInt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+pub fn globalParseInt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = ctx;
     _ = this_value;
     const s = try argString(allocator, args, 0);
@@ -1312,7 +981,7 @@ fn globalParseInt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     return JSValue.fromNumber(znumber.ParsingMethods.parseInt(allocator, s, radix));
 }
 
-fn globalParseFloat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+pub fn globalParseFloat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = ctx;
     _ = this_value;
     const s = try argString(allocator, args, 0);
@@ -1356,11 +1025,6 @@ fn globalString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     return self.boxPrimitiveIfConstructed(ctx, this_value, try self.gcNewString(s));
 }
 
-fn globalNumber(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    const primitive = JSValue.fromNumber(try coercion.toNumber(arg(args, 0)));
-    return interp(ctx).boxPrimitiveIfConstructed(ctx, this_value, primitive);
-}
 
 /// Indirect `eval` (called as a plain value, not the literal `eval(...)`
 /// form): runs its string argument in the GLOBAL scope. A non-string
@@ -1372,73 +1036,6 @@ fn globalEval(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     const a = arg(args, 0);
     if (a != .string) return a.retain();
     return self.evalSource(self.global_env, a.string.value.data);
-}
-
-// ===== Number.prototype (only the primitive receiver; hollow `new Number()`
-// wrapper objects have no [[NumberData]] here -- documented narrowing) =====
-
-fn requireNumber(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!f64 {
-    return (try requirePrimitive(ctx, this_value, .number, "Number.prototype.{s} called on a non-number", method)).number;
-}
-
-/// `n.toString(radix?)` / `toLocaleString` -- radix 2..36 (default 10).
-fn numberToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    const n = try requireNumber(ctx, this_value, "toString");
-    var radix: ?u8 = null;
-    if (arg(args, 0) != .@"undefined") {
-        const r = toIntSat(try coercion.toNumber(arg(args, 0)));
-        if (r < 2 or r > 36) return interp(ctx).throwError(.range_error, "toString() radix must be between 2 and 36", .{});
-        radix = @intCast(r);
-    }
-    const s = try znumber.FormattingMethods.toString(n, allocator, radix);
-    defer allocator.free(s);
-    return interp(ctx).gcNewString(s);
-}
-
-fn numberValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = args;
-    return JSValue.fromNumber(try requireNumber(ctx, this_value, "valueOf"));
-}
-
-/// Shared 0..100 digit argument for toFixed/toExponential/toPrecision, with
-/// the spec's RangeError. `null` when omitted (allowed by exponential/
-/// precision). `lo` is the minimum (0 for fixed/exponential, 1 for precision).
-fn digitArg(ctx: *anyopaque, args: []const JSValue, lo: i64) anyerror!?usize {
-    if (arg(args, 0) == .@"undefined") return null;
-    const d = toIntSat(try coercion.toNumber(arg(args, 0)));
-    if (d < lo or d > 100) return interp(ctx).throwError(.range_error, "toFixed() digits argument must be between 0 and 100", .{});
-    return @intCast(d);
-}
-
-fn numberToFixed(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    const n = try requireNumber(ctx, this_value, "toFixed");
-    const digits = (try digitArg(ctx, args, 0)) orelse 0;
-    const s = try znumber.FormattingMethods.toFixed(n, allocator, digits);
-    defer allocator.free(s);
-    return interp(ctx).gcNewString(s);
-}
-
-fn numberToExponential(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    const n = try requireNumber(ctx, this_value, "toExponential");
-    const digits = try digitArg(ctx, args, 0);
-    const s = try znumber.FormattingMethods.toExponential(n, allocator, digits);
-    defer allocator.free(s);
-    return interp(ctx).gcNewString(s);
-}
-
-fn numberToPrecision(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    const n = try requireNumber(ctx, this_value, "toPrecision");
-    // Omitted precision behaves like toString.
-    if (arg(args, 0) == .@"undefined") {
-        const s = try znumber.FormattingMethods.toString(n, allocator, null);
-        defer allocator.free(s);
-        return interp(ctx).gcNewString(s);
-    }
-    const p = (try digitArg(ctx, args, 1)).?;
-    const s = try znumber.FormattingMethods.toPrecision(n, allocator, p);
-    defer allocator.free(s);
-    return interp(ctx).gcNewString(s);
 }
 
 // ===== ArrayBuffer / DataView (roadmap item 19, phase 1) =====
@@ -2460,29 +2057,6 @@ fn arrayFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
 
 // ===== Number / String statics =====
 
-fn numberIsNaN(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
-    _ = allocator;
-    _ = this_value;
-    const v = arg(args, 0);
-    return JSValue.fromBool(v == .number and std.math.isNan(v.number));
-}
-
-fn numberIsFinite(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
-    _ = allocator;
-    _ = this_value;
-    const v = arg(args, 0);
-    return JSValue.fromBool(v == .number and std.math.isFinite(v.number));
-}
-
-fn numberIsInteger(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
-    _ = allocator;
-    _ = this_value;
-    const v = arg(args, 0);
-    return JSValue.fromBool(v == .number and std.math.isFinite(v.number) and v.number == @trunc(v.number));
-}
 
 fn stringFromCharCode(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
@@ -3479,231 +3053,6 @@ fn stringFromCodePoint(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
         try buf.appendSlice(allocator, tmp[0..n]);
     }
     return interp(ctx).gcNewString(buf.items);
-}
-
-// ===== Map / Set =====
-
-fn requireMap(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {
-    return requireTag(ctx, this_value, .map, "Method Map.prototype.{s} called on incompatible receiver", method);
-}
-
-fn requireSet(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {
-    return requireTag(ctx, this_value, .set, "Method Set.prototype.{s} called on incompatible receiver", method);
-}
-
-fn mapConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = this_value;
-    const self = interp(ctx);
-    if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor Map requires 'new'", .{});
-    var m = try interp(ctx).gcNewMap();
-    const init = arg(args, 0);
-    if (init != .@"undefined" and init != .@"null") {
-        const items = try self.iterableItems(init);
-        defer self.gc_allocator.free(items);
-        for (items) |entry| {
-            if (entry != .array and entry != .object) return self.throwError(.type_error, "Iterator value {s} is not an entry object", .{entry.typeOf()});
-            const k = try self.getProperty(entry, "0");
-            const v = try self.getProperty(entry, "1");
-            try m.map.value.set(k.retain(), v.retain());
-        }
-    }
-    return m;
-}
-
-fn setConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = this_value;
-    const self = interp(ctx);
-    if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor Set requires 'new'", .{});
-    var s = try interp(ctx).gcNewSet();
-    const init = arg(args, 0);
-    if (init != .@"undefined" and init != .@"null") {
-        const items = try self.iterableItems(init);
-        defer self.gc_allocator.free(items);
-        for (items) |v| try s.set.value.add(v.retain());
-    }
-    return s;
-}
-
-fn mapGet(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    const m = try requireMap(ctx, this_value, "get");
-    return if (m.map.value.get(arg(args, 0))) |v| v.retain() else JSValue.UNDEFINED;
-}
-
-fn mapSet(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    const m = try requireMap(ctx, this_value, "set");
-    const key = arg(args, 0);
-    const value = arg(args, 1);
-    // std.array_hash_map's put() only replaces the VALUE on an existing
-    // key (getOrPutContext leaves key_ptr alone) -- so retaining the key
-    // argument when the key already exists would retain something that
-    // never gets stored, a pure leak. Capture+release the displaced value
-    // the same way (set() silently overwrites it otherwise).
-    const existed = m.map.value.has(key);
-    const old_value = if (existed) m.map.value.get(key) else null;
-    try m.map.value.set(if (existed) key else key.retain(), value.retain());
-    if (old_value) |v| v.deinit();
-    return m.retain(); // chainable
-}
-
-fn mapHas(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    const m = try requireMap(ctx, this_value, "has");
-    return JSValue.fromBool(m.map.value.has(arg(args, 0)));
-}
-
-fn mapDelete(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    const m = try requireMap(ctx, this_value, "delete");
-    const key = arg(args, 0);
-    // delete() only returns a bool (no removed key/value) -- capture the
-    // value first so we can release it. The stored KEY isn't released here
-    // (deliberately out of scope): for object/symbol/function keys
-    // SameValueZero is reference identity so `key` IS the stored box, but
-    // for strings it's value equality over possibly-different boxes, and
-    // ZMap doesn't expose "the actual stored key" to disambiguate safely.
-    const old_value = m.map.value.get(key);
-    const removed = m.map.value.delete(key);
-    if (removed) if (old_value) |v| v.deinit();
-    return JSValue.fromBool(removed);
-}
-
-fn mapClear(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = args;
-    const m = try requireMap(ctx, this_value, "clear");
-    m.map.value.clear();
-    return JSValue.UNDEFINED;
-}
-
-fn mapForEach(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    const m = try requireMap(ctx, this_value, "forEach");
-    const cb = try requireCallback(ctx, args);
-    const ks = m.map.value.keys();
-    const vs = m.map.value.values();
-    // Snapshot + retain before calling into JS: `ks`/`vs` are live slices
-    // into the map's storage, and the callback may mutate `m` (delete/
-    // set), which can resize/compact that storage and invalidate them
-    // mid-iteration -- a real, confirmed crash ("switch on corrupt
-    // value" in JSValue.retain(), Test262). A copy WITHOUT retaining
-    // isn't enough either: a callback that deletes the very entry being
-    // visited would leave the snapshot pointing at an already-freed box.
-    const snap_keys = try allocator.alloc(JSValue, ks.len);
-    defer allocator.free(snap_keys);
-    const snap_values = try allocator.alloc(JSValue, ks.len);
-    defer allocator.free(snap_values);
-    for (ks, vs, 0..) |k, v, i| {
-        snap_keys[i] = k.retain();
-        snap_values[i] = v.retain();
-    }
-    defer for (snap_keys, snap_values) |k, v| {
-        k.deinit();
-        v.deinit();
-    };
-    for (snap_keys, snap_values) |k, v| {
-        _ = try cb.function.value.call(cb.function.value.ctx, allocator, JSValue.UNDEFINED, &.{ v, k, m });
-    }
-    return JSValue.UNDEFINED;
-}
-
-/// Snapshot slice -> array iterator (reuses the array-iterator machinery).
-fn iteratorFromValues(self: *Interpreter, allocator: Allocator, items: []const JSValue) anyerror!JSValue {
-    var arr = try self.gcNewArray();
-    for (items) |it| _ = try arr.array.value.push(it.retain());
-    return makeArrayIterator(self, allocator, arr, .values);
-}
-
-fn mapKeys(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = args;
-    const m = try requireMap(ctx, this_value, "keys");
-    return iteratorFromValues(interp(ctx), allocator, m.map.value.keys());
-}
-
-fn mapValues(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = args;
-    const m = try requireMap(ctx, this_value, "values");
-    return iteratorFromValues(interp(ctx), allocator, m.map.value.values());
-}
-
-fn mapEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = args;
-    const m = try requireMap(ctx, this_value, "entries");
-    const ks = m.map.value.keys();
-    const vs = m.map.value.values();
-    var pairs: std.ArrayList(JSValue) = .empty;
-    defer pairs.deinit(allocator);
-    for (ks, vs) |k, v| {
-        var pair = try interp(ctx).gcNewArray();
-        _ = try pair.array.value.push(k.retain());
-        _ = try pair.array.value.push(v.retain());
-        try pairs.append(allocator, pair);
-    }
-    return iteratorFromValues(interp(ctx), allocator, pairs.items);
-}
-
-fn setAdd(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    const s = try requireSet(ctx, this_value, "add");
-    if (!s.set.value.has(arg(args, 0))) try s.set.value.add(arg(args, 0).retain());
-    return s.retain(); // chainable
-}
-
-fn setHas(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    const s = try requireSet(ctx, this_value, "has");
-    return JSValue.fromBool(s.set.value.has(arg(args, 0)));
-}
-
-fn setDelete(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    const s = try requireSet(ctx, this_value, "delete");
-    return JSValue.fromBool(s.set.value.delete(arg(args, 0)));
-}
-
-fn setClear(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = args;
-    const s = try requireSet(ctx, this_value, "clear");
-    s.set.value.clear();
-    return JSValue.UNDEFINED;
-}
-
-fn setForEach(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    const s = try requireSet(ctx, this_value, "forEach");
-    const cb = try requireCallback(ctx, args);
-    const vs = s.set.value.values();
-    // Same snapshot-and-retain rationale as mapForEach above.
-    const snap_values = try allocator.alloc(JSValue, vs.len);
-    defer allocator.free(snap_values);
-    for (vs, 0..) |v, i| snap_values[i] = v.retain();
-    defer for (snap_values) |v| v.deinit();
-    for (snap_values) |v| {
-        _ = try cb.function.value.call(cb.function.value.ctx, allocator, JSValue.UNDEFINED, &.{ v, v, s });
-    }
-    return JSValue.UNDEFINED;
-}
-
-fn setValues(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = args;
-    const s = try requireSet(ctx, this_value, "values");
-    return iteratorFromValues(interp(ctx), allocator, s.set.value.values());
-}
-
-fn setEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = args;
-    const s = try requireSet(ctx, this_value, "entries");
-    var pairs: std.ArrayList(JSValue) = .empty;
-    defer pairs.deinit(allocator);
-    for (s.set.value.values()) |v| {
-        var pair = try interp(ctx).gcNewArray();
-        _ = try pair.array.value.push(v.retain());
-        _ = try pair.array.value.push(v.retain());
-        try pairs.append(allocator, pair);
-    }
-    return iteratorFromValues(interp(ctx), allocator, pairs.items);
 }
 
 // ===== String methods with RegExp patterns =====
