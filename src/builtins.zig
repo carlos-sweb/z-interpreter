@@ -109,6 +109,19 @@ const regexFindFrom = regex_builtins.regexFindFrom;
 const makeMatchArray = regex_builtins.makeMatchArray;
 const regexSplit = regex_builtins.regexSplit;
 
+// z-interpreter-refactor.md, Step 5 Phase A batch 2: Math/JSON/Proxy
+// (statics-only or ctor-only, no cross-domain deps beyond
+// builtin_helpers) and Boolean/BigInt (each needed one surgical
+// single-function pull too: `globalBoolean` physically lived in the old
+// "Loose globals" grab-bag section, not next to Boolean.prototype).
+const math_builtins = @import("math_builtins.zig");
+const json_builtins = @import("json_builtins.zig");
+const boolean_builtins = @import("boolean_builtins.zig");
+const bigint_builtins = @import("bigint_builtins.zig");
+const proxy_builtins = @import("proxy_builtins.zig");
+pub const boolean_methods = boolean_builtins.boolean_methods;
+pub const bigint_methods = bigint_builtins.bigint_methods;
+
 // ===== Method tables (consulted by the interpreter's getProperty) =====
 
 pub const array_methods = std.StaticStringMap(NativeFn).initComptime(.{
@@ -231,17 +244,6 @@ pub const number_methods = std.StaticStringMap(NativeFn).initComptime(.{
     .{ "toFixed", numberToFixed },
     .{ "toExponential", numberToExponential },
     .{ "toPrecision", numberToPrecision },
-});
-
-pub const boolean_methods = std.StaticStringMap(NativeFn).initComptime(.{
-    .{ "toString", booleanToString },
-    .{ "valueOf", booleanValueOf },
-});
-
-pub const bigint_methods = std.StaticStringMap(NativeFn).initComptime(.{
-    .{ "toString", bigintToString },
-    .{ "toLocaleString", bigintToString },
-    .{ "valueOf", bigintValueOf },
 });
 
 pub const array_buffer_methods = std.StaticStringMap(NativeFn).initComptime(.{
@@ -374,21 +376,7 @@ pub fn setupGlobals(self: *Interpreter) !void {
     } });
     try g.define(arena, "print", try native(self, "print", globalPrint));
 
-    _ = try installBuiltin(self, .{ .name = "Math", .statics = &.{
-        .{ .name = "PI", .value = .{ .constant = JSValue.fromNumber(zmath.PI) } },
-        .{ .name = "E", .value = .{ .constant = JSValue.fromNumber(zmath.E) } },
-        .{ .name = "floor", .value = .{ .method = mathFloor } },
-        .{ .name = "ceil", .value = .{ .method = mathCeil } },
-        .{ .name = "round", .value = .{ .method = mathRound } },
-        .{ .name = "trunc", .value = .{ .method = mathTrunc } },
-        .{ .name = "abs", .value = .{ .method = mathAbs } },
-        .{ .name = "sign", .value = .{ .method = mathSign } },
-        .{ .name = "sqrt", .value = .{ .method = mathSqrt } },
-        .{ .name = "pow", .value = .{ .method = mathPow } },
-        .{ .name = "min", .value = .{ .method = mathMin } },
-        .{ .name = "max", .value = .{ .method = mathMax } },
-        .{ .name = "random", .value = .{ .method = mathRandom } },
-    } });
+    try math_builtins.install(self);
 
     _ = try installBuiltin(self, .{ .name = "Reflect", .statics = &.{
         .{ .name = "get", .value = .{ .method = reflectGet } },
@@ -403,10 +391,7 @@ pub fn setupGlobals(self: *Interpreter) !void {
         .{ .name = "construct", .value = .{ .method = reflectConstruct } },
     } });
 
-    _ = try installBuiltin(self, .{ .name = "JSON", .statics = &.{
-        .{ .name = "stringify", .value = .{ .method = jsonStringify } },
-        .{ .name = "parse", .value = .{ .method = jsonParse } },
-    } });
+    try json_builtins.install(self);
 
     // Array: constructable (new Array(n) / Array(a, b, c)) + statics.
     _ = try installBuiltin(self, .{ .name = "Array", .ctor = .{ .arity = 1, .call = arrayConstructor, .constructable = true }, .statics = &.{
@@ -428,9 +413,7 @@ pub fn setupGlobals(self: *Interpreter) !void {
 
     try temporal_builtins.install(self);
 
-    // `new Proxy(target, handler)` -- unlike Date, MUST reject a bare
-    // (non-new) call (proxyConstructor's own construct_target check).
-    _ = try installBuiltin(self, .{ .name = "Proxy", .ctor = .{ .arity = 2, .call = proxyConstructor, .constructable = true } });
+    try proxy_builtins.install(self);
 
     // `new ArrayBuffer(byteLength)` / `new DataView(buffer, byteOffset,
     // byteLength)` -- both reject a bare (non-new) call, same pattern as
@@ -539,17 +522,8 @@ pub fn setupGlobals(self: *Interpreter) !void {
         .{ .name = "NEGATIVE_INFINITY", .value = .{ .constant = JSValue.fromNumber(-std.math.inf(f64)) } },
     } });
 
-    _ = try installBuiltin(self, .{ .name = "Boolean", .ctor = .{ .arity = 1, .call = globalBoolean, .constructable = true } });
-
-    // Unlike String/Number/Boolean, BigInt is NEVER constructable --
-    // `new BigInt(5)` is a real TypeError in real JS (there's no
-    // [[BigIntData]] wrapper object at all), which `constructValue`'s
-    // existing generic `!callee.function.value.constructable` guard
-    // already produces for free by just leaving this false.
-    _ = try installBuiltin(self, .{ .name = "BigInt", .ctor = .{ .arity = 1, .call = globalBigInt, .constructable = false }, .statics = &.{
-        .{ .name = "asIntN", .value = .{ .method = bigintAsIntN } },
-        .{ .name = "asUintN", .value = .{ .method = bigintAsUintN } },
-    } });
+    try boolean_builtins.install(self);
+    try bigint_builtins.install(self);
 
     // Materialize every builtin prototype as a real object (own methods with
     // descriptors, chained to Object.prototype) now that all constructors
@@ -1200,111 +1174,6 @@ fn dateSetter(comptime method: []const u8, comptime n_optional: usize) NativeFn 
     }.call;
 }
 
-// ===== Math =====
-
-fn mathUnary(comptime f: fn (f64) f64) NativeFn {
-    return struct {
-        fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-            _ = ctx;
-            _ = allocator;
-            _ = this_value;
-            return JSValue.fromNumber(f(try coercion.toNumber(arg(args, 0))));
-        }
-    }.call;
-}
-
-const mathFloor = mathUnary(zmath.floor);
-const mathCeil = mathUnary(zmath.ceil);
-const mathRound = mathUnary(zmath.round);
-const mathTrunc = mathUnary(zmath.trunc);
-const mathAbs = mathUnary(zmath.abs);
-const mathSign = mathUnary(zmath.sign);
-const mathSqrt = mathUnary(zmath.sqrt);
-
-fn mathPow(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
-    _ = allocator;
-    _ = this_value;
-    return JSValue.fromNumber(std.math.pow(f64, try coercion.toNumber(arg(args, 0)), try coercion.toNumber(arg(args, 1))));
-}
-
-fn mathVariadic(ctx: *anyopaque, allocator: Allocator, args: []const JSValue, comptime f: fn ([]const f64) f64) anyerror!JSValue {
-    _ = ctx;
-    const nums = try allocator.alloc(f64, args.len);
-    defer allocator.free(nums);
-    for (args, 0..) |a, i| nums[i] = try coercion.toNumber(a);
-    return JSValue.fromNumber(f(nums));
-}
-
-fn mathMin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = this_value;
-    return mathVariadic(ctx, allocator, args, zmath.min);
-}
-
-fn mathMax(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = this_value;
-    return mathVariadic(ctx, allocator, args, zmath.max);
-}
-
-fn mathRandom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = this_value;
-    _ = args;
-    // Not cryptographic (neither is JS's Math.random). Seeded once per
-    // process from ASLR'd addresses -- this Zig version's OS entropy API
-    // needs an std.Io instance, which this interpreter doesn't thread.
-    const S = struct {
-        var prng: ?std.Random.DefaultPrng = null;
-    };
-    if (S.prng == null) {
-        const seed = @intFromPtr(&S.prng) ^ (@intFromPtr(ctx) << 16);
-        S.prng = std.Random.DefaultPrng.init(seed);
-    }
-    return JSValue.fromNumber(S.prng.?.random().float(f64));
-}
-
-// ===== JSON =====
-
-fn jsonStringify(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = this_value;
-    const v = arg(args, 0);
-    // Real spec: JSON.stringify(undefined | function | symbol) at the TOP
-    // LEVEL returns the JS value `undefined` (not the string "undefined"),
-    // it does NOT throw -- z-json's stringify() surfaces this same case as
-    // JSONError.Unserializable (there's no []u8 to return), so it must be
-    // special-cased BEFORE calling it, or the interpreter can't tell it
-    // apart from the BigInt case below (which DOES throw).
-    if (v == .@"undefined" or v == .function or v == .symbol) return JSValue.UNDEFINED;
-    const out = zjson.stringify(allocator, v) catch |err| switch (err) {
-        error.CircularStructure => return interp(ctx).throwError(.type_error, "Converting circular structure to JSON", .{}),
-        // Real Node: JSON.stringify(5n) (BigInt anywhere in the tree, not
-        // just top-level) throws a catchable TypeError, not an uncaught
-        // engine error -- was falling through to `else => return err`,
-        // propagating a raw Zig error instead of a real JS exception.
-        error.Unserializable => return interp(ctx).throwError(.type_error, "Do not know how to serialize a BigInt", .{}),
-        else => return err,
-    };
-    defer allocator.free(out);
-    return interp(ctx).gcNewString(out);
-}
-
-fn jsonParse(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = this_value;
-    const self = interp(ctx);
-    const text = arg(args, 0);
-    if (text != .string) return self.throwError(.syntax_error, "Unexpected token in JSON", .{});
-    const value = zjson.parse(allocator, text.string.value.data) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        // A real, catchable SyntaxError -- matching JSON.parse's spec'd
-        // failure mode.
-        else => return self.throwError(.syntax_error, "Unexpected token in JSON", .{}),
-    };
-    // zjson.parse builds the tree via z-value's raw constructors, bypassing
-    // gcNew*/gcTrack at every level -- see gcAdoptTree's doc comment.
-    try self.gcAdoptTree(value);
-    return value;
-}
-
 // ===== Object statics =====
 
 fn requireObject(ctx: *anyopaque, v: JSValue, what: []const u8) anyerror!JSValue {
@@ -1493,12 +1362,6 @@ fn globalNumber(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     return interp(ctx).boxPrimitiveIfConstructed(ctx, this_value, primitive);
 }
 
-fn globalBoolean(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    const primitive = JSValue.fromBool(coercion.isTruthy(arg(args, 0)));
-    return interp(ctx).boxPrimitiveIfConstructed(ctx, this_value, primitive);
-}
-
 /// Indirect `eval` (called as a plain value, not the literal `eval(...)`
 /// form): runs its string argument in the GLOBAL scope. A non-string
 /// argument is returned unchanged. Direct eval is handled in evalCall.
@@ -1576,129 +1439,6 @@ fn numberToPrecision(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     const s = try znumber.FormattingMethods.toPrecision(n, allocator, p);
     defer allocator.free(s);
     return interp(ctx).gcNewString(s);
-}
-
-// ===== Boolean.prototype =====
-
-fn requireBoolean(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!bool {
-    return (try requirePrimitive(ctx, this_value, .boolean, "Boolean.prototype.{s} called on a non-boolean", method)).boolean;
-}
-
-fn booleanToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = args;
-    const b = try requireBoolean(ctx, this_value, "toString");
-    return interp(ctx).gcNewString(if (b) "true" else "false");
-}
-
-fn booleanValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = args;
-    return JSValue.fromBool(try requireBoolean(ctx, this_value, "valueOf"));
-}
-
-// ===== BigInt =====
-
-/// `BigInt(value)`'s own algorithm: Number gets a special conversion
-/// (NumberToBigInt, integer-only, RangeError otherwise) that plain
-/// ToBigInt does NOT have -- everything else (including the "not an
-/// integer" narrowing on strings/booleans-that-aren't-really-numbers)
-/// delegates to the shared `toBigIntValue`.
-fn globalBigInt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = this_value;
-    const self = interp(ctx);
-    const a = arg(args, 0);
-    if (a == .number) {
-        if (std.math.isNan(a.number) or std.math.isInf(a.number) or @floor(a.number) != a.number) {
-            const shown = try coercion.toDisplayString(allocator, a);
-            defer allocator.free(shown);
-            return self.throwError(.range_error, "The number {s} cannot be converted to a BigInt because it is not an integer", .{shown});
-        }
-        return self.gcNewBigIntValue(try zbigint.ZBigInt.fromFloat(self.gc_allocator, a.number));
-    }
-    return toBigIntValue(self, allocator, a);
-}
-
-fn requireBigInt(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {
-    return requireTag(ctx, this_value, .bigint, "BigInt.prototype.{s} called on a non-BigInt", method);
-}
-
-/// `n.toString(radix?)` -- radix 2..36 (default 10), same contract as
-/// `Number.prototype.toString`.
-fn bigintToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    const v = try requireBigInt(ctx, this_value, "toString");
-    var radix: u8 = 10;
-    if (arg(args, 0) != .@"undefined") {
-        const r = toIntSat(try coercion.toNumber(arg(args, 0)));
-        if (r < 2 or r > 36) return interp(ctx).throwError(.range_error, "toString() radix argument must be between 2 and 36", .{});
-        radix = @intCast(r);
-    }
-    const s = try v.bigint.value.toString(allocator, radix);
-    defer allocator.free(s);
-    return interp(ctx).gcNewString(s);
-}
-
-fn bigintValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = args;
-    return (try requireBigInt(ctx, this_value, "valueOf")).retain();
-}
-
-/// Shared by `BigInt.asIntN`/`asUintN`: validates the `bits` argument
-/// (a non-negative safe integer, matching Node's exact RangeError text)
-/// and the `bigint` argument, then returns `(1n << bits) - 1n` (the
-/// low-`bits`-bits mask) -- caller owns the returned `ZBigInt`.
-fn bigintAsNArgs(ctx: *anyopaque, args: []const JSValue) anyerror!struct { bits: usize, x: JSValue, mask: zbigint.ZBigInt } {
-    const self = interp(ctx);
-    const bits_n = try coercion.toNumber(arg(args, 0));
-    if (std.math.isNan(bits_n) or std.math.isInf(bits_n) or bits_n < 0 or @floor(bits_n) != bits_n) {
-        return self.throwError(.range_error, "Invalid value: not (convertible to) a safe integer", .{});
-    }
-    const bits: usize = @intFromFloat(bits_n);
-    // Real spec: `bigint` also goes through ToBigInt (accepts boolean/
-    // string/number, not just an already-bigint value) -- `x` is OWNED
-    // (`toBigIntValue` always returns a fresh reference), so every
-    // caller must `.deinit()` it once done reading `.bigint.value`.
-    const x = try toBigIntValue(self, self.gc_allocator, arg(args, 1));
-    var one = try zbigint.ZBigInt.fromInt(self.gc_allocator, 1);
-    defer one.deinit();
-    var shifted = try zbigint.ZBigInt.shiftLeft(self.gc_allocator, one, bits);
-    defer shifted.deinit();
-    const mask = try zbigint.ZBigInt.sub(self.gc_allocator, shifted, one);
-    return .{ .bits = bits, .x = x, .mask = mask };
-}
-
-fn bigintAsUintN(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = this_value;
-    const self = interp(ctx);
-    var parsed = try bigintAsNArgs(ctx, args);
-    defer parsed.mask.deinit();
-    defer parsed.x.deinit();
-    const result = try zbigint.ZBigInt.bitAnd(self.gc_allocator, parsed.x.bigint.value, parsed.mask);
-    return self.gcNewBigIntValue(result);
-}
-
-fn bigintAsIntN(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = this_value;
-    const self = interp(ctx);
-    var parsed = try bigintAsNArgs(ctx, args);
-    defer parsed.mask.deinit();
-    defer parsed.x.deinit();
-    if (parsed.bits == 0) return self.gcNewBigIntValue(try zbigint.ZBigInt.fromInt(self.gc_allocator, 0));
-    var unsigned_val = try zbigint.ZBigInt.bitAnd(self.gc_allocator, parsed.x.bigint.value, parsed.mask);
-    defer unsigned_val.deinit();
-    var one = try zbigint.ZBigInt.fromInt(self.gc_allocator, 1);
-    defer one.deinit();
-    var half = try zbigint.ZBigInt.shiftLeft(self.gc_allocator, one, parsed.bits - 1);
-    defer half.deinit();
-    if (unsigned_val.cmp(half) != .lt) {
-        var full = try zbigint.ZBigInt.shiftLeft(self.gc_allocator, one, parsed.bits);
-        defer full.deinit();
-        return self.gcNewBigIntValue(try zbigint.ZBigInt.sub(self.gc_allocator, unsigned_val, full));
-    }
-    return self.gcNewBigIntValue(try unsigned_val.clone());
 }
 
 // ===== ArrayBuffer / DataView (roadmap item 19, phase 1) =====
@@ -4088,23 +3828,6 @@ fn regexReplace(self: *Interpreter, allocator: Allocator, data: []const u8, re: 
     }
     if (pos < data.len) try buf.appendSlice(allocator, data[pos..]);
     return self.gcNewString(buf.items);
-}
-
-// ===== Proxy =====
-
-fn proxyConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = this_value;
-    const self = interp(ctx);
-    if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor Proxy requires 'new'", .{});
-    const target = arg(args, 0);
-    const handler = arg(args, 1);
-    // Real Node uses ONE combined message for either failure, not two
-    // distinct ones (verified against actual Node, not assumed).
-    if (!isObjectLike(target) or !isObjectLike(handler)) {
-        return self.throwError(.type_error, "Cannot create proxy with a non-object as target or handler", .{});
-    }
-    return self.gcNewProxy(target.retain(), handler.retain());
 }
 
 // ===== Reflect =====
