@@ -4,11 +4,8 @@
 //! "Number / String statics" section -- `stringFromCharCode` there stays
 //! behind for String's own extraction pass). `Number.parseInt`/`parseFloat`
 //! reuse the global `parseInt`/`parseFloat` (`globalParseInt`/
-//! `globalParseFloat`), which also depend on `argString`, shared with
-//! String.prototype methods not yet extracted -- kept in builtins.zig
-//! (`pub`) and referenced back across the (already-circular, same pattern
-//! as interpreter.zig <-> builtins.zig) import until Loose globals/String
-//! get their own passes. z-interpreter-refactor.md, Step 5 Phase A batch 3.
+//! `globalParseFloat`), imported directly from globals_builtins.zig since
+//! batch 10. z-interpreter-refactor.md, Step 5 Phase A batch 3.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -21,7 +18,7 @@ const Interpreter = interpreter_mod.Interpreter;
 const coercion = @import("coercion.zig");
 const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
-const builtins = @import("builtins.zig");
+const globals_builtins = @import("globals_builtins.zig");
 
 pub const NativeFn = native_helpers.NativeFn;
 const interp = native_helpers.interp;
@@ -140,8 +137,8 @@ pub fn install(self: *Interpreter) !void {
         .{ .name = "isNaN", .value = .{ .method = numberIsNaN } },
         .{ .name = "isFinite", .value = .{ .method = numberIsFinite } },
         .{ .name = "isInteger", .value = .{ .method = numberIsInteger } },
-        .{ .name = "parseFloat", .value = .{ .method = builtins.globalParseFloat } },
-        .{ .name = "parseInt", .value = .{ .method = builtins.globalParseInt } },
+        .{ .name = "parseFloat", .value = .{ .method = globals_builtins.globalParseFloat } },
+        .{ .name = "parseInt", .value = .{ .method = globals_builtins.globalParseInt } },
         .{ .name = "MAX_SAFE_INTEGER", .value = .{ .constant = JSValue.fromNumber(9007199254740991.0) } },
         .{ .name = "MIN_SAFE_INTEGER", .value = .{ .constant = JSValue.fromNumber(-9007199254740991.0) } },
         .{ .name = "EPSILON", .value = .{ .constant = JSValue.fromNumber(std.math.floatEps(f64)) } },

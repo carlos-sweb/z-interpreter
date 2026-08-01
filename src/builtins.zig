@@ -167,14 +167,11 @@ pub const normIndex = array_builtins.normIndex;
 // physically lived inside the old "String.prototype (extended
 // coverage)" section (should have been next to `stringFromCharCode`, a
 // static) -- grouped correctly in the new file instead of transcribed
-// forward. `argString` moves to string_builtins.zig (made `pub`);
-// `globalParseInt`/`globalParseFloat` (still here, "Loose globals", not
-// yet its own domain) reach it via `builtins.argString` below --
-// unchanged reach-back pattern from batch 3's
-// `globalParseInt`/`globalParseFloat`.
+// forward. `argString`'s `builtins.argString` re-export (added for
+// `globalParseInt`/`globalParseFloat`'s sake) is gone as of batch 10:
+// globals_builtins.zig now imports string_builtins.zig directly for it.
 const string_builtins = @import("string_builtins.zig");
 pub const string_methods = string_builtins.string_methods;
-pub const argString = string_builtins.argString;
 
 // z-interpreter-refactor.md, Step 5 Phase A batch 7: Object statics +
 // Object.prototype methods + property descriptors -- the biggest
@@ -202,6 +199,14 @@ const reflect_builtins = @import("reflect_builtins.zig");
 // single self-contained section.
 const error_builtins = @import("error_builtins.zig");
 
+// z-interpreter-refactor.md, Step 5 Phase A batch 10 (FINAL batch of
+// Phase A): the "loose globals" grab-bag -- console/print,
+// parseInt/parseFloat/isNaN/isFinite, indirect eval. Nothing left in
+// this file reaches back into it: number_builtins.zig now imports
+// globals_builtins.zig directly for globalParseInt/globalParseFloat
+// instead of through builtins.zig.
+const globals_builtins = @import("globals_builtins.zig");
+
 // ===== Globals =====
 
 /// Installs every global binding. Called lazily from `run()` (never from
@@ -218,18 +223,6 @@ pub fn setupGlobals(self: *Interpreter) !void {
     // why (every other builtin's ordinaryObject() calls need real
     // Object.prototype to already exist).
     try object_builtins.install(self);
-
-    // Real Node: log/info/debug -> stdout, error/warn -> stderr (verified
-    // against actual Node, not assumed) -- same rendering either way,
-    // only the destination writer differs. See consoleLog/consoleError.
-    _ = try installBuiltin(self, .{ .name = "console", .statics = &.{
-        .{ .name = "log", .value = .{ .method = consoleLog } },
-        .{ .name = "info", .value = .{ .method = consoleLog } },
-        .{ .name = "debug", .value = .{ .method = consoleLog } },
-        .{ .name = "error", .value = .{ .method = consoleError } },
-        .{ .name = "warn", .value = .{ .method = consoleError } },
-    } });
-    try g.define(arena, "print", try native(self, "print", globalPrint));
 
     try math_builtins.install(self);
 
@@ -257,18 +250,7 @@ pub fn setupGlobals(self: *Interpreter) !void {
     try regex_builtins.install(self);
     try mapset_builtins.install(self);
 
-    const eval_fn = try native(self, "eval", globalEval);
-    // self.eval_fn needs its OWN retained reference -- see the same fix
-    // on symbol_iterator/global_object for why (an interpreter field
-    // aliasing a reassignable global binding, without its own retain, is
-    // left dangling the moment that binding's old value gets released).
-    self.eval_fn = eval_fn.retain();
-    try g.define(arena, "eval", eval_fn);
-
-    try g.define(arena, "parseInt", try native(self, "parseInt", globalParseInt));
-    try g.define(arena, "parseFloat", try native(self, "parseFloat", globalParseFloat));
-    try g.define(arena, "isNaN", try native(self, "isNaN", globalIsNaN));
-    try g.define(arena, "isFinite", try native(self, "isFinite", globalIsFinite));
+    try globals_builtins.install(self);
 
     try string_builtins.install(self);
 
@@ -291,111 +273,5 @@ pub fn setupGlobals(self: *Interpreter) !void {
     // `globalThis` global binding.
     self.global_object = global_this.retain();
     try g.define(arena, "globalThis", global_this);
-}
-
-// ===== console =====
-
-fn consoleLog(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = this_value;
-    const self = interp(ctx);
-    try inspect.writeConsoleLog(allocator, self.console_writer, args);
-    return JSValue.UNDEFINED;
-}
-
-fn consoleError(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = this_value;
-    const self = interp(ctx);
-    try inspect.writeConsoleLog(allocator, self.console_error_writer, args);
-    return JSValue.UNDEFINED;
-}
-
-/// `print(msg)`: writes ToString(msg) + a newline. A d8/jsshell/qjs-style
-/// core global (not host-specific like `os` -- it's exactly as fundamental
-/// as `console`, which already lives here), and notably what Test262's own
-/// harness (doneprintHandle.js's $DONE) uses to report async-test
-/// completion -- so this also makes the runner able to detect "did an
-/// async test finish" for every async/async-generator test that reaches
-/// $DONE, not just this phase's own tests.
-fn globalPrint(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = this_value;
-    const self = interp(ctx);
-    const msg = try coercion.toDisplayString(allocator, arg(args, 0));
-    defer allocator.free(msg);
-    try self.console_writer.writeAll(msg);
-    try self.console_writer.writeByte('\n');
-    return JSValue.UNDEFINED;
-}
-
-// ===== Generic receiver guards (z-interpreter-refactor.md, Step 3) =====
-//
-// 16 requireX functions existed here, each independently re-implementing
-// "check this_value's tag, throw a TypeError naming `method` if wrong,
-// return something". Re-reading every one against current source (not
-// trusting the plan's original guess) found two clean, truly-identical
-// shapes -- requireTag below (9 functions: no unwrapping, returns the
-// whole JSValue or void) and requirePrimitive (3 functions: unwraps a
-// `new String()`/`new Number()`/`new Boolean()` primitive wrapper first,
-// returns an inner scalar field) -- plus 4 genuinely divergent ones that
-// stay hand-written because they don't fit either shape: requireCallback
-// (checks args[0], not this_value), requireObject/requirePlainObject
-// (caller supplies the whole message prefix, not just a method name --
-// near-duplicates of EACH OTHER, not of this group), and requireDataView
-// (takes `*Interpreter` directly instead of `*anyopaque`, and returns an
-// extracted `.view` rather than the JSValue itself).
-//
-// The exact message template of every migrated function is preserved
-// verbatim (passed as a comptime format string) -- this is a pure
-// dedup, not a message-wording change.
-
-// ===== Loose globals =====
-
-pub fn globalParseInt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
-    _ = this_value;
-    const s = try argString(allocator, args, 0);
-    defer allocator.free(s);
-    const radix: ?u8 = if (arg(args, 1) == .@"undefined") null else blk: {
-        // Clamp into u8; out-of-[2,36] values are left for parseInt to reject
-        // (as NaN). Avoids @intFromFloat panicking on NaN/Infinity/huge radix.
-        const r = toIntSat(try coercion.toNumber(arg(args, 1)));
-        break :blk if (r >= 0 and r <= 36) @intCast(r) else 255;
-    };
-    return JSValue.fromNumber(znumber.ParsingMethods.parseInt(allocator, s, radix));
-}
-
-pub fn globalParseFloat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
-    _ = this_value;
-    const s = try argString(allocator, args, 0);
-    defer allocator.free(s);
-    return JSValue.fromNumber(znumber.ParsingMethods.parseFloat(s));
-}
-
-fn globalIsNaN(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
-    _ = allocator;
-    _ = this_value;
-    return JSValue.fromBool(std.math.isNan(try coercion.toNumber(arg(args, 0))));
-}
-
-fn globalIsFinite(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
-    _ = allocator;
-    _ = this_value;
-    const n = try coercion.toNumber(arg(args, 0));
-    return JSValue.fromBool(!std.math.isNan(n) and !std.math.isInf(n));
-}
-
-
-/// Indirect `eval` (called as a plain value, not the literal `eval(...)`
-/// form): runs its string argument in the GLOBAL scope. A non-string
-/// argument is returned unchanged. Direct eval is handled in evalCall.
-fn globalEval(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = this_value;
-    const self = interp(ctx);
-    const a = arg(args, 0);
-    if (a != .string) return a.retain();
-    return self.evalSource(self.global_env, a.string.value.data);
 }
 
