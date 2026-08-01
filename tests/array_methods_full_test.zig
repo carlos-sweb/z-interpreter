@@ -3,6 +3,25 @@
 const std = @import("std");
 const helpers = @import("helpers.zig");
 
+test "concat with a mix of arrays, loose values, and a nested array (shallow)" {
+    try helpers.expectStdout(
+        "console.log(JSON.stringify([1, 2].concat(3, [4, 5], 6, [[7]])));",
+        "[1,2,3,4,5,6,[7]]\n",
+    );
+    try helpers.expectStdout("console.log([].concat().length);", "0\n");
+    try helpers.expectStdout("console.log([1].concat([2, 3]).length);", "3\n");
+    try helpers.expectStdout("console.log([].concat([]).length);", "0\n");
+}
+
+test "concat retains a shared object independently per occurrence" {
+    try helpers.expectStdout(
+        \\const obj = { x: 1 };
+        \\const merged = [obj].concat([obj], obj);
+        \\merged[0].x = 99;
+        \\console.log(merged[1].x, merged[2].x, merged.length);
+    , "99 99 3\n");
+}
+
 test "index and length writes (the transversal gap)" {
     try helpers.expectStdout(
         \\const a = [1, 2, 3]; a[1] = 9; a[5] = 7; a[0] += 100;
@@ -32,6 +51,27 @@ test "flat with depth" {
 test "fill and copyWithin" {
     try helpers.expectStdout("console.log([1, 2, 3, 4, 5].fill(0, 1, 3).join(','));", "1,0,0,4,5\n");
     try helpers.expectStdout("console.log([1, 2, 3, 4, 5].copyWithin(0, 3).join(','));", "4,5,3,4,5\n");
+}
+
+test "copyWithin with negative indices" {
+    try helpers.expectStdout("console.log([1, 2, 3, 4, 5].copyWithin(-2, 0).join(','));", "1,2,3,1,2\n");
+    try helpers.expectStdout("console.log([1, 2, 3, 4, 5].copyWithin(0, -2).join(','));", "4,5,3,4,5\n");
+}
+
+test "copyWithin with overlapping source/destination ranges, both shift directions" {
+    // target(1) is inside the source range [0,3) -- shifting right/down.
+    try helpers.expectStdout("console.log([1, 2, 3, 4, 5].copyWithin(1, 0, 3).join(','));", "1,1,2,3,5\n");
+    // target(0) is inside the source range [1,4) -- shifting left/up.
+    try helpers.expectStdout("console.log([1, 2, 3, 4, 5].copyWithin(0, 1, 4).join(','));", "2,3,4,4,5\n");
+    // target == start + 1, single-element overlap, worst case for an
+    // interleaved release/retain implementation (Node-verified).
+    try helpers.expectStdout("console.log([1, 2, 3].copyWithin(1, 0, 2).join(','));", "1,1,2\n");
+}
+
+test "copyWithin no-ops: empty range, target beyond bounds, target == start" {
+    try helpers.expectStdout("console.log([1, 2, 3].copyWithin(0, 2, 1).join(','));", "1,2,3\n");
+    try helpers.expectStdout("console.log([1, 2, 3].copyWithin(5, 0, 2).join(','));", "1,2,3\n");
+    try helpers.expectStdout("console.log([1, 2, 3].copyWithin(1, 1, 2).join(','));", "1,2,3\n");
 }
 
 test "splice mutates in place and returns the removed elements" {

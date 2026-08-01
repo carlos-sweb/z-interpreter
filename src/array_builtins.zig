@@ -155,17 +155,42 @@ fn arraySlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 }
 
 fn arrayConcat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
     try requireArray(ctx, this_value, "concat");
-    var result = try interp(ctx).gcNewArray();
-    for (this_value.array.value.toSlice()) |item| _ = try result.array.value.push(item.retain());
+    const Arr = @TypeOf(this_value.array.value);
+
+    // z-array's own concat() only takes arrays to merge; a loose
+    // (non-array) argument needs a throwaway single-element array to fit
+    // that shape -- JS's own concat() accepts a mix of both. `others`
+    // mixes borrowed arrays (from array-typed args, owned by their own
+    // JSValue) with these synthetic ones, so `owned` separately tracks
+    // just the synthetic wrappers for cleanup after the merge.
+    var others: std.ArrayList(Arr) = .empty;
+    defer others.deinit(allocator);
+    var owned: std.ArrayList(Arr) = .empty;
+    defer {
+        for (owned.items) |*o| o.deinit();
+        owned.deinit(allocator);
+    }
     for (args) |a| {
         if (a == .array) {
-            for (a.array.value.toSlice()) |item| _ = try result.array.value.push(item.retain());
+            try others.append(allocator, a.array.value);
         } else {
-            _ = try result.array.value.push(a.retain());
+            var one = Arr.init(allocator);
+            _ = try one.push(a);
+            try others.append(allocator, one);
+            try owned.append(allocator, one);
         }
     }
+
+    // z-array's own concat() does the bulk merge (this array's elements,
+    // then each of `others` in order); it just copies raw JSValue bytes
+    // without retaining (doesn't know T might be refcounted), so retain
+    // each element of the merged result on the way into the GC-tracked
+    // array.
+    var merged = try this_value.array.value.concat(others.items);
+    defer merged.deinit();
+    var result = try interp(ctx).gcNewArray();
+    for (merged.toSlice()) |item| _ = try result.array.value.push(item.retain());
     return result;
 }
 
@@ -552,19 +577,40 @@ fn arrayCopyWithin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     const target = normIndex(try coercion.toNumber(arg(args, 0)), len);
     const start = if (arg(args, 1) == .undefined) 0 else normIndex(try coercion.toNumber(arg(args, 1)), len);
     const end = if (arg(args, 2) == .undefined) len else normIndex(try coercion.toNumber(arg(args, 2)), len);
-    // Snapshot the source slice (retained) so overlapping copies are correct.
-    var tmp: std.ArrayList(JSValue) = .empty;
-    defer tmp.deinit(std.heap.page_allocator);
-    var i = start;
-    while (i < end) : (i += 1) try tmp.append(std.heap.page_allocator, arr.toSlice()[i]);
-    const mut = arr.toSliceMut();
-    var t = target;
-    for (tmp.items) |src| {
-        if (t >= len) break;
-        mut[t].deinit();
-        mut[t] = src.retain();
-        t += 1;
-    }
+    if (start >= end or start == target) return this_value.retain();
+    // Matches z-array's own copyWithin()'s clamp: the shifted range
+    // can't run past the end of the array.
+    const count = @min(end - start, len - target);
+    if (count == 0) return this_value.retain();
+
+    // z-array's own copyWithin() does the overlap-safe byte-level shift
+    // (memmove via a temp buffer / direction-aware element copy, same
+    // rules ECMA-262 wants); it just moves raw JSValue bytes without any
+    // retain/release of its own (it doesn't know T might be refcounted).
+    //
+    // Retain the whole SOURCE range first, before releasing anything in
+    // the destination range, rather than interleaving one slot's
+    // release/retain at a time (what the previous hand-rolled version
+    // did). If the two ranges overlap, a per-slot interleaved order can
+    // release a destination slot whose value is ALSO still-unread source
+    // data before that source has been retained anywhere else -- in a
+    // strict immediate-free-at-zero Rc (which is what JSValue.deinit()
+    // actually is, see zvalue.zig) that's a real use-after-free the
+    // instant refcount hits zero; in practice this engine's normal
+    // literal/declaration paths leave every such value with an extra,
+    // never-explicitly-released "+1" (the same baseline-2 quirk
+    // documented in refcount_test.zig), which happens to keep it above
+    // zero and mask the bug for ordinary values, so it wasn't
+    // reproducible here as an observable crash -- but relying on that
+    // incidental floor would be fragile, and the two-phase order below
+    // is correct regardless of whether the floor is present. Retaining
+    // the full source range up front, then releasing the full
+    // destination range only afterward, keeps every index's
+    // retain-then-release pair ordered correctly regardless of overlap
+    // direction.
+    for (arr.toSlice()[start..][0..count]) |v| _ = v.retain();
+    for (arr.toSlice()[target..][0..count]) |v| v.deinit();
+    arr.copyWithin(@intCast(target), @intCast(start), @intCast(end));
     return this_value.retain();
 }
 
