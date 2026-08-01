@@ -196,6 +196,12 @@ pub const freeOwnedKeys = object_builtins.freeOwnedKeys;
 // imports object_builtins.zig directly for them.
 const reflect_builtins = @import("reflect_builtins.zig");
 
+// z-interpreter-refactor.md, Step 5 Phase A batch 9: the Error constructor
+// family (Error/TypeError/RangeError/SyntaxError/ReferenceError/
+// EvalError/URIError). No interleaving possible -- this was already a
+// single self-contained section.
+const error_builtins = @import("error_builtins.zig");
+
 // ===== Globals =====
 
 /// Installs every global binding. Called lazily from `run()` (never from
@@ -243,27 +249,7 @@ pub fn setupGlobals(self: *Interpreter) !void {
 
     try arraybuffer_builtins.install(self);
 
-    // Error constructors -- `new Error('msg')` (and `Error('msg')`, which
-    // real JS also allows) produce catchable/throwable .error values of
-    // the right kind.
-    inline for (.{
-        .{ "Error", zvalue.ErrorKind.generic },
-        .{ "TypeError", zvalue.ErrorKind.type_error },
-        .{ "RangeError", zvalue.ErrorKind.range_error },
-        .{ "SyntaxError", zvalue.ErrorKind.syntax_error },
-        .{ "ReferenceError", zvalue.ErrorKind.reference_error },
-        .{ "EvalError", zvalue.ErrorKind.eval_error },
-        .{ "URIError", zvalue.ErrorKind.uri_error },
-    }) |entry| {
-        const ctor = try self.gcNewFunction(.{
-            .ctx = self,
-            .name = entry[0],
-            .arity = 1,
-            .call = errorConstructor(entry[1]),
-            .constructable = true,
-        });
-        try g.define(arena, entry[0], ctor);
-    }
+    try error_builtins.install(self);
 
     try promise_builtins.install(self);
     try symbol_builtins.install(self);
@@ -411,22 +397,5 @@ fn globalEval(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     const a = arg(args, 0);
     if (a != .string) return a.retain();
     return self.evalSource(self.global_env, a.string.value.data);
-}
-
-// ===== Error constructors =====
-
-/// Comptime factory: one native per ErrorKind. The message argument is
-/// coerced with toDisplayString (Node stringifies it too); no argument =
-/// empty message.
-fn errorConstructor(comptime kind: zvalue.ErrorKind) NativeFn {
-    return struct {
-        fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-            _ = this_value;
-            const has_msg = arg(args, 0) != .@"undefined";
-            const msg: []const u8 = if (has_msg) try coercion.toDisplayString(allocator, arg(args, 0)) else "";
-            defer if (has_msg) allocator.free(msg);
-            return interp(ctx).gcNewError(kind, msg);
-        }
-    }.call;
 }
 
