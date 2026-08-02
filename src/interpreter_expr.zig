@@ -63,7 +63,7 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                 try buf.appendSlice(arena, quasi);
                 if (i < t.expressions.len) {
                     const v = try self.evalExpression(env, t.expressions[i]);
-                    const s = try coercion.toDisplayString(arena, v);
+                    const s = try self.toDisplayStringJS(arena, v);
                     defer arena.free(s);
                     try buf.appendSlice(arena, s);
                 }
@@ -439,7 +439,7 @@ pub fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSV
         .minus => {
             const v = try self.evalExpression(env, u.operand);
             if (v == .bigint) return try self.gcNewBigIntValue(try v.bigint.value.negate());
-            return JSValue.fromNumber(-(try coercion.toNumber(v)));
+            return JSValue.fromNumber(-(try self.toNumberJS(v)));
         },
         .plus => {
             // Real spec: unary `+` is ALWAYS a ToNumber, and
@@ -450,7 +450,7 @@ pub fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSV
             // explicit-conversion case).
             const v = try self.evalExpression(env, u.operand);
             if (v == .bigint) return self.throwError(.type_error, "Cannot convert a BigInt value to a number", .{});
-            return JSValue.fromNumber(try coercion.toNumber(v));
+            return JSValue.fromNumber(try self.toNumberJS(v));
         },
         .typeof => {
             // typeof on an undeclared identifier is "undefined", not a

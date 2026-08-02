@@ -103,8 +103,9 @@ fn numberToPrecision(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
 
 fn globalNumber(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
-    const primitive = JSValue.fromNumber(try coercion.toNumber(arg(args, 0)));
-    return interp(ctx).boxPrimitiveIfConstructed(ctx, this_value, primitive);
+    const self = interp(ctx);
+    const primitive = JSValue.fromNumber(try self.toNumberJS(arg(args, 0)));
+    return self.boxPrimitiveIfConstructed(ctx, this_value, primitive);
 }
 
 fn numberIsNaN(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {

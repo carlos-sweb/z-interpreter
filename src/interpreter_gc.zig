@@ -286,6 +286,7 @@ pub fn deinit(self: *Interpreter) void {
     self.regex_state.deinit(self.gc_allocator);
     self.array_props.deinit(self.gc_allocator);
     self.primitive_wrapper_data.deinit(self.gc_allocator);
+    self.deleted_fn_props.deinit(self.gc_allocator);
     self.pending_jobs.deinit(self.gc_allocator);
     self.timers.deinit(self.gc_allocator);
 

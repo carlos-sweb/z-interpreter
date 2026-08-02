@@ -451,6 +451,25 @@ pub fn deletePropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8) 
         if (box.value.target == .object) return self.deleteObjectProperty(box.value.target, key);
         return true;
     }
+    if (obj == .function) {
+        // name/length are configurable (spec) but aren't backed by a
+        // real ZObject bag entry -- they're read straight off the
+        // Callable struct (see getProperty's `.function` case), so
+        // "deleting" them just flips a side-table flag that
+        // hasOwnProperty/getOwnPropertyDescriptor/getProperty all
+        // consult instead of actually clearing Callable.name/.arity
+        // (which stay intact -- other machinery, e.g. stack traces,
+        // still needs the real name).
+        if (std.mem.eql(u8, key, "name")) {
+            try self.markFnPropDeleted(obj, "name");
+            return true;
+        }
+        if (std.mem.eql(u8, key, "length")) {
+            try self.markFnPropDeleted(obj, "length");
+            return true;
+        }
+        return true;
+    }
     if (obj != .object) return true;
     return self.deleteObjectProperty(obj, key);
 }
@@ -612,6 +631,7 @@ pub fn materializeProtos(self: *Interpreter) !void {
         const proto = try self.functionPrototype(ctor);
         try proto.object.value.setPrototype(&object_proto.object.value);
         try proto.object.value.defineProperty("constructor", ctor.retain(), proto_attrs);
+        try self.installProto(proto, e[0], builtins.error_methods, ctor);
         @field(self.protos, e[0]) = proto;
     }
 

@@ -19,6 +19,36 @@ const interp = native_helpers.interp;
 const arg = native_helpers.arg;
 pub const NativeFn = native_helpers.NativeFn;
 
+// ===== Error.prototype methods =====
+
+/// ECMA-262 20.5.3.4 Error.prototype.toString: "{name}: {message}", or
+/// just whichever of the two is non-empty, or "Error" if `name` is
+/// undefined -- via real property reads (getProperty), not `this_value`'s
+/// raw `.@"error"` fields directly, so it also works if `this`/`name`/
+/// `message` were reassigned (spec allows any receiver, not just a real
+/// Error instance).
+fn errorToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    const name_v = try self.getProperty(this_value, "name");
+    defer name_v.deinit();
+    const name = if (name_v == .undefined) try allocator.dupe(u8, "Error") else try self.toDisplayStringJS(allocator, name_v);
+    defer allocator.free(name);
+    const msg_v = try self.getProperty(this_value, "message");
+    defer msg_v.deinit();
+    const msg = if (msg_v == .undefined) try allocator.dupe(u8, "") else try self.toDisplayStringJS(allocator, msg_v);
+    defer allocator.free(msg);
+    if (name.len == 0) return self.gcNewString(msg);
+    if (msg.len == 0) return self.gcNewString(name);
+    const combined = try std.fmt.allocPrint(allocator, "{s}: {s}", .{ name, msg });
+    defer allocator.free(combined);
+    return self.gcNewString(combined);
+}
+
+pub const error_methods = std.StaticStringMap(NativeFn).initComptime(.{
+    .{ "toString", errorToString },
+});
+
 // ===== Error constructors =====
 
 /// Comptime factory: one native per ErrorKind. The message argument is

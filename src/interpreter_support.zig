@@ -123,6 +123,20 @@ pub fn unboxPrimitiveWrapper(self: *Interpreter, value: JSValue) ?JSValue {
     return self.primitive_wrapper_data.get(@intFromPtr(value.object));
 }
 
+/// `delete f.name`/`delete f.length`'s deletion state (deleted_fn_props
+/// side table), defaulting to "not deleted" for a function never touched.
+pub fn deletedFnProps(self: *Interpreter, fn_val: JSValue) interpreter_mod.DeletedFnProps {
+    return self.deleted_fn_props.get(@intFromPtr(fn_val.function)) orelse .{};
+}
+
+/// Marks one of `name`/`length` as deleted on `fn_val` (deleted_fn_props
+/// side table) -- called by `deletePropertyOnValue`'s `.function` case.
+pub fn markFnPropDeleted(self: *Interpreter, fn_val: JSValue, comptime field: []const u8) anyerror!void {
+    const gop = try self.deleted_fn_props.getOrPut(self.gc_allocator, @intFromPtr(fn_val.function));
+    if (!gop.found_existing) gop.value_ptr.* = .{};
+    @field(gop.value_ptr.*, field) = true;
+}
+
 
 /// A shared native-method JSValue for a (type, name) pair, cached so
 /// `a.push === b.push` holds like real JS prototype methods.
@@ -189,13 +203,71 @@ pub fn argsToArray(self: *Interpreter, args: []const JSValue) anyerror!JSValue {
 /// `coercion.binaryOp`'s plain numeric `+`.
 pub fn stringConcat(self: *Interpreter, left: JSValue, right: JSValue) anyerror!?JSValue {
     if (left != .string and right != .string) return null;
-    const ls = try coercion.toDisplayString(self.gc_allocator, left);
+    const ls = try toDisplayStringJS(self, self.gc_allocator, left);
     defer self.gc_allocator.free(ls);
-    const rs = try coercion.toDisplayString(self.gc_allocator, right);
+    const rs = try toDisplayStringJS(self, self.gc_allocator, right);
     defer self.gc_allocator.free(rs);
     const joined = try std.mem.concat(self.gc_allocator, u8, &.{ ls, rs });
     defer self.gc_allocator.free(joined);
     return try self.gcNewString(joined);
+}
+
+/// ECMA-262 7.1.1 ToPrimitive, narrowed: no `Symbol.toPrimitive` lookup
+/// (not implemented anywhere in this engine yet), just the
+/// `OrdinaryToPrimitive` fallback -- hint "string" tries
+/// `toString()` then `valueOf()`; "number"/"default" tries `valueOf()`
+/// then `toString()`. Needs `self` (real method dispatch via
+/// `getProperty`/`callValue`, through the same prototype chain
+/// `instanceof`/`in` walk) -- `coercion.zig` deliberately has none of
+/// that, hence its object-shaped `error.NotImplemented`.
+pub fn toPrimitive(self: *Interpreter, v: JSValue, hint: enum { default, number, string }) anyerror!JSValue {
+    if (isPrimitiveTag(v)) return v.retain();
+    const order: [2][]const u8 = if (hint == .string) .{ "toString", "valueOf" } else .{ "valueOf", "toString" };
+    for (order) |method_name| {
+        const method = try self.getProperty(v, method_name);
+        defer method.deinit();
+        if (method != .function and method != .proxy) continue;
+        const result = try self.callValue(method, v, &.{}, method_name);
+        if (isPrimitiveTag(result)) return result;
+        result.deinit();
+    }
+    return self.throwError(.type_error, "Cannot convert object to primitive value", .{});
+}
+
+fn isPrimitiveTag(v: JSValue) bool {
+    return switch (v) {
+        .undefined, .null, .boolean, .number, .string, .bigint, .symbol => true,
+        else => false,
+    };
+}
+
+/// `coercion.toDisplayString` plus a real ToPrimitive fallback for the
+/// object-shaped kinds it can't handle on its own (see `toPrimitive`
+/// above) -- the general-purpose ToString callers (template literals,
+/// `String(x)`, `+`'s string-concat path) should reach for this
+/// instead of `coercion.toDisplayString` directly.
+pub fn toDisplayStringJS(self: *Interpreter, allocator: std.mem.Allocator, v: JSValue) anyerror![]u8 {
+    return coercion.toDisplayString(allocator, v) catch |err| switch (err) {
+        error.NotImplemented => blk: {
+            const prim = try toPrimitive(self, v, .string);
+            defer prim.deinit();
+            break :blk try coercion.toDisplayString(allocator, prim);
+        },
+        else => err,
+    };
+}
+
+/// `coercion.toNumber` plus the same real-ToPrimitive fallback (hint
+/// "number") that `toDisplayStringJS` gives ToString.
+pub fn toNumberJS(self: *Interpreter, v: JSValue) anyerror!f64 {
+    // coercion.toNumber's inferred error set is just `error.NotImplemented`
+    // (no allocation in its body, unlike toDisplayString) -- a bare `catch`
+    // covers it without an unreachable `else` prong.
+    return coercion.toNumber(v) catch {
+        const prim = try toPrimitive(self, v, .number);
+        defer prim.deinit();
+        return try coercion.toNumber(prim);
+    };
 }
 
 /// Real JS BigInt arithmetic/bitwise operators need same-type

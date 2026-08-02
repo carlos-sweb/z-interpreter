@@ -526,7 +526,7 @@ fn globalString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
         defer allocator.free(s);
         return self.boxPrimitiveIfConstructed(ctx, this_value, try self.gcNewString(s));
     }
-    const s = try coercion.toDisplayString(allocator, arg(args, 0));
+    const s = try self.toDisplayStringJS(allocator, arg(args, 0));
     defer allocator.free(s);
     return self.boxPrimitiveIfConstructed(ctx, this_value, try self.gcNewString(s));
 }

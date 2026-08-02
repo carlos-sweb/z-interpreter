@@ -134,6 +134,7 @@ const date_builtins = @import("date_builtins.zig");
 const number_builtins = @import("number_builtins.zig");
 const mapset_builtins = @import("mapset_builtins.zig");
 pub const date_methods = date_builtins.date_methods;
+pub const error_methods = error_builtins.error_methods;
 pub const number_methods = number_builtins.number_methods;
 pub const map_methods = mapset_builtins.map_methods;
 pub const set_methods = mapset_builtins.set_methods;

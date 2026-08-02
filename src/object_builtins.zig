@@ -175,11 +175,32 @@ fn requirePlainObject(ctx: *anyopaque, v: JSValue, what: []const u8) anyerror!JS
     return v;
 }
 
+/// Real spec: `Proxy` is the one constructable builtin with NO own
+/// `"prototype"` property (proxy exotic objects have no [[Prototype]]
+/// slot needing initialization) -- every other constructor's own
+/// `constructable` flag is the right signal, but this one needs an
+/// identity carve-out (same shape as `.@"error"`'s "constructor"
+/// identity check in getProperty).
+fn isProxyConstructor(self: *Interpreter, v: JSValue) bool {
+    const proxy_ctor = self.global_env.get("Proxy") orelse return false;
+    return zvalue.equality.strictEquals(v, proxy_ctor);
+}
+
 fn objHasOwnProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const key = try interp(ctx).encodeKey(arg(args, 0));
     defer allocator.free(key);
     return switch (this_value) {
         .object => |box| JSValue.fromBool(box.value.hasOwnProperty(key)),
+        // Functions expose name/length/prototype as own properties (mirrors
+        // objectGetOwnPropertyDescriptor's own-property set for `.function`
+        // below) plus whatever's on their statics bag.
+        .function => |box| blk: {
+            const deleted = interp(ctx).deletedFnProps(this_value);
+            if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromBool(!deleted.length);
+            if (std.mem.eql(u8, key, "name")) break :blk JSValue.fromBool(!deleted.name);
+            if (std.mem.eql(u8, key, "prototype")) break :blk JSValue.fromBool(!isProxyConstructor(interp(ctx), this_value) and (box.value.prototype != null or box.value.constructable));
+            break :blk JSValue.fromBool(if (box.value.statics) |bag| bag.object.value.hasOwnProperty(key) else false);
+        },
         // Arrays expose `length` and every in-bounds index as an own property
         // (they have no general ZObject bag, so answer these directly).
         .array => |box| blk: {
@@ -436,11 +457,12 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, thi
         // Functions expose name/length/prototype as own properties (with the
         // spec attributes) plus whatever's on their statics bag.
         .function => |box| {
+            const deleted = self.deletedFnProps(obj);
             if (std.mem.eql(u8, key, "length"))
-                return dataDescObj(self, JSValue.fromNumber(@floatFromInt(box.value.arity)), false, false, true);
+                return if (deleted.length) JSValue.UNDEFINED else dataDescObj(self, JSValue.fromNumber(@floatFromInt(box.value.arity)), false, false, true);
             if (std.mem.eql(u8, key, "name"))
-                return dataDescObj(self, try interp(ctx).gcNewString(box.value.name), false, false, true);
-            if (std.mem.eql(u8, key, "prototype") and (box.value.prototype != null or box.value.constructable))
+                return if (deleted.name) JSValue.UNDEFINED else dataDescObj(self, try interp(ctx).gcNewString(box.value.name), false, false, true);
+            if (std.mem.eql(u8, key, "prototype") and !isProxyConstructor(self, obj) and (box.value.prototype != null or box.value.constructable))
                 return dataDescObj(self, try self.functionPrototype(obj), true, false, false);
             if (box.value.statics) |bag| {
                 if (bag.object.value.getOwnRecord(key)) |rec| return descFromRecord(self, rec);

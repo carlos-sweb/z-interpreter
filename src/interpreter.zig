@@ -109,6 +109,12 @@ pub const RegexState = struct {
     last_index: usize = 0,
 };
 
+/// `delete f.name`/`delete f.length` state -- see `deleted_fn_props`.
+pub const DeletedFnProps = struct {
+    name: bool = false,
+    length: bool = false,
+};
+
 /// A user-defined closure's opaque Callable context: the parsed function's
 /// AST node, the environment it closed over at definition time, and a back
 /// pointer to the Interpreter so `closureCall` can recurse into
@@ -610,6 +616,16 @@ pub const Interpreter = struct {
     /// keyed by the wrapper object's Rc box pointer. Same side-table
     /// shape as `array_props`. See /home/sweb/.plans/primitive-wrapper-objects.md.
     primitive_wrapper_data: std.AutoHashMapUnmanaged(usize, JSValue) = .empty,
+    /// `delete f.name`/`delete f.length` tracking: those aren't real
+    /// ZObject bag entries (getProperty/hasOwnProperty/
+    /// getOwnPropertyDescriptor read them straight off the Callable
+    /// struct's own `name`/`arity` fields, per real spec's
+    /// configurable-but-otherwise-fixed own properties), so `delete`
+    /// needs its own side table to record "gone" -- same shape as
+    /// `array_props`/`primitive_wrapper_data`, keyed by the function box
+    /// pointer. No JSValue payload, so no GC-tracking/cleanup needed
+    /// (unlike those two).
+    deleted_fn_props: std.AutoHashMapUnmanaged(usize, DeletedFnProps) = .empty,
     /// The stack-depth guard: recursing below this native stack address
     /// raises the real `RangeError: Maximum call stack size exceeded`
     /// instead of segfaulting (Test262's tco-* tests found this). Set
@@ -817,6 +833,11 @@ pub const Interpreter = struct {
     // z-interpreter-refactor.md, Step 5 Phase C batch 6: regex+arrayextra+
     // boxing+coerce+native cluster, split into interpreter_support.zig.
     pub const stringConcat = interpreter_support.stringConcat;
+    pub const toPrimitive = interpreter_support.toPrimitive;
+    pub const toDisplayStringJS = interpreter_support.toDisplayStringJS;
+    pub const toNumberJS = interpreter_support.toNumberJS;
+    pub const deletedFnProps = interpreter_support.deletedFnProps;
+    pub const markFnPropDeleted = interpreter_support.markFnPropDeleted;
     pub const bigintArithmetic = interpreter_support.bigintArithmetic;
     pub const bigintShift = interpreter_support.bigintShift;
     pub const bigintErr = interpreter_support.bigintErr;
