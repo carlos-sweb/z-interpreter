@@ -30,5 +30,6 @@
         .zbigint = .{ .path = "../z-bigint" },
         .zbuffer = .{ .path = "../z-buffer" },
         .ztemporal = .{ .path = "../z-temporal" },
+        .zurlcode = .{ .path = "../z-urlcode" },
     },
 }

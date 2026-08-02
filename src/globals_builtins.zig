@@ -12,6 +12,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const znumber = @import("znumber");
 const zvalue = @import("zvalue");
+const zurlcode = @import("zurlcode");
 const JSValue = zvalue.JSValue;
 
 const interpreter_mod = @import("interpreter.zig");
@@ -101,6 +102,61 @@ fn globalIsFinite(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     return JSValue.fromBool(!std.math.isNan(n) and !std.math.isInf(n));
 }
 
+/// ECMA-262 19.2.6.4/19.2.6.1: percent-encode everything outside
+/// uriReserved+uriUnescaped+"#".
+fn globalEncodeURI(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const s = try argString(allocator, args, 0);
+    defer allocator.free(s);
+    const encoded = zurlcode.encode(allocator, s, .uri) catch |err| switch (err) {
+        error.InvalidUtf8 => unreachable, // ZString's data is always valid UTF-8
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    defer allocator.free(encoded);
+    return interp(ctx).gcNewString(encoded);
+}
+
+/// ECMA-262 19.2.6.5/19.2.6.1: percent-encode everything outside
+/// uriUnescaped (uriReserved gets encoded too, unlike encodeURI).
+fn globalEncodeURIComponent(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const s = try argString(allocator, args, 0);
+    defer allocator.free(s);
+    const encoded = zurlcode.encode(allocator, s, .component) catch |err| switch (err) {
+        error.InvalidUtf8 => unreachable, // ZString's data is always valid UTF-8
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    defer allocator.free(encoded);
+    return interp(ctx).gcNewString(encoded);
+}
+
+/// ECMA-262 19.2.6.2/19.2.6.1: unescape %XY sequences, leaving a
+/// reserved-set (uriReserved+"#") %XY literal rather than decoding it.
+fn globalDecodeURI(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const s = try argString(allocator, args, 0);
+    defer allocator.free(s);
+    const decoded = zurlcode.decode(allocator, s, true) catch |err| switch (err) {
+        error.MalformedUri => return interp(ctx).throwError(.uri_error, "URI malformed", .{}),
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    defer allocator.free(decoded);
+    return interp(ctx).gcNewString(decoded);
+}
+
+/// ECMA-262 19.2.6.3/19.2.6.1: unescape every %XY sequence, no exceptions.
+fn globalDecodeURIComponent(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const s = try argString(allocator, args, 0);
+    defer allocator.free(s);
+    const decoded = zurlcode.decode(allocator, s, false) catch |err| switch (err) {
+        error.MalformedUri => return interp(ctx).throwError(.uri_error, "URI malformed", .{}),
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    defer allocator.free(decoded);
+    return interp(ctx).gcNewString(decoded);
+}
+
 /// Indirect `eval` (called as a plain value, not the literal `eval(...)`
 /// form): runs its string argument in the GLOBAL scope. A non-string
 /// argument is returned unchanged. Direct eval is handled in evalCall.
@@ -143,4 +199,9 @@ pub fn install(self: *Interpreter) !void {
     try g.define(arena, "parseFloat", try native(self, "parseFloat", globalParseFloat));
     try g.define(arena, "isNaN", try native(self, "isNaN", globalIsNaN));
     try g.define(arena, "isFinite", try native(self, "isFinite", globalIsFinite));
+
+    try g.define(arena, "encodeURI", try native(self, "encodeURI", globalEncodeURI));
+    try g.define(arena, "encodeURIComponent", try native(self, "encodeURIComponent", globalEncodeURIComponent));
+    try g.define(arena, "decodeURI", try native(self, "decodeURI", globalDecodeURI));
+    try g.define(arena, "decodeURIComponent", try native(self, "decodeURIComponent", globalDecodeURIComponent));
 }

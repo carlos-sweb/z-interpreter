@@ -340,17 +340,48 @@ pub fn evalInstanceof(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSVal
     if (r != .function) {
         return self.throwError(.type_error, "Right-hand side of 'instanceof' is not callable", .{});
     }
+
+    // Every error kind (TypeError/RangeError/.../URIError) shares ONE
+    // prototype object (self.protos.@"error") -- each kind's OWN
+    // `X.prototype` is still a real, separate, lazily-materialized
+    // object (for property-descriptor purposes), but it's chained to
+    // Object.prototype, not to self.protos.@"error". So the generic
+    // chain walk below can only ever prove "instanceof Error", never
+    // "instanceof TypeError" specifically -- checked here instead, by
+    // identity against the value's own kind's global constructor (the
+    // same trick getProperty's `.constructor` resolution already uses).
+    // Falls through to the walk below for the generic Error case.
+    if (l == .@"error") {
+        if (self.global_env.get(l.@"error".value.kind.name())) |own_ctor| {
+            if (zvalue.equality.strictEquals(own_ctor, r)) return JSValue.fromBool(true);
+        }
+    }
+
     // A never-touched prototype slot means this function never
     // constructed anything -- nothing can be an instance of it.
     const proto = r.function.value.prototype orelse return JSValue.fromBool(false);
     if (proto != .object) return JSValue.fromBool(false);
-    // TypedArray instances have no ZObject of their own -- the chain
-    // walk starts directly at their (kind-specific) prototype object
-    // instead of "the instance's own prototype" like the `.object`
-    // case below.
+    // These boxed kinds have exactly one shared method-table prototype
+    // each (no user-settable [[Prototype]] chain of their own, no
+    // subclassing) -- the chain walk starts directly at the kind's
+    // shared prototype object (materializeProtos already wires each of
+    // these to be the SAME object as the matching global constructor's
+    // `.prototype`) instead of "the instance's own prototype" like the
+    // `.object` case below.
     var current: ?*const zobject.ZObject(JSValue) = switch (l) {
         .object => l.object.value.getPrototype(),
         .typed_array => |box| &self.typedArrayProto(box.value.kind).object.value,
+        .array => &self.protos.array.object.value,
+        .date => &self.protos.date.object.value,
+        .regex => &self.protos.regex.object.value,
+        .function => &self.protos.function.object.value,
+        .map => &self.protos.map.object.value,
+        .set => &self.protos.set.object.value,
+        .promise => &self.protos.promise.object.value,
+        .array_buffer => &self.protos.array_buffer.object.value,
+        .data_view => &self.protos.data_view.object.value,
+        .@"error" => &self.protos.@"error".object.value,
+        .temporal => |box| &self.protos.temporalProtoFor(box.value).object.value,
         else => return JSValue.fromBool(false), // primitives are never instances
     };
     while (current) |p| : (current = p.getPrototype()) {

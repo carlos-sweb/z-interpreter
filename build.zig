@@ -61,6 +61,9 @@ pub fn build(b: *std.Build) void {
     const ztemporal_dep = b.dependency("ztemporal", .{ .target = target, .optimize = optimize });
     const ztemporal_module = ztemporal_dep.module("ztemporal");
 
+    const zurlcode_dep = b.dependency("zurlcode", .{ .target = target, .optimize = optimize });
+    const zurlcode_module = zurlcode_dep.module("zurlcode");
+
     const zinterpreter_module = b.addModule("zinterpreter", .{
         .root_source_file = b.path("src/zinterpreter.zig"),
     });
@@ -83,6 +86,7 @@ pub fn build(b: *std.Build) void {
     zinterpreter_module.addImport("zbigint", zbigint_module);
     zinterpreter_module.addImport("zbuffer", zbuffer_module);
     zinterpreter_module.addImport("ztemporal", ztemporal_module);
+    zinterpreter_module.addImport("zurlcode", zurlcode_module);
 
     const test_step = b.step("test", "Run all tests");
 
@@ -188,6 +192,7 @@ pub fn build(b: *std.Build) void {
     src_tests.root_module.addImport("zbigint", zbigint_module);
     src_tests.root_module.addImport("zbuffer", zbuffer_module);
     src_tests.root_module.addImport("ztemporal", ztemporal_module);
+    src_tests.root_module.addImport("zurlcode", zurlcode_module);
     const run_src_tests = b.addRunArtifact(src_tests);
     test_step.dependOn(&run_src_tests.step);
 
