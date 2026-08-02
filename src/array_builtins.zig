@@ -122,20 +122,13 @@ fn arrayIncludes(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
 fn arrayJoin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArray(ctx, this_value, "join");
     const sep = if (arg(args, 0) == .string) arg(args, 0).string.value.data else ",";
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    for (this_value.array.value.toSlice(), 0..) |item, i| {
-        if (i != 0) try buf.appendSlice(allocator, sep);
-        switch (item) {
-            .undefined, .null => {},
-            else => {
-                const s = try coercion.toDisplayString(allocator, item);
-                defer allocator.free(s);
-                try buf.appendSlice(allocator, s);
-            },
-        }
-    }
-    return interp(ctx).gcNewString(buf.items);
+    // z-array's joinWith() does the mechanical loop/separator-placement;
+    // coercion.joinElementToString supplies the per-element stringify
+    // policy (holes become "", same rule as toDisplayString's own `.array`
+    // case) -- see ~/.plans/builtins-consolidation-analysis.md.
+    const s = try this_value.array.value.joinWith(sep, allocator, {}, coercion.joinElementToString);
+    defer allocator.free(s);
+    return interp(ctx).gcNewString(s);
 }
 
 fn arraySlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -713,7 +706,9 @@ fn sortLess(allocator: Allocator, cmp: JSValue, a: JSValue, b: JSValue) anyerror
 fn arrayToStringMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
     try requireArray(ctx, this_value, "toString");
-    const s = try coercion.toDisplayString(allocator, this_value);
+    // Array.prototype.toString() === Array.prototype.join(",") per spec --
+    // same delegation coercion.toDisplayString's own `.array` case uses.
+    const s = try this_value.array.value.joinWith(",", allocator, {}, coercion.joinElementToString);
     defer allocator.free(s);
     return interp(ctx).gcNewString(s);
 }

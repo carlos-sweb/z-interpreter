@@ -10,7 +10,7 @@ const JSValue = zvalue.JSValue;
 /// empty -- the real JS quirk, not a bug.
 pub fn isTruthy(v: JSValue) bool {
     return switch (v) {
-        .@"undefined", .@"null" => false,
+        .undefined, .null => false,
         .boolean => |b| b,
         .number => |n| n != 0 and !std.math.isNan(n),
         .string => |box| box.value.data.len != 0,
@@ -28,8 +28,8 @@ pub fn toNumber(v: JSValue) !f64 {
     return switch (v) {
         .number => |n| n,
         .boolean => |b| if (b) @as(f64, 1) else @as(f64, 0),
-        .@"undefined" => std.math.nan(f64),
-        .@"null" => 0,
+        .undefined => std.math.nan(f64),
+        .null => 0,
         // Real ToNumber(string) requires the *whole* (trimmed) string to be
         // a valid numeric literal, else NaN -- znumber's parseFloat is more
         // permissive (stops at trailing garbage). Narrowed/simplified for
@@ -65,6 +65,21 @@ pub fn toUint32(v: JSValue) !u32 {
     return @intFromFloat(wrapped);
 }
 
+/// Array.prototype.join()/toString()'s per-element stringify policy: holes
+/// (undefined/null) become "" rather than the literal "undefined"/"null"
+/// text general ToString produces for those same values -- a rule specific
+/// to Array join, not to ToString itself. Shared by toDisplayString's own
+/// `.array` case below and by `array_builtins.zig`'s arrayJoin/
+/// arrayToStringMethod, all three of which used to hand-roll this same
+/// loop independently (see ~/.plans/builtins-consolidation-analysis.md).
+/// z-array's joinWith() takes this as its comptime stringify callback.
+pub fn joinElementToString(_: void, item: JSValue, allocator: Allocator) anyerror![]u8 {
+    return switch (item) {
+        .undefined, .null => try allocator.dupe(u8, ""),
+        else => toDisplayString(allocator, item),
+    };
+}
+
 /// ECMA-262 ToString, narrowed to what template literals and `+`'s
 /// string-concat branch need. Caller owns the returned slice.
 pub fn toDisplayString(allocator: Allocator, v: JSValue) ![]u8 {
@@ -72,26 +87,11 @@ pub fn toDisplayString(allocator: Allocator, v: JSValue) ![]u8 {
         .number => |n| try znumber.FormattingMethods.toString(n, allocator, null),
         .string => |box| try allocator.dupe(u8, box.value.data),
         .boolean => |b| try allocator.dupe(u8, if (b) "true" else "false"),
-        .@"undefined" => try allocator.dupe(u8, "undefined"),
-        .@"null" => try allocator.dupe(u8, "null"),
+        .undefined => try allocator.dupe(u8, "undefined"),
+        .null => try allocator.dupe(u8, "null"),
         // Array.prototype.toString's default behavior: comma-join each
         // element's own ToString (holes/null/undefined become "").
-        .array => |box| {
-            var buf: std.ArrayList(u8) = .empty;
-            errdefer buf.deinit(allocator);
-            for (box.value.toSlice(), 0..) |item, i| {
-                if (i != 0) try buf.append(allocator, ',');
-                switch (item) {
-                    .@"undefined", .@"null" => {},
-                    else => {
-                        const s = try toDisplayString(allocator, item);
-                        defer allocator.free(s);
-                        try buf.appendSlice(allocator, s);
-                    },
-                }
-            }
-            return buf.toOwnedSlice(allocator);
-        },
+        .array => |box| try box.value.joinWith(",", allocator, {}, joinElementToString),
         // ToString(date) uses toString() ("Wed Jul 20 2026 ...") -- NOT
         // toISOString (that's console.log/inspect's job); see the .date case
         // in inspect.zig.
@@ -115,8 +115,8 @@ fn looseEquals(allocator: Allocator, a: JSValue, b: JSValue) !bool {
     if (@as(std.meta.Tag(JSValue), a) == @as(std.meta.Tag(JSValue), b)) {
         return zvalue.equality.strictEquals(a, b);
     }
-    if ((a == .@"undefined" or a == .@"null") and (b == .@"undefined" or b == .@"null")) return true;
-    if (a == .@"undefined" or a == .@"null" or b == .@"undefined" or b == .@"null") return false;
+    if ((a == .undefined or a == .null) and (b == .undefined or b == .null)) return true;
+    if (a == .undefined or a == .null or b == .undefined or b == .null) return false;
     if (a == .boolean) return looseEquals(allocator, JSValue.fromNumber(try toNumber(a)), b);
     if (b == .boolean) return looseEquals(allocator, a, JSValue.fromNumber(try toNumber(b)));
     if (a == .number and b == .string) return a.number == try toNumber(b);
