@@ -91,8 +91,6 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             // retain before returning -- necessary now that
             // Callable.deinit() actually releases .prototype).
             if (std.mem.eql(u8, key, "prototype")) break :blk (try self.functionPrototype(obj)).retain();
-            if (std.mem.eql(u8, key, "name")) break :blk try self.gcNewString(box.value.name);
-            if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.arity));
             // The statics bag (class statics, F.myProp = 1) shadows
             // the Function.prototype methods, like an own property
             // would. Recursing through getProperty gives accessor
@@ -100,9 +98,19 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             // parent's bag -- static inheritance. Narrowing: a static
             // getter's `this` is the bag, not the class function, so
             // `this.otherStatic` works but `this === C` doesn't.
+            //
+            // Checked BEFORE the name/length fallbacks below: real
+            // spec's `.name`/`.length` are configurable own data
+            // properties, so an explicit `static name(){}` (installed
+            // via DefineMethod, which overwrites the auto-created own
+            // property) or a direct `fn.name = "x"` (routed into this
+            // same bag by setPropertyOnValue) must win over the
+            // Callable-struct-backed default.
             if (box.value.statics) |bag| {
                 if (bag.object.value.has(key)) break :blk try self.getProperty(bag, key);
             }
+            if (std.mem.eql(u8, key, "name")) break :blk try self.gcNewString(box.value.name);
+            if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.arity));
             if (try self.getFromProto(obj, self.protos.function, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
@@ -347,6 +355,22 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
             if (value != .object) return error.NotImplemented;
             obj.function.value.prototype = value.retain();
             return;
+        }
+        // `.name`/`.length` start life as virtual (writable: false)
+        // properties backed by the Callable struct, not a real bag
+        // entry -- a bare assignment (unlike a `static name(){}`
+        // class member or `Object.defineProperty`, both of which use
+        // [[DefineOwnProperty]] and bypass writability) must respect
+        // that and fail, same as assigning any other non-writable
+        // own data property. Once something HAS put an own record in
+        // the bag (either of those two paths), plain assignment falls
+        // through below and is governed by that record's own writable
+        // flag, like any ordinary object property.
+        if (std.mem.eql(u8, key, "name") or std.mem.eql(u8, key, "length")) {
+            const already_own = if (obj.function.value.statics) |bag| bag.object.value.has(key) else false;
+            if (!already_own) {
+                return self.throwError(.type_error, "Cannot assign to read only property '{s}' of function", .{key});
+            }
         }
         // Real [[Set]]: an inherited ACCESSOR (e.g.
         // `Object.defineProperty(Function.prototype, "x", {get,set})`)
