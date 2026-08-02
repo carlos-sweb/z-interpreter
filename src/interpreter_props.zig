@@ -348,6 +348,24 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
             obj.function.value.prototype = value.retain();
             return;
         }
+        // Real [[Set]]: an inherited ACCESSOR (e.g.
+        // `Object.defineProperty(Function.prototype, "x", {get,set})`)
+        // must invoke the setter with `this` = this function, not
+        // silently create an own property in the statics bag -- same
+        // walk `setObjectProperty` already does for plain objects,
+        // applied to the function's own prototype chain (getProperty's
+        // `.function` case reads from this same `self.protos.function`
+        // chain for inherited lookups).
+        var current: ?*const @TypeOf(self.protos.function.object.value) = &self.protos.function.object.value;
+        while (current) |o| : (current = o.getPrototype()) {
+            const rec = o.getOwnRecord(key) orelse continue;
+            if (rec.isAccessor()) {
+                const s = rec.setter orelse return; // getter-only: silent no-op
+                _ = try s.function.value.call(s.function.value.ctx, self.gc_allocator, obj, &.{value});
+                return;
+            }
+            break;
+        }
         const bag = try self.functionStatics(obj);
         return self.setObjectProperty(bag, key, value);
     }

@@ -18,6 +18,21 @@ const ClassCtx = interpreter_mod.ClassCtx;
 const ClosureCtx = interpreter_mod.ClosureCtx;
 const FieldDef = interpreter_mod.FieldDef;
 
+/// ECMA-262 15.1.3 ExpectedArgumentCount: leading parameters up to (not
+/// including) the first one with a default -- NOT `params.items.len`,
+/// which counts every declared parameter regardless of defaults. A rest
+/// parameter (`params.rest`, tracked separately from `.items` in this
+/// AST) never adds to the count either way, so it needs no special
+/// case here.
+fn expectedArgumentCount(params: zfunctions.Params) usize {
+    var count: usize = 0;
+    for (params.items) |p| {
+        if (p.default != null) break;
+        count += 1;
+    }
+    return count;
+}
+
 pub fn makeClosure(self: *Interpreter, env: *Environment, fnode: *zfunctions.FunctionNode) anyerror!JSValue {
     const arena = self.gc_allocator;
     // A named function expression's own name is visible inside its own
@@ -42,7 +57,7 @@ pub fn makeClosure(self: *Interpreter, env: *Environment, fnode: *zfunctions.Fun
     const fn_value = try self.gcNewFunction(.{
         .ctx = ctx,
         .name = name,
-        .arity = fnode.params.items.len,
+        .arity = expectedArgumentCount(fnode.params),
         .call = closureCall,
         // Arrows and object-literal methods are not constructors
         // (spec); natives keep the default false via their own
@@ -270,7 +285,7 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
     const class_fn = try self.gcNewFunction(.{
         .ctx = cctx,
         .name = cnode.name orelse "",
-        .arity = if (ctor_fnode) |f| f.params.items.len else 0,
+        .arity = if (ctor_fnode) |f| expectedArgumentCount(f.params) else 0,
         .call = classConstructorCall,
         .constructable = true,
     });
