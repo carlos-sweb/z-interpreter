@@ -85,6 +85,12 @@ pub fn install(self: *Interpreter) !void {
     _ = try installBuiltin(self, .{ .name = "Math", .statics = &.{
         .{ .name = "PI", .value = .{ .constant = JSValue.fromNumber(zmath.PI) } },
         .{ .name = "E", .value = .{ .constant = JSValue.fromNumber(zmath.E) } },
+        .{ .name = "LN10", .value = .{ .constant = JSValue.fromNumber(zmath.LN10) } },
+        .{ .name = "LN2", .value = .{ .constant = JSValue.fromNumber(zmath.LN2) } },
+        .{ .name = "LOG10E", .value = .{ .constant = JSValue.fromNumber(zmath.LOG10E) } },
+        .{ .name = "LOG2E", .value = .{ .constant = JSValue.fromNumber(zmath.LOG2E) } },
+        .{ .name = "SQRT1_2", .value = .{ .constant = JSValue.fromNumber(zmath.SQRT1_2) } },
+        .{ .name = "SQRT2", .value = .{ .constant = JSValue.fromNumber(zmath.SQRT2) } },
         .{ .name = "floor", .value = .{ .method = .{ .call = mathFloor, .arity = 1 } } },
         .{ .name = "ceil", .value = .{ .method = .{ .call = mathCeil, .arity = 1 } } },
         .{ .name = "round", .value = .{ .method = .{ .call = mathRound, .arity = 1 } } },

@@ -221,8 +221,9 @@ fn stringAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
 fn stringPadStart(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const data = try requireString(ctx, this_value, "padStart");
     const target: isize = toIntSat(try coercion.toNumber(arg(args, 0)));
-    const pad: ?[]const u8 = if (arg(args, 1) == .string) arg(args, 1).string.value.data else null;
-    const out = try zstring.padding.padStart(allocator, data, target, pad);
+    const pad_owned = try padFillArg(allocator, args);
+    defer if (pad_owned) |p| allocator.free(p);
+    const out = try zstring.padding.padStart(allocator, data, target, pad_owned);
     defer allocator.free(out);
     return interp(ctx).gcNewString(out);
 }
@@ -230,10 +231,22 @@ fn stringPadStart(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
 fn stringPadEnd(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const data = try requireString(ctx, this_value, "padEnd");
     const target: isize = toIntSat(try coercion.toNumber(arg(args, 0)));
-    const pad: ?[]const u8 = if (arg(args, 1) == .string) arg(args, 1).string.value.data else null;
-    const out = try zstring.padding.padEnd(allocator, data, target, pad);
+    const pad_owned = try padFillArg(allocator, args);
+    defer if (pad_owned) |p| allocator.free(p);
+    const out = try zstring.padding.padEnd(allocator, data, target, pad_owned);
     defer allocator.free(out);
     return interp(ctx).gcNewString(out);
+}
+
+/// padStart/padEnd's `fillString` argument: `undefined` (including not
+/// passed) means "use the default (space)", real spec's ONLY exemption
+/// from ToString -- any other value (even `false`/a number/an object)
+/// must be ToString-coerced, not silently treated as absent (confirmed
+/// against real Node: `"abc".padEnd(10, false)` pads with "false", not
+/// spaces).
+fn padFillArg(allocator: Allocator, args: []const JSValue) anyerror!?[]const u8 {
+    if (arg(args, 1) == .undefined) return null;
+    return try coercion.toDisplayString(allocator, arg(args, 1));
 }
 
 fn stringSubstring(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {

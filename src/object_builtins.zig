@@ -240,11 +240,43 @@ fn objPropertyIsEnumerable(ctx: *anyopaque, allocator: Allocator, this_value: JS
     return JSValue.fromBool(this_value.object.value.propertyIsEnumerable(key));
 }
 
+/// ECMA-262 20.1.3.6 Object.prototype.toString's built-in tag table --
+/// NOT the full algorithm (that also consults an own/inherited
+/// `@@toStringTag` string property for anything not on this hardcoded
+/// list, e.g. Map/Set/Promise/Math -- unimplemented here, narrowing:
+/// those stay "Object" until @@toStringTag exists on their
+/// prototypes/namespace objects too). `new Number(x)`/`new String(x)`/
+/// `new Boolean(x)` wrapper objects are `.object` with no internal-slot
+/// concept of their own (see `unboxPrimitiveWrapper`'s doc comment),
+/// so their tag comes from the boxed primitive's own JSValue tag.
 fn objToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
-    _ = this_value;
     _ = args;
-    return interp(ctx).gcNewString("[object Object]");
+    const self = interp(ctx);
+    const tag: []const u8 = switch (this_value) {
+        .undefined => "Undefined",
+        .null => "Null",
+        .array => "Array",
+        .function => "Function",
+        .@"error" => "Error",
+        .date => "Date",
+        .regex => "RegExp",
+        .object => blk: {
+            if (self.unboxPrimitiveWrapper(this_value)) |prim| {
+                break :blk switch (prim) {
+                    .number => "Number",
+                    .string => "String",
+                    .boolean => "Boolean",
+                    else => "Object",
+                };
+            }
+            break :blk "Object";
+        },
+        else => "Object",
+    };
+    const msg = try std.fmt.allocPrint(self.gc_allocator, "[object {s}]", .{tag});
+    defer self.gc_allocator.free(msg);
+    return self.gcNewString(msg);
 }
 
 fn objValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
