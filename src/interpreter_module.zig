@@ -84,6 +84,15 @@ pub fn loadModule(self: *Interpreter, specifier: []const u8, referrer: ?[]const 
     parser.setStackLimit(self.stack_limit);
     const program = try parser.parseProgram();
     const module_env = try self.gcChildEnv(self.global_env);
+    // The entry file (no referrer -- never a dependency reached via
+    // `import`) still gets classic-script globalThis semantics: z-run
+    // treats every script as a "module" for import/export support, but
+    // test262 (and real-world entry scripts) expect top-level `var`/
+    // function declarations to reify onto globalThis, exactly like
+    // run()'s script_env does. A real dependency module's own top-level
+    // `var`s must NOT do this (spec: only classic scripts populate the
+    // global object), so this only fires for the untouched initial call.
+    if (referrer == null and self.global_var_env == null) self.global_var_env = module_env;
 
     // Import pre-pass: dependencies evaluate first (DFS), then their
     // exports bind here -- snapshots, taken after the dep finished.

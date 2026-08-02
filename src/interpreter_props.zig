@@ -26,10 +26,19 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             // `globalThis`: a global binding (Object, a top-level `var`,
             // ...) shadows its own props; a miss falls through to the
             // normal own->chain walk (defineProperty'd props, then
-            // Object.prototype methods).
+            // Object.prototype methods). Top-level `var`/function names
+            // live in global_var_env (a child of global_env, kept
+            // separate so `let console = 5` can shadow the builtin) --
+            // its `.get` walks its own parent chain, so this still finds
+            // global_env's builtins too; must start from global_var_env,
+            // not global_env directly, or every script-level var/function
+            // would be invisible through globalThis (confirmed against
+            // real Node this must resolve, e.g. `var x=1; globalThis.x
+            // === 1`).
             if (self.global_object) |go| {
                 if (obj.object == go.object) {
-                    if (self.global_env.get(key)) |v| break :blk v.retain();
+                    const lookup_env = self.global_var_env orelse self.global_env;
+                    if (lookup_env.get(key)) |v| break :blk v.retain();
                 }
             }
             var current: ?*const @TypeOf(box.value) = &box.value;

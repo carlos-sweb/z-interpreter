@@ -176,6 +176,7 @@ pub fn run(self: *Interpreter, source: []const u8) anyerror!JSValue {
         self.globals_ready = true;
     }
     if (self.script_env == null) self.script_env = try self.gcChildEnv(self.global_env);
+    if (self.global_var_env == null) self.global_var_env = self.script_env;
     // AST nodes stay on the arena (immutable, bulk-freed with the
     // whole run -- never GC-tracked); everything else this function
     // creates goes through gc_allocator.

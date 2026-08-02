@@ -526,6 +526,28 @@ pub const Interpreter = struct {
     /// Shared native-method values, keyed "type.name" (e.g. "array.push"),
     /// so `a.push === b.push` holds like real JS prototype methods.
     method_cache: std.StringHashMapUnmanaged(JSValue) = .empty,
+    /// The environment whose `var`/function hoisting counts as "global
+    /// declaration instantiation" for `globalThis` reification purposes --
+    /// `run()` sets this to `script_env`; `runModule`'s entry file (no
+    /// referrer -- z-run always executes even import-less scripts as a
+    /// "module" for import/export support, but the entry file itself
+    /// still needs classic-script globalThis semantics) sets it to that
+    /// file's own module_env. A DEPENDENCY module loaded via `import`
+    /// never touches this field, so its top-level `var`s correctly stay
+    /// module-local (real spec: only a classic script's declarations
+    /// become global object properties, never a module's).
+    global_var_env: ?*Environment = null,
+    /// Names of top-level `var`/function declarations in `global_var_env`.
+    /// Real spec's CreateGlobalVarBinding/CreateGlobalFunctionBinding make
+    /// these genuine (non-configurable) own properties of the global
+    /// object; `let`/`const`/`class` at script scope do NOT (confirmed
+    /// against real Node) -- since Environment doesn't tag bindings by
+    /// declaration kind, this set is the only record of which
+    /// global_var_env names are var/function-kind, consulted by
+    /// hasOwnProperty et al on globalThis. Keys are AST-borrowed slices
+    /// (same lifetime contract as Environment.bindings), never freed
+    /// individually.
+    global_var_names: std.StringHashMapUnmanaged(void) = .empty,
     /// The `new`-detection token: evalNew (and `super(...)`) set this to
     /// the callee's ctx pointer for exactly the duration of the
     /// constructor call; classConstructorCall requires it to match and

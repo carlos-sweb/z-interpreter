@@ -153,6 +153,7 @@ pub fn hoistVarPattern(self: *Interpreter, env: *Environment, pattern: *const zs
     switch (pattern.*) {
         .identifier => |id| if (!env.bindings.contains(id.name)) {
             try env.define(arena, id.name, JSValue.UNDEFINED);
+            try markGlobalVarName(self, env, id.name);
         },
         .array => |arr| {
             for (arr.elements) |maybe_el| {
@@ -164,8 +165,22 @@ pub fn hoistVarPattern(self: *Interpreter, env: *Environment, pattern: *const zs
             for (obj.properties) |p| try self.hoistVarPattern(env, p.value);
             if (obj.rest) |r| if (!env.bindings.contains(r.name)) {
                 try env.define(arena, r.name, JSValue.UNDEFINED);
+                try markGlobalVarName(self, env, r.name);
             };
         },
+    }
+}
+
+/// Records `name` as a real (non-configurable) own property of the
+/// global object -- but ONLY when `env` is script_env itself, i.e. this
+/// is a genuine top-level `var`/function declaration, not one nested in
+/// a function body or block scope (those never reach script_env: blocks
+/// get their own child env, and function calls hoist into their own
+/// call env). See `global_var_names`'s doc comment for why this can't
+/// just be derived from `env.bindings` directly.
+fn markGlobalVarName(self: *Interpreter, env: *Environment, name: []const u8) anyerror!void {
+    if (self.global_var_env == env) {
+        try self.global_var_names.put(self.gc_allocator, name, {});
     }
 }
 
@@ -190,6 +205,7 @@ pub fn hoistLexical(self: *Interpreter, env: *Environment, stmts: []const *zstat
                 }
                 const value = try self.makeClosure(env, fnode);
                 try env.define(arena, name, value);
+                try markGlobalVarName(self, env, name);
             },
             .variable => |v| {
                 if (v.kind == .@"var") {

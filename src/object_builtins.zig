@@ -191,7 +191,21 @@ fn objHasOwnProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     const key = try interp(ctx).encodeKey(arg(args, 0));
     defer allocator.free(key);
     return switch (this_value) {
-        .object => |box| JSValue.fromBool(box.value.hasOwnProperty(key)),
+        // `globalThis`: builtins (global_env) and top-level var/function
+        // declarations (global_var_names -- NOT script-level let/const,
+        // which real spec never reifies as globalThis own properties;
+        // confirmed against real Node) aren't backed by a real ZObject
+        // record on this object, so a bare hasOwnProperty would miss
+        // them all -- same gap as getProperty's globalThis branch above.
+        .object => |box| blk: {
+            if (interp(ctx).global_object) |go| {
+                if (this_value.object == go.object) {
+                    const self = interp(ctx);
+                    break :blk JSValue.fromBool(self.global_var_names.contains(key) or self.global_env.declaresLocally(key) or box.value.hasOwnProperty(key));
+                }
+            }
+            break :blk JSValue.fromBool(box.value.hasOwnProperty(key));
+        },
         // Functions expose name/length/prototype as own properties (mirrors
         // objectGetOwnPropertyDescriptor's own-property set for `.function`
         // below) plus whatever's on their statics bag.
