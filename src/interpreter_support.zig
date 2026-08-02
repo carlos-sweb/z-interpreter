@@ -140,7 +140,7 @@ pub fn markFnPropDeleted(self: *Interpreter, fn_val: JSValue, comptime field: []
 
 /// A shared native-method JSValue for a (type, name) pair, cached so
 /// `a.push === b.push` holds like real JS prototype methods.
-pub fn nativeMethod(self: *Interpreter, comptime type_prefix: []const u8, name: []const u8, call_fn: native_helpers.NativeFn) anyerror!JSValue {
+pub fn nativeMethod(self: *Interpreter, comptime type_prefix: []const u8, name: []const u8, arity: usize, call_fn: native_helpers.NativeFn) anyerror!JSValue {
     const arena = self.gc_allocator;
     const cache_key = try std.fmt.allocPrint(arena, type_prefix ++ ".{s}", .{name});
     // Ownership: method_cache holds its OWN retained reference,
@@ -156,7 +156,7 @@ pub fn nativeMethod(self: *Interpreter, comptime type_prefix: []const u8, name: 
         self.gc_allocator.free(cache_key);
         return cached.retain();
     }
-    const fn_value = try self.gcNewFunction(.{ .ctx = self, .name = name, .call = call_fn });
+    const fn_value = try self.gcNewFunction(.{ .ctx = self, .name = name, .arity = arity, .call = call_fn });
     try self.method_cache.put(arena, cache_key, fn_value.retain());
     return fn_value;
 }

@@ -26,6 +26,7 @@ const builtin_helpers = @import("builtin_helpers.zig");
 const regex_builtins = @import("regex_builtins.zig");
 
 pub const NativeFn = native_helpers.NativeFn;
+const MethodSpec = native_helpers.MethodSpec;
 const interp = native_helpers.interp;
 const arg = native_helpers.arg;
 const native = native_helpers.native;
@@ -37,37 +38,37 @@ const regexFindFrom = regex_builtins.regexFindFrom;
 const makeMatchArray = regex_builtins.makeMatchArray;
 const regexSplit = regex_builtins.regexSplit;
 
-pub const string_methods = std.StaticStringMap(NativeFn).initComptime(.{
-    .{ "toUpperCase", stringToUpperCase },
-    .{ "toLowerCase", stringToLowerCase },
-    .{ "charAt", stringCharAt },
-    .{ "indexOf", stringIndexOf },
-    .{ "includes", stringIncludes },
-    .{ "startsWith", stringStartsWith },
-    .{ "endsWith", stringEndsWith },
-    .{ "slice", stringSlice },
-    .{ "repeat", stringRepeat },
-    .{ "split", stringSplit },
-    .{ "trim", stringTrim },
-    .{ "trimStart", stringTrimStart },
-    .{ "trimEnd", stringTrimEnd },
-    .{ "charCodeAt", stringCharCodeAt },
-    .{ "codePointAt", stringCodePointAt },
-    .{ "at", stringAt },
-    .{ "padStart", stringPadStart },
-    .{ "padEnd", stringPadEnd },
-    .{ "substring", stringSubstring },
-    .{ "substr", stringSubstr },
-    .{ "lastIndexOf", stringLastIndexOf },
-    .{ "concat", stringConcat },
-    .{ "replace", stringReplace },
-    .{ "replaceAll", stringReplaceAll },
-    .{ "match", stringMatch },
-    .{ "matchAll", stringMatchAll },
-    .{ "search", stringSearch },
-    .{ "localeCompare", stringLocaleCompare },
-    .{ "toString", stringToStringMethod },
-    .{ "valueOf", stringToStringMethod },
+pub const string_methods = std.StaticStringMap(MethodSpec).initComptime(.{
+    .{ "toUpperCase", MethodSpec{ .call = stringToUpperCase, .arity = 0 } },
+    .{ "toLowerCase", MethodSpec{ .call = stringToLowerCase, .arity = 0 } },
+    .{ "charAt", MethodSpec{ .call = stringCharAt, .arity = 1 } },
+    .{ "indexOf", MethodSpec{ .call = stringIndexOf, .arity = 1 } },
+    .{ "includes", MethodSpec{ .call = stringIncludes, .arity = 1 } },
+    .{ "startsWith", MethodSpec{ .call = stringStartsWith, .arity = 1 } },
+    .{ "endsWith", MethodSpec{ .call = stringEndsWith, .arity = 1 } },
+    .{ "slice", MethodSpec{ .call = stringSlice, .arity = 2 } },
+    .{ "repeat", MethodSpec{ .call = stringRepeat, .arity = 1 } },
+    .{ "split", MethodSpec{ .call = stringSplit, .arity = 2 } },
+    .{ "trim", MethodSpec{ .call = stringTrim, .arity = 0 } },
+    .{ "trimStart", MethodSpec{ .call = stringTrimStart, .arity = 0 } },
+    .{ "trimEnd", MethodSpec{ .call = stringTrimEnd, .arity = 0 } },
+    .{ "charCodeAt", MethodSpec{ .call = stringCharCodeAt, .arity = 1 } },
+    .{ "codePointAt", MethodSpec{ .call = stringCodePointAt, .arity = 1 } },
+    .{ "at", MethodSpec{ .call = stringAt, .arity = 1 } },
+    .{ "padStart", MethodSpec{ .call = stringPadStart, .arity = 1 } },
+    .{ "padEnd", MethodSpec{ .call = stringPadEnd, .arity = 1 } },
+    .{ "substring", MethodSpec{ .call = stringSubstring, .arity = 2 } },
+    .{ "substr", MethodSpec{ .call = stringSubstr, .arity = 2 } },
+    .{ "lastIndexOf", MethodSpec{ .call = stringLastIndexOf, .arity = 1 } },
+    .{ "concat", MethodSpec{ .call = stringConcat, .arity = 1 } },
+    .{ "replace", MethodSpec{ .call = stringReplace, .arity = 2 } },
+    .{ "replaceAll", MethodSpec{ .call = stringReplaceAll, .arity = 2 } },
+    .{ "match", MethodSpec{ .call = stringMatch, .arity = 1 } },
+    .{ "matchAll", MethodSpec{ .call = stringMatchAll, .arity = 1 } },
+    .{ "search", MethodSpec{ .call = stringSearch, .arity = 1 } },
+    .{ "localeCompare", MethodSpec{ .call = stringLocaleCompare, .arity = 1 } },
+    .{ "toString", MethodSpec{ .call = stringToStringMethod, .arity = 0 } },
+    .{ "valueOf", MethodSpec{ .call = stringToStringMethod, .arity = 0 } },
 });
 
 // ===== String.prototype (direct reuse of z-string's standalone method
@@ -537,7 +538,7 @@ pub fn install(self: *Interpreter) !void {
     // constructable = evalNew keeps the hollow instance (typeof "object",
     // no [[PrimitiveValue]] -- documented narrowing). Statics via bags.
     _ = try installBuiltin(self, .{ .name = "String", .ctor = .{ .arity = 1, .call = globalString, .constructable = true }, .statics = &.{
-        .{ .name = "fromCharCode", .value = .{ .method = stringFromCharCode } },
-        .{ .name = "fromCodePoint", .value = .{ .method = stringFromCodePoint } },
+        .{ .name = "fromCharCode", .value = .{ .method = .{ .call = stringFromCharCode, .arity = 1 } } },
+        .{ .name = "fromCodePoint", .value = .{ .method = .{ .call = stringFromCodePoint, .arity = 1 } } },
     } });
 }

@@ -15,6 +15,7 @@ const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
 
 pub const NativeFn = native_helpers.NativeFn;
+const MethodSpec = native_helpers.MethodSpec;
 const interp = native_helpers.interp;
 const arg = native_helpers.arg;
 const native = native_helpers.native;
@@ -23,9 +24,9 @@ const dneConst = builtin_helpers.dneConst;
 const requireTag = builtin_helpers.requireTag;
 const installBuiltin = builtin_helpers.installBuiltin;
 
-pub const symbol_methods = std.StaticStringMap(NativeFn).initComptime(.{
-    .{ "toString", symbolToString },
-    .{ "valueOf", symbolValueOf },
+pub const symbol_methods = std.StaticStringMap(MethodSpec).initComptime(.{
+    .{ "toString", MethodSpec{ .call = symbolToString, .arity = 0 } },
+    .{ "valueOf", MethodSpec{ .call = symbolValueOf, .arity = 0 } },
 });
 
 fn symbolConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -113,7 +114,7 @@ pub fn install(self: *Interpreter) !void {
         if (comptime std.mem.eql(u8, wk, "iterator")) self.symbol_iterator = sym.retain();
         if (comptime std.mem.eql(u8, wk, "asyncIterator")) self.symbol_async_iterator = sym.retain();
     }
-    try dneMethod(symbol_statics, "for", try native(self, "for", symbolFor));
-    try dneMethod(symbol_statics, "keyFor", try native(self, "keyFor", symbolKeyFor));
+    try dneMethod(symbol_statics, "for", try native(self, "for", 1, symbolFor));
+    try dneMethod(symbol_statics, "keyFor", try native(self, "keyFor", 1, symbolKeyFor));
     try g.define(arena, "Symbol", symbol_ctor);
 }

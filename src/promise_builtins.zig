@@ -16,6 +16,7 @@ const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
 
 pub const NativeFn = native_helpers.NativeFn;
+const MethodSpec = native_helpers.MethodSpec;
 const interp = native_helpers.interp;
 const arg = native_helpers.arg;
 const native = native_helpers.native;
@@ -24,10 +25,10 @@ const dneConst = builtin_helpers.dneConst;
 const requireTag = builtin_helpers.requireTag;
 const installBuiltin = builtin_helpers.installBuiltin;
 
-pub const promise_methods = std.StaticStringMap(NativeFn).initComptime(.{
-    .{ "then", promiseThen },
-    .{ "catch", promiseCatch },
-    .{ "finally", promiseFinally },
+pub const promise_methods = std.StaticStringMap(MethodSpec).initComptime(.{
+    .{ "then", MethodSpec{ .call = promiseThen, .arity = 2 } },
+    .{ "catch", MethodSpec{ .call = promiseCatch, .arity = 1 } },
+    .{ "finally", MethodSpec{ .call = promiseFinally, .arity = 1 } },
 });
 
 /// The pair of capabilities `new Promise(executor)` hands the executor.
@@ -306,12 +307,12 @@ pub fn install(self: *Interpreter) !void {
     // Promise: constructable native; the statics (resolve/reject/all/
     // race) ride the phase-10 property bag.
     _ = try installBuiltin(self, .{ .name = "Promise", .ctor = .{ .arity = 1, .call = promiseConstructor, .constructable = true }, .statics = &.{
-        .{ .name = "resolve", .value = .{ .method = promiseResolveStatic } },
-        .{ .name = "reject", .value = .{ .method = promiseRejectStatic } },
-        .{ .name = "all", .value = .{ .method = promiseAll } },
-        .{ .name = "race", .value = .{ .method = promiseRace } },
+        .{ .name = "resolve", .value = .{ .method = .{ .call = promiseResolveStatic, .arity = 1 } } },
+        .{ .name = "reject", .value = .{ .method = .{ .call = promiseRejectStatic, .arity = 1 } } },
+        .{ .name = "all", .value = .{ .method = .{ .call = promiseAll, .arity = 1 } } },
+        .{ .name = "race", .value = .{ .method = .{ .call = promiseRace, .arity = 1 } } },
     } });
 
-    try g.define(arena, "setTimeout", try native(self, "setTimeout", globalSetTimeout));
-    try g.define(arena, "clearTimeout", try native(self, "clearTimeout", globalClearTimeout));
+    try g.define(arena, "setTimeout", try native(self, "setTimeout", 2, globalSetTimeout));
+    try g.define(arena, "clearTimeout", try native(self, "clearTimeout", 1, globalClearTimeout));
 }

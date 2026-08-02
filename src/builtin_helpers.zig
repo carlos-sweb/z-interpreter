@@ -79,7 +79,7 @@ pub const BuiltinSpec = struct {
 
     const StaticEntry = struct {
         name: []const u8,
-        value: union(enum) { method: NativeFn, constant: JSValue },
+        value: union(enum) { method: native_helpers.MethodSpec, constant: JSValue },
     };
 };
 
@@ -98,7 +98,7 @@ pub fn installBuiltin(self: *Interpreter, comptime spec: BuiltinSpec) !JSValue {
         const bag = if (spec.ctor != null) try self.functionStatics(value) else value;
         inline for (spec.statics) |s| {
             switch (s.value) {
-                .method => |fptr| try dneMethod(bag, s.name, try native(self, s.name, fptr)),
+                .method => |m| try dneMethod(bag, s.name, try native(self, s.name, m.arity, m.call)),
                 .constant => |v| try dneConst(bag, s.name, v),
             }
         }
@@ -502,7 +502,7 @@ pub fn makeArrayIterator(self: *Interpreter, allocator: Allocator, this_value: J
     if (self.symbol_iterator) |sym| {
         const key = try self.encodeKey(sym);
         defer allocator.free(key);
-        try obj.object.value.set(key, try self.nativeMethod("iterator", "self", iteratorSelfBuiltin));
+        try obj.object.value.set(key, try self.nativeMethod("iterator", "self", 0, iteratorSelfBuiltin));
     }
     return obj;
 }

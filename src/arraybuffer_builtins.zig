@@ -26,6 +26,7 @@ const builtin_helpers = @import("builtin_helpers.zig");
 const builtins = @import("builtins.zig");
 
 pub const NativeFn = native_helpers.NativeFn;
+const MethodSpec = native_helpers.MethodSpec;
 const interp = native_helpers.interp;
 const arg = native_helpers.arg;
 const native = native_helpers.native;
@@ -52,31 +53,31 @@ const arrayIterNext = builtin_helpers.arrayIterNext;
 const iteratorSelfBuiltin = builtin_helpers.iteratorSelfBuiltin;
 const normIndex = builtins.normIndex;
 
-pub const array_buffer_methods = std.StaticStringMap(NativeFn).initComptime(.{
-    .{ "slice", arrayBufferSlice },
+pub const array_buffer_methods = std.StaticStringMap(MethodSpec).initComptime(.{
+    .{ "slice", MethodSpec{ .call = arrayBufferSlice, .arity = 2 } },
 });
 
-pub const dataview_methods = std.StaticStringMap(NativeFn).initComptime(.{
-    .{ "getInt8", dataViewGetInt8 },
-    .{ "getUint8", dataViewGetUint8 },
-    .{ "setInt8", dataViewSetInt8 },
-    .{ "setUint8", dataViewSetUint8 },
-    .{ "getInt16", dataViewGetInt16 },
-    .{ "getUint16", dataViewGetUint16 },
-    .{ "setInt16", dataViewSetInt16 },
-    .{ "setUint16", dataViewSetUint16 },
-    .{ "getInt32", dataViewGetInt32 },
-    .{ "getUint32", dataViewGetUint32 },
-    .{ "setInt32", dataViewSetInt32 },
-    .{ "setUint32", dataViewSetUint32 },
-    .{ "getFloat32", dataViewGetFloat32 },
-    .{ "setFloat32", dataViewSetFloat32 },
-    .{ "getFloat64", dataViewGetFloat64 },
-    .{ "setFloat64", dataViewSetFloat64 },
-    .{ "getBigInt64", dataViewGetBigInt64 },
-    .{ "getBigUint64", dataViewGetBigUint64 },
-    .{ "setBigInt64", dataViewSetBigInt64 },
-    .{ "setBigUint64", dataViewSetBigUint64 },
+pub const dataview_methods = std.StaticStringMap(MethodSpec).initComptime(.{
+    .{ "getInt8", MethodSpec{ .call = dataViewGetInt8, .arity = 1 } },
+    .{ "getUint8", MethodSpec{ .call = dataViewGetUint8, .arity = 1 } },
+    .{ "setInt8", MethodSpec{ .call = dataViewSetInt8, .arity = 2 } },
+    .{ "setUint8", MethodSpec{ .call = dataViewSetUint8, .arity = 2 } },
+    .{ "getInt16", MethodSpec{ .call = dataViewGetInt16, .arity = 1 } },
+    .{ "getUint16", MethodSpec{ .call = dataViewGetUint16, .arity = 1 } },
+    .{ "setInt16", MethodSpec{ .call = dataViewSetInt16, .arity = 2 } },
+    .{ "setUint16", MethodSpec{ .call = dataViewSetUint16, .arity = 2 } },
+    .{ "getInt32", MethodSpec{ .call = dataViewGetInt32, .arity = 1 } },
+    .{ "getUint32", MethodSpec{ .call = dataViewGetUint32, .arity = 1 } },
+    .{ "setInt32", MethodSpec{ .call = dataViewSetInt32, .arity = 2 } },
+    .{ "setUint32", MethodSpec{ .call = dataViewSetUint32, .arity = 2 } },
+    .{ "getFloat32", MethodSpec{ .call = dataViewGetFloat32, .arity = 1 } },
+    .{ "setFloat32", MethodSpec{ .call = dataViewSetFloat32, .arity = 2 } },
+    .{ "getFloat64", MethodSpec{ .call = dataViewGetFloat64, .arity = 1 } },
+    .{ "setFloat64", MethodSpec{ .call = dataViewSetFloat64, .arity = 2 } },
+    .{ "getBigInt64", MethodSpec{ .call = dataViewGetBigInt64, .arity = 1 } },
+    .{ "getBigUint64", MethodSpec{ .call = dataViewGetBigUint64, .arity = 1 } },
+    .{ "setBigInt64", MethodSpec{ .call = dataViewSetBigInt64, .arity = 2 } },
+    .{ "setBigUint64", MethodSpec{ .call = dataViewSetBigUint64, .arity = 2 } },
 });
 
 // ===== ArrayBuffer / DataView (roadmap item 19, phase 1) =====
@@ -881,7 +882,7 @@ fn taIterator(self: *Interpreter, allocator: Allocator, this_value: JSValue, kin
     if (self.symbol_iterator) |sym| {
         const key = try self.encodeKey(sym);
         defer allocator.free(key);
-        try obj.object.value.set(key, try self.nativeMethod("iterator", "self", iteratorSelfBuiltin));
+        try obj.object.value.set(key, try self.nativeMethod("iterator", "self", 0, iteratorSelfBuiltin));
     }
     return obj;
 }
@@ -904,35 +905,35 @@ fn taEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     return taIterator(interp(ctx), allocator, this_value, .entries);
 }
 
-pub const typed_array_methods = std.StaticStringMap(NativeFn).initComptime(.{
-    .{ "at", taAt },
-    .{ "copyWithin", taCopyWithin },
-    .{ "entries", taEntries },
-    .{ "every", taEvery },
-    .{ "fill", taFill },
-    .{ "filter", taFilter },
-    .{ "find", taFind },
-    .{ "findIndex", taFindIndex },
-    .{ "findLast", taFindLast },
-    .{ "findLastIndex", taFindLastIndex },
-    .{ "forEach", taForEach },
-    .{ "includes", taIncludes },
-    .{ "indexOf", taIndexOf },
-    .{ "join", taJoin },
-    .{ "keys", taKeys },
-    .{ "lastIndexOf", taLastIndexOf },
-    .{ "map", taMap },
-    .{ "reduce", taReduce },
-    .{ "reduceRight", taReduceRight },
-    .{ "reverse", taReverse },
-    .{ "set", taSetMethod },
-    .{ "slice", taSlice },
-    .{ "some", taSome },
-    .{ "sort", taSort },
-    .{ "subarray", taSubarray },
-    .{ "toLocaleString", taToStringMethod },
-    .{ "toString", taToStringMethod },
-    .{ "values", taValues },
+pub const typed_array_methods = std.StaticStringMap(MethodSpec).initComptime(.{
+    .{ "at", MethodSpec{ .call = taAt, .arity = 1 } },
+    .{ "copyWithin", MethodSpec{ .call = taCopyWithin, .arity = 2 } },
+    .{ "entries", MethodSpec{ .call = taEntries, .arity = 0 } },
+    .{ "every", MethodSpec{ .call = taEvery, .arity = 1 } },
+    .{ "fill", MethodSpec{ .call = taFill, .arity = 1 } },
+    .{ "filter", MethodSpec{ .call = taFilter, .arity = 1 } },
+    .{ "find", MethodSpec{ .call = taFind, .arity = 1 } },
+    .{ "findIndex", MethodSpec{ .call = taFindIndex, .arity = 1 } },
+    .{ "findLast", MethodSpec{ .call = taFindLast, .arity = 1 } },
+    .{ "findLastIndex", MethodSpec{ .call = taFindLastIndex, .arity = 1 } },
+    .{ "forEach", MethodSpec{ .call = taForEach, .arity = 1 } },
+    .{ "includes", MethodSpec{ .call = taIncludes, .arity = 1 } },
+    .{ "indexOf", MethodSpec{ .call = taIndexOf, .arity = 1 } },
+    .{ "join", MethodSpec{ .call = taJoin, .arity = 1 } },
+    .{ "keys", MethodSpec{ .call = taKeys, .arity = 0 } },
+    .{ "lastIndexOf", MethodSpec{ .call = taLastIndexOf, .arity = 1 } },
+    .{ "map", MethodSpec{ .call = taMap, .arity = 1 } },
+    .{ "reduce", MethodSpec{ .call = taReduce, .arity = 1 } },
+    .{ "reduceRight", MethodSpec{ .call = taReduceRight, .arity = 1 } },
+    .{ "reverse", MethodSpec{ .call = taReverse, .arity = 0 } },
+    .{ "set", MethodSpec{ .call = taSetMethod, .arity = 1 } },
+    .{ "slice", MethodSpec{ .call = taSlice, .arity = 2 } },
+    .{ "some", MethodSpec{ .call = taSome, .arity = 1 } },
+    .{ "sort", MethodSpec{ .call = taSort, .arity = 1 } },
+    .{ "subarray", MethodSpec{ .call = taSubarray, .arity = 2 } },
+    .{ "toLocaleString", MethodSpec{ .call = taToStringMethod, .arity = 0 } },
+    .{ "toString", MethodSpec{ .call = taToStringMethod, .arity = 0 } },
+    .{ "values", MethodSpec{ .call = taValues, .arity = 0 } },
 });
 
 /// Installs `ArrayBuffer`, `DataView`, and the 10 TypedArray constructors.

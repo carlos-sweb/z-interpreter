@@ -13,64 +13,65 @@ const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
 
 pub const NativeFn = native_helpers.NativeFn;
+const MethodSpec = native_helpers.MethodSpec;
 const interp = native_helpers.interp;
 const arg = native_helpers.arg;
 const native = native_helpers.native;
 const installBuiltin = builtin_helpers.installBuiltin;
 const requireTag = builtin_helpers.requireTag;
 
-pub const date_methods = std.StaticStringMap(NativeFn).initComptime(.{
+pub const date_methods = std.StaticStringMap(MethodSpec).initComptime(.{
     // Local-time getters
-    .{ "getTime", dateGetTime },
-    .{ "valueOf", dateGetTime },
-    .{ "getFullYear", dateGetter("getFullYear") },
-    .{ "getMonth", dateGetter("getMonth") },
-    .{ "getDate", dateGetter("getDate") },
-    .{ "getDay", dateGetter("getDay") },
-    .{ "getHours", dateGetter("getHours") },
-    .{ "getMinutes", dateGetter("getMinutes") },
-    .{ "getSeconds", dateGetter("getSeconds") },
-    .{ "getMilliseconds", dateGetter("getMilliseconds") },
-    .{ "getTimezoneOffset", dateGetter("getTimezoneOffset") },
-    .{ "getYear", dateGetter("getYear") }, // Annex B
+    .{ "getTime", MethodSpec{ .call = dateGetTime, .arity = 0 } },
+    .{ "valueOf", MethodSpec{ .call = dateGetTime, .arity = 0 } },
+    .{ "getFullYear", MethodSpec{ .call = dateGetter("getFullYear"), .arity = 0 } },
+    .{ "getMonth", MethodSpec{ .call = dateGetter("getMonth"), .arity = 0 } },
+    .{ "getDate", MethodSpec{ .call = dateGetter("getDate"), .arity = 0 } },
+    .{ "getDay", MethodSpec{ .call = dateGetter("getDay"), .arity = 0 } },
+    .{ "getHours", MethodSpec{ .call = dateGetter("getHours"), .arity = 0 } },
+    .{ "getMinutes", MethodSpec{ .call = dateGetter("getMinutes"), .arity = 0 } },
+    .{ "getSeconds", MethodSpec{ .call = dateGetter("getSeconds"), .arity = 0 } },
+    .{ "getMilliseconds", MethodSpec{ .call = dateGetter("getMilliseconds"), .arity = 0 } },
+    .{ "getTimezoneOffset", MethodSpec{ .call = dateGetter("getTimezoneOffset"), .arity = 0 } },
+    .{ "getYear", MethodSpec{ .call = dateGetter("getYear"), .arity = 0 } }, // Annex B
     // UTC getters
-    .{ "getUTCFullYear", dateGetter("getUTCFullYear") },
-    .{ "getUTCMonth", dateGetter("getUTCMonth") },
-    .{ "getUTCDate", dateGetter("getUTCDate") },
-    .{ "getUTCDay", dateGetter("getUTCDay") },
-    .{ "getUTCHours", dateGetter("getUTCHours") },
-    .{ "getUTCMinutes", dateGetter("getUTCMinutes") },
-    .{ "getUTCSeconds", dateGetter("getUTCSeconds") },
-    .{ "getUTCMilliseconds", dateGetter("getUTCMilliseconds") },
+    .{ "getUTCFullYear", MethodSpec{ .call = dateGetter("getUTCFullYear"), .arity = 0 } },
+    .{ "getUTCMonth", MethodSpec{ .call = dateGetter("getUTCMonth"), .arity = 0 } },
+    .{ "getUTCDate", MethodSpec{ .call = dateGetter("getUTCDate"), .arity = 0 } },
+    .{ "getUTCDay", MethodSpec{ .call = dateGetter("getUTCDay"), .arity = 0 } },
+    .{ "getUTCHours", MethodSpec{ .call = dateGetter("getUTCHours"), .arity = 0 } },
+    .{ "getUTCMinutes", MethodSpec{ .call = dateGetter("getUTCMinutes"), .arity = 0 } },
+    .{ "getUTCSeconds", MethodSpec{ .call = dateGetter("getUTCSeconds"), .arity = 0 } },
+    .{ "getUTCMilliseconds", MethodSpec{ .call = dateGetter("getUTCMilliseconds"), .arity = 0 } },
     // Local-time setters (n_optional trailing components default to current)
-    .{ "setTime", dateSetTime },
-    .{ "setMilliseconds", dateSetter("setMilliseconds", 0) },
-    .{ "setSeconds", dateSetter("setSeconds", 1) },
-    .{ "setMinutes", dateSetter("setMinutes", 2) },
-    .{ "setHours", dateSetter("setHours", 3) },
-    .{ "setDate", dateSetter("setDate", 0) },
-    .{ "setMonth", dateSetter("setMonth", 1) },
-    .{ "setFullYear", dateSetter("setFullYear", 2) },
-    .{ "setYear", dateSetter("setYear", 0) }, // Annex B
+    .{ "setTime", MethodSpec{ .call = dateSetTime, .arity = 1 } },
+    .{ "setMilliseconds", MethodSpec{ .call = dateSetter("setMilliseconds", 0), .arity = 1 } },
+    .{ "setSeconds", MethodSpec{ .call = dateSetter("setSeconds", 1), .arity = 2 } },
+    .{ "setMinutes", MethodSpec{ .call = dateSetter("setMinutes", 2), .arity = 3 } },
+    .{ "setHours", MethodSpec{ .call = dateSetter("setHours", 3), .arity = 4 } },
+    .{ "setDate", MethodSpec{ .call = dateSetter("setDate", 0), .arity = 1 } },
+    .{ "setMonth", MethodSpec{ .call = dateSetter("setMonth", 1), .arity = 2 } },
+    .{ "setFullYear", MethodSpec{ .call = dateSetter("setFullYear", 2), .arity = 3 } },
+    .{ "setYear", MethodSpec{ .call = dateSetter("setYear", 0), .arity = 1 } }, // Annex B
     // UTC setters
-    .{ "setUTCMilliseconds", dateSetter("setUTCMilliseconds", 0) },
-    .{ "setUTCSeconds", dateSetter("setUTCSeconds", 1) },
-    .{ "setUTCMinutes", dateSetter("setUTCMinutes", 2) },
-    .{ "setUTCHours", dateSetter("setUTCHours", 3) },
-    .{ "setUTCDate", dateSetter("setUTCDate", 0) },
-    .{ "setUTCMonth", dateSetter("setUTCMonth", 1) },
-    .{ "setUTCFullYear", dateSetter("setUTCFullYear", 2) },
+    .{ "setUTCMilliseconds", MethodSpec{ .call = dateSetter("setUTCMilliseconds", 0), .arity = 1 } },
+    .{ "setUTCSeconds", MethodSpec{ .call = dateSetter("setUTCSeconds", 1), .arity = 2 } },
+    .{ "setUTCMinutes", MethodSpec{ .call = dateSetter("setUTCMinutes", 2), .arity = 3 } },
+    .{ "setUTCHours", MethodSpec{ .call = dateSetter("setUTCHours", 3), .arity = 4 } },
+    .{ "setUTCDate", MethodSpec{ .call = dateSetter("setUTCDate", 0), .arity = 1 } },
+    .{ "setUTCMonth", MethodSpec{ .call = dateSetter("setUTCMonth", 1), .arity = 2 } },
+    .{ "setUTCFullYear", MethodSpec{ .call = dateSetter("setUTCFullYear", 2), .arity = 3 } },
     // Formatting / conversion
-    .{ "toISOString", dateToISOString },
-    .{ "toJSON", dateToJSON },
-    .{ "toString", dateFormatter("toString") },
-    .{ "toDateString", dateFormatter("toDateString") },
-    .{ "toTimeString", dateFormatter("toTimeString") },
-    .{ "toUTCString", dateFormatter("toUTCString") },
-    .{ "toGMTString", dateFormatter("toUTCString") }, // Annex B alias of toUTCString
-    .{ "toLocaleString", dateLocale("toLocaleString") },
-    .{ "toLocaleDateString", dateLocale("toLocaleDateString") },
-    .{ "toLocaleTimeString", dateLocale("toLocaleTimeString") },
+    .{ "toISOString", MethodSpec{ .call = dateToISOString, .arity = 0 } },
+    .{ "toJSON", MethodSpec{ .call = dateToJSON, .arity = 1 } },
+    .{ "toString", MethodSpec{ .call = dateFormatter("toString"), .arity = 0 } },
+    .{ "toDateString", MethodSpec{ .call = dateFormatter("toDateString"), .arity = 0 } },
+    .{ "toTimeString", MethodSpec{ .call = dateFormatter("toTimeString"), .arity = 0 } },
+    .{ "toUTCString", MethodSpec{ .call = dateFormatter("toUTCString"), .arity = 0 } },
+    .{ "toGMTString", MethodSpec{ .call = dateFormatter("toUTCString"), .arity = 0 } }, // Annex B alias of toUTCString
+    .{ "toLocaleString", MethodSpec{ .call = dateLocale("toLocaleString"), .arity = 0 } },
+    .{ "toLocaleDateString", MethodSpec{ .call = dateLocale("toLocaleDateString"), .arity = 0 } },
+    .{ "toLocaleTimeString", MethodSpec{ .call = dateLocale("toLocaleTimeString"), .arity = 0 } },
 });
 
 /// Milliseconds since the Unix epoch via the raw Linux syscall -- this
@@ -313,8 +314,8 @@ fn dateSetter(comptime method: []const u8, comptime n_optional: usize) NativeFn 
 /// `date_methods` is consulted directly by materializeProtos).
 pub fn install(self: *Interpreter) !void {
     _ = try installBuiltin(self, .{ .name = "Date", .ctor = .{ .call = dateConstructor, .constructable = true }, .statics = &.{
-        .{ .name = "now", .value = .{ .method = dateNow } },
-        .{ .name = "parse", .value = .{ .method = dateParse } },
-        .{ .name = "UTC", .value = .{ .method = dateUTC } },
+        .{ .name = "now", .value = .{ .method = .{ .call = dateNow, .arity = 0 } } },
+        .{ .name = "parse", .value = .{ .method = .{ .call = dateParse, .arity = 1 } } },
+        .{ .name = "UTC", .value = .{ .method = .{ .call = dateUTC, .arity = 7 } } },
     } });
 }

@@ -61,7 +61,7 @@ fn jsonParse(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
 /// Installs the `JSON` namespace (no constructor).
 pub fn install(self: *Interpreter) !void {
     _ = try installBuiltin(self, .{ .name = "JSON", .statics = &.{
-        .{ .name = "stringify", .value = .{ .method = jsonStringify } },
-        .{ .name = "parse", .value = .{ .method = jsonParse } },
+        .{ .name = "stringify", .value = .{ .method = .{ .call = jsonStringify, .arity = 3 } } },
+        .{ .name = "parse", .value = .{ .method = .{ .call = jsonParse, .arity = 2 } } },
     } });
 }

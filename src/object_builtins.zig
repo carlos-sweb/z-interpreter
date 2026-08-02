@@ -32,18 +32,19 @@ const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
 
 pub const NativeFn = native_helpers.NativeFn;
+const MethodSpec = native_helpers.MethodSpec;
 const interp = native_helpers.interp;
 const arg = native_helpers.arg;
 const native = native_helpers.native;
 const isSymbolKey = builtin_helpers.isSymbolKey;
 const dneMethod = builtin_helpers.dneMethod;
 
-pub const object_methods = std.StaticStringMap(NativeFn).initComptime(.{
-    .{ "hasOwnProperty", objHasOwnProperty },
-    .{ "propertyIsEnumerable", objPropertyIsEnumerable },
-    .{ "toString", objToString },
-    .{ "valueOf", objValueOf },
-    .{ "isPrototypeOf", objIsPrototypeOf },
+pub const object_methods = std.StaticStringMap(MethodSpec).initComptime(.{
+    .{ "hasOwnProperty", MethodSpec{ .call = objHasOwnProperty, .arity = 1 } },
+    .{ "propertyIsEnumerable", MethodSpec{ .call = objPropertyIsEnumerable, .arity = 1 } },
+    .{ "toString", MethodSpec{ .call = objToString, .arity = 0 } },
+    .{ "valueOf", MethodSpec{ .call = objValueOf, .arity = 0 } },
+    .{ "isPrototypeOf", MethodSpec{ .call = objIsPrototypeOf, .arity = 1 } },
 });
 
 // ===== Object statics =====
@@ -756,19 +757,19 @@ pub fn install(self: *Interpreter) !void {
     });
     const object_statics = try self.functionStatics(object_ctor);
     inline for (.{
-        .{ "keys", objectKeys },                                         .{ "values", objectValues },
-        .{ "entries", objectEntries },                                   .{ "assign", objectAssign },
-        .{ "defineProperty", objectDefineProperty },                     .{ "defineProperties", objectDefineProperties },
-        .{ "getOwnPropertyDescriptor", objectGetOwnPropertyDescriptor }, .{ "getOwnPropertyNames", objectGetOwnPropertyNames },
-        .{ "getOwnPropertySymbols", objectGetOwnPropertySymbols },       .{ "create", objectCreate },
-        .{ "freeze", objectFreeze },                                     .{ "isFrozen", objectIsFrozen },
-        .{ "seal", objectSeal },                                         .{ "isSealed", objectIsSealed },
-        .{ "preventExtensions", objectPreventExtensions },               .{ "isExtensible", objectIsExtensible },
-        .{ "setPrototypeOf", objectSetPrototypeOf },                     .{ "getPrototypeOf", objectGetPrototypeOf },
-        .{ "is", objectIs },                                             .{ "hasOwn", objectHasOwn },
-        .{ "fromEntries", objectFromEntries },
+        .{ "keys", 1, objectKeys },                                         .{ "values", 1, objectValues },
+        .{ "entries", 1, objectEntries },                                   .{ "assign", 2, objectAssign },
+        .{ "defineProperty", 3, objectDefineProperty },                     .{ "defineProperties", 2, objectDefineProperties },
+        .{ "getOwnPropertyDescriptor", 2, objectGetOwnPropertyDescriptor }, .{ "getOwnPropertyNames", 1, objectGetOwnPropertyNames },
+        .{ "getOwnPropertySymbols", 1, objectGetOwnPropertySymbols },       .{ "create", 2, objectCreate },
+        .{ "freeze", 1, objectFreeze },                                     .{ "isFrozen", 1, objectIsFrozen },
+        .{ "seal", 1, objectSeal },                                         .{ "isSealed", 1, objectIsSealed },
+        .{ "preventExtensions", 1, objectPreventExtensions },               .{ "isExtensible", 1, objectIsExtensible },
+        .{ "setPrototypeOf", 2, objectSetPrototypeOf },                     .{ "getPrototypeOf", 1, objectGetPrototypeOf },
+        .{ "is", 2, objectIs },                                             .{ "hasOwn", 2, objectHasOwn },
+        .{ "fromEntries", 1, objectFromEntries },
     }) |entry| {
-        try dneMethod(object_statics, entry[0], try native(self, entry[0], entry[1]));
+        try dneMethod(object_statics, entry[0], try native(self, entry[0], entry[1], entry[2]));
     }
     self.protos.object = try self.functionPrototype(object_ctor);
     try g.define(arena, "Object", object_ctor);

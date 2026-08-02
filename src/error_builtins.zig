@@ -18,6 +18,7 @@ const native_helpers = @import("native_helpers.zig");
 const interp = native_helpers.interp;
 const arg = native_helpers.arg;
 pub const NativeFn = native_helpers.NativeFn;
+const MethodSpec = native_helpers.MethodSpec;
 
 // ===== Error.prototype methods =====
 
@@ -45,8 +46,8 @@ fn errorToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     return self.gcNewString(combined);
 }
 
-pub const error_methods = std.StaticStringMap(NativeFn).initComptime(.{
-    .{ "toString", errorToString },
+pub const error_methods = std.StaticStringMap(MethodSpec).initComptime(.{
+    .{ "toString", MethodSpec{ .call = errorToString, .arity = 0 } },
 });
 
 // ===== Error constructors =====

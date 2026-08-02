@@ -152,15 +152,15 @@ fn reflectConstruct(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
 /// Installs the `Reflect` namespace (statics-only, no constructor).
 pub fn install(self: *Interpreter) !void {
     _ = try installBuiltin(self, .{ .name = "Reflect", .statics = &.{
-        .{ .name = "get", .value = .{ .method = reflectGet } },
-        .{ .name = "set", .value = .{ .method = reflectSet } },
-        .{ .name = "has", .value = .{ .method = reflectHas } },
-        .{ .name = "deleteProperty", .value = .{ .method = reflectDeleteProperty } },
-        .{ .name = "ownKeys", .value = .{ .method = reflectOwnKeys } },
-        .{ .name = "getPrototypeOf", .value = .{ .method = reflectGetPrototypeOf } },
-        .{ .name = "defineProperty", .value = .{ .method = reflectDefineProperty } },
-        .{ .name = "getOwnPropertyDescriptor", .value = .{ .method = reflectGetOwnPropertyDescriptor } },
-        .{ .name = "apply", .value = .{ .method = reflectApply } },
-        .{ .name = "construct", .value = .{ .method = reflectConstruct } },
+        .{ .name = "get", .value = .{ .method = .{ .call = reflectGet, .arity = 2 } } },
+        .{ .name = "set", .value = .{ .method = .{ .call = reflectSet, .arity = 3 } } },
+        .{ .name = "has", .value = .{ .method = .{ .call = reflectHas, .arity = 2 } } },
+        .{ .name = "deleteProperty", .value = .{ .method = .{ .call = reflectDeleteProperty, .arity = 2 } } },
+        .{ .name = "ownKeys", .value = .{ .method = .{ .call = reflectOwnKeys, .arity = 1 } } },
+        .{ .name = "getPrototypeOf", .value = .{ .method = .{ .call = reflectGetPrototypeOf, .arity = 1 } } },
+        .{ .name = "defineProperty", .value = .{ .method = .{ .call = reflectDefineProperty, .arity = 3 } } },
+        .{ .name = "getOwnPropertyDescriptor", .value = .{ .method = .{ .call = reflectGetOwnPropertyDescriptor, .arity = 2 } } },
+        .{ .name = "apply", .value = .{ .method = .{ .call = reflectApply, .arity = 3 } } },
+        .{ .name = "construct", .value = .{ .method = .{ .call = reflectConstruct, .arity = 2 } } },
     } });
 }

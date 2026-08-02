@@ -179,15 +179,15 @@ pub fn install(self: *Interpreter) !void {
     // against actual Node, not assumed) -- same rendering either way,
     // only the destination writer differs. See consoleLog/consoleError.
     _ = try installBuiltin(self, .{ .name = "console", .statics = &.{
-        .{ .name = "log", .value = .{ .method = consoleLog } },
-        .{ .name = "info", .value = .{ .method = consoleLog } },
-        .{ .name = "debug", .value = .{ .method = consoleLog } },
-        .{ .name = "error", .value = .{ .method = consoleError } },
-        .{ .name = "warn", .value = .{ .method = consoleError } },
+        .{ .name = "log", .value = .{ .method = .{ .call = consoleLog, .arity = 0 } } },
+        .{ .name = "info", .value = .{ .method = .{ .call = consoleLog, .arity = 0 } } },
+        .{ .name = "debug", .value = .{ .method = .{ .call = consoleLog, .arity = 0 } } },
+        .{ .name = "error", .value = .{ .method = .{ .call = consoleError, .arity = 0 } } },
+        .{ .name = "warn", .value = .{ .method = .{ .call = consoleError, .arity = 0 } } },
     } });
-    try g.define(arena, "print", try native(self, "print", globalPrint));
+    try g.define(arena, "print", try native(self, "print", 1, globalPrint));
 
-    const eval_fn = try native(self, "eval", globalEval);
+    const eval_fn = try native(self, "eval", 1, globalEval);
     // self.eval_fn needs its OWN retained reference -- see the same fix
     // on symbol_iterator/global_object for why (an interpreter field
     // aliasing a reassignable global binding, without its own retain, is
@@ -195,13 +195,13 @@ pub fn install(self: *Interpreter) !void {
     self.eval_fn = eval_fn.retain();
     try g.define(arena, "eval", eval_fn);
 
-    try g.define(arena, "parseInt", try native(self, "parseInt", globalParseInt));
-    try g.define(arena, "parseFloat", try native(self, "parseFloat", globalParseFloat));
-    try g.define(arena, "isNaN", try native(self, "isNaN", globalIsNaN));
-    try g.define(arena, "isFinite", try native(self, "isFinite", globalIsFinite));
+    try g.define(arena, "parseInt", try native(self, "parseInt", 2, globalParseInt));
+    try g.define(arena, "parseFloat", try native(self, "parseFloat", 1, globalParseFloat));
+    try g.define(arena, "isNaN", try native(self, "isNaN", 1, globalIsNaN));
+    try g.define(arena, "isFinite", try native(self, "isFinite", 1, globalIsFinite));
 
-    try g.define(arena, "encodeURI", try native(self, "encodeURI", globalEncodeURI));
-    try g.define(arena, "encodeURIComponent", try native(self, "encodeURIComponent", globalEncodeURIComponent));
-    try g.define(arena, "decodeURI", try native(self, "decodeURI", globalDecodeURI));
-    try g.define(arena, "decodeURIComponent", try native(self, "decodeURIComponent", globalDecodeURIComponent));
+    try g.define(arena, "encodeURI", try native(self, "encodeURI", 1, globalEncodeURI));
+    try g.define(arena, "encodeURIComponent", try native(self, "encodeURIComponent", 1, globalEncodeURIComponent));
+    try g.define(arena, "decodeURI", try native(self, "decodeURI", 1, globalDecodeURI));
+    try g.define(arena, "decodeURIComponent", try native(self, "decodeURIComponent", 1, globalDecodeURIComponent));
 }

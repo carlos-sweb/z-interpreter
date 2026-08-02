@@ -568,10 +568,11 @@ pub fn getFromProto(self: *Interpreter, receiver: JSValue, proto: JSValue, key: 
 /// (writable, NON-enumerable, configurable), plus a non-enumerable
 /// `constructor` back-reference. The functions come from `nativeMethod`,
 /// which caches by identity so `[].push === Array.prototype.push` holds.
-pub fn installProto(self: *Interpreter, proto: JSValue, comptime type_prefix: []const u8, methods: std.StaticStringMap(native_helpers.NativeFn), ctor: JSValue) !void {
+pub fn installProto(self: *Interpreter, proto: JSValue, comptime type_prefix: []const u8, methods: std.StaticStringMap(native_helpers.MethodSpec), ctor: JSValue) !void {
     const attrs = zvalue.PropertyDescriptor{ .writable = true, .enumerable = false, .configurable = true };
     for (methods.keys()) |k| {
-        const f = try self.nativeMethod(type_prefix, k, methods.get(k).?);
+        const spec = methods.get(k).?;
+        const f = try self.nativeMethod(type_prefix, k, spec.arity, spec.call);
         try proto.object.value.defineProperty(k, f, attrs);
     }
     try proto.object.value.defineProperty("constructor", ctor.retain(), attrs);
@@ -584,11 +585,12 @@ pub fn installProto(self: *Interpreter, proto: JSValue, comptime type_prefix: []
 /// `%TypedArray%.prototype`/values). Reuses `nativeMethod`'s cache
 /// (the same (type_prefix, name) key `installProto` used for the
 /// string-named method), so this returns the identical JSValue.
-pub fn aliasSymbolIterator(self: *Interpreter, proto: JSValue, comptime type_prefix: []const u8, methods: std.StaticStringMap(native_helpers.NativeFn), method_name: []const u8) !void {
+pub fn aliasSymbolIterator(self: *Interpreter, proto: JSValue, comptime type_prefix: []const u8, methods: std.StaticStringMap(native_helpers.MethodSpec), method_name: []const u8) !void {
     const sym = self.symbol_iterator orelse return;
     const key = try self.encodeKey(sym);
     defer self.gc_allocator.free(key);
-    const f = try self.nativeMethod(type_prefix, method_name, methods.get(method_name).?);
+    const aliased = methods.get(method_name).?;
+    const f = try self.nativeMethod(type_prefix, method_name, aliased.arity, aliased.call);
     const attrs = zvalue.PropertyDescriptor{ .writable = true, .enumerable = false, .configurable = true };
     try proto.object.value.defineProperty(key, f, attrs);
 }
@@ -668,7 +670,8 @@ pub fn materializeProtos(self: *Interpreter) !void {
     // `getFromProto`'s existing chain walk gives every kind these
     // methods for free (matches real spec structure exactly).
     for (builtins.typed_array_methods.keys()) |k| {
-        const f = try self.nativeMethod("typed_array", k, builtins.typed_array_methods.get(k).?);
+        const spec = builtins.typed_array_methods.get(k).?;
+        const f = try self.nativeMethod("typed_array", k, spec.arity, spec.call);
         try typed_array_base.object.value.defineProperty(k, f, proto_attrs);
     }
     // Real spec: %TypedArray%.prototype[Symbol.iterator] === %TypedArray%.prototype.values.

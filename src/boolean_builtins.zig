@@ -17,6 +17,7 @@ const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
 
 pub const NativeFn = native_helpers.NativeFn;
+const MethodSpec = native_helpers.MethodSpec;
 const interp = native_helpers.interp;
 const arg = native_helpers.arg;
 const native = native_helpers.native;
@@ -24,9 +25,9 @@ const installBuiltin = builtin_helpers.installBuiltin;
 
 const requirePrimitive = builtin_helpers.requirePrimitive;
 
-pub const boolean_methods = std.StaticStringMap(NativeFn).initComptime(.{
-    .{ "toString", booleanToString },
-    .{ "valueOf", booleanValueOf },
+pub const boolean_methods = std.StaticStringMap(MethodSpec).initComptime(.{
+    .{ "toString", MethodSpec{ .call = booleanToString, .arity = 0 } },
+    .{ "valueOf", MethodSpec{ .call = booleanValueOf, .arity = 0 } },
 });
 
 fn requireBoolean(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!bool {

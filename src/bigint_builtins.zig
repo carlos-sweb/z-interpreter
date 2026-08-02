@@ -14,6 +14,7 @@ const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
 
 pub const NativeFn = native_helpers.NativeFn;
+const MethodSpec = native_helpers.MethodSpec;
 const interp = native_helpers.interp;
 const arg = native_helpers.arg;
 const native = native_helpers.native;
@@ -23,10 +24,10 @@ const requireTag = builtin_helpers.requireTag;
 const toIntSat = builtin_helpers.toIntSat;
 const toBigIntValue = builtin_helpers.toBigIntValue;
 
-pub const bigint_methods = std.StaticStringMap(NativeFn).initComptime(.{
-    .{ "toString", bigintToString },
-    .{ "toLocaleString", bigintToString },
-    .{ "valueOf", bigintValueOf },
+pub const bigint_methods = std.StaticStringMap(MethodSpec).initComptime(.{
+    .{ "toString", MethodSpec{ .call = bigintToString, .arity = 0 } },
+    .{ "toLocaleString", MethodSpec{ .call = bigintToString, .arity = 0 } },
+    .{ "valueOf", MethodSpec{ .call = bigintValueOf, .arity = 0 } },
 });
 
 /// `BigInt(value)`'s own algorithm: Number gets a special conversion
@@ -140,7 +141,7 @@ pub fn install(self: *Interpreter) !void {
     // existing generic `!callee.function.value.constructable` guard
     // already produces for free by just leaving this false.
     _ = try installBuiltin(self, .{ .name = "BigInt", .ctor = .{ .arity = 1, .call = globalBigInt, .constructable = false }, .statics = &.{
-        .{ .name = "asIntN", .value = .{ .method = bigintAsIntN } },
-        .{ .name = "asUintN", .value = .{ .method = bigintAsUintN } },
+        .{ .name = "asIntN", .value = .{ .method = .{ .call = bigintAsIntN, .arity = 2 } } },
+        .{ .name = "asUintN", .value = .{ .method = .{ .call = bigintAsUintN, .arity = 2 } } },
     } });
 }

@@ -16,6 +16,7 @@ const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
 
 pub const NativeFn = native_helpers.NativeFn;
+const MethodSpec = native_helpers.MethodSpec;
 const interp = native_helpers.interp;
 const arg = native_helpers.arg;
 const native = native_helpers.native;
@@ -24,10 +25,10 @@ const dneConst = builtin_helpers.dneConst;
 const requireTag = builtin_helpers.requireTag;
 const installBuiltin = builtin_helpers.installBuiltin;
 
-pub const function_methods = std.StaticStringMap(NativeFn).initComptime(.{
-    .{ "call", fnCall },
-    .{ "apply", fnApply },
-    .{ "bind", fnBind },
+pub const function_methods = std.StaticStringMap(MethodSpec).initComptime(.{
+    .{ "call", MethodSpec{ .call = fnCall, .arity = 1 } },
+    .{ "apply", MethodSpec{ .call = fnApply, .arity = 2 } },
+    .{ "bind", MethodSpec{ .call = fnBind, .arity = 1 } },
 });
 
 fn requireFunction(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {

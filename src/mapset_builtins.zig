@@ -13,6 +13,7 @@ const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
 
 pub const NativeFn = native_helpers.NativeFn;
+const MethodSpec = native_helpers.MethodSpec;
 const interp = native_helpers.interp;
 const arg = native_helpers.arg;
 const native = native_helpers.native;
@@ -21,27 +22,27 @@ const requireTag = builtin_helpers.requireTag;
 const requireCallback = builtin_helpers.requireCallback;
 const makeArrayIterator = builtin_helpers.makeArrayIterator;
 
-pub const map_methods = std.StaticStringMap(NativeFn).initComptime(.{
-    .{ "get", mapGet },
-    .{ "set", mapSet },
-    .{ "has", mapHas },
-    .{ "delete", mapDelete },
-    .{ "clear", mapClear },
-    .{ "forEach", mapForEach },
-    .{ "keys", mapKeys },
-    .{ "values", mapValues },
-    .{ "entries", mapEntries },
+pub const map_methods = std.StaticStringMap(MethodSpec).initComptime(.{
+    .{ "get", MethodSpec{ .call = mapGet, .arity = 1 } },
+    .{ "set", MethodSpec{ .call = mapSet, .arity = 2 } },
+    .{ "has", MethodSpec{ .call = mapHas, .arity = 1 } },
+    .{ "delete", MethodSpec{ .call = mapDelete, .arity = 1 } },
+    .{ "clear", MethodSpec{ .call = mapClear, .arity = 0 } },
+    .{ "forEach", MethodSpec{ .call = mapForEach, .arity = 1 } },
+    .{ "keys", MethodSpec{ .call = mapKeys, .arity = 0 } },
+    .{ "values", MethodSpec{ .call = mapValues, .arity = 0 } },
+    .{ "entries", MethodSpec{ .call = mapEntries, .arity = 0 } },
 });
 
-pub const set_methods = std.StaticStringMap(NativeFn).initComptime(.{
-    .{ "add", setAdd },
-    .{ "has", setHas },
-    .{ "delete", setDelete },
-    .{ "clear", setClear },
-    .{ "forEach", setForEach },
-    .{ "keys", setValues },
-    .{ "values", setValues },
-    .{ "entries", setEntries },
+pub const set_methods = std.StaticStringMap(MethodSpec).initComptime(.{
+    .{ "add", MethodSpec{ .call = setAdd, .arity = 1 } },
+    .{ "has", MethodSpec{ .call = setHas, .arity = 1 } },
+    .{ "delete", MethodSpec{ .call = setDelete, .arity = 1 } },
+    .{ "clear", MethodSpec{ .call = setClear, .arity = 0 } },
+    .{ "forEach", MethodSpec{ .call = setForEach, .arity = 1 } },
+    .{ "keys", MethodSpec{ .call = setValues, .arity = 0 } },
+    .{ "values", MethodSpec{ .call = setValues, .arity = 0 } },
+    .{ "entries", MethodSpec{ .call = setEntries, .arity = 0 } },
 });
 
 fn requireMap(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {

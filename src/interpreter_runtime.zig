@@ -449,7 +449,7 @@ pub fn makeGeneratorObject(self: *Interpreter, fnode: *zfunctions.FunctionNode, 
     if (self.symbol_iterator) |sym| {
         const key = try self.encodeKey(sym);
         defer self.gc_allocator.free(key);
-        try obj.object.value.set(key, try self.nativeMethod("iterator", "self", iteratorSelf));
+        try obj.object.value.set(key, try self.nativeMethod("iterator", "self", 0, iteratorSelf));
     }
     return obj;
 }
@@ -506,7 +506,7 @@ pub fn makeAsyncGeneratorObject(self: *Interpreter, fnode: *zfunctions.FunctionN
     if (self.symbol_async_iterator) |sym| {
         const key = try self.encodeKey(sym);
         defer self.gc_allocator.free(key);
-        try obj.object.value.set(key, try self.nativeMethod("asyncIterator", "self", iteratorSelf));
+        try obj.object.value.set(key, try self.nativeMethod("asyncIterator", "self", 0, iteratorSelf));
     }
     return obj;
 }

@@ -18,6 +18,7 @@ const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
 
 pub const NativeFn = native_helpers.NativeFn;
+const MethodSpec = native_helpers.MethodSpec;
 const interp = native_helpers.interp;
 const arg = native_helpers.arg;
 const native = native_helpers.native;
@@ -31,40 +32,40 @@ const hasIteratorMethod = builtin_helpers.hasIteratorMethod;
 const arrayLikeToList = builtin_helpers.arrayLikeToList;
 const makeArrayIterator = builtin_helpers.makeArrayIterator;
 
-pub const array_methods = std.StaticStringMap(NativeFn).initComptime(.{
-    .{ "push", arrayPush },
-    .{ "pop", arrayPop },
-    .{ "shift", arrayShift },
-    .{ "unshift", arrayUnshift },
-    .{ "indexOf", arrayIndexOf },
-    .{ "includes", arrayIncludes },
-    .{ "join", arrayJoin },
-    .{ "slice", arraySlice },
-    .{ "concat", arrayConcat },
-    .{ "reverse", arrayReverse },
-    .{ "map", arrayMap },
-    .{ "filter", arrayFilter },
-    .{ "forEach", arrayForEach },
-    .{ "reduce", arrayReduce },
-    .{ "find", arrayFind },
-    .{ "findIndex", arrayFindIndex },
-    .{ "findLast", arrayFindLast },
-    .{ "findLastIndex", arrayFindLastIndex },
-    .{ "some", arraySome },
-    .{ "every", arrayEvery },
-    .{ "reduceRight", arrayReduceRight },
-    .{ "flatMap", arrayFlatMap },
-    .{ "at", arrayAt },
-    .{ "lastIndexOf", arrayLastIndexOf },
-    .{ "fill", arrayFill },
-    .{ "copyWithin", arrayCopyWithin },
-    .{ "flat", arrayFlat },
-    .{ "splice", arraySplice },
-    .{ "sort", arraySort },
-    .{ "toString", arrayToStringMethod },
-    .{ "keys", arrayKeys },
-    .{ "values", arrayValues },
-    .{ "entries", arrayEntries },
+pub const array_methods = std.StaticStringMap(MethodSpec).initComptime(.{
+    .{ "push", MethodSpec{ .call = arrayPush, .arity = 1 } },
+    .{ "pop", MethodSpec{ .call = arrayPop, .arity = 0 } },
+    .{ "shift", MethodSpec{ .call = arrayShift, .arity = 0 } },
+    .{ "unshift", MethodSpec{ .call = arrayUnshift, .arity = 1 } },
+    .{ "indexOf", MethodSpec{ .call = arrayIndexOf, .arity = 1 } },
+    .{ "includes", MethodSpec{ .call = arrayIncludes, .arity = 1 } },
+    .{ "join", MethodSpec{ .call = arrayJoin, .arity = 1 } },
+    .{ "slice", MethodSpec{ .call = arraySlice, .arity = 2 } },
+    .{ "concat", MethodSpec{ .call = arrayConcat, .arity = 1 } },
+    .{ "reverse", MethodSpec{ .call = arrayReverse, .arity = 0 } },
+    .{ "map", MethodSpec{ .call = arrayMap, .arity = 1 } },
+    .{ "filter", MethodSpec{ .call = arrayFilter, .arity = 1 } },
+    .{ "forEach", MethodSpec{ .call = arrayForEach, .arity = 1 } },
+    .{ "reduce", MethodSpec{ .call = arrayReduce, .arity = 1 } },
+    .{ "find", MethodSpec{ .call = arrayFind, .arity = 1 } },
+    .{ "findIndex", MethodSpec{ .call = arrayFindIndex, .arity = 1 } },
+    .{ "findLast", MethodSpec{ .call = arrayFindLast, .arity = 1 } },
+    .{ "findLastIndex", MethodSpec{ .call = arrayFindLastIndex, .arity = 1 } },
+    .{ "some", MethodSpec{ .call = arraySome, .arity = 1 } },
+    .{ "every", MethodSpec{ .call = arrayEvery, .arity = 1 } },
+    .{ "reduceRight", MethodSpec{ .call = arrayReduceRight, .arity = 1 } },
+    .{ "flatMap", MethodSpec{ .call = arrayFlatMap, .arity = 1 } },
+    .{ "at", MethodSpec{ .call = arrayAt, .arity = 1 } },
+    .{ "lastIndexOf", MethodSpec{ .call = arrayLastIndexOf, .arity = 1 } },
+    .{ "fill", MethodSpec{ .call = arrayFill, .arity = 1 } },
+    .{ "copyWithin", MethodSpec{ .call = arrayCopyWithin, .arity = 2 } },
+    .{ "flat", MethodSpec{ .call = arrayFlat, .arity = 0 } },
+    .{ "splice", MethodSpec{ .call = arraySplice, .arity = 2 } },
+    .{ "sort", MethodSpec{ .call = arraySort, .arity = 1 } },
+    .{ "toString", MethodSpec{ .call = arrayToStringMethod, .arity = 0 } },
+    .{ "keys", MethodSpec{ .call = arrayKeys, .arity = 0 } },
+    .{ "values", MethodSpec{ .call = arrayValues, .arity = 0 } },
+    .{ "entries", MethodSpec{ .call = arrayEntries, .arity = 0 } },
 });
 
 // ===== Array.prototype =====
@@ -735,8 +736,8 @@ fn arrayEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 pub fn install(self: *Interpreter) !void {
     // Array: constructable (new Array(n) / Array(a, b, c)) + statics.
     _ = try installBuiltin(self, .{ .name = "Array", .ctor = .{ .arity = 1, .call = arrayConstructor, .constructable = true }, .statics = &.{
-        .{ .name = "isArray", .value = .{ .method = arrayIsArray } },
-        .{ .name = "of", .value = .{ .method = arrayOf } },
-        .{ .name = "from", .value = .{ .method = arrayFrom } },
+        .{ .name = "isArray", .value = .{ .method = .{ .call = arrayIsArray, .arity = 1 } } },
+        .{ .name = "of", .value = .{ .method = .{ .call = arrayOf, .arity = 0 } } },
+        .{ .name = "from", .value = .{ .method = .{ .call = arrayFrom, .arity = 1 } } },
     } });
 }

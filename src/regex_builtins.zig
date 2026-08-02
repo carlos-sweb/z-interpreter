@@ -18,6 +18,7 @@ const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
 
 pub const NativeFn = native_helpers.NativeFn;
+const MethodSpec = native_helpers.MethodSpec;
 const interp = native_helpers.interp;
 const arg = native_helpers.arg;
 const native = native_helpers.native;
@@ -28,10 +29,10 @@ const installBuiltin = builtin_helpers.installBuiltin;
 
 const isObjectLike = builtin_helpers.isObjectLike;
 
-pub const regex_methods = std.StaticStringMap(NativeFn).initComptime(.{
-    .{ "test", regexTest },
-    .{ "exec", regexExec },
-    .{ "toString", regexToString },
+pub const regex_methods = std.StaticStringMap(MethodSpec).initComptime(.{
+    .{ "test", MethodSpec{ .call = regexTest, .arity = 1 } },
+    .{ "exec", MethodSpec{ .call = regexExec, .arity = 1 } },
+    .{ "toString", MethodSpec{ .call = regexToString, .arity = 0 } },
 });
 
 const zregex = @import("zregex");

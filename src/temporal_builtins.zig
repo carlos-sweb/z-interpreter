@@ -245,7 +245,8 @@ fn orderToJs(order: std.math.Order) f64 {
 }
 
 fn installGetter(self: *Interpreter, proto: JSValue, name: []const u8, call_fn: NativeFn) !void {
-    const getter = try native(self, name, call_fn);
+    // Real spec: every accessor getter has arity 0 (takes no arguments).
+    const getter = try native(self, name, 0, call_fn);
     try proto.object.value.defineAccessor(name, getter, null, JSValue.UNDEFINED);
     const rec = proto.object.value.getOwnRecordMut(name).?;
     rec.descriptor.enumerable = false;
@@ -438,8 +439,8 @@ fn pdToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 fn installPlainDate(self: *Interpreter, temporal_ns: JSValue) !void {
     const ctor = try self.gcNewFunction(.{ .ctx = self, .name = "PlainDate", .arity = 3, .call = plainDateConstructor, .constructable = true });
     const statics = try self.functionStatics(ctor);
-    try dneMethod(statics, "from", try native(self, "from", plainDateFrom));
-    try dneMethod(statics, "compare", try native(self, "compare", plainDateCompare));
+    try dneMethod(statics, "from", try native(self, "from", 1, plainDateFrom));
+    try dneMethod(statics, "compare", try native(self, "compare", 2, plainDateCompare));
 
     const proto = try self.functionPrototype(ctor);
     try installGetter(self, proto, "year", pdGetYear);
@@ -454,13 +455,13 @@ fn installPlainDate(self: *Interpreter, temporal_ns: JSValue) !void {
     try installGetter(self, proto, "monthsInYear", pdGetMonthsInYear);
     try installGetter(self, proto, "inLeapYear", pdGetInLeapYear);
     try installGetter(self, proto, "weekOfYear", pdGetWeekOfYear);
-    try dneMethod(proto, "with", try native(self, "with", pdWith));
-    try dneMethod(proto, "add", try native(self, "add", pdAdd));
-    try dneMethod(proto, "subtract", try native(self, "subtract", pdSubtract));
-    try dneMethod(proto, "until", try native(self, "until", pdUntil));
-    try dneMethod(proto, "since", try native(self, "since", pdSince));
-    try dneMethod(proto, "equals", try native(self, "equals", pdEquals));
-    try dneMethod(proto, "toString", try native(self, "toString", pdToString));
+    try dneMethod(proto, "with", try native(self, "with", 1, pdWith));
+    try dneMethod(proto, "add", try native(self, "add", 1, pdAdd));
+    try dneMethod(proto, "subtract", try native(self, "subtract", 1, pdSubtract));
+    try dneMethod(proto, "until", try native(self, "until", 1, pdUntil));
+    try dneMethod(proto, "since", try native(self, "since", 1, pdSince));
+    try dneMethod(proto, "equals", try native(self, "equals", 1, pdEquals));
+    try dneMethod(proto, "toString", try native(self, "toString", 0, pdToString));
 
     self.protos.temporal_plain_date = proto;
     try dneMethod(temporal_ns, "PlainDate", ctor);
@@ -634,8 +635,8 @@ fn ptToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 fn installPlainTime(self: *Interpreter, temporal_ns: JSValue) !void {
     const ctor = try self.gcNewFunction(.{ .ctx = self, .name = "PlainTime", .arity = 0, .call = plainTimeConstructor, .constructable = true });
     const statics = try self.functionStatics(ctor);
-    try dneMethod(statics, "from", try native(self, "from", plainTimeFrom));
-    try dneMethod(statics, "compare", try native(self, "compare", plainTimeCompare));
+    try dneMethod(statics, "from", try native(self, "from", 1, plainTimeFrom));
+    try dneMethod(statics, "compare", try native(self, "compare", 2, plainTimeCompare));
 
     const proto = try self.functionPrototype(ctor);
     try installGetter(self, proto, "hour", ptGetHour);
@@ -644,14 +645,14 @@ fn installPlainTime(self: *Interpreter, temporal_ns: JSValue) !void {
     try installGetter(self, proto, "millisecond", ptGetMillisecond);
     try installGetter(self, proto, "microsecond", ptGetMicrosecond);
     try installGetter(self, proto, "nanosecond", ptGetNanosecond);
-    try dneMethod(proto, "with", try native(self, "with", ptWith));
-    try dneMethod(proto, "add", try native(self, "add", ptAdd));
-    try dneMethod(proto, "subtract", try native(self, "subtract", ptSubtract));
-    try dneMethod(proto, "round", try native(self, "round", ptRound));
-    try dneMethod(proto, "until", try native(self, "until", ptUntil));
-    try dneMethod(proto, "since", try native(self, "since", ptSince));
-    try dneMethod(proto, "equals", try native(self, "equals", ptEquals));
-    try dneMethod(proto, "toString", try native(self, "toString", ptToString));
+    try dneMethod(proto, "with", try native(self, "with", 1, ptWith));
+    try dneMethod(proto, "add", try native(self, "add", 1, ptAdd));
+    try dneMethod(proto, "subtract", try native(self, "subtract", 1, ptSubtract));
+    try dneMethod(proto, "round", try native(self, "round", 1, ptRound));
+    try dneMethod(proto, "until", try native(self, "until", 1, ptUntil));
+    try dneMethod(proto, "since", try native(self, "since", 1, ptSince));
+    try dneMethod(proto, "equals", try native(self, "equals", 1, ptEquals));
+    try dneMethod(proto, "toString", try native(self, "toString", 0, ptToString));
 
     self.protos.temporal_plain_time = proto;
     try dneMethod(temporal_ns, "PlainTime", ctor);
@@ -898,8 +899,8 @@ fn pdtToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
 fn installPlainDateTime(self: *Interpreter, temporal_ns: JSValue) !void {
     const ctor = try self.gcNewFunction(.{ .ctx = self, .name = "PlainDateTime", .arity = 3, .call = plainDateTimeConstructor, .constructable = true });
     const statics = try self.functionStatics(ctor);
-    try dneMethod(statics, "from", try native(self, "from", plainDateTimeFrom));
-    try dneMethod(statics, "compare", try native(self, "compare", plainDateTimeCompare));
+    try dneMethod(statics, "from", try native(self, "from", 1, plainDateTimeFrom));
+    try dneMethod(statics, "compare", try native(self, "compare", 2, plainDateTimeCompare));
 
     const proto = try self.functionPrototype(ctor);
     try installGetter(self, proto, "year", pdtGetYear);
@@ -916,16 +917,16 @@ fn installPlainDateTime(self: *Interpreter, temporal_ns: JSValue) !void {
     try installGetter(self, proto, "daysInMonth", pdtGetDaysInMonth);
     try installGetter(self, proto, "inLeapYear", pdtGetInLeapYear);
     try installGetter(self, proto, "calendarId", pdtGetCalendarId);
-    try dneMethod(proto, "toPlainDate", try native(self, "toPlainDate", pdtToPlainDate));
-    try dneMethod(proto, "toPlainTime", try native(self, "toPlainTime", pdtToPlainTime));
-    try dneMethod(proto, "with", try native(self, "with", pdtWith));
-    try dneMethod(proto, "add", try native(self, "add", pdtAdd));
-    try dneMethod(proto, "subtract", try native(self, "subtract", pdtSubtract));
-    try dneMethod(proto, "round", try native(self, "round", pdtRound));
-    try dneMethod(proto, "until", try native(self, "until", pdtUntil));
-    try dneMethod(proto, "since", try native(self, "since", pdtSince));
-    try dneMethod(proto, "equals", try native(self, "equals", pdtEquals));
-    try dneMethod(proto, "toString", try native(self, "toString", pdtToString));
+    try dneMethod(proto, "toPlainDate", try native(self, "toPlainDate", 0, pdtToPlainDate));
+    try dneMethod(proto, "toPlainTime", try native(self, "toPlainTime", 0, pdtToPlainTime));
+    try dneMethod(proto, "with", try native(self, "with", 1, pdtWith));
+    try dneMethod(proto, "add", try native(self, "add", 1, pdtAdd));
+    try dneMethod(proto, "subtract", try native(self, "subtract", 1, pdtSubtract));
+    try dneMethod(proto, "round", try native(self, "round", 1, pdtRound));
+    try dneMethod(proto, "until", try native(self, "until", 1, pdtUntil));
+    try dneMethod(proto, "since", try native(self, "since", 1, pdtSince));
+    try dneMethod(proto, "equals", try native(self, "equals", 1, pdtEquals));
+    try dneMethod(proto, "toString", try native(self, "toString", 0, pdtToString));
 
     self.protos.temporal_plain_date_time = proto;
     try dneMethod(temporal_ns, "PlainDateTime", ctor);
@@ -1088,21 +1089,21 @@ fn instToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 fn installInstant(self: *Interpreter, temporal_ns: JSValue) !void {
     const ctor = try self.gcNewFunction(.{ .ctx = self, .name = "Instant", .arity = 1, .call = instantConstructor, .constructable = true });
     const statics = try self.functionStatics(ctor);
-    try dneMethod(statics, "from", try native(self, "from", instantFrom));
-    try dneMethod(statics, "compare", try native(self, "compare", instantCompare));
-    try dneMethod(statics, "fromEpochMilliseconds", try native(self, "fromEpochMilliseconds", instantFromEpochMilliseconds));
-    try dneMethod(statics, "fromEpochNanoseconds", try native(self, "fromEpochNanoseconds", instantFromEpochNanoseconds));
+    try dneMethod(statics, "from", try native(self, "from", 1, instantFrom));
+    try dneMethod(statics, "compare", try native(self, "compare", 2, instantCompare));
+    try dneMethod(statics, "fromEpochMilliseconds", try native(self, "fromEpochMilliseconds", 1, instantFromEpochMilliseconds));
+    try dneMethod(statics, "fromEpochNanoseconds", try native(self, "fromEpochNanoseconds", 1, instantFromEpochNanoseconds));
 
     const proto = try self.functionPrototype(ctor);
     try installGetter(self, proto, "epochMilliseconds", instGetEpochMilliseconds);
     try installGetter(self, proto, "epochNanoseconds", instGetEpochNanoseconds);
-    try dneMethod(proto, "add", try native(self, "add", instAdd));
-    try dneMethod(proto, "subtract", try native(self, "subtract", instSubtract));
-    try dneMethod(proto, "until", try native(self, "until", instUntil));
-    try dneMethod(proto, "since", try native(self, "since", instSince));
-    try dneMethod(proto, "round", try native(self, "round", instRound));
-    try dneMethod(proto, "equals", try native(self, "equals", instEquals));
-    try dneMethod(proto, "toString", try native(self, "toString", instToString));
+    try dneMethod(proto, "add", try native(self, "add", 1, instAdd));
+    try dneMethod(proto, "subtract", try native(self, "subtract", 1, instSubtract));
+    try dneMethod(proto, "until", try native(self, "until", 1, instUntil));
+    try dneMethod(proto, "since", try native(self, "since", 1, instSince));
+    try dneMethod(proto, "round", try native(self, "round", 1, instRound));
+    try dneMethod(proto, "equals", try native(self, "equals", 1, instEquals));
+    try dneMethod(proto, "toString", try native(self, "toString", 0, instToString));
 
     self.protos.temporal_instant = proto;
     try dneMethod(temporal_ns, "Instant", ctor);
@@ -1272,8 +1273,8 @@ fn durToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
 fn installDuration(self: *Interpreter, temporal_ns: JSValue) !void {
     const ctor = try self.gcNewFunction(.{ .ctx = self, .name = "Duration", .arity = 0, .call = durationConstructor, .constructable = true });
     const statics = try self.functionStatics(ctor);
-    try dneMethod(statics, "from", try native(self, "from", durationFrom));
-    try dneMethod(statics, "compare", try native(self, "compare", durationCompare));
+    try dneMethod(statics, "from", try native(self, "from", 1, durationFrom));
+    try dneMethod(statics, "compare", try native(self, "compare", 2, durationCompare));
 
     const proto = try self.functionPrototype(ctor);
     try installGetter(self, proto, "years", durField("years"));
@@ -1288,14 +1289,14 @@ fn installDuration(self: *Interpreter, temporal_ns: JSValue) !void {
     try installGetter(self, proto, "nanoseconds", durField("nanoseconds"));
     try installGetter(self, proto, "sign", durGetSign);
     try installGetter(self, proto, "blank", durGetBlank);
-    try dneMethod(proto, "negated", try native(self, "negated", durNegated));
-    try dneMethod(proto, "abs", try native(self, "abs", durAbs));
-    try dneMethod(proto, "with", try native(self, "with", durWith));
-    try dneMethod(proto, "add", try native(self, "add", durAdd));
-    try dneMethod(proto, "subtract", try native(self, "subtract", durSubtract));
-    try dneMethod(proto, "round", try native(self, "round", durRound));
-    try dneMethod(proto, "total", try native(self, "total", durTotal));
-    try dneMethod(proto, "toString", try native(self, "toString", durToString));
+    try dneMethod(proto, "negated", try native(self, "negated", 0, durNegated));
+    try dneMethod(proto, "abs", try native(self, "abs", 0, durAbs));
+    try dneMethod(proto, "with", try native(self, "with", 1, durWith));
+    try dneMethod(proto, "add", try native(self, "add", 1, durAdd));
+    try dneMethod(proto, "subtract", try native(self, "subtract", 1, durSubtract));
+    try dneMethod(proto, "round", try native(self, "round", 1, durRound));
+    try dneMethod(proto, "total", try native(self, "total", 1, durTotal));
+    try dneMethod(proto, "toString", try native(self, "toString", 0, durToString));
 
     self.protos.temporal_duration = proto;
     try dneMethod(temporal_ns, "Duration", ctor);
@@ -1469,8 +1470,8 @@ fn pymToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
 fn installPlainYearMonth(self: *Interpreter, temporal_ns: JSValue) !void {
     const ctor = try self.gcNewFunction(.{ .ctx = self, .name = "PlainYearMonth", .arity = 2, .call = plainYearMonthConstructor, .constructable = true });
     const statics = try self.functionStatics(ctor);
-    try dneMethod(statics, "from", try native(self, "from", plainYearMonthFrom));
-    try dneMethod(statics, "compare", try native(self, "compare", plainYearMonthCompare));
+    try dneMethod(statics, "from", try native(self, "from", 1, plainYearMonthFrom));
+    try dneMethod(statics, "compare", try native(self, "compare", 2, plainYearMonthCompare));
 
     const proto = try self.functionPrototype(ctor);
     try installGetter(self, proto, "year", pymGetYear);
@@ -1481,14 +1482,14 @@ fn installPlainYearMonth(self: *Interpreter, temporal_ns: JSValue) !void {
     try installGetter(self, proto, "daysInYear", pymGetDaysInYear);
     try installGetter(self, proto, "monthsInYear", pymGetMonthsInYear);
     try installGetter(self, proto, "inLeapYear", pymGetInLeapYear);
-    try dneMethod(proto, "toPlainDate", try native(self, "toPlainDate", pymToPlainDate));
-    try dneMethod(proto, "with", try native(self, "with", pymWith));
-    try dneMethod(proto, "add", try native(self, "add", pymAdd));
-    try dneMethod(proto, "subtract", try native(self, "subtract", pymSubtract));
-    try dneMethod(proto, "until", try native(self, "until", pymUntil));
-    try dneMethod(proto, "since", try native(self, "since", pymSince));
-    try dneMethod(proto, "equals", try native(self, "equals", pymEquals));
-    try dneMethod(proto, "toString", try native(self, "toString", pymToString));
+    try dneMethod(proto, "toPlainDate", try native(self, "toPlainDate", 1, pymToPlainDate));
+    try dneMethod(proto, "with", try native(self, "with", 1, pymWith));
+    try dneMethod(proto, "add", try native(self, "add", 1, pymAdd));
+    try dneMethod(proto, "subtract", try native(self, "subtract", 1, pymSubtract));
+    try dneMethod(proto, "until", try native(self, "until", 1, pymUntil));
+    try dneMethod(proto, "since", try native(self, "since", 1, pymSince));
+    try dneMethod(proto, "equals", try native(self, "equals", 1, pymEquals));
+    try dneMethod(proto, "toString", try native(self, "toString", 0, pymToString));
 
     self.protos.temporal_plain_year_month = proto;
     try dneMethod(temporal_ns, "PlainYearMonth", ctor);
@@ -1592,16 +1593,16 @@ fn pmdToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
 fn installPlainMonthDay(self: *Interpreter, temporal_ns: JSValue) !void {
     const ctor = try self.gcNewFunction(.{ .ctx = self, .name = "PlainMonthDay", .arity = 2, .call = plainMonthDayConstructor, .constructable = true });
     const statics = try self.functionStatics(ctor);
-    try dneMethod(statics, "from", try native(self, "from", plainMonthDayFrom));
+    try dneMethod(statics, "from", try native(self, "from", 1, plainMonthDayFrom));
 
     const proto = try self.functionPrototype(ctor);
     try installGetter(self, proto, "day", pmdGetDay);
     try installGetter(self, proto, "monthCode", pmdGetMonthCode);
     try installGetter(self, proto, "calendarId", pmdGetCalendarId);
-    try dneMethod(proto, "toPlainDate", try native(self, "toPlainDate", pmdToPlainDate));
-    try dneMethod(proto, "with", try native(self, "with", pmdWith));
-    try dneMethod(proto, "equals", try native(self, "equals", pmdEquals));
-    try dneMethod(proto, "toString", try native(self, "toString", pmdToString));
+    try dneMethod(proto, "toPlainDate", try native(self, "toPlainDate", 1, pmdToPlainDate));
+    try dneMethod(proto, "with", try native(self, "with", 1, pmdWith));
+    try dneMethod(proto, "equals", try native(self, "equals", 1, pmdEquals));
+    try dneMethod(proto, "toString", try native(self, "toString", 0, pmdToString));
 
     self.protos.temporal_plain_month_day = proto;
     try dneMethod(temporal_ns, "PlainMonthDay", ctor);
@@ -1633,7 +1634,7 @@ pub fn install(self: *Interpreter) !void {
     // `Temporal.now` -- only `.instant()` (see this file's top doc
     // comment for why the other `Now.*` functions stay deferred).
     const now_obj = try self.ordinaryObject();
-    try dneMethod(now_obj, "instant", try native(self, "instant", nowInstant));
+    try dneMethod(now_obj, "instant", try native(self, "instant", 0, nowInstant));
     try dneMethod(temporal_ns, "now", now_obj);
 
     try self.global_env.define(self.gc_allocator, "Temporal", temporal_ns);

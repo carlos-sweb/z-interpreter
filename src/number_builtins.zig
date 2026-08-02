@@ -21,6 +21,7 @@ const builtin_helpers = @import("builtin_helpers.zig");
 const globals_builtins = @import("globals_builtins.zig");
 
 pub const NativeFn = native_helpers.NativeFn;
+const MethodSpec = native_helpers.MethodSpec;
 const interp = native_helpers.interp;
 const arg = native_helpers.arg;
 const native = native_helpers.native;
@@ -28,13 +29,13 @@ const installBuiltin = builtin_helpers.installBuiltin;
 const requirePrimitive = builtin_helpers.requirePrimitive;
 const toIntSat = builtin_helpers.toIntSat;
 
-pub const number_methods = std.StaticStringMap(NativeFn).initComptime(.{
-    .{ "toString", numberToString },
-    .{ "toLocaleString", numberToString },
-    .{ "valueOf", numberValueOf },
-    .{ "toFixed", numberToFixed },
-    .{ "toExponential", numberToExponential },
-    .{ "toPrecision", numberToPrecision },
+pub const number_methods = std.StaticStringMap(MethodSpec).initComptime(.{
+    .{ "toString", MethodSpec{ .call = numberToString, .arity = 1 } },
+    .{ "toLocaleString", MethodSpec{ .call = numberToString, .arity = 0 } },
+    .{ "valueOf", MethodSpec{ .call = numberValueOf, .arity = 0 } },
+    .{ "toFixed", MethodSpec{ .call = numberToFixed, .arity = 1 } },
+    .{ "toExponential", MethodSpec{ .call = numberToExponential, .arity = 1 } },
+    .{ "toPrecision", MethodSpec{ .call = numberToPrecision, .arity = 1 } },
 });
 
 fn requireNumber(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!f64 {
@@ -135,11 +136,11 @@ fn numberIsInteger(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
 /// Installs the `Number` constructor + statics.
 pub fn install(self: *Interpreter) !void {
     _ = try installBuiltin(self, .{ .name = "Number", .ctor = .{ .arity = 1, .call = globalNumber, .constructable = true }, .statics = &.{
-        .{ .name = "isNaN", .value = .{ .method = numberIsNaN } },
-        .{ .name = "isFinite", .value = .{ .method = numberIsFinite } },
-        .{ .name = "isInteger", .value = .{ .method = numberIsInteger } },
-        .{ .name = "parseFloat", .value = .{ .method = globals_builtins.globalParseFloat } },
-        .{ .name = "parseInt", .value = .{ .method = globals_builtins.globalParseInt } },
+        .{ .name = "isNaN", .value = .{ .method = .{ .call = numberIsNaN, .arity = 1 } } },
+        .{ .name = "isFinite", .value = .{ .method = .{ .call = numberIsFinite, .arity = 1 } } },
+        .{ .name = "isInteger", .value = .{ .method = .{ .call = numberIsInteger, .arity = 1 } } },
+        .{ .name = "parseFloat", .value = .{ .method = .{ .call = globals_builtins.globalParseFloat, .arity = 1 } } },
+        .{ .name = "parseInt", .value = .{ .method = .{ .call = globals_builtins.globalParseInt, .arity = 2 } } },
         .{ .name = "MAX_SAFE_INTEGER", .value = .{ .constant = JSValue.fromNumber(9007199254740991.0) } },
         .{ .name = "MIN_SAFE_INTEGER", .value = .{ .constant = JSValue.fromNumber(-9007199254740991.0) } },
         .{ .name = "EPSILON", .value = .{ .constant = JSValue.fromNumber(std.math.floatEps(f64)) } },
