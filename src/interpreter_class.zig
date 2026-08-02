@@ -289,7 +289,9 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
         .call = classConstructorCall,
         .constructable = true,
     });
-    try proto.object.value.set("constructor", class_fn.retain());
+    // Real spec (MakeConstructor): `constructor` is installed with
+    // [[Enumerable]]: false, same as every class method/accessor below.
+    try proto.object.value.defineProperty("constructor", class_fn.retain(), .{ .writable = true, .enumerable = false, .configurable = true });
     class_fn.function.value.prototype = proto;
 
     // A derived class always gets a statics bag chained to the
@@ -366,10 +368,32 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
         if (!el.is_static and el.kind == .method and el.key == .ident and std.mem.eql(u8, el.key.ident, "constructor")) continue;
         const m = try self.makeMethodClosure(closure_env, el.function.?, super_proto, cctx);
         const target = if (el.is_static) try self.functionStatics(class_fn) else proto;
+        // Real spec (ClassDefinitionEvaluation/PropertyDefinitionEvaluation
+        // for MethodDefinition): every class method/accessor is installed
+        // via DefinePropertyOrThrow with [[Enumerable]]: false --
+        // `target.object.value.set`/`defineAccessor`'s own defaults
+        // (Property.init: enumerable true, matching a plain object
+        // literal) are wrong here. Regular methods get an explicit
+        // descriptor directly; accessors go through defineAccessor
+        // first (so a separate `get x(){}`/`set x(v){}` pair still
+        // merges into ONE property, its own documented behavior) then
+        // have their descriptor corrected the same way
+        // definePropertyFromJs already does for JS-level accessors.
+        const method_attrs = zvalue.PropertyDescriptor{ .writable = true, .enumerable = false, .configurable = true };
         switch (el.kind) {
-            .method => try target.object.value.set(key, m),
-            .get => try target.object.value.defineAccessor(key, m, null, JSValue.UNDEFINED),
-            .set => try target.object.value.defineAccessor(key, null, m, JSValue.UNDEFINED),
+            .method => try target.object.value.defineProperty(key, m, method_attrs),
+            .get => {
+                try target.object.value.defineAccessor(key, m, null, JSValue.UNDEFINED);
+                const rec = target.object.value.getOwnRecordMut(key).?;
+                rec.descriptor.enumerable = false;
+                rec.descriptor.configurable = true;
+            },
+            .set => {
+                try target.object.value.defineAccessor(key, null, m, JSValue.UNDEFINED);
+                const rec = target.object.value.getOwnRecordMut(key).?;
+                rec.descriptor.enumerable = false;
+                rec.descriptor.configurable = true;
+            },
             .field, .static_block => unreachable,
         }
     }
