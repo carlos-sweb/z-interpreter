@@ -664,6 +664,21 @@ pub fn materializeProtos(self: *Interpreter) !void {
         @field(self.protos, e[0]) = proto;
     }
 
+    // Real spec: Number.prototype/Boolean.prototype/String.prototype
+    // each carry their own internal slot ([[NumberData]]=+0,
+    // [[BooleanData]]=false, [[StringData]]="") -- confirmed against
+    // real Node that `Number.prototype.toString()` (called with no
+    // `new Number()` receiver at all) returns "0", not a TypeError.
+    // These 3 prototypes are ordinary `.object`s with nothing in
+    // primitive_wrapper_data (only `new Number()`/etc via
+    // boxPrimitiveIfConstructed register there), so every
+    // requirePrimitive-gated method (toString/valueOf/toFixed/...)
+    // was rejecting them outright. Registering the ambient primitive
+    // here, once, makes them unbox exactly like a real boxed instance.
+    try self.primitive_wrapper_data.put(self.gc_allocator, @intFromPtr(self.protos.number.object), JSValue.fromNumber(0));
+    try self.primitive_wrapper_data.put(self.gc_allocator, @intFromPtr(self.protos.boolean.object), JSValue.fromBool(false));
+    try self.primitive_wrapper_data.put(self.gc_allocator, @intFromPtr(self.protos.string.object), try self.gcNewString(""));
+
     // Real spec: Array.prototype/Map.prototype/Set.prototype's
     // [Symbol.iterator] own property aliases an already-installed
     // string-named method (verified via real Node identity checks) --
