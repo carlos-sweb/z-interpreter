@@ -163,7 +163,11 @@ pub fn binaryOp(allocator: Allocator, op: zparser.BinaryOp, left: JSValue, right
         .sub => JSValue.fromNumber((try toNumber(left)) - (try toNumber(right))),
         .mul => JSValue.fromNumber((try toNumber(left)) * (try toNumber(right))),
         .div => JSValue.fromNumber((try toNumber(left)) / (try toNumber(right))),
-        .mod => JSValue.fromNumber(@mod(try toNumber(left), try toNumber(right))),
+        // ECMA-262 `%` is a truncated-division remainder (result takes
+        // the DIVIDEND's sign, e.g. -1 % 2 === -1) -- `@rem`, not `@mod`
+        // (Zig's `@mod` is floored, taking the DIVISOR's sign instead,
+        // e.g. would give -1 % 2 === 1). Confirmed against real Node.
+        .mod => JSValue.fromNumber(@rem(try toNumber(left), try toNumber(right))),
         .pow => JSValue.fromNumber(std.math.pow(f64, try toNumber(left), try toNumber(right))),
         // Real JS allows `<`/`>`/`<=`/`>=` to mix BigInt and Number
         // without throwing. Both-bigint compares exactly (no precision
