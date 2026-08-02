@@ -290,6 +290,13 @@ pub fn evalStatement(self: *Interpreter, env: *Environment, stmt: *zstatements.S
                 // the argument).
                 if (v.kind == .@"var" and decl.init == null) continue;
                 const value = if (decl.init) |init_expr| try self.evalExpression(env, init_expr) else JSValue.UNDEFINED;
+                // NamedEvaluation: `let/const/var x = AnonFn` names the
+                // function/class "x" -- simple-identifier targets only.
+                if (decl.init) |init_expr| {
+                    if (decl.pattern.* == .identifier) {
+                        try self.maybeNameAnonymousValue(init_expr, value, decl.pattern.identifier.name);
+                    }
+                }
                 // var writes to its hoisted function-scope binding
                 // (that's how `if (1) { var x = 5; } x` works);
                 // let/const define here, ending their TDZ.

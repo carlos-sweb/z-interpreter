@@ -33,6 +33,77 @@ fn expectedArgumentCount(params: zfunctions.Params) usize {
     return count;
 }
 
+/// Unwraps `(expr)` nodes -- real spec's `IsAnonymousFunctionDefinition`
+/// looks through parenthesization (`let x = (() => {})` still names `x`,
+/// confirmed against real Node), but this AST keeps `paren` as its own
+/// node (semantically load-bearing elsewhere, e.g. `(-2) ** 2`), so
+/// every syntactic check below has to see past it explicitly.
+fn unwrapParen(node: *const zparser.Node) *const zparser.Node {
+    var n = node;
+    while (n.data == .paren) n = n.data.paren;
+    return n;
+}
+
+/// ECMA-262 `IsAnonymousFunctionDefinition`: true only for a
+/// FunctionExpression/GeneratorExpression/AsyncFunctionExpression/
+/// AsyncGeneratorExpression with no BindingIdentifier, or an
+/// ArrowFunction/AsyncArrowFunction (always anonymous by grammar) --
+/// NOT "any expression that happens to evaluate to a function" (e.g.
+/// `let x = make()` never triggers this, even if `make()` returns an
+/// anonymous arrow). Generator/async-ness is an orthogonal flag on the
+/// same `FunctionNode`, so no separate check is needed for those.
+fn isAnonFnNode(node: *const zparser.Node) bool {
+    const n = unwrapParen(node);
+    if (n.data != .function_like) return false;
+    const fnode = zfunctions.asFunctionNode(n.data.function_like);
+    return switch (fnode.kind) {
+        .arrow => true,
+        .function_expr => |e| e.name == null,
+        .function_decl, .method => false,
+    };
+}
+
+/// Same idea as `isAnonFnNode`, for `ClassExpression` with no
+/// `BindingIdentifier`.
+fn isAnonClassNode(node: *const zparser.Node) bool {
+    const n = unwrapParen(node);
+    if (n.data != .class_like) return false;
+    return zfunctions.asClassNode(n.data.class_like).name == null;
+}
+
+/// ECMA-262 NamedEvaluation: if `init_node` is syntactically one of the
+/// anonymous-function-definition productions above, and the value it
+/// evaluated to is a nameless `.function`, gives it `name` -- the
+/// SetFunctionName step every named binding/assignment/property-value/
+/// default/class-field context has to run. `name` is always dupe'd
+/// rather than trusted to outlive the call (some callers -- e.g. a
+/// computed object-literal property key -- free their copy before this
+/// returns) -- onto `arena_state`, NOT `gc_allocator`: `Callable.name`
+/// is never freed by `Callable.deinit()` (every existing name is an
+/// AST-borrowed slice, permanent for the parse tree's lifetime), so a
+/// `gc_allocator` dupe here would leak on every rename (confirmed: it
+/// did, before this fix, showing up as a real leaked-allocation in
+/// nearly every test that declares a named const/let arrow). `arena_
+/// state` is the same "AST-adjacent, freed once at shutdown, never
+/// individually freed" category this codebase already uses for exactly
+/// this kind of permanent-but-not-GC-traced string.
+pub fn maybeNameAnonymousValue(self: *Interpreter, init_node: *const zparser.Node, value: JSValue, name: []const u8) anyerror!void {
+    if (!isAnonFnNode(init_node) and !isAnonClassNode(init_node)) return;
+    if (value != .function or value.function.value.name.len != 0) return;
+    value.function.value.name = try self.arena_state.allocator().dupe(u8, name);
+}
+
+/// Recovers a class-field key's readable source name for NamedEvaluation:
+/// a private key is encoded as `\x00P<hex>|#name` (see `encodePrivateKey`
+/// -- the source lexeme already includes its own `#`, so the part after
+/// the last `|` matches real spec's "#name" PrivateName display exactly).
+/// A plain (public) key is used as-is.
+fn fieldDisplayName(key: []const u8) []const u8 {
+    if (key.len == 0 or key[0] != 0) return key;
+    if (std.mem.lastIndexOfScalar(u8, key, '|')) |i| return key[i + 1 ..];
+    return key;
+}
+
 pub fn makeClosure(self: *Interpreter, env: *Environment, fnode: *zfunctions.FunctionNode) anyerror!JSValue {
     const arena = self.gc_allocator;
     // A named function expression's own name is visible inside its own
@@ -199,6 +270,10 @@ pub fn runInstanceFields(self: *Interpreter, cctx: *ClassCtx, instance: JSValue)
     field_env.private_ctx = cctx;
     for (cctx.instance_fields) |fd| {
         const v = if (fd.value) |vexpr| try self.evalExpression(field_env, vexpr) else JSValue.UNDEFINED;
+        // NamedEvaluation: `class C { x = AnonFn }` names it "x" --
+        // `fieldDisplayName` recovers "#x" from a private key's
+        // internal `\x00P<hex>|#x` encoding, per real spec.
+        if (fd.value) |vexpr| try self.maybeNameAnonymousValue(vexpr, v, fieldDisplayName(fd.key));
         const is_private = fd.key.len > 0 and fd.key[0] == 0;
         const target = &instance.object.value;
         target.set(fd.key, v.retain()) catch |err| switch (err) {
@@ -353,6 +428,10 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
                 field_env.super_proto = super_proto;
                 field_env.private_ctx = cctx;
                 const v = if (el.value) |vexpr| try self.evalExpression(field_env, vexpr) else JSValue.UNDEFINED;
+                // NamedEvaluation: `class C { static x = AnonFn }` names
+                // it "x" (or "#x" for a private static field, via
+                // fieldDisplayName -- see runInstanceFields).
+                if (el.value) |vexpr| try self.maybeNameAnonymousValue(vexpr, v, fieldDisplayName(key));
                 const bag = try self.functionStatics(class_fn);
                 try bag.object.value.set(key, v.retain());
             } else {
@@ -440,7 +519,13 @@ pub fn invokeFunctionNode(
     for (fnode.params.items, 0..) |param, i| {
         var value = if (i < args.len) args[i] else JSValue.UNDEFINED;
         if (value == .@"undefined") {
-            if (param.default) |def| value = try self.evalExpression(call_env, def);
+            if (param.default) |def| {
+                value = try self.evalExpression(call_env, def);
+                // NamedEvaluation: `function f(x = AnonFn)` names it "x".
+                if (param.pattern.* == .identifier) {
+                    try self.maybeNameAnonymousValue(def, value, param.pattern.identifier.name);
+                }
+            }
         }
         try self.bindPattern(call_env, param.pattern, value, .define);
     }

@@ -847,6 +847,7 @@ pub const Interpreter = struct {
     // z-interpreter-refactor.md, Step 5 Phase C batch 4: class+private+closures
     // cluster, split into interpreter_class.zig.
     pub const makeClosure = interpreter_class.makeClosure;
+    pub const maybeNameAnonymousValue = interpreter_class.maybeNameAnonymousValue;
     pub const makeMethodClosure = interpreter_class.makeMethodClosure;
     pub const encodePrivateKey = interpreter_class.encodePrivateKey;
     pub const privateHolder = interpreter_class.privateHolder;

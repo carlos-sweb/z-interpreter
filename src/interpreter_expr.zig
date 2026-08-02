@@ -100,6 +100,10 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                         switch (prop.kind) {
                             .init => {
                                 const value = try self.evalExpression(env, prop.value);
+                                // NamedEvaluation: `{ x: AnonFn }` names
+                                // the function/class with the (already
+                                // static-or-computed-resolved) key.
+                                try self.maybeNameAnonymousValue(prop.value, value, key_str);
                                 try obj.object.value.set(key_str, value.retain());
                             },
                             .method => {
@@ -535,6 +539,13 @@ pub fn evalAssignment(self: *Interpreter, env: *Environment, a: anytype) anyerro
             // (`([a] = [7])[0]` is 7), per spec.
             .array_literal, .object_literal => try self.destructuringAssign(env, a.target, value),
             else => try self.assignTo(env, a.target, value),
+        }
+        // NamedEvaluation: `x = AnonFn` names the function/class "x" --
+        // real spec gates this on IsIdentifierRef(LeftHandSideExpression),
+        // i.e. only a bare identifier target (`obj.x = () => {}` does NOT
+        // get named "x").
+        if (a.target.data == .identifier) {
+            try self.maybeNameAnonymousValue(a.value, value, a.target.data.identifier);
         }
         return value;
     }

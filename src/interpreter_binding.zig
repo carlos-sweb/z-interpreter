@@ -227,7 +227,13 @@ pub fn bindPattern(self: *Interpreter, env: *Environment, pattern: *const zstate
                 const el = maybe_el orelse continue; // elision hole
                 var v = if (i < items.len) items[i] else JSValue.UNDEFINED;
                 if (v == .@"undefined") {
-                    if (el.default) |def| v = try self.evalExpression(env, def);
+                    if (el.default) |def| {
+                        v = try self.evalExpression(env, def);
+                        // NamedEvaluation: `[a = AnonFn]` names it "a".
+                        if (el.pattern.* == .identifier) {
+                            try self.maybeNameAnonymousValue(def, v, el.pattern.identifier.name);
+                        }
+                    }
                 }
                 try self.bindPattern(env, el.pattern, v, mode);
             }
@@ -255,7 +261,13 @@ pub fn bindPattern(self: *Interpreter, env: *Environment, pattern: *const zstate
             for (obj_pat.properties) |prop| {
                 var v = try self.getProperty(value, prop.key);
                 if (v == .@"undefined") {
-                    if (prop.default) |def| v = try self.evalExpression(env, def);
+                    if (prop.default) |def| {
+                        v = try self.evalExpression(env, def);
+                        // NamedEvaluation: `{a = AnonFn}` names it "a".
+                        if (prop.value.* == .identifier) {
+                            try self.maybeNameAnonymousValue(def, v, prop.value.identifier.name);
+                        }
+                    }
                 }
                 try self.bindPattern(env, prop.value, v, mode);
             }
