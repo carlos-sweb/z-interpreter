@@ -564,7 +564,13 @@ pub fn invokeFunctionNode(
         if (start < args.len) {
             for (args[start..]) |a| _ = try rest_arr.array.value.push(a.retain());
         }
-        try call_env.define(allocator, rest.name, rest_arr);
+        // Real spec: a rest parameter can be a destructuring pattern
+        // (`function f(...[a, b]) {}`), not just a plain identifier --
+        // confirmed against real Node (test262 exercises this too).
+        // bindPattern already handles both shapes (its `.identifier`
+        // case is exactly the old `call_env.define(rest.name, ...)`
+        // path), same as every other parameter above.
+        try self.bindPattern(call_env, rest, rest_arr, .define);
     }
 
     switch (fnode.body) {
