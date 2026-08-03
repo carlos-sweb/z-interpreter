@@ -37,6 +37,27 @@ const mathTrunc = mathUnary(zmath.trunc);
 const mathAbs = mathUnary(zmath.abs);
 const mathSign = mathUnary(zmath.sign);
 const mathSqrt = mathUnary(zmath.sqrt);
+const mathSin = mathUnary(zmath.sin);
+const mathCos = mathUnary(zmath.cos);
+const mathTan = mathUnary(zmath.tan);
+const mathAsin = mathUnary(zmath.asin);
+const mathAcos = mathUnary(zmath.acos);
+const mathAtan = mathUnary(zmath.atan);
+const mathSinh = mathUnary(zmath.sinh);
+const mathCosh = mathUnary(zmath.cosh);
+const mathTanh = mathUnary(zmath.tanh);
+const mathAsinh = mathUnary(zmath.asinh);
+const mathAcosh = mathUnary(zmath.acosh);
+const mathAtanh = mathUnary(zmath.atanh);
+const mathExp = mathUnary(zmath.exp);
+const mathExpm1 = mathUnary(zmath.expm1);
+const mathLog = mathUnary(zmath.log);
+const mathLog2 = mathUnary(zmath.log2);
+const mathLog10 = mathUnary(zmath.log10);
+const mathLog1p = mathUnary(zmath.log1p);
+const mathCbrt = mathUnary(zmath.cbrt);
+const mathClz32 = mathUnary(zmath.clz32);
+const mathFround = mathUnary(zmath.fround);
 
 fn mathPow(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = ctx;
@@ -44,6 +65,20 @@ fn mathPow(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     _ = this_value;
     return JSValue.fromNumber(std.math.pow(f64, try coercion.toNumber(arg(args, 0)), try coercion.toNumber(arg(args, 1))));
 }
+
+fn mathBinary(comptime f: fn (f64, f64) f64) NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+            _ = ctx;
+            _ = allocator;
+            _ = this_value;
+            return JSValue.fromNumber(f(try coercion.toNumber(arg(args, 0)), try coercion.toNumber(arg(args, 1))));
+        }
+    }.call;
+}
+
+const mathAtan2 = mathBinary(zmath.atan2);
+const mathImul = mathBinary(zmath.imul);
 
 fn mathVariadic(ctx: *anyopaque, allocator: Allocator, args: []const JSValue, comptime f: fn ([]const f64) f64) anyerror!JSValue {
     _ = ctx;
@@ -61,6 +96,11 @@ fn mathMin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
 fn mathMax(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
     return mathVariadic(ctx, allocator, args, zmath.max);
+}
+
+fn mathHypot(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    return mathVariadic(ctx, allocator, args, zmath.hypot);
 }
 
 fn mathRandom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -102,5 +142,29 @@ pub fn install(self: *Interpreter) !void {
         .{ .name = "min", .value = .{ .method = .{ .call = mathMin, .arity = 2 } } },
         .{ .name = "max", .value = .{ .method = .{ .call = mathMax, .arity = 2 } } },
         .{ .name = "random", .value = .{ .method = .{ .call = mathRandom, .arity = 0 } } },
+        .{ .name = "sin", .value = .{ .method = .{ .call = mathSin, .arity = 1 } } },
+        .{ .name = "cos", .value = .{ .method = .{ .call = mathCos, .arity = 1 } } },
+        .{ .name = "tan", .value = .{ .method = .{ .call = mathTan, .arity = 1 } } },
+        .{ .name = "asin", .value = .{ .method = .{ .call = mathAsin, .arity = 1 } } },
+        .{ .name = "acos", .value = .{ .method = .{ .call = mathAcos, .arity = 1 } } },
+        .{ .name = "atan", .value = .{ .method = .{ .call = mathAtan, .arity = 1 } } },
+        .{ .name = "atan2", .value = .{ .method = .{ .call = mathAtan2, .arity = 2 } } },
+        .{ .name = "sinh", .value = .{ .method = .{ .call = mathSinh, .arity = 1 } } },
+        .{ .name = "cosh", .value = .{ .method = .{ .call = mathCosh, .arity = 1 } } },
+        .{ .name = "tanh", .value = .{ .method = .{ .call = mathTanh, .arity = 1 } } },
+        .{ .name = "asinh", .value = .{ .method = .{ .call = mathAsinh, .arity = 1 } } },
+        .{ .name = "acosh", .value = .{ .method = .{ .call = mathAcosh, .arity = 1 } } },
+        .{ .name = "atanh", .value = .{ .method = .{ .call = mathAtanh, .arity = 1 } } },
+        .{ .name = "exp", .value = .{ .method = .{ .call = mathExp, .arity = 1 } } },
+        .{ .name = "expm1", .value = .{ .method = .{ .call = mathExpm1, .arity = 1 } } },
+        .{ .name = "log", .value = .{ .method = .{ .call = mathLog, .arity = 1 } } },
+        .{ .name = "log2", .value = .{ .method = .{ .call = mathLog2, .arity = 1 } } },
+        .{ .name = "log10", .value = .{ .method = .{ .call = mathLog10, .arity = 1 } } },
+        .{ .name = "log1p", .value = .{ .method = .{ .call = mathLog1p, .arity = 1 } } },
+        .{ .name = "cbrt", .value = .{ .method = .{ .call = mathCbrt, .arity = 1 } } },
+        .{ .name = "clz32", .value = .{ .method = .{ .call = mathClz32, .arity = 1 } } },
+        .{ .name = "fround", .value = .{ .method = .{ .call = mathFround, .arity = 1 } } },
+        .{ .name = "imul", .value = .{ .method = .{ .call = mathImul, .arity = 2 } } },
+        .{ .name = "hypot", .value = .{ .method = .{ .call = mathHypot, .arity = 2 } } },
     } });
 }
