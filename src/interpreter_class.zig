@@ -419,6 +419,19 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
             },
         };
 
+        // Real spec: a static class element (field, method, accessor,
+        // or generator) named "prototype" is a TypeError -- confirmed
+        // against real Node (a LITERAL `static prototype(){}` is
+        // actually an earlier parse-time SyntaxError there, which this
+        // engine's parser doesn't implement yet; this runtime check at
+        // least catches every case reachable today, matching the
+        // spec-mandated computed-key case -- `static ['prototype'](){}`
+        // -- exactly, and improves the literal case from silently
+        // doing nothing to a real TypeError).
+        if (el.is_static and std.mem.eql(u8, key, "prototype")) {
+            return self.throwError(.type_error, "Classes may not have a static property named 'prototype'", .{});
+        }
+
         if (el.kind == .field) {
             if (el.is_static) {
                 // Static fields initialize at DEFINITION time, in
