@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const zvalue = @import("zvalue");
+const zstring = @import("zstring");
 const JSValue = zvalue.JSValue;
 
 const coercion = @import("coercion.zig");
@@ -69,12 +70,25 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             break :blk box.value.get(idx).retain();
         },
         .string => |box| blk: {
-            if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.data.len));
+            // Real JS strings are UTF-16: `.length` and indexed access
+            // both count/address UTF-16 code units, not UTF-8 bytes --
+            // `box.value.data.len` is a byte count, wrong for any
+            // non-ASCII string (confirmed against real Node: "café"
+            // .length is 4, not the 5 UTF-8 bytes). String.prototype's
+            // real methods (charAt, slice, ...) already go through
+            // zstring's UTF-16-aware helpers; this raw property-access
+            // path just never did.
+            if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(zstring.utf16.lengthUtf16(box.value.data)));
             if (std.fmt.parseInt(usize, key, 10)) |idx| {
-                // Indexed access: the one-char string at that position,
-                // or undefined past the end (real JS string indexing).
-                if (idx < box.value.data.len) break :blk try self.gcNewString(box.value.data[idx .. idx + 1]);
-                break :blk JSValue.UNDEFINED;
+                // Indexed access: the one-char string at that UTF-16
+                // position, or undefined past the end (real JS string
+                // indexing) -- charAt() returning "" is exactly the
+                // out-of-bounds case here, since every valid UTF-16
+                // index in a real string yields a non-empty result.
+                const ch = zstring.access.charAt(self.gc_allocator, box.value.data, @intCast(idx)) catch break :blk JSValue.UNDEFINED;
+                defer self.gc_allocator.free(ch);
+                if (ch.len == 0) break :blk JSValue.UNDEFINED;
+                break :blk try self.gcNewString(ch);
             } else |_| {}
             if (try self.getFromProto(obj, self.protos.string, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;

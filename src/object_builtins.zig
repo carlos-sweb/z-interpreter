@@ -23,6 +23,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const zvalue = @import("zvalue");
+const zstring = @import("zstring");
 const JSValue = zvalue.JSValue;
 
 const interpreter_mod = @import("interpreter.zig");
@@ -100,6 +101,35 @@ pub fn ownEnumerableKeys(ctx: *anyopaque, allocator: Allocator, v: JSValue) anye
         .object => |box| try box.value.keys(allocator),
         .function => |box| if (box.value.statics) |bag| try bag.object.value.keys(allocator) else try allocator.alloc([]const u8, 0),
         .undefined, .null => return interp(ctx).throwError(.type_error, "Cannot convert undefined or null to object", .{}),
+        // Neither had a case here at all (fell to the `else` empty-array
+        // branch below) -- Object.keys/values/entries on a plain array
+        // or string always returned []. Every index up to `.length` is
+        // enumerable (own, no notion of holes in this engine's array/
+        // string model). String length/index count is UTF-16 code
+        // units, not UTF-8 bytes -- same fix as getProperty's `.string`
+        // case (interpreter_props.zig). Both build their own fully-owned
+        // result and return directly (bypassing the generic borrowed/
+        // owned dedup below, exactly like `.proxy` already does) since
+        // every string here is freshly allocated, not borrowed from
+        // existing storage like `.object`/`.function`'s `.keys()` calls.
+        .array => |box| {
+            var keys: std.ArrayList([]const u8) = .empty;
+            defer keys.deinit(allocator);
+            var i: usize = 0;
+            while (i < box.value.length()) : (i += 1) {
+                try keys.append(allocator, try std.fmt.allocPrint(allocator, "{d}", .{i}));
+            }
+            return keys.toOwnedSlice(allocator);
+        },
+        .string => |box| {
+            var keys: std.ArrayList([]const u8) = .empty;
+            defer keys.deinit(allocator);
+            var i: usize = 0;
+            while (i < zstring.utf16.lengthUtf16(box.value.data)) : (i += 1) {
+                try keys.append(allocator, try std.fmt.allocPrint(allocator, "{d}", .{i}));
+            }
+            return keys.toOwnedSlice(allocator);
+        },
         // ownKeys(target) -- narrowed: every trap-returned key is treated
         // as enumerable (real spec would filter via a
         // getOwnPropertyDescriptor call per key), matching this
@@ -251,10 +281,12 @@ fn objHasOwnProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
             break :blk JSValue.fromBool(idx < box.value.length());
         },
         // Strings: `length` and in-bounds character indices are own props.
+        // UTF-16 code unit count, not UTF-8 byte count -- same fix as
+        // getProperty's .string case (interpreter_props.zig).
         .string => |box| blk: {
             if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromBool(true);
             const idx = std.fmt.parseInt(usize, key, 10) catch break :blk JSValue.fromBool(false);
-            break :blk JSValue.fromBool(idx < box.value.data.len);
+            break :blk JSValue.fromBool(idx < zstring.utf16.lengthUtf16(box.value.data));
         },
         else => JSValue.fromBool(false),
     };

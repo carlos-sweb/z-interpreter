@@ -9,6 +9,7 @@ const zvalue = @import("zvalue");
 const JSValue = zvalue.JSValue;
 const zparser = @import("zparser");
 const zstatements = @import("zstatements");
+const zstring = @import("zstring");
 
 const coercion = @import("coercion.zig");
 const builtins = @import("builtins.zig");
@@ -651,8 +652,10 @@ pub fn evalForIn(self: *Interpreter, env: *Environment, head: anytype, body: *zs
             }
         },
         .string => |box| {
+            // UTF-16 code unit count, not UTF-8 byte count -- same fix
+            // as getProperty's .string case (interpreter_props.zig).
             var i: usize = 0;
-            while (i < box.value.data.len) : (i += 1) {
+            while (i < zstring.utf16.lengthUtf16(box.value.data)) : (i += 1) {
                 const key_str = try std.fmt.allocPrint(arena, "{d}", .{i});
                 defer arena.free(key_str);
                 const kv = try self.gcNewString(key_str);
