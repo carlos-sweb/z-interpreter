@@ -26,6 +26,7 @@ const isObjectLike = builtin_helpers.isObjectLike;
 const definePropertyOn = object_builtins.definePropertyOn;
 const objectGetOwnPropertyDescriptor = object_builtins.objectGetOwnPropertyDescriptor;
 const objectGetOwnPropertyNames = object_builtins.objectGetOwnPropertyNames;
+const objectGetOwnPropertySymbols = object_builtins.objectGetOwnPropertySymbols;
 const objectGetPrototypeOf = object_builtins.objectGetPrototypeOf;
 
 // ===== Reflect =====
@@ -79,9 +80,26 @@ fn reflectDeleteProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
 /// Narrowing: excludes symbol-keyed properties, same as
 /// `objectGetOwnPropertyNames` it delegates to (real `Reflect.ownKeys`
 /// includes both string and symbol keys).
+/// Real spec's [[OwnPropertyKeys]]: every string key (integer indices
+/// ascending, then the rest in creation order -- objectGetOwnPropertyNames
+/// already gets that part right) FOLLOWED BY every symbol key (creation
+/// order). objectGetOwnPropertyNames deliberately excludes symbols
+/// (correct for its own real name, Object.getOwnPropertyNames), so
+/// Reflect.ownKeys can't just delegate to it alone -- confirmed against
+/// real Node that a plain object with both string and symbol own
+/// properties returns both from Reflect.ownKeys, in that order.
 fn reflectOwnKeys(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = try reflectRequireObject(ctx, "ownKeys", arg(args, 0));
-    return objectGetOwnPropertyNames(ctx, allocator, this_value, args);
+    const target = try reflectRequireObject(ctx, "ownKeys", arg(args, 0));
+    const names = try objectGetOwnPropertyNames(ctx, allocator, this_value, args);
+    // Only plain objects can carry symbol-keyed properties in this
+    // engine (arrays/functions/proxies don't -- same narrowing
+    // objectGetOwnPropertySymbols itself already enforces via
+    // requirePlainObject), so skip the symbol pass for anything else.
+    if (target != .object) return names;
+    const symbols = try objectGetOwnPropertySymbols(ctx, allocator, this_value, args);
+    defer symbols.deinit();
+    for (symbols.array.value.toSlice()) |s| _ = try names.array.value.push(s.retain());
+    return names;
 }
 
 fn reflectGetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {

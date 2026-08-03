@@ -627,7 +627,7 @@ pub fn objectGetOwnPropertyNames(ctx: *anyopaque, allocator: Allocator, this_val
     return result;
 }
 
-fn objectGetOwnPropertySymbols(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+pub fn objectGetOwnPropertySymbols(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
     const self = interp(ctx);
     const o = try requirePlainObject(ctx, arg(args, 0), "Object.getOwnPropertySymbols");
