@@ -702,20 +702,22 @@ pub fn materializeProtos(self: *Interpreter) !void {
     try self.primitive_wrapper_data.put(self.gc_allocator, @intFromPtr(self.protos.boolean.object), JSValue.fromBool(false));
     try self.primitive_wrapper_data.put(self.gc_allocator, @intFromPtr(self.protos.string.object), try self.gcNewString(""));
 
-    // Real spec: Map.prototype/Set.prototype[Symbol.toStringTag] are
-    // real own properties ("Map"/"Set") -- Object.prototype.toString's
-    // fallback for types not in its hardcoded internal-slot list
-    // reads through here (see objToString's own `.map`/`.set` cases,
-    // which -- narrowing -- hardcode the same 2 strings directly
-    // rather than consulting this property generically, so overriding
-    // it here would NOT change what Object.prototype.toString.call
-    // reports, only a direct property read of it).
+    // Real spec: Map.prototype/Set.prototype/Promise.prototype[Symbol.
+    // toStringTag] are real own properties ("Map"/"Set"/"Promise") --
+    // Object.prototype.toString's fallback for types not in its
+    // hardcoded internal-slot list reads through here (see
+    // objToString's own `.map`/`.set`/`.promise` cases, which --
+    // narrowing -- hardcode the same 3 strings directly rather than
+    // consulting this property generically, so overriding it here
+    // would NOT change what Object.prototype.toString.call reports,
+    // only a direct property read of it).
     if (self.symbol_to_string_tag) |tag_sym| {
         const tag_key = try self.encodeKey(tag_sym);
         defer self.gc_allocator.free(tag_key);
         const tag_attrs = zvalue.PropertyDescriptor{ .writable = false, .enumerable = false, .configurable = true };
         try self.protos.map.object.value.defineProperty(tag_key, try self.gcNewString("Map"), tag_attrs);
         try self.protos.set.object.value.defineProperty(tag_key, try self.gcNewString("Set"), tag_attrs);
+        try self.protos.promise.object.value.defineProperty(tag_key, try self.gcNewString("Promise"), tag_attrs);
     }
 
     // Real spec: Array.prototype/Map.prototype/Set.prototype's
