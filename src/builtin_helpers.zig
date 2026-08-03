@@ -467,7 +467,10 @@ pub fn arrayIterNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     _ = this_value;
     _ = args;
     const ic: *ArrayIterCtx = @ptrCast(@alignCast(ctx));
-    var result = try ic.interp.gcNewObject();
+    // Chained to Object.prototype like any ordinary object -- confirmed
+    // against real Node that `Object.getPrototypeOf(it.next())` is
+    // Object.prototype, not null.
+    var result = try ic.interp.ordinaryObject();
     if (ic.index >= ic.items.len) {
         try result.object.value.set("value", JSValue.UNDEFINED);
         try result.object.value.set("done", JSValue.fromBool(true));

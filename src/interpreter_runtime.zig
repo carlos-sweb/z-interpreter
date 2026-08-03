@@ -132,9 +132,11 @@ fn asyncGeneratorNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     return p;
 }
 
-/// A `{ value, done }` iterator-result object.
+/// A `{ value, done }` iterator-result object, chained to Object.prototype
+/// like any ordinary object -- confirmed against real Node that
+/// `Object.getPrototypeOf(gen().next())` is Object.prototype, not null.
 fn iterResult(self: *Interpreter, value: JSValue, done: bool) anyerror!JSValue {
-    var obj = try self.gcNewObject();
+    var obj = try self.ordinaryObject();
     try obj.object.value.set("value", value.retain());
     try obj.object.value.set("done", JSValue.fromBool(done));
     return obj;
