@@ -702,12 +702,13 @@ pub fn materializeProtos(self: *Interpreter) !void {
     try self.primitive_wrapper_data.put(self.gc_allocator, @intFromPtr(self.protos.boolean.object), JSValue.fromBool(false));
     try self.primitive_wrapper_data.put(self.gc_allocator, @intFromPtr(self.protos.string.object), try self.gcNewString(""));
 
-    // Real spec: Map.prototype/Set.prototype/Promise.prototype[Symbol.
-    // toStringTag] are real own properties ("Map"/"Set"/"Promise") --
+    // Real spec: Map.prototype/Set.prototype/Promise.prototype/Symbol.
+    // prototype/BigInt.prototype[Symbol.toStringTag] are real own
+    // properties ("Map"/"Set"/"Promise"/"Symbol"/"BigInt") --
     // Object.prototype.toString's fallback for types not in its
-    // hardcoded internal-slot list reads through here (see
-    // objToString's own `.map`/`.set`/`.promise` cases, which --
-    // narrowing -- hardcode the same 3 strings directly rather than
+    // hardcoded internal-slot list reads through here (see objToString's
+    // own `.map`/`.set`/`.promise`/`.symbol`/`.bigint` cases, which --
+    // narrowing -- hardcode the same strings directly rather than
     // consulting this property generically, so overriding it here
     // would NOT change what Object.prototype.toString.call reports,
     // only a direct property read of it).
@@ -718,6 +719,8 @@ pub fn materializeProtos(self: *Interpreter) !void {
         try self.protos.map.object.value.defineProperty(tag_key, try self.gcNewString("Map"), tag_attrs);
         try self.protos.set.object.value.defineProperty(tag_key, try self.gcNewString("Set"), tag_attrs);
         try self.protos.promise.object.value.defineProperty(tag_key, try self.gcNewString("Promise"), tag_attrs);
+        try self.protos.symbol.object.value.defineProperty(tag_key, try self.gcNewString("Symbol"), tag_attrs);
+        try self.protos.bigint.object.value.defineProperty(tag_key, try self.gcNewString("BigInt"), tag_attrs);
     }
 
     // Real spec: Array.prototype/Map.prototype/Set.prototype's

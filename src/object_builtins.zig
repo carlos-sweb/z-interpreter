@@ -274,6 +274,22 @@ fn objToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
         .map => "Map",
         .set => "Set",
         .promise => "Promise",
+        // Unlike Map/Set/Promise above, test262 has real coverage of
+        // deleting/overriding Symbol.prototype/BigInt.prototype[Symbol.
+        // toStringTag] and observing it here (symbol-tag-non-str-builtin
+        // .js), so this can't be hardcoded -- it needs a real Get.
+        // Neither type has a builtinTag entry in the spec's internal-
+        // slot list, so the fallback (no tag installed, or a non-string
+        // tag) is "Object", not "Symbol"/"BigInt".
+        .symbol, .bigint => blk: {
+            if (self.symbol_to_string_tag) |tag_sym| {
+                const tag_key = try self.encodeKey(tag_sym);
+                defer self.gc_allocator.free(tag_key);
+                const tag_val = try self.getProperty(this_value, tag_key);
+                if (tag_val == .string) break :blk tag_val.string.value.data;
+            }
+            break :blk "Object";
+        },
         .object => blk: {
             if (self.unboxPrimitiveWrapper(this_value)) |prim| {
                 break :blk switch (prim) {
