@@ -536,7 +536,8 @@ fn globalString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     // String(regex) is regex.toString() -- /source/flags (with flags).
     if (arg(args, 0) == .regex) {
         const st = self.regexState(arg(args, 0));
-        const s = try std.fmt.allocPrint(allocator, "/{s}/{s}", .{ st.source, st.flags });
+        var flags_buf: [8]u8 = undefined;
+        const s = try std.fmt.allocPrint(allocator, "/{s}/{s}", .{ st.source, Interpreter.canonicalFlags(st, &flags_buf) });
         defer allocator.free(s);
         return self.boxPrimitiveIfConstructed(ctx, this_value, try self.gcNewString(s));
     }

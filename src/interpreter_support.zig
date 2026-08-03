@@ -19,6 +19,50 @@ const interpreter_mod = @import("interpreter.zig");
 const Interpreter = interpreter_mod.Interpreter;
 const RegexState = interpreter_mod.RegexState;
 
+/// Real spec: `.flags` (and anywhere else `/source/flags` gets
+/// re-derived, e.g. RegExp.prototype.toString / String(regex)) is a
+/// COMPUTED property in fixed canonical order (d,g,i,m,s,u,v,y) -- NOT
+/// the raw source text's own flag order (confirmed against real Node:
+/// `/x/yusmigd`.flags === "dgimsuy", not "yusmigd"). Returns a slice
+/// into `buf` (caller-provided, must be at least 8 bytes -- one per
+/// flag).
+pub fn canonicalFlags(st: *const RegexState, buf: []u8) []const u8 {
+    var n: usize = 0;
+    if (st.has_indices) {
+        buf[n] = 'd';
+        n += 1;
+    }
+    if (st.global) {
+        buf[n] = 'g';
+        n += 1;
+    }
+    if (st.ignore_case) {
+        buf[n] = 'i';
+        n += 1;
+    }
+    if (st.multiline) {
+        buf[n] = 'm';
+        n += 1;
+    }
+    if (st.dot_all) {
+        buf[n] = 's';
+        n += 1;
+    }
+    if (st.unicode) {
+        buf[n] = 'u';
+        n += 1;
+    }
+    if (st.unicode_sets) {
+        buf[n] = 'v';
+        n += 1;
+    }
+    if (st.sticky) {
+        buf[n] = 'y';
+        n += 1;
+    }
+    return buf[0..n];
+}
+
 /// Compiles `pattern` with `flags` into a `.regex` value and records
 /// its JS-level state. A bad pattern is a catchable SyntaxError.
 pub fn makeRegex(self: *Interpreter, pattern: []const u8, flags: []const u8) anyerror!JSValue {
@@ -32,6 +76,8 @@ pub fn makeRegex(self: *Interpreter, pattern: []const u8, flags: []const u8) any
         .dot_all = false,
         .sticky = false,
         .unicode = false,
+        .has_indices = false,
+        .unicode_sets = false,
     };
     // Only fires on an error return below (invalid flags/pattern) --
     // on success `state` is copied into `self.regex_state` and these
@@ -44,7 +90,9 @@ pub fn makeRegex(self: *Interpreter, pattern: []const u8, flags: []const u8) any
         'm' => state.multiline = true,
         's' => state.dot_all = true,
         'y' => state.sticky = true,
-        'u', 'd', 'v' => state.unicode = state.unicode or f == 'u',
+        'u' => state.unicode = true,
+        'd' => state.has_indices = true,
+        'v' => state.unicode_sets = true,
         else => return self.throwError(.syntax_error, "Invalid flags supplied to RegExp constructor '{s}'", .{flags}),
     };
     const re = zregex.Regex.compileWithOptions(arena, pattern, .{

@@ -106,6 +106,8 @@ pub const RegexState = struct {
     dot_all: bool,
     sticky: bool,
     unicode: bool,
+    has_indices: bool,
+    unicode_sets: bool,
     last_index: usize = 0,
 };
 
@@ -731,6 +733,7 @@ pub const Interpreter = struct {
     // boxing+coerce+native cluster, split into interpreter_support.zig.
     pub const makeRegex = interpreter_support.makeRegex;
     pub const regexState = interpreter_support.regexState;
+    pub const canonicalFlags = interpreter_support.canonicalFlags;
     pub const setArrayExtra = interpreter_support.setArrayExtra;
     pub const arrayExtra = interpreter_support.arrayExtra;
     pub const arrayPropsObject = interpreter_support.arrayPropsObject;

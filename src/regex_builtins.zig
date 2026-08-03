@@ -169,7 +169,8 @@ fn regexToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     _ = args;
     const re = try requireRegex(ctx, this_value, "toString");
     const st = interp(ctx).regexState(re);
-    const s = try std.fmt.allocPrint(allocator, "/{s}/{s}", .{ st.source, st.flags });
+    var flags_buf: [8]u8 = undefined;
+    const s = try std.fmt.allocPrint(allocator, "/{s}/{s}", .{ st.source, Interpreter.canonicalFlags(st, &flags_buf) });
     defer allocator.free(s);
     return interp(ctx).gcNewString(s);
 }

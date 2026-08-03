@@ -218,13 +218,22 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
         .regex => blk: {
             const st = self.regexState(obj);
             if (std.mem.eql(u8, key, "source")) break :blk try self.gcNewString(st.source);
-            if (std.mem.eql(u8, key, "flags")) break :blk try self.gcNewString(st.flags);
+            // Real spec: `.flags` is a COMPUTED property, canonical
+            // fixed order (d,g,i,m,s,u,v,y) -- NOT a passthrough of the
+            // source text's own flag order (confirmed against real
+            // Node: `/x/yusmigd`.flags === "dgimsuy", not "yusmigd").
+            if (std.mem.eql(u8, key, "flags")) {
+                var buf: [8]u8 = undefined;
+                break :blk try self.gcNewString(Interpreter.canonicalFlags(st, &buf));
+            }
             if (std.mem.eql(u8, key, "global")) break :blk JSValue.fromBool(st.global);
             if (std.mem.eql(u8, key, "ignoreCase")) break :blk JSValue.fromBool(st.ignore_case);
             if (std.mem.eql(u8, key, "multiline")) break :blk JSValue.fromBool(st.multiline);
             if (std.mem.eql(u8, key, "dotAll")) break :blk JSValue.fromBool(st.dot_all);
             if (std.mem.eql(u8, key, "sticky")) break :blk JSValue.fromBool(st.sticky);
             if (std.mem.eql(u8, key, "unicode")) break :blk JSValue.fromBool(st.unicode);
+            if (std.mem.eql(u8, key, "hasIndices")) break :blk JSValue.fromBool(st.has_indices);
+            if (std.mem.eql(u8, key, "unicodeSets")) break :blk JSValue.fromBool(st.unicode_sets);
             if (std.mem.eql(u8, key, "lastIndex")) break :blk JSValue.fromNumber(@floatFromInt(st.last_index));
             if (try self.getFromProto(obj, self.protos.regex, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
