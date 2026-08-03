@@ -63,7 +63,12 @@ fn mathPow(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     _ = ctx;
     _ = allocator;
     _ = this_value;
-    return JSValue.fromNumber(std.math.pow(f64, try coercion.toNumber(arg(args, 0)), try coercion.toNumber(arg(args, 1))));
+    // zmath.pow, NOT std.math.pow directly: JS's Number::exponentiate
+    // checks the exponent for NaN/Infinity before the base, diverging
+    // from C99/IEEE754 pow() for cases like pow(1, Infinity) (1 in C,
+    // NaN in JS) -- zmath.pow already implements the exact spec
+    // algorithm (see its own doc comment), std.math.pow does not.
+    return JSValue.fromNumber(zmath.pow(try coercion.toNumber(arg(args, 0)), try coercion.toNumber(arg(args, 1))));
 }
 
 fn mathBinary(comptime f: fn (f64, f64) f64) NativeFn {

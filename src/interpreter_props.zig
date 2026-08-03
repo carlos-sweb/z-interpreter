@@ -721,6 +721,13 @@ pub fn materializeProtos(self: *Interpreter) !void {
         try self.protos.promise.object.value.defineProperty(tag_key, try self.gcNewString("Promise"), tag_attrs);
         try self.protos.symbol.object.value.defineProperty(tag_key, try self.gcNewString("Symbol"), tag_attrs);
         try self.protos.bigint.object.value.defineProperty(tag_key, try self.gcNewString("BigInt"), tag_attrs);
+        // Math/JSON are plain namespace objects (no dedicated proto
+        // slot) -- unlike the 5 above, objToString's `.object` case
+        // does a real dynamic Get for these (no internal-slot builtinTag
+        // entry exists for a plain object at all), so this one DOES
+        // take effect on Object.prototype.toString.call(Math/JSON).
+        if (self.global_env.get("Math")) |math_obj| try math_obj.object.value.defineProperty(tag_key, try self.gcNewString("Math"), tag_attrs);
+        if (self.global_env.get("JSON")) |json_obj| try json_obj.object.value.defineProperty(tag_key, try self.gcNewString("JSON"), tag_attrs);
     }
 
     // Real spec: Array.prototype/Map.prototype/Set.prototype's

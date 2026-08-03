@@ -326,6 +326,16 @@ fn objToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
                     else => "Object",
                 };
             }
+            // A plain object (Math, JSON, or any object with its own
+            // [Symbol.toStringTag]) has no internal-slot builtinTag
+            // entry, so real spec falls straight to a dynamic Get here
+            // -- same mechanism as the .symbol/.bigint case above.
+            if (self.symbol_to_string_tag) |tag_sym| {
+                const tag_key = try self.encodeKey(tag_sym);
+                defer self.gc_allocator.free(tag_key);
+                const tag_val = try self.getProperty(this_value, tag_key);
+                if (tag_val == .string) break :blk tag_val.string.value.data;
+            }
             break :blk "Object";
         },
         else => "Object",
