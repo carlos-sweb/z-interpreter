@@ -298,12 +298,39 @@ fn objIsPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
 fn objectConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     _ = this_value;
+    const self = interp(ctx);
     const v = arg(args, 0);
     return switch (v) {
         // Object(x) on object-likes returns x; on nothing, a fresh {}.
         .object, .array, .function, .@"error", .date, .promise, .map, .set, .regex, .temporal => v.retain(),
-        else => try interp(ctx).ordinaryObject(),
+        // Real ToObject on a primitive: a boxed wrapper chaining to
+        // that primitive's OWN prototype (Number.prototype/etc, not
+        // Object.prototype), carrying the primitive so
+        // requirePrimitive-gated methods (`.valueOf()`,
+        // `Number.prototype.toFixed`, ...) unwrap it correctly --
+        // previously this fell to the `else` branch below and just
+        // silently produced an empty `{}`, losing the primitive
+        // entirely (confirmed against real Node: `Object(5).valueOf()
+        // === 5`, this returned `{}` instead).
+        .number => try boxWrapper(self, self.protos.number, v),
+        .string => try boxWrapper(self, self.protos.string, v),
+        .boolean => try boxWrapper(self, self.protos.boolean, v),
+        .symbol => try boxWrapper(self, self.protos.symbol, v),
+        .bigint => try boxWrapper(self, self.protos.bigint, v),
+        else => try self.ordinaryObject(),
     };
+}
+
+/// `Object(primitive)`'s wrapper: a fresh object chaining to `proto`
+/// (the primitive's OWN prototype), registered in
+/// primitive_wrapper_data so it unboxes exactly like `new Number(x)`/
+/// etc (see `unboxPrimitiveWrapper`'s doc comment -- same side table,
+/// same contract, just populated from a different call site).
+fn boxWrapper(self: *Interpreter, proto: JSValue, primitive: JSValue) anyerror!JSValue {
+    const obj = try self.gcNewObject();
+    try obj.object.value.setPrototype(&proto.object.value);
+    try self.primitive_wrapper_data.put(self.gc_allocator, @intFromPtr(obj.object), primitive.retain());
+    return obj;
 }
 
 /// Shared by defineProperty/defineProperties/create: applies ONE

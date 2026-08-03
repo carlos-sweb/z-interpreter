@@ -22,6 +22,7 @@ const native = native_helpers.native;
 const dneMethod = builtin_helpers.dneMethod;
 const dneConst = builtin_helpers.dneConst;
 const requireTag = builtin_helpers.requireTag;
+const requirePrimitive = builtin_helpers.requirePrimitive;
 const installBuiltin = builtin_helpers.installBuiltin;
 
 pub const symbol_methods = std.StaticStringMap(MethodSpec).initComptime(.{
@@ -46,17 +47,20 @@ fn symbolConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
 
 fn symbolToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
-    if (this_value != .symbol) return interp(ctx).throwError(.type_error, "Symbol.prototype.toString requires a symbol", .{});
-    const s = try this_value.symbol.value.toString(allocator);
+    // requirePrimitive unwraps `Object(sym)` wrappers too -- a bare
+    // `this_value != .symbol` check (the old body here) rejected
+    // those outright, when real spec's SymbolDescriptiveString/
+    // thisSymbolValue explicitly accept a boxed Symbol object.
+    const sym = try requirePrimitive(ctx, this_value, .symbol, "Symbol.prototype.{s} requires a symbol", "toString");
+    const s = try sym.symbol.value.toString(allocator);
     defer allocator.free(s);
     return interp(ctx).gcNewString(s);
 }
 
 fn symbolValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
     _ = allocator;
     _ = args;
-    return this_value.retain();
+    return (try requirePrimitive(ctx, this_value, .symbol, "Symbol.prototype.{s} requires a symbol", "valueOf")).retain();
 }
 
 fn symbolFor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -102,7 +106,7 @@ pub fn install(self: *Interpreter) !void {
     // symbols owned by the interpreter (identity = Rc box).
     const symbol_ctor = try self.gcNewFunction(.{ .ctx = self, .name = "Symbol", .arity = 0, .call = symbolConstructor });
     const symbol_statics = try self.functionStatics(symbol_ctor);
-    inline for (.{ "iterator", "asyncIterator", "hasInstance", "toPrimitive", "toStringTag", "species", "isConcatSpreadable", "match", "replace", "search", "split", "unscopables" }) |wk| {
+    inline for (.{ "iterator", "asyncIterator", "hasInstance", "toPrimitive", "toStringTag", "species", "isConcatSpreadable", "match", "matchAll", "replace", "search", "split", "unscopables", "dispose", "asyncDispose" }) |wk| {
         const sym = try self.gcNewSymbol("Symbol." ++ wk);
         try dneConst(symbol_statics, wk, sym.retain());
         // These interpreter fields need their OWN retained reference --
