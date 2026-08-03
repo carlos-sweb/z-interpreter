@@ -29,9 +29,16 @@ pub fn inspect(allocator: Allocator, buf: *std.ArrayList(u8), v: JSValue) !void 
         .@"null" => try buf.appendSlice(allocator, "null"),
         .boolean => |b| try buf.appendSlice(allocator, if (b) "true" else "false"),
         .number => |n| {
-            const s = try znumber.FormattingMethods.toString(n, allocator, null);
-            defer allocator.free(s);
-            try buf.appendSlice(allocator, s);
+            // Real Node's inspect (unlike ToString, which is genuinely
+            // "0" for -0 per spec -- confirmed String(-0) stays "0")
+            // special-cases negative zero for developer visibility.
+            if (n == 0 and std.math.signbit(n)) {
+                try buf.appendSlice(allocator, "-0");
+            } else {
+                const s = try znumber.FormattingMethods.toString(n, allocator, null);
+                defer allocator.free(s);
+                try buf.appendSlice(allocator, s);
+            }
         },
         .string => |box| try buf.appendSlice(allocator, box.value.data),
         .array => |box| {
