@@ -33,6 +33,19 @@ pub const Environment = struct {
     /// by chain walk like `this` -- arrows nested in methods inherit.
     super_proto: ?JSValue = null,
     super_ctor: ?JSValue = null,
+    /// Non-null only at an object-literal method/getter/setter call
+    /// boundary: the object literal itself (real spec's [[HomeObject]]).
+    /// Unlike `super_proto` (a class method's parent prototype, captured
+    /// ONCE at class-definition time), `super.x` here must resolve the
+    /// home object's CURRENT prototype at every access -- real spec's
+    /// GetSuperBase reads home.[[GetPrototypeOf]]() fresh each time, so
+    /// e.g. `Object.setPrototypeOf(obj, proto)` called after `obj`'s
+    /// literal finished evaluating still changes what `super.m()` finds
+    /// inside its methods (confirmed against real Node; test262 exercises
+    /// exactly this). `resolveSuperHome` is checked BEFORE `super_proto`
+    /// at the one `super.x` resolution site, so class semantics (which
+    /// never set this field) are completely unaffected.
+    home_object: ?JSValue = null,
     /// The enclosing class's identity (an opaque `*ClassCtx` pointer),
     /// non-null only at a class method/constructor/field-initializer call
     /// boundary -- ECMA-262's PrivateEnvironment, collapsed to a single
@@ -135,6 +148,20 @@ pub const Environment = struct {
         return null;
     }
 
+    /// Walks up until a non-null home_object is found -- see its own
+    /// doc comment. Checked BEFORE resolveSuperProto at the `super.x`
+    /// resolution site (object-literal methods never set super_proto,
+    /// class methods never set home_object -- the two are mutually
+    /// exclusive in practice, but checking home_object first is what
+    /// makes that ordering-independent).
+    pub fn resolveSuperHome(self: *Environment) ?JSValue {
+        var env: ?*Environment = self;
+        while (env) |e| : (env = e.parent) {
+            if (e.home_object) |v| return v;
+        }
+        return null;
+    }
+
     /// Walks up until a non-null private_ctx is found -- null means no
     /// enclosing class (a `#x` access there is an error).
     pub fn resolvePrivateCtx(self: *Environment) ?*anyopaque {
@@ -173,6 +200,7 @@ pub const Environment = struct {
         if (self.this_value) |v| visitor.value(v);
         if (self.super_proto) |v| visitor.value(v);
         if (self.super_ctor) |v| visitor.value(v);
+        if (self.home_object) |v| visitor.value(v);
     }
 };
 

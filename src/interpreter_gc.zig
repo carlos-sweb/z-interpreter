@@ -792,6 +792,7 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
             if (e.this_value) |v| sweeper.value(v);
             if (e.super_proto) |v| sweeper.value(v);
             if (e.super_ctor) |v| sweeper.value(v);
+            if (e.home_object) |v| sweeper.value(v);
             // parent/private_ctx are unowned traversal links (see
             // Sweeper.environment's doc comment) -- nothing to release.
             e.bindings.deinit(self.gc_allocator);
@@ -800,6 +801,7 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
         },
         .closure_ctx => |cc| {
             if (cc.super_proto) |v| sweeper.value(v);
+            if (cc.home_object) |v| sweeper.value(v);
             self.gc_allocator.destroy(cc);
         },
         .fiber_state => |fs| {

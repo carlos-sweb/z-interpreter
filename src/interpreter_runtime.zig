@@ -50,7 +50,7 @@ fn fiberEntry(arg: *anyopaque) void {
     const fs: *FiberState = @ptrCast(@alignCast(arg));
     const self = fs.interp;
     const arena = self.gc_allocator;
-    const result = invokeFunctionNode(self, fs.fnode, fs.closure_env, arena, fs.this_value, null, null, fs.private_ctx, fs.args) catch |err| {
+    const result = invokeFunctionNode(self, fs.fnode, fs.closure_env, arena, fs.this_value, null, null, fs.private_ctx, fs.args, null) catch |err| {
         if (err == error.JsThrow) {
             const ex = self.pending_exception.?;
             self.pending_exception = null;

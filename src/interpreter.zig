@@ -136,6 +136,11 @@ pub const ClosureCtx = struct {
     /// prototype, so `super.m()` resolves inside the body (copied onto
     /// the call env; arrows nested in the method inherit via chain walk).
     super_proto: ?JSValue = null,
+    /// Non-null only for object-literal method/getter/setter closures:
+    /// see Environment.home_object's own doc comment for why this needs
+    /// a separate field from super_proto (dynamic vs. snapshot super
+    /// resolution).
+    home_object: ?JSValue = null,
     /// Non-null only for class method closures: the declaring class's
     /// identity (its *ClassCtx), so `this.#x` inside the body resolves
     /// private names against the right class (copied onto the call env).
@@ -147,6 +152,7 @@ pub const ClosureCtx = struct {
     pub fn traceChildren(self: *const ClosureCtx, visitor: anytype) void {
         visitor.environment(self.closure_env);
         if (self.super_proto) |v| visitor.value(v);
+        if (self.home_object) |v| visitor.value(v);
         if (self.private_ctx) |pc| classCtxFromOpaque(pc).traceChildren(visitor);
     }
 };
@@ -887,6 +893,7 @@ pub const Interpreter = struct {
     pub const makeClosure = interpreter_class.makeClosure;
     pub const maybeNameAnonymousValue = interpreter_class.maybeNameAnonymousValue;
     pub const makeMethodClosure = interpreter_class.makeMethodClosure;
+    pub const makeObjectMethodClosure = interpreter_class.makeObjectMethodClosure;
     pub const encodePrivateKey = interpreter_class.encodePrivateKey;
     pub const privateHolder = interpreter_class.privateHolder;
     pub const privateGet = interpreter_class.privateGet;

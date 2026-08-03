@@ -155,6 +155,20 @@ pub fn makeMethodClosure(self: *Interpreter, env: *Environment, fnode: *zfunctio
     return v;
 }
 
+/// An object-literal method/getter/setter closure: an ordinary
+/// makeClosure whose ClosureCtx additionally carries the object literal
+/// itself as [[HomeObject]] (see Environment.home_object's doc comment
+/// for why this is a distinct mechanism from makeMethodClosure's
+/// super_proto -- dynamic prototype lookup vs. a class's fixed
+/// snapshot). `home` must be the `.object` JSValue being built by the
+/// enclosing object-literal evaluation.
+pub fn makeObjectMethodClosure(self: *Interpreter, env: *Environment, fnode: *zfunctions.FunctionNode, home: JSValue) anyerror!JSValue {
+    const v = try self.makeClosure(env, fnode);
+    const cc: *ClosureCtx = @ptrCast(@alignCast(v.function.value.ctx));
+    cc.home_object = home;
+    return v;
+}
+
 // ===== Private (`#name`) member machinery =====
 //
 // ECMA-262's PrivateEnvironment/PrivateName pair, collapsed onto the
@@ -391,7 +405,7 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
         if (el.kind == .static_block) {
             // Runs once, now, with this = the class and privates in
             // scope.
-            _ = try invokeFunctionNode(self, el.function.?, closure_env, arena, class_fn, super_proto, null, cctx, &.{});
+            _ = try invokeFunctionNode(self, el.function.?, closure_env, arena, class_fn, super_proto, null, cctx, &.{}, null);
             continue;
         }
 
@@ -511,12 +525,14 @@ pub fn invokeFunctionNode(
     super_ctor: ?JSValue,
     private_ctx: ?*anyopaque,
     args: []const JSValue,
+    home_object: ?JSValue,
 ) anyerror!JSValue {
     const call_env = try self.gcChildEnv(closure_env);
     if (this_value) |tv| call_env.this_value = tv;
     call_env.super_proto = super_proto;
     call_env.super_ctor = super_ctor;
     call_env.private_ctx = private_ctx;
+    call_env.home_object = home_object;
 
     // `arguments`: every non-arrow call gets one (arrows inherit the
     // enclosing function's via the scope chain -- no binding here).
@@ -577,7 +593,7 @@ fn closureCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     if (fnode.is_async) {
         return closure_ctx.interp.runAsyncFunction(fnode, closure_ctx.closure_env, this, closure_ctx.private_ctx, args);
     }
-    return invokeFunctionNode(closure_ctx.interp, fnode, closure_ctx.closure_env, allocator, this, closure_ctx.super_proto, null, closure_ctx.private_ctx, args);
+    return invokeFunctionNode(closure_ctx.interp, fnode, closure_ctx.closure_env, allocator, this, closure_ctx.super_proto, null, closure_ctx.private_ctx, args, closure_ctx.home_object);
 }
 
 fn classConstructorCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -604,9 +620,9 @@ fn classConstructorCall(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
             const prev_pending = self.pending_field_init;
             self.pending_field_init = cctx;
             defer self.pending_field_init = prev_pending;
-            return invokeFunctionNode(self, fnode, cctx.closure_env, allocator, this_value, cctx.super_proto, cctx.super_ctor, cctx, args);
+            return invokeFunctionNode(self, fnode, cctx.closure_env, allocator, this_value, cctx.super_proto, cctx.super_ctor, cctx, args, null);
         }
-        return invokeFunctionNode(self, fnode, cctx.closure_env, allocator, this_value, cctx.super_proto, cctx.super_ctor, cctx, args);
+        return invokeFunctionNode(self, fnode, cctx.closure_env, allocator, this_value, cctx.super_proto, cctx.super_ctor, cctx, args, null);
     }
     // Implicit constructor: a derived class forwards this + args to its
     // parent (`constructor(...args) { super(...args) }`) and then runs its

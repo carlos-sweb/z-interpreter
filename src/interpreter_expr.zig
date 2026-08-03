@@ -107,7 +107,7 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                                 try obj.object.value.set(key_str, value.retain());
                             },
                             .method => {
-                                const f = try self.makeClosure(env, zfunctions.asFunctionNode(prop.value.data.function_like));
+                                const f = try self.makeObjectMethodClosure(env, zfunctions.asFunctionNode(prop.value.data.function_like), obj);
                                 try obj.object.value.set(key_str, f);
                             },
                             // get+set for the same key merge into one
@@ -115,7 +115,7 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                             // contract); data-only consumers see
                             // UNDEFINED as its value.
                             .get, .set => {
-                                const f = try self.makeClosure(env, zfunctions.asFunctionNode(prop.value.data.function_like));
+                                const f = try self.makeObjectMethodClosure(env, zfunctions.asFunctionNode(prop.value.data.function_like), obj);
                                 try obj.object.value.defineAccessor(
                                     key_str,
                                     if (prop.kind == .get) f else null,
@@ -199,10 +199,26 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
             // getProperty's receiver rule -- close enough for this
             // narrow phase).
             if (m.object.data == .super_expr) {
-                const sproto = env.resolveSuperProto() orelse
-                    return self.throwError(.syntax_error, "'super' keyword unexpected here", .{});
                 const pk = try self.memberKeyString(env, m);
                 defer pk.free(self.gc_allocator);
+                // Object-literal methods (home_object) resolve their
+                // home's CURRENT prototype dynamically, every access --
+                // see Environment.home_object's doc comment for why this
+                // differs from the class-method super_proto case just
+                // below (a fixed snapshot). Checked first since the two
+                // are mutually exclusive.
+                if (env.resolveSuperHome()) |home| {
+                    const p = home.object.value.getPrototype();
+                    const sproto: JSValue = if (p) |pp| blk: {
+                        const Box = @TypeOf(home.object.*);
+                        const box: *Box = @fieldParentPtr("value", pp);
+                        break :blk (JSValue{ .object = box }).retain();
+                    } else JSValue.NULL;
+                    defer sproto.deinit();
+                    return try self.getProperty(sproto, pk.key);
+                }
+                const sproto = env.resolveSuperProto() orelse
+                    return self.throwError(.syntax_error, "'super' keyword unexpected here", .{});
                 return try self.getProperty(sproto, pk.key);
             }
             const obj = try self.evalExpression(env, m.object);
@@ -628,10 +644,26 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
     // invoked with the current `this` -- the whole point of super.
     if (c.callee.data == .member and c.callee.data.member.object.data == .super_expr) {
         const m = c.callee.data.member;
-        const sproto = env.resolveSuperProto() orelse
-            return self.throwError(.syntax_error, "'super' keyword unexpected here", .{});
         const pk = try self.memberKeyString(env, m);
         defer pk.free(self.gc_allocator);
+        // Same home_object-first resolution as the `.member` GET case
+        // above (see its own comment for why) -- duplicated here rather
+        // than shared because this branch also needs the method value
+        // itself (to validate callability) before invoking with the
+        // enclosing `this`, not the prototype.
+        const sproto: JSValue = blk: {
+            if (env.resolveSuperHome()) |home| {
+                const p = home.object.value.getPrototype();
+                break :blk if (p) |pp| inner: {
+                    const Box = @TypeOf(home.object.*);
+                    const box: *Box = @fieldParentPtr("value", pp);
+                    break :inner (JSValue{ .object = box }).retain();
+                } else JSValue.NULL;
+            }
+            break :blk (env.resolveSuperProto() orelse
+                return self.throwError(.syntax_error, "'super' keyword unexpected here", .{})).retain();
+        };
+        defer sproto.deinit();
         const method = try self.getProperty(sproto, pk.key);
         if (method != .function) {
             return self.throwError(.type_error, "(intermediate value).{s} is not a function", .{pk.key});
