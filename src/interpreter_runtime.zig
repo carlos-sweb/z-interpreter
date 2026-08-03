@@ -177,7 +177,15 @@ pub fn run(self: *Interpreter, source: []const u8) anyerror!JSValue {
         try builtins.setupGlobals(self);
         self.globals_ready = true;
     }
-    if (self.script_env == null) self.script_env = try self.gcChildEnv(self.global_env);
+    if (self.script_env == null) {
+        self.script_env = try self.gcChildEnv(self.global_env);
+        // Real spec: a classic Script's top-level `this` is globalThis
+        // -- run() IS the classic-script entry point (eval/REPL/embed),
+        // unlike runModule(), so there's no module-vs-script ambiguity
+        // to resolve here at all. Confirmed against real Node this was
+        // simply missing (this === undefined before this fix).
+        self.script_env.?.this_value = self.global_object;
+    }
     if (self.global_var_env == null) self.global_var_env = self.script_env;
     // AST nodes stay on the arena (immutable, bulk-freed with the
     // whole run -- never GC-tracked); everything else this function

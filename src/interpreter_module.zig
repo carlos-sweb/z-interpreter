@@ -92,7 +92,30 @@ pub fn loadModule(self: *Interpreter, specifier: []const u8, referrer: ?[]const 
     // run()'s script_env does. A real dependency module's own top-level
     // `var`s must NOT do this (spec: only classic scripts populate the
     // global object), so this only fires for the untouched initial call.
-    if (referrer == null and self.global_var_env == null) self.global_var_env = module_env;
+    if (referrer == null and self.global_var_env == null) {
+        self.global_var_env = module_env;
+        // Real spec: a Script's top-level `this` is globalThis, but a
+        // Module's is always `undefined` (confirmed against real
+        // Node's actual .mjs execution -- this engine's prior
+        // `this === undefined` for every entry file was only
+        // ACCIDENTALLY correct for genuine modules, and wrong for the
+        // vast majority of entry files/test262 tests, which are
+        // Script-shaped and never use import/export at all).
+        // `import`/`export` are reserved words, so their presence as a
+        // top-level declaration is the exact, spec-sound signal that a
+        // file is a real module (dynamic `import()` is a distinct
+        // expression node, not a declaration, and stays legal in a
+        // Script either way) -- absence means it should behave like a
+        // classic Script instead.
+        var has_module_syntax = false;
+        for (program) |stmt| {
+            if (stmt.data == .import_decl or stmt.data == .export_decl) {
+                has_module_syntax = true;
+                break;
+            }
+        }
+        if (!has_module_syntax) module_env.this_value = self.global_object;
+    }
 
     // Import pre-pass: dependencies evaluate first (DFS), then their
     // exports bind here -- snapshots, taken after the dep finished.
