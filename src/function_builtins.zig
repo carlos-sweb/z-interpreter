@@ -86,7 +86,16 @@ fn fnBind(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     const pre = if (args.len > 1) args[1..] else &[_]JSValue{};
     const pre_copy = try allocator.alloc(JSValue, pre.len);
     for (pre, 0..) |a, i| pre_copy[i] = a.retain();
-    const name = try std.fmt.allocPrint(allocator, "bound {s}", .{target.function.value.name});
+    // Real spec (19.2.3.2 [[Call]] step 12-14): the bound name is
+    // built from `Get(Target, "name")` -- the real, JS-visible `.name`
+    // property (which may have been redefined via
+    // `Object.defineProperty`, going through the statics bag), not
+    // the raw Callable.name field. Falls back to "" if that property
+    // isn't a string (e.g. deleted, or overwritten with a non-string).
+    const target_name = try interp(ctx).getProperty(target, "name");
+    defer target_name.deinit();
+    const target_name_str = if (target_name == .string) target_name.string.value.data else "";
+    const name = try std.fmt.allocPrint(allocator, "bound {s}", .{target_name_str});
     bc.* = .{
         .target = target.retain(),
         .bound_this = arg(args, 0).retain(),
