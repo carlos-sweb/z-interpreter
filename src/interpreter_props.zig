@@ -556,6 +556,23 @@ pub fn deletePropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8) 
             try self.markFnPropDeleted(obj, "length");
             return true;
         }
+        // Real spec: `.prototype` is non-configurable on an ordinary
+        // constructable function/class -- always-strict (see README),
+        // so a failed [[Delete]] here must throw, not silently return
+        // false (confirmed against real Node). Functions with no
+        // `.prototype` at all (arrows, methods) have nothing to delete,
+        // so fall through to the bag lookup below like any other miss.
+        if (std.mem.eql(u8, key, "prototype") and (obj.function.value.prototype != null or obj.function.value.constructable)) {
+            return self.throwError(.type_error, "Cannot delete property '{s}' of function", .{key});
+        }
+        // Everything else (class statics, ad-hoc `F.x = 1` properties)
+        // lives in the statics bag -- this used to just `return true`
+        // unconditionally without ever touching it, so `delete` claimed
+        // success while the property silently stayed put (confirmed
+        // against real Node: `delete C.staticMethod` must actually
+        // remove it). No bag yet means nothing was ever defined, so
+        // there's genuinely nothing to delete.
+        if (obj.function.value.statics) |bag| return self.deleteObjectProperty(bag, key);
         return true;
     }
     if (obj != .object) return true;
