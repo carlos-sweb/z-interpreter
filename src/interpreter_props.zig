@@ -98,8 +98,22 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             // functionPrototype() returns a borrow of Callable.prototype's
             // own reference (matching every other branch here, which all
             // retain before returning -- necessary now that
-            // Callable.deinit() actually releases .prototype).
-            if (std.mem.eql(u8, key, "prototype")) break :blk (try self.functionPrototype(obj)).retain();
+            // Callable.deinit() actually releases .prototype). Gated on
+            // constructability (same condition objectGetOwnPropertyDescriptor
+            // already uses for this exact key) -- a non-constructable
+            // function (native methods, arrows, ...) has NO `.prototype`
+            // at all per real spec, confirmed against Node:
+            // `Function.prototype.toString.prototype === undefined`,
+            // `(() => {}).prototype === undefined`. Materializing one
+            // unconditionally here was also a second bug: it made
+            // hasOwnProperty(fn, "prototype") flip to true right after
+            // the first plain read, since that check ORs in
+            // `prototype != null`.
+            if (std.mem.eql(u8, key, "prototype")) {
+                if (box.value.prototype) |p| break :blk p.retain();
+                if (!box.value.constructable) break :blk JSValue.UNDEFINED;
+                break :blk (try self.functionPrototype(obj)).retain();
+            }
             // The statics bag (class statics, F.myProp = 1) shadows
             // the Function.prototype methods, like an own property
             // would. Recursing through getProperty gives accessor
