@@ -598,6 +598,11 @@ pub const Interpreter = struct {
     /// The well-known `Symbol.asyncIterator` -- resolveAsyncIterator's
     /// first choice for `for await`. Set in setupGlobals.
     symbol_async_iterator: ?JSValue = null,
+    /// The well-known `Symbol.toStringTag` -- installed as a real
+    /// property on the prototypes of types whose tag isn't in
+    /// Object.prototype.toString's hardcoded internal-slot list (Map,
+    /// Set, ...). Set in setupGlobals.
+    symbol_to_string_tag: ?JSValue = null,
     /// The real builtin prototype objects (`Object.prototype`,
     /// `Array.prototype`, ...), materialized once in setupGlobals and alive
     /// for the whole run (arena). Each holds its type's methods as real own

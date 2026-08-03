@@ -117,6 +117,7 @@ pub fn install(self: *Interpreter) !void {
         // for eval_fn/global_object just below).
         if (comptime std.mem.eql(u8, wk, "iterator")) self.symbol_iterator = sym.retain();
         if (comptime std.mem.eql(u8, wk, "asyncIterator")) self.symbol_async_iterator = sym.retain();
+        if (comptime std.mem.eql(u8, wk, "toStringTag")) self.symbol_to_string_tag = sym.retain();
     }
     try dneMethod(symbol_statics, "for", try native(self, "for", 1, symbolFor));
     try dneMethod(symbol_statics, "keyFor", try native(self, "keyFor", 1, symbolKeyFor));

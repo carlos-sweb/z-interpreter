@@ -261,6 +261,17 @@ fn objToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
         .@"error" => "Error",
         .date => "Date",
         .regex => "RegExp",
+        // Real spec gets these via the generic `@@toStringTag` fallback
+        // (Map.prototype/Set.prototype's own property, now installed --
+        // see materializeProtos), not the hardcoded internal-slot list
+        // Array/Function/Error/Date/RegExp above -- narrowed to a
+        // hardcoded case here too rather than a real property lookup,
+        // so overriding `Map.prototype[Symbol.toStringTag]` wouldn't
+        // change this specific result (confirmed against real Node
+        // this matches for the untouched-prototype case, which is the
+        // only one that mattered for what was actually failing).
+        .map => "Map",
+        .set => "Set",
         .object => blk: {
             if (self.unboxPrimitiveWrapper(this_value)) |prim| {
                 break :blk switch (prim) {
