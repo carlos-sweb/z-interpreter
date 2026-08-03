@@ -550,6 +550,14 @@ pub const Interpreter = struct {
     /// (same lifetime contract as Environment.bindings), never freed
     /// individually.
     global_var_names: std.StringHashMapUnmanaged(void) = .empty,
+    /// Snapshot of `global_env`'s binding names taken right after
+    /// `setupGlobals()` installs every builtin (isNaN, Boolean, Math, ...)
+    /// -- lets `Object.getOwnPropertyDescriptor(globalThis, k)` tell an
+    /// original builtin (non-enumerable, confirmed against real Node)
+    /// apart from a later ad-hoc `globalThis.foo = 1` (enumerable), since
+    /// both land in the same `global_env.bindings` map with no other
+    /// distinguishing mark.
+    global_builtin_names: std.StringHashMapUnmanaged(void) = .empty,
     /// The `new`-detection token: evalNew (and `super(...)`) set this to
     /// the callee's ctx pointer for exactly the duration of the
     /// constructor call; classConstructorCall requires it to match and

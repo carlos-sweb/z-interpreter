@@ -600,6 +600,29 @@ pub fn evalForIn(self: *Interpreter, env: *Environment, head: anytype, body: *zs
             defer seen.deinit(arena);
             var keys_list: std.ArrayList([]const u8) = .empty;
             defer keys_list.deinit(arena);
+            // `globalThis`: top-level var/function names and ad-hoc
+            // globals aren't backed by a real ZObject record, so the
+            // bag walk below would miss them entirely -- same gap as
+            // ownEnumerableKeys (see its global_builtin_names comment).
+            if (self.global_object) |go| {
+                if (target.object == go.object) {
+                    if (self.global_var_env) |gve| {
+                        var it = gve.bindings.keyIterator();
+                        while (it.next()) |k| {
+                            if (seen.contains(k.*)) continue;
+                            try seen.put(arena, k.*, {});
+                            try keys_list.append(arena, k.*);
+                        }
+                    }
+                    var it2 = self.global_env.bindings.keyIterator();
+                    while (it2.next()) |k| {
+                        if (self.global_builtin_names.contains(k.*)) continue;
+                        if (seen.contains(k.*)) continue;
+                        try seen.put(arena, k.*, {});
+                        try keys_list.append(arena, k.*);
+                    }
+                }
+            }
             var current: ?*const @TypeOf(box.value) = &box.value;
             while (current) |o| : (current = o.getPrototype()) {
                 const ks = try o.keys(arena);

@@ -265,6 +265,7 @@ pub fn deinit(self: *Interpreter) void {
     self.method_cache.deinit(self.gc_allocator);
 
     self.global_var_names.deinit(self.gc_allocator);
+    self.global_builtin_names.deinit(self.gc_allocator);
 
     var skit = self.symbol_keys.keyIterator();
     while (skit.next()) |k| self.gc_allocator.free(k.*);

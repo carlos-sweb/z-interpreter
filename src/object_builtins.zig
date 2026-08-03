@@ -67,6 +67,35 @@ fn requireObject(ctx: *anyopaque, v: JSValue, what: []const u8) anyerror!JSValue
 /// caller can free the same uniform way (see `freeOwnedKeys`) instead of
 /// needing to special-case one variant.
 pub fn ownEnumerableKeys(ctx: *anyopaque, allocator: Allocator, v: JSValue) anyerror![][]const u8 {
+    const self = interp(ctx);
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(allocator);
+    var owned: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (owned.items) |k| allocator.free(k);
+        owned.deinit(allocator);
+    }
+    // `globalThis`: top-level var/function names (always enumerable) and
+    // any ad-hoc-added global (enumerable, unlike an original builtin --
+    // see global_builtin_names' doc comment) aren't in the object's own
+    // bag, same gap as getOwnPropertyDescriptor/getOwnPropertyNames above.
+    if (v == .object and isGlobalObject(self, v)) {
+        if (self.global_var_env) |gve| {
+            var it = gve.bindings.keyIterator();
+            while (it.next()) |k| {
+                if (seen.contains(k.*)) continue;
+                try seen.put(allocator, k.*, {});
+                try owned.append(allocator, try allocator.dupe(u8, k.*));
+            }
+        }
+        var it2 = self.global_env.bindings.keyIterator();
+        while (it2.next()) |k| {
+            if (self.global_builtin_names.contains(k.*)) continue;
+            if (seen.contains(k.*)) continue;
+            try seen.put(allocator, k.*, {});
+            try owned.append(allocator, try allocator.dupe(u8, k.*));
+        }
+    }
     const borrowed: [][]const u8 = switch (v) {
         .object => |box| try box.value.keys(allocator),
         .function => |box| if (box.value.statics) |bag| try bag.object.value.keys(allocator) else try allocator.alloc([]const u8, 0),
@@ -94,12 +123,10 @@ pub fn ownEnumerableKeys(ctx: *anyopaque, allocator: Allocator, v: JSValue) anye
         else => try allocator.alloc([]const u8, 0),
     };
     defer allocator.free(borrowed);
-    var owned: std.ArrayList([]const u8) = .empty;
-    errdefer {
-        for (owned.items) |k| allocator.free(k);
-        owned.deinit(allocator);
+    for (borrowed) |k| {
+        if (seen.contains(k)) continue;
+        try owned.append(allocator, try allocator.dupe(u8, k));
     }
-    for (borrowed) |k| try owned.append(allocator, try allocator.dupe(u8, k));
     return owned.toOwnedSlice(allocator);
 }
 
@@ -514,6 +541,44 @@ fn objectDefineProperties(ctx: *anyopaque, allocator: Allocator, this_value: JSV
 
 /// A `{value, writable, enumerable, configurable}` descriptor object (chained
 /// to Object.prototype like any ordinary object).
+/// True when `obj` is the well-known `globalThis` object -- reads/writes
+/// on it are redirected to the global environment rather than a real
+/// property bag (see interpreter_props.zig's getProperty/
+/// setPropertyOnValue), so reflective APIs need the same redirect.
+fn isGlobalObject(self: *Interpreter, obj: JSValue) bool {
+    const go = self.global_object orelse return false;
+    return obj == .object and obj.object == go.object;
+}
+
+/// `Object.getOwnPropertyDescriptor(globalThis, key)` for a name that
+/// lives in the global environment rather than a real property bag --
+/// null if `key` isn't one of these (falls through to the normal bag
+/// lookup). Attributes confirmed against real Node: top-level `var`/
+/// function declarations are enumerable but non-configurable
+/// (CreateGlobalVarBinding); `undefined`/`NaN`/`Infinity` are fully
+/// locked down; an original builtin (isNaN, Boolean, Math, ...) is
+/// writable and configurable but non-enumerable, while a later ad-hoc
+/// `globalThis.foo = 1` write is writable, enumerable, AND configurable
+/// (distinguished via global_builtin_names -- see its doc comment).
+/// Mirrors getProperty's own precedence (global-env binding shadows a
+/// same-named bag record).
+fn globalPropertyDescriptor(self: *Interpreter, key: []const u8) !?JSValue {
+    if (self.global_var_names.contains(key)) {
+        const env = self.global_var_env orelse self.global_env;
+        if (env.bindings.get(key)) |v| return try dataDescObj(self, v.retain(), true, true, false);
+        return null;
+    }
+    if (std.mem.eql(u8, key, "undefined") or std.mem.eql(u8, key, "NaN") or std.mem.eql(u8, key, "Infinity")) {
+        if (self.global_env.bindings.get(key)) |v| return try dataDescObj(self, v.retain(), false, false, false);
+        return null;
+    }
+    if (self.global_env.bindings.get(key)) |v| {
+        const is_builtin = self.global_builtin_names.contains(key);
+        return try dataDescObj(self, v.retain(), true, !is_builtin, true);
+    }
+    return null;
+}
+
 fn dataDescObj(self: *Interpreter, value: JSValue, writable: bool, enumerable: bool, configurable: bool) !JSValue {
     var out = try self.ordinaryObject();
     try out.object.value.set("value", value);
@@ -554,6 +619,9 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, thi
     defer allocator.free(key);
     switch (obj) {
         .object => {
+            if (isGlobalObject(self, obj)) {
+                if (try globalPropertyDescriptor(self, key)) |d| return d;
+            }
             const rec = obj.object.value.getOwnRecord(key) orelse return JSValue.UNDEFINED;
             return descFromRecord(self, rec);
         },
@@ -602,10 +670,29 @@ pub fn objectGetOwnPropertyNames(ctx: *anyopaque, allocator: Allocator, this_val
     var result = try interp(ctx).gcNewArray();
     switch (o) {
         .object => {
+            var seen: std.StringHashMapUnmanaged(void) = .empty;
+            defer seen.deinit(allocator);
+            if (isGlobalObject(self, o)) {
+                var it = self.global_env.bindings.keyIterator();
+                while (it.next()) |k| {
+                    if (seen.contains(k.*)) continue;
+                    try seen.put(allocator, k.*, {});
+                    _ = try result.array.value.push(try interp(ctx).gcNewString(k.*));
+                }
+                if (self.global_var_env) |gve| {
+                    var vit = gve.bindings.keyIterator();
+                    while (vit.next()) |k| {
+                        if (seen.contains(k.*)) continue;
+                        try seen.put(allocator, k.*, {});
+                        _ = try result.array.value.push(try interp(ctx).gcNewString(k.*));
+                    }
+                }
+            }
             const names = try o.object.value.getOwnPropertyNames(allocator);
             defer allocator.free(names);
             for (names) |n| {
                 if (isSymbolKey(n)) continue;
+                if (seen.contains(n)) continue;
                 _ = try result.array.value.push(try interp(ctx).gcNewString(n));
             }
         },

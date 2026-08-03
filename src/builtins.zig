@@ -274,5 +274,10 @@ pub fn setupGlobals(self: *Interpreter) !void {
     // `globalThis` global binding.
     self.global_object = global_this.retain();
     try g.define(arena, "globalThis", global_this);
+
+    // Snapshot every builtin name now, before any user script runs --
+    // see Interpreter.global_builtin_names' doc comment.
+    var it = g.bindings.keyIterator();
+    while (it.next()) |k| try self.global_builtin_names.put(arena, k.*, {});
 }
 
