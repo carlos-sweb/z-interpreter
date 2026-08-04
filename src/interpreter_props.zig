@@ -575,6 +575,31 @@ pub fn deletePropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8) 
         if (obj.function.value.statics) |bag| return self.deleteObjectProperty(bag, key);
         return true;
     }
+    // `globalThis`: reads/writes/hasOwnProperty/getOwnPropertyDescriptor/
+    // getOwnPropertyNames/for-in are already redirected to global_env
+    // elsewhere (see getProperty/setPropertyOnValue/objHasOwnProperty/
+    // globalPropertyDescriptor/evalForIn) -- delete never was, so
+    // `delete this.y` (this being globalThis) claimed success without
+    // ever touching global_env, same bug class as the `.function` fix
+    // just above. var/function declarations and undefined/NaN/Infinity
+    // are non-configurable (confirmed against real Node: `"use strict";
+    // delete globalThis.topVar` throws TypeError there too, this engine
+    // being always-strict); every other global (builtins, ad-hoc
+    // `globalThis.x = 1` writes) is configurable and actually removed.
+    if (obj == .object) {
+        if (self.global_object) |go| {
+            if (obj.object == go.object) {
+                if (std.mem.eql(u8, key, "undefined") or std.mem.eql(u8, key, "NaN") or std.mem.eql(u8, key, "Infinity") or self.global_var_names.contains(key)) {
+                    return self.throwError(.type_error, "Cannot delete property '{s}' of #<Object>", .{key});
+                }
+                if (self.global_env.bindings.fetchRemove(key)) |kv| {
+                    kv.value.deinit();
+                    return true;
+                }
+                return true;
+            }
+        }
+    }
     if (obj != .object) return true;
     return self.deleteObjectProperty(obj, key);
 }
