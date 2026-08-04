@@ -318,6 +318,26 @@ pub fn toNumberJS(self: *Interpreter, v: JSValue) anyerror!f64 {
     };
 }
 
+/// `coercion.looseEquals` plus a real-ToPrimitive fallback: ECMA-262
+/// Abstract Equality Comparison says that when one side is an Object
+/// and the other isn't (and neither side is null/undefined), the
+/// Object side is reduced via `? ToPrimitive(x)` (no hint, i.e.
+/// "default") and the comparison retried -- exactly the same shape as
+/// `toNumberJS`/`toDisplayStringJS` above, just plugged into equality
+/// instead of ToNumber/ToString. `coercion.looseEquals` already
+/// throws `error.NotImplemented` in precisely that situation (mismatched
+/// tags it can't resolve on its own), so a bare catch-and-retry is
+/// sufficient -- no need to duplicate its tag-dispatch logic here.
+pub fn looseEqualsJS(self: *Interpreter, allocator: std.mem.Allocator, a: JSValue, b: JSValue) anyerror!bool {
+    return coercion.looseEquals(allocator, a, b) catch {
+        const pa = if (isPrimitiveTag(a)) a.retain() else try toPrimitive(self, a, .default);
+        defer pa.deinit();
+        const pb = if (isPrimitiveTag(b)) b.retain() else try toPrimitive(self, b, .default);
+        defer pb.deinit();
+        return try coercion.looseEquals(allocator, pa, pb);
+    };
+}
+
 /// Real JS BigInt arithmetic/bitwise operators need same-type
 /// enforcement (mixing BigInt and Number is a TypeError, not a
 /// silent coercion) plus RangeError machinery (division by zero,

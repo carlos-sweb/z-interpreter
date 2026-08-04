@@ -170,6 +170,12 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
             switch (b.op) {
                 .instanceof => return self.evalInstanceof(l, r),
                 .in => return self.evalIn(l, r),
+                // `coercion.binaryOp`'s own `.eq`/`.ne` cases can't do
+                // ToPrimitive on an object operand (no interpreter
+                // access there) -- routed through the ToPrimitive-aware
+                // wrapper instead of `coercion.binaryOp`.
+                .eq => return JSValue.fromBool(try self.looseEqualsJS(arena, l, r)),
+                .ne => return JSValue.fromBool(!try self.looseEqualsJS(arena, l, r)),
                 else => {
                     if (try self.bigintArithmetic(b.op, l, r)) |result| return result;
                     if (b.op == .add) {

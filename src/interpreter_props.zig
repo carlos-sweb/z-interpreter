@@ -321,15 +321,19 @@ pub fn setTypedArrayProperty(self: *Interpreter, obj: JSValue, key: []const u8, 
 
 /// [[Set]] on an `.object` JSValue with accessor dispatch: a setter
 /// anywhere on the chain is invoked with this = the receiver; a
-/// getter-only accessor swallows the write silently (sloppy-mode
-/// [[Set]]); the first *data* record found stops the walk and the
+/// getter-only accessor has no setter to invoke, which is a [[Set]]
+/// failure -- this engine is always-strict (no non-strict mode at
+/// all), so that failure is a TypeError, not the sloppy-mode silent
+/// no-op real JS would do without "use strict" (confirmed against
+/// real Node: `"use strict"; o.getterOnly = 1;` throws TypeError
+/// there too). The first *data* record found stops the walk and the
 /// write shadows it as an own property, exactly like real JS.
 pub fn setObjectProperty(self: *Interpreter, obj: JSValue, key: []const u8, value: JSValue) anyerror!void {
     var current: ?*const @TypeOf(obj.object.value) = &obj.object.value;
     while (current) |o| : (current = o.getPrototype()) {
         const rec = o.getOwnRecord(key) orelse continue;
         if (rec.isAccessor()) {
-            const s = rec.setter orelse return; // getter-only: silent no-op
+            const s = rec.setter orelse return self.throwError(.type_error, "Cannot set property {s} of #<Object> which has only a getter", .{key});
             _ = try s.function.value.call(s.function.value.ctx, self.gc_allocator, obj, &.{value});
             return;
         }
@@ -430,7 +434,9 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
         while (current) |o| : (current = o.getPrototype()) {
             const rec = o.getOwnRecord(key) orelse continue;
             if (rec.isAccessor()) {
-                const s = rec.setter orelse return; // getter-only: silent no-op
+                // Getter-only: always-strict [[Set]] failure -- TypeError,
+                // same reasoning as `setObjectProperty` above.
+                const s = rec.setter orelse return self.throwError(.type_error, "Cannot set property {s} of #<Function> which has only a getter", .{key});
                 _ = try s.function.value.call(s.function.value.ctx, self.gc_allocator, obj, &.{value});
                 return;
             }

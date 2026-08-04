@@ -105,7 +105,12 @@ fn numberToPrecision(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
 fn globalNumber(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const self = interp(ctx);
-    const primitive = JSValue.fromNumber(try self.toNumberJS(arg(args, 0)));
+    // Real spec (21.1.1.1): "If no arguments were passed to this function
+    // invocation, let n be +0." -- NOT ToNumber(undefined) (NaN), which is
+    // what a bare `arg(args, 0)` default would give. `Number(undefined)`
+    // (an EXPLICIT undefined argument) is correctly still NaN -- confirmed
+    // against real Node, same empty-arg-list special case as `String()`.
+    const primitive = JSValue.fromNumber(if (args.len == 0) 0 else try self.toNumberJS(arg(args, 0)));
     return self.boxPrimitiveIfConstructed(ctx, this_value, primitive);
 }
 

@@ -34,7 +34,22 @@ pub fn toNumber(v: JSValue) !f64 {
         // a valid numeric literal, else NaN -- znumber's parseFloat is more
         // permissive (stops at trailing garbage). Narrowed/simplified for
         // this phase; not spec-exact.
-        .string => |box| znumber.ParsingMethods.parseFloat(box.value.data),
+        //
+        // One StringNumericLiteral case znumber's parseFloat gets wrong
+        // for THIS caller specifically: an empty (or all-whitespace)
+        // string is explicitly defined as 0 by the grammar (StrWhiteSpace
+        // alone is a valid StringNumericLiteral, empty StrNumericLiteral
+        // production), not NaN -- confirmed against real Node
+        // (`Number("")`/`Number("   ")` === 0). `parseFloat`/
+        // `Number.parseFloat` (the JS global, a DIFFERENT algorithm) is
+        // NOT touched here and correctly keeps giving NaN for "" -- this
+        // special case belongs only to ToNumber, not to znumber's shared
+        // parser.
+        .string => |box| blk: {
+            const trimmed = std.mem.trim(u8, box.value.data, " \t\n\r\x0b\x0c");
+            if (trimmed.len == 0) break :blk 0;
+            break :blk znumber.ParsingMethods.parseFloat(box.value.data);
+        },
         // Number(date) is its millisecond timestamp (real ToPrimitive
         // "number" hint behavior for Dates).
         .date => |box| @floatFromInt(box.value.getTime()),
@@ -110,8 +125,12 @@ pub fn toDisplayString(allocator: Allocator, v: JSValue) ![]u8 {
 /// ECMA-262 Strict Equality plus a narrowed Abstract Equality Comparison
 /// (`==`/`!=`) -- only the primitive-coercion cases; any comparison
 /// involving a non-null/undefined array/object/function/etc. against a
-/// mismatched tag is `error.NotImplemented` (needs real ToPrimitive).
-fn looseEquals(allocator: Allocator, a: JSValue, b: JSValue) !bool {
+/// mismatched tag is `error.NotImplemented` (needs real ToPrimitive --
+/// see `interpreter_support.zig`'s `looseEqualsJS`, which retries via
+/// `toPrimitive` on whichever side isn't already primitive). `pub` so
+/// that wrapper can call back into the primitive-only cases here once
+/// both sides have been reduced to primitives.
+pub fn looseEquals(allocator: Allocator, a: JSValue, b: JSValue) !bool {
     if (@as(std.meta.Tag(JSValue), a) == @as(std.meta.Tag(JSValue), b)) {
         return zvalue.equality.strictEquals(a, b);
     }
@@ -174,20 +193,42 @@ pub fn binaryOp(allocator: Allocator, op: zparser.BinaryOp, left: JSValue, right
         // loss); a mixed pair falls back to the existing ToNumber path
         // (documented narrowing -- same precision-loss tradeoff as
         // ToNumber(bigint) elsewhere in this file).
+        //
+        // Real spec's Abstract Relational Comparison (11.8.5) special-
+        // cases "both operands are Strings": a lexicographic code-unit
+        // comparison, NOT ToNumber(string) on each side -- ToNumber
+        // only applies when at least one side isn't a String. Missing
+        // this branch made every string `<`/`>` comparison silently
+        // wrong (e.g. `"a" < "b"` gave `false`, since ToNumber("a") is
+        // NaN on both sides), not just the embedded-NUL edge case that
+        // surfaced it (test262 test/language/types/string/S8.4_A5.js).
+        // `std.mem.order` on the raw UTF-8 bytes matches UTF-16
+        // code-unit order for every codepoint that doesn't need a
+        // surrogate pair (BMP-only, the overwhelming common case) --
+        // documented narrowing, same spirit as the bigint precision-loss
+        // notes elsewhere in this file.
         .lt => if (left == .bigint and right == .bigint)
             JSValue.fromBool(left.bigint.value.cmp(right.bigint.value) == .lt)
+        else if (left == .string and right == .string)
+            JSValue.fromBool(std.mem.order(u8, left.string.value.data, right.string.value.data) == .lt)
         else
             JSValue.fromBool((try toNumber(left)) < (try toNumber(right))),
         .gt => if (left == .bigint and right == .bigint)
             JSValue.fromBool(left.bigint.value.cmp(right.bigint.value) == .gt)
+        else if (left == .string and right == .string)
+            JSValue.fromBool(std.mem.order(u8, left.string.value.data, right.string.value.data) == .gt)
         else
             JSValue.fromBool((try toNumber(left)) > (try toNumber(right))),
         .le => if (left == .bigint and right == .bigint)
             JSValue.fromBool(left.bigint.value.cmp(right.bigint.value) != .gt)
+        else if (left == .string and right == .string)
+            JSValue.fromBool(std.mem.order(u8, left.string.value.data, right.string.value.data) != .gt)
         else
             JSValue.fromBool((try toNumber(left)) <= (try toNumber(right))),
         .ge => if (left == .bigint and right == .bigint)
             JSValue.fromBool(left.bigint.value.cmp(right.bigint.value) != .lt)
+        else if (left == .string and right == .string)
+            JSValue.fromBool(std.mem.order(u8, left.string.value.data, right.string.value.data) != .lt)
         else
             JSValue.fromBool((try toNumber(left)) >= (try toNumber(right))),
         .eqeqeq => JSValue.fromBool(zvalue.equality.strictEquals(left, right)),

@@ -622,6 +622,15 @@ fn stringRaw(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
 
 fn globalString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const self = interp(ctx);
+    // Real spec (22.1.1.1): "If no arguments were passed to this function
+    // invocation, let s be the empty String." -- NOT ToString(undefined)
+    // ("undefined"), which is what a bare `arg(args, 0)` default would
+    // give since a missing argument reads as JSValue.UNDEFINED here.
+    // Confirmed against real Node: `new String()` boxes "", `new
+    // String(undefined)` (an EXPLICIT undefined argument) boxes
+    // "undefined" -- the empty-arg-list case is genuinely special, not
+    // just ToString of the default.
+    if (args.len == 0) return self.boxPrimitiveIfConstructed(ctx, this_value, try self.gcNewString(""));
     // String(symbol) is the one explicit coercion the spec allows --
     // "Symbol(desc)" -- unlike implicit `sym + ''` which throws.
     if (arg(args, 0) == .symbol) {

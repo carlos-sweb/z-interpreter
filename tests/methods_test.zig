@@ -20,8 +20,12 @@ test "get + set for the same key merge into one accessor" {
     try helpers.expectNumber("const gs = { _v: 0, get v() { return this._v; }, set v(x) { this._v = x * 2; } }; gs.v = 21; gs.v;", 42);
 }
 
-test "assigning through a getter-only accessor is a silent no-op (sloppy)" {
-    try helpers.expectNumber("const go = { get x() { return 1; } }; go.x = 99; go.x;", 1);
+test "assigning through a getter-only accessor throws TypeError (always-strict)" {
+    try helpers.expectUncaught(
+        "const go = { get x() { return 1; } }; go.x = 99;",
+        .type_error,
+        "Cannot set property x of #<Object> which has only a getter",
+    );
 }
 
 test "setter-only accessor reads as undefined" {

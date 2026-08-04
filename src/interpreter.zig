@@ -880,6 +880,7 @@ pub const Interpreter = struct {
     pub const toPrimitive = interpreter_support.toPrimitive;
     pub const toDisplayStringJS = interpreter_support.toDisplayStringJS;
     pub const toNumberJS = interpreter_support.toNumberJS;
+    pub const looseEqualsJS = interpreter_support.looseEqualsJS;
     pub const deletedFnProps = interpreter_support.deletedFnProps;
     pub const markFnPropDeleted = interpreter_support.markFnPropDeleted;
     pub const bigintArithmetic = interpreter_support.bigintArithmetic;
