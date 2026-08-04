@@ -22,10 +22,13 @@ const installBuiltin = builtin_helpers.installBuiltin;
 fn mathUnary(comptime f: fn (f64) f64) NativeFn {
     return struct {
         fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-            _ = ctx;
             _ = allocator;
             _ = this_value;
-            return JSValue.fromNumber(f(try coercion.toNumber(arg(args, 0))));
+            // toNumberJS, not the pure coercion.toNumber: real ToNumber
+            // calls ToPrimitive on an object (valueOf()/toString()/
+            // @@toPrimitive), which needs interpreter access -- confirmed
+            // against real Node (Math.sin({valueOf(){return 1;}}) works).
+            return JSValue.fromNumber(f(try interp(ctx).toNumberJS(arg(args, 0))));
         }
     }.call;
 }
@@ -58,9 +61,9 @@ const mathLog1p = mathUnary(zmath.log1p);
 const mathCbrt = mathUnary(zmath.cbrt);
 const mathClz32 = mathUnary(zmath.clz32);
 const mathFround = mathUnary(zmath.fround);
+const mathF16round = mathUnary(zmath.f16round);
 
 fn mathPow(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
     _ = allocator;
     _ = this_value;
     // zmath.pow, NOT std.math.pow directly: JS's Number::exponentiate
@@ -68,16 +71,18 @@ fn mathPow(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     // from C99/IEEE754 pow() for cases like pow(1, Infinity) (1 in C,
     // NaN in JS) -- zmath.pow already implements the exact spec
     // algorithm (see its own doc comment), std.math.pow does not.
-    return JSValue.fromNumber(zmath.pow(try coercion.toNumber(arg(args, 0)), try coercion.toNumber(arg(args, 1))));
+    // toNumberJS (real ToPrimitive) for the same reason as mathUnary.
+    const self = interp(ctx);
+    return JSValue.fromNumber(zmath.pow(try self.toNumberJS(arg(args, 0)), try self.toNumberJS(arg(args, 1))));
 }
 
 fn mathBinary(comptime f: fn (f64, f64) f64) NativeFn {
     return struct {
         fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-            _ = ctx;
             _ = allocator;
             _ = this_value;
-            return JSValue.fromNumber(f(try coercion.toNumber(arg(args, 0)), try coercion.toNumber(arg(args, 1))));
+            const self = interp(ctx);
+            return JSValue.fromNumber(f(try self.toNumberJS(arg(args, 0)), try self.toNumberJS(arg(args, 1))));
         }
     }.call;
 }
@@ -86,10 +91,10 @@ const mathAtan2 = mathBinary(zmath.atan2);
 const mathImul = mathBinary(zmath.imul);
 
 fn mathVariadic(ctx: *anyopaque, allocator: Allocator, args: []const JSValue, comptime f: fn ([]const f64) f64) anyerror!JSValue {
-    _ = ctx;
+    const self = interp(ctx);
     const nums = try allocator.alloc(f64, args.len);
     defer allocator.free(nums);
-    for (args, 0..) |a, i| nums[i] = try coercion.toNumber(a);
+    for (args, 0..) |a, i| nums[i] = try self.toNumberJS(a);
     return JSValue.fromNumber(f(nums));
 }
 
@@ -123,6 +128,92 @@ fn mathRandom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
         S.prng = std.Random.DefaultPrng.init(seed);
     }
     return JSValue.fromNumber(S.prng.?.random().float(f64));
+}
+
+/// Best-effort IteratorClose: calls `.return()` if present, discarding
+/// its outcome either way -- this engine has no general IteratorClose
+/// primitive yet (see ~/.plans/pendientes/destructuring-iterator-protocol.md),
+/// so this is a narrow one-off matching exactly what
+/// Math.sumPrecise needs (real spec: on an abrupt completion, the
+/// ORIGINAL error always wins over anything `.return()` itself throws).
+fn closeIterator(self: *Interpreter, allocator: Allocator, iter: JSValue) void {
+    const return_fn = self.getProperty(iter, "return") catch return;
+    defer return_fn.deinit();
+    if (return_fn != .function) return;
+    const result = return_fn.function.value.call(return_fn.function.value.ctx, allocator, iter, &.{}) catch return;
+    result.deinit();
+}
+
+/// Math.sumPrecise(iterable) -- ES2025. Real spec: RequireObjectCoercible
+/// then GetIterator, stepping ONE element at a time (NOT an eager full
+/// drain like this engine's iterableItems -- confirmed by test262's own
+/// throws-on-non-number.js, which feeds an INFINITE custom iterator and
+/// asserts exactly 1 next() + 1 return() call, i.e. the algorithm must
+/// stop and close immediately on the first non-Number element rather
+/// than exhausting the iterator first). Each element must already be a
+/// Number (no ToNumber coercion -- TypeError otherwise, confirmed
+/// test262 checks valueOf()/toString() are never invoked). NaN/+-
+/// Infinity collision/all-minus-zero are resolved by a state machine
+/// before any finite value reaches zmath.sumPrecise's exact-summation
+/// core (see that function's own doc comment for why the split).
+fn mathSumPrecise(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const iterable = arg(args, 0);
+    if (iterable == .undefined or iterable == .null) {
+        return self.throwError(.type_error, "Cannot convert undefined or null to object", .{});
+    }
+    const iter = try self.resolveIterator(iterable);
+    const next_fn = try self.getProperty(iter, "next");
+    if (next_fn != .function) return self.throwError(.type_error, "iterator.next is not a function", .{});
+
+    var has_nan = false;
+    var has_pos_inf = false;
+    var has_neg_inf = false;
+    var has_finite = false;
+    var finite_nums: std.ArrayList(f64) = .empty;
+    defer finite_nums.deinit(allocator);
+    var count: f64 = 0;
+
+    while (true) {
+        const step = try next_fn.function.value.call(next_fn.function.value.ctx, allocator, iter, &.{});
+        if (step != .object) return self.throwError(.type_error, "Iterator result {s} is not an object", .{step.typeOf()});
+        if (coercion.isTruthy(try self.getProperty(step, "done"))) break;
+        const value = try self.getProperty(step, "value");
+
+        count += 1;
+        if (count >= 9007199254740992.0) {
+            closeIterator(self, allocator, iter);
+            return self.throwError(.range_error, "Too many values to sum", .{});
+        }
+        if (value != .number) {
+            closeIterator(self, allocator, iter);
+            return self.throwError(.type_error, "Cannot convert {s} to a number", .{value.typeOf()});
+        }
+        const n = value.number;
+
+        if (std.math.isNan(n)) {
+            has_nan = true;
+        } else if (n == std.math.inf(f64)) {
+            has_pos_inf = true;
+        } else if (n == -std.math.inf(f64)) {
+            has_neg_inf = true;
+        } else if (!(n == 0 and std.math.signbit(n))) {
+            has_finite = true;
+            try finite_nums.append(allocator, n);
+        }
+    }
+
+    if (has_nan or (has_pos_inf and has_neg_inf)) return JSValue.fromNumber(std.math.nan(f64));
+    if (has_pos_inf) return JSValue.fromNumber(std.math.inf(f64));
+    if (has_neg_inf) return JSValue.fromNumber(-std.math.inf(f64));
+    if (!has_finite) return JSValue.fromNumber(-0.0);
+
+    const result = zmath.sumPrecise(allocator, finite_nums.items) catch |err| switch (err) {
+        error.Overflow => return self.throwError(.range_error, "overflow", .{}),
+        error.OutOfMemory => return err,
+    };
+    return JSValue.fromNumber(result);
 }
 
 /// Installs the `Math` namespace (no constructor).
@@ -169,7 +260,9 @@ pub fn install(self: *Interpreter) !void {
         .{ .name = "cbrt", .value = .{ .method = .{ .call = mathCbrt, .arity = 1 } } },
         .{ .name = "clz32", .value = .{ .method = .{ .call = mathClz32, .arity = 1 } } },
         .{ .name = "fround", .value = .{ .method = .{ .call = mathFround, .arity = 1 } } },
+        .{ .name = "f16round", .value = .{ .method = .{ .call = mathF16round, .arity = 1 } } },
         .{ .name = "imul", .value = .{ .method = .{ .call = mathImul, .arity = 2 } } },
         .{ .name = "hypot", .value = .{ .method = .{ .call = mathHypot, .arity = 2 } } },
+        .{ .name = "sumPrecise", .value = .{ .method = .{ .call = mathSumPrecise, .arity = 1 } } },
     } });
 }
