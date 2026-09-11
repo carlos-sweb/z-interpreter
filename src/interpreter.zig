@@ -617,6 +617,9 @@ pub const Interpreter = struct {
     /// Object.prototype.toString's hardcoded internal-slot list (Map,
     /// Set, ...). Set in setupGlobals.
     symbol_to_string_tag: ?JSValue = null,
+    /// The well-known `Symbol.toPrimitive` -- the first thing
+    /// `toPrimitive` looks up on an object operand. Set in setupGlobals.
+    symbol_to_primitive: ?JSValue = null,
     /// The real builtin prototype objects (`Object.prototype`,
     /// `Array.prototype`, ...), materialized once in setupGlobals and alive
     /// for the whole run (arena). Each holds its type's methods as real own
@@ -878,6 +881,10 @@ pub const Interpreter = struct {
     // boxing+coerce+native cluster, split into interpreter_support.zig.
     pub const stringConcat = interpreter_support.stringConcat;
     pub const toPrimitive = interpreter_support.toPrimitive;
+    pub const PrimitiveHint = interpreter_support.PrimitiveHint;
+    pub const ordinaryToPrimitive = interpreter_support.ordinaryToPrimitive;
+    pub const OrdinaryHint = interpreter_support.OrdinaryHint;
+    pub const isPrimitiveTag = interpreter_support.isPrimitiveTag;
     pub const toDisplayStringJS = interpreter_support.toDisplayStringJS;
     pub const toNumberJS = interpreter_support.toNumberJS;
     pub const looseEqualsJS = interpreter_support.looseEqualsJS;

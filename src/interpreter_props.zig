@@ -11,6 +11,7 @@ const JSValue = zvalue.JSValue;
 const coercion = @import("coercion.zig");
 const builtins = @import("builtins.zig");
 const native_helpers = @import("native_helpers.zig");
+const date_builtins = @import("date_builtins.zig");
 
 const interpreter_mod = @import("interpreter.zig");
 const Interpreter = interpreter_mod.Interpreter;
@@ -774,6 +775,14 @@ pub fn materializeProtos(self: *Interpreter) !void {
     // consulting this property generically, so overriding it here
     // would NOT change what Object.prototype.toString.call reports,
     // only a direct property read of it).
+    // Real spec (21.4.4.45): Date.prototype[Symbol.toPrimitive] is a real
+    // own method; `toPrimitive` finds it like any user-defined one.
+    if (self.symbol_to_primitive) |tp_sym| {
+        const tp_key = try self.encodeKey(tp_sym);
+        defer self.gc_allocator.free(tp_key);
+        const tp_fn = try native_helpers.native(self, "[Symbol.toPrimitive]", 1, date_builtins.dateToPrimitive);
+        try self.protos.date.object.value.defineProperty(tp_key, tp_fn, .{ .writable = false, .enumerable = false, .configurable = true });
+    }
     if (self.symbol_to_string_tag) |tag_sym| {
         const tag_key = try self.encodeKey(tag_sym);
         defer self.gc_allocator.free(tag_key);

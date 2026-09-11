@@ -673,6 +673,7 @@ pub fn markRoots(self: *Interpreter, marker: *Marker) void {
     if (self.eval_fn) |v| marker.value(v);
     if (self.symbol_iterator) |v| marker.value(v);
     if (self.symbol_async_iterator) |v| marker.value(v);
+    if (self.symbol_to_primitive) |v| marker.value(v);
     inline for (std.meta.fields(Protos)) |f| marker.value(@field(self.protos, f.name));
 }
 
@@ -937,6 +938,7 @@ pub fn freeAllGcNodes(self: *Interpreter) void {
     if (self.eval_fn) |v| sweeper.value(v);
     if (self.symbol_iterator) |v| sweeper.value(v);
     if (self.symbol_async_iterator) |v| sweeper.value(v);
+    if (self.symbol_to_primitive) |v| sweeper.value(v);
     inline for (std.meta.fields(Protos)) |f| sweeper.value(@field(self.protos, f.name));
 }
 

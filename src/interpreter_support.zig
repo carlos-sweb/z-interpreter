@@ -260,16 +260,49 @@ pub fn stringConcat(self: *Interpreter, left: JSValue, right: JSValue) anyerror!
     return try self.gcNewString(joined);
 }
 
-/// ECMA-262 7.1.1 ToPrimitive, narrowed: no `Symbol.toPrimitive` lookup
-/// (not implemented anywhere in this engine yet), just the
-/// `OrdinaryToPrimitive` fallback -- hint "string" tries
-/// `toString()` then `valueOf()`; "number"/"default" tries `valueOf()`
-/// then `toString()`. Needs `self` (real method dispatch via
-/// `getProperty`/`callValue`, through the same prototype chain
-/// `instanceof`/`in` walk) -- `coercion.zig` deliberately has none of
-/// that, hence its object-shaped `error.NotImplemented`.
-pub fn toPrimitive(self: *Interpreter, v: JSValue, hint: enum { default, number, string }) anyerror!JSValue {
+/// ToPrimitive's hint -- its tag name is also the exact string a
+/// user-defined `[Symbol.toPrimitive]` method receives.
+pub const PrimitiveHint = enum { default, number, string };
+
+/// OrdinaryToPrimitive only ever sees "number" or "string" ("default"
+/// is folded into "number" by the time it gets there).
+pub const OrdinaryHint = enum { number, string };
+
+/// ECMA-262 7.1.1 ToPrimitive: an own or inherited `[Symbol.toPrimitive]`
+/// wins (called with the hint as a string; its result must be a
+/// primitive), otherwise `ordinaryToPrimitive`. Dates need no special
+/// case here -- `Date.prototype[Symbol.toPrimitive]` (date_builtins
+/// `dateToPrimitive`) is a real method this lookup finds, and it is what
+/// maps a Date's "default" hint to "string". Needs `self` (real method
+/// dispatch via `getProperty`/`callValue`) -- `coercion.zig`
+/// deliberately has none of that, hence its object-shaped
+/// `error.NotImplemented`. Always returns an owned value.
+pub fn toPrimitive(self: *Interpreter, v: JSValue, hint: PrimitiveHint) anyerror!JSValue {
     if (isPrimitiveTag(v)) return v.retain();
+    if (self.symbol_to_primitive) |sym| {
+        const key = try self.encodeKey(sym);
+        defer self.gc_allocator.free(key);
+        const exotic = try self.getProperty(v, key);
+        defer exotic.deinit();
+        if (exotic != .undefined and exotic != .null) {
+            if (exotic != .function and exotic != .proxy) {
+                return self.throwError(.type_error, "Symbol.toPrimitive is not a function", .{});
+            }
+            const hint_str = try self.gcNewString(@tagName(hint));
+            defer hint_str.deinit();
+            const result = try self.callValue(exotic, v, &.{hint_str}, "[Symbol.toPrimitive]");
+            if (isPrimitiveTag(result)) return result;
+            result.deinit();
+            return self.throwError(.type_error, "Cannot convert object to primitive value", .{});
+        }
+    }
+    return ordinaryToPrimitive(self, v, if (hint == .string) .string else .number);
+}
+
+/// ECMA-262 7.1.1.1 OrdinaryToPrimitive: hint "string" tries
+/// `toString()` then `valueOf()`; "number" tries them the other way
+/// round. The first one that is callable AND returns a primitive wins.
+pub fn ordinaryToPrimitive(self: *Interpreter, v: JSValue, hint: OrdinaryHint) anyerror!JSValue {
     const order: [2][]const u8 = if (hint == .string) .{ "toString", "valueOf" } else .{ "valueOf", "toString" };
     for (order) |method_name| {
         const method = try self.getProperty(v, method_name);
@@ -282,7 +315,7 @@ pub fn toPrimitive(self: *Interpreter, v: JSValue, hint: enum { default, number,
     return self.throwError(.type_error, "Cannot convert object to primitive value", .{});
 }
 
-fn isPrimitiveTag(v: JSValue) bool {
+pub fn isPrimitiveTag(v: JSValue) bool {
     return switch (v) {
         .undefined, .null, .boolean, .number, .string, .bigint, .symbol => true,
         else => false,
@@ -297,8 +330,12 @@ fn isPrimitiveTag(v: JSValue) bool {
 pub fn toDisplayStringJS(self: *Interpreter, allocator: std.mem.Allocator, v: JSValue) anyerror![]u8 {
     return coercion.toDisplayString(allocator, v) catch |err| switch (err) {
         error.NotImplemented => blk: {
+            // Implicit ToString(Symbol) is a real TypeError (explicit
+            // `String(sym)` never reaches here -- globalString handles it).
+            if (v == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a string", .{});
             const prim = try toPrimitive(self, v, .string);
             defer prim.deinit();
+            if (prim == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a string", .{});
             break :blk try coercion.toDisplayString(allocator, prim);
         },
         else => err,
@@ -312,8 +349,10 @@ pub fn toNumberJS(self: *Interpreter, v: JSValue) anyerror!f64 {
     // (no allocation in its body, unlike toDisplayString) -- a bare `catch`
     // covers it without an unreachable `else` prong.
     return coercion.toNumber(v) catch {
+        if (v == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a number", .{});
         const prim = try toPrimitive(self, v, .number);
         defer prim.deinit();
+        if (prim == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a number", .{});
         return try coercion.toNumber(prim);
     };
 }

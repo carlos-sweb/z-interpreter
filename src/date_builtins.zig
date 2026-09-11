@@ -181,6 +181,28 @@ fn requireDate(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerro
     return requireTag(ctx, this_value, .date, "Date.prototype.{s} called on a non-date", method);
 }
 
+/// ECMA-262 21.4.4.45 `Date.prototype[@@toPrimitive](hint)`. Generic over
+/// any object receiver, not just Dates. "default" behaves like "string",
+/// which is what makes `new Date() + 1` concatenate instead of add.
+/// Installed on Date.prototype by `materializeProtos`.
+pub fn dateToPrimitive(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    if (Interpreter.isPrimitiveTag(this_value)) {
+        return self.throwError(.type_error, "Date.prototype [ @@toPrimitive ] called on non-object", .{});
+    }
+    const h = arg(args, 0);
+    const hint: Interpreter.OrdinaryHint = blk: {
+        if (h == .string) {
+            const s = h.string.value.data;
+            if (std.mem.eql(u8, s, "string") or std.mem.eql(u8, s, "default")) break :blk .string;
+            if (std.mem.eql(u8, s, "number")) break :blk .number;
+        }
+        return self.throwError(.type_error, "Invalid hint", .{});
+    };
+    return self.ordinaryToPrimitive(this_value, hint);
+}
+
 /// A raw millisecond timestamp as a JS Number, mapping z-date's Invalid Date
 /// (and any out-of-range value) to NaN -- what `getTime`/`valueOf`/the setters
 /// must return for an Invalid Date (the ?i32 getters already yield NaN on
