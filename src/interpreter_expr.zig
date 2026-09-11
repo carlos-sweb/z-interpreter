@@ -170,19 +170,7 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
             switch (b.op) {
                 .instanceof => return self.evalInstanceof(l, r),
                 .in => return self.evalIn(l, r),
-                // `coercion.binaryOp`'s own `.eq`/`.ne` cases can't do
-                // ToPrimitive on an object operand (no interpreter
-                // access there) -- routed through the ToPrimitive-aware
-                // wrapper instead of `coercion.binaryOp`.
-                .eq => return JSValue.fromBool(try self.looseEqualsJS(arena, l, r)),
-                .ne => return JSValue.fromBool(!try self.looseEqualsJS(arena, l, r)),
-                else => {
-                    if (try self.bigintArithmetic(b.op, l, r)) |result| return result;
-                    if (b.op == .add) {
-                        if (try self.stringConcat(l, r)) |result| return result;
-                    }
-                    return try coercion.binaryOp(arena, b.op, l, r);
-                },
+                else => return applyBinaryOp(self, b.op, l, r),
             }
         },
         .logical => |l| {
@@ -463,9 +451,12 @@ pub fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSV
     switch (u.op) {
         .not => return JSValue.fromBool(!coercion.isTruthy(try self.evalExpression(env, u.operand))),
         .minus => {
-            const v = try self.evalExpression(env, u.operand);
-            if (v == .bigint) return try self.gcNewBigIntValue(try v.bigint.value.negate());
-            return JSValue.fromNumber(-(try self.toNumberJS(v)));
+            const n = try self.toNumericJS(try self.evalExpression(env, u.operand));
+            if (n == .bigint) {
+                defer n.deinit();
+                return try self.gcNewBigIntValue(try n.bigint.value.negate());
+            }
+            return JSValue.fromNumber(-n.number);
         },
         .plus => {
             // Real spec: unary `+` is ALWAYS a ToNumber, and
@@ -499,14 +490,19 @@ pub fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSV
             return JSValue.UNDEFINED;
         },
         .pre_inc, .pre_dec => {
-            const old = try self.evalExpression(env, u.operand);
-            const new_val = try self.incDecOne(old, u.op == .pre_inc);
+            const old_num = try self.toNumericJS(try self.evalExpression(env, u.operand));
+            defer old_num.deinit();
+            const new_val = try self.incDecOne(old_num, u.op == .pre_inc);
             try self.assignTo(env, u.operand, new_val);
             return new_val;
         },
         .post_inc, .post_dec => {
             const old = try self.evalExpression(env, u.operand);
-            const new_val = try self.incDecOne(old, u.op == .post_inc);
+            // ToNumeric exactly once: the conversion (e.g. a user
+            // valueOf) is observable, and its result is both the
+            // increment's input and the expression's value.
+            const old_num = try self.toNumericJS(old);
+            const new_val = try self.incDecOne(old_num, u.op == .post_inc);
             try self.assignTo(env, u.operand, new_val);
             // Real spec: the EXPRESSION's value is `old` already
             // ToNumeric'd, not the raw pre-coercion operand (e.g.
@@ -519,13 +515,19 @@ pub fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSV
             // this engine, so it's left untouched rather than
             // guessed at; this returns a value of its own instead of
             // trying to share `old`'s.
-            return if (old == .bigint) try self.gcNewBigIntValue(try old.bigint.value.clone()) else JSValue.fromNumber(try coercion.toNumber(old));
+            if (old_num == .bigint) {
+                defer old_num.deinit();
+                return try self.gcNewBigIntValue(try old_num.bigint.value.clone());
+            }
+            return old_num;
         },
         .bitnot => {
-            const v = try self.evalExpression(env, u.operand);
-            if (v == .bigint) return try self.gcNewBigIntValue(try zbigint.ZBigInt.not(self.gc_allocator, v.bigint.value));
-            const n = try coercion.toInt32(v);
-            return JSValue.fromNumber(@floatFromInt(~n));
+            const n = try self.toNumericJS(try self.evalExpression(env, u.operand));
+            if (n == .bigint) {
+                defer n.deinit();
+                return try self.gcNewBigIntValue(try zbigint.ZBigInt.not(self.gc_allocator, n.bigint.value));
+            }
+            return JSValue.fromNumber(@floatFromInt(~(try coercion.toInt32(n))));
         },
         .delete => {
             // Always-strict delete: unqualified identifiers are the
@@ -588,17 +590,61 @@ pub fn evalAssignment(self: *Interpreter, env: *Environment, a: anytype) anyerro
         else => {
             const current = try self.evalExpression(env, a.target);
             const rhs = try self.evalExpression(env, a.value);
-            const bop = compoundToBinary(a.op);
-            const result = blk: {
-                if (try self.bigintArithmetic(bop, current, rhs)) |r| break :blk r;
-                if (bop == .add) {
-                    if (try self.stringConcat(current, rhs)) |r| break :blk r;
-                }
-                break :blk try coercion.binaryOp(self.gc_allocator, bop, current, rhs);
-            };
+            const result = try applyBinaryOp(self, compoundToBinary(a.op), current, rhs);
             try self.assignTo(env, a.target, result);
             return result;
         },
+    }
+}
+
+/// Every binary operator except `instanceof`/`in` (the caller's). Object
+/// operands are reduced first -- ToPrimitive with hint "default" for `+`,
+/// "number" for the relational operators, ToNumeric for arithmetic/
+/// bitwise/shift operators -- the left operand fully before the right
+/// one (a throw from the left means the right is never converted), so
+/// `stringConcat`/`bigintArithmetic`/`coercion.binaryOp` only ever see
+/// primitives. `==`/`!=` keep `looseEqualsJS`, which does its own
+/// spec-shaped reduction. Shared by binary expressions and compound
+/// assignment.
+fn applyBinaryOp(self: *Interpreter, op: zparser.BinaryOp, l: JSValue, r: JSValue) anyerror!JSValue {
+    const allocator = self.gc_allocator;
+    switch (op) {
+        .instanceof, .in => unreachable,
+        .eqeqeq, .noteqeq => return coercion.binaryOp(allocator, op, l, r),
+        .eq => return JSValue.fromBool(try self.looseEqualsJS(allocator, l, r)),
+        .ne => return JSValue.fromBool(!try self.looseEqualsJS(allocator, l, r)),
+        .add => {
+            const lp = try self.toPrimitive(l, .default);
+            defer lp.deinit();
+            const rp = try self.toPrimitive(r, .default);
+            defer rp.deinit();
+            if (try self.stringConcat(lp, rp)) |s| return s;
+            try rejectSymbolOperands(self, lp, rp);
+            if (try self.bigintArithmetic(op, lp, rp)) |n| return n;
+            return coercion.binaryOp(allocator, op, lp, rp);
+        },
+        .lt, .gt, .le, .ge => {
+            const lp = try self.toPrimitive(l, .number);
+            defer lp.deinit();
+            const rp = try self.toPrimitive(r, .number);
+            defer rp.deinit();
+            try rejectSymbolOperands(self, lp, rp);
+            return coercion.binaryOp(allocator, op, lp, rp);
+        },
+        else => {
+            const ln = try self.toNumericJS(l);
+            defer ln.deinit();
+            const rn = try self.toNumericJS(r);
+            defer rn.deinit();
+            if (try self.bigintArithmetic(op, ln, rn)) |n| return n;
+            return coercion.binaryOp(allocator, op, ln, rn);
+        },
+    }
+}
+
+fn rejectSymbolOperands(self: *Interpreter, a: JSValue, b: JSValue) anyerror!void {
+    if (a == .symbol or b == .symbol) {
+        return self.throwError(.type_error, "Cannot convert a Symbol value to a number", .{});
     }
 }
 

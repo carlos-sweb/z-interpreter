@@ -887,6 +887,7 @@ pub const Interpreter = struct {
     pub const isPrimitiveTag = interpreter_support.isPrimitiveTag;
     pub const toDisplayStringJS = interpreter_support.toDisplayStringJS;
     pub const toNumberJS = interpreter_support.toNumberJS;
+    pub const toNumericJS = interpreter_support.toNumericJS;
     pub const looseEqualsJS = interpreter_support.looseEqualsJS;
     pub const deletedFnProps = interpreter_support.deletedFnProps;
     pub const markFnPropDeleted = interpreter_support.markFnPropDeleted;

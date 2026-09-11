@@ -20,7 +20,7 @@ const arg = native_helpers.arg;
 const native = native_helpers.native;
 const installBuiltin = builtin_helpers.installBuiltin;
 
-const requireTag = builtin_helpers.requireTag;
+const requirePrimitive = builtin_helpers.requirePrimitive;
 const toIntSat = builtin_helpers.toIntSat;
 const toBigIntValue = builtin_helpers.toBigIntValue;
 
@@ -50,8 +50,10 @@ fn globalBigInt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     return toBigIntValue(self, allocator, a);
 }
 
+/// thisBigIntValue: a BigInt, or an `Object(1n)` wrapper unboxed to its
+/// BigInt -- same as requireNumber/requireBoolean/requireString.
 fn requireBigInt(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {
-    return requireTag(ctx, this_value, .bigint, "BigInt.prototype.{s} called on a non-BigInt", method);
+    return requirePrimitive(ctx, this_value, .bigint, "BigInt.prototype.{s} called on a non-BigInt", method);
 }
 
 /// `n.toString(radix?)` -- radix 2..36 (default 10), same contract as

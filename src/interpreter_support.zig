@@ -290,9 +290,12 @@ pub fn toPrimitive(self: *Interpreter, v: JSValue, hint: PrimitiveHint) anyerror
             }
             const hint_str = try self.gcNewString(@tagName(hint));
             defer hint_str.deinit();
+            // A call's result may be BORROWED: `return someVar` hands back
+            // the binding's own reference unretained (invokeFunctionNode
+            // returns the completion value as-is). Never deinit it; retain
+            // what we return. Worst case a fresh result lives until GC.
             const result = try self.callValue(exotic, v, &.{hint_str}, "[Symbol.toPrimitive]");
-            if (isPrimitiveTag(result)) return result;
-            result.deinit();
+            if (isPrimitiveTag(result)) return result.retain();
             return self.throwError(.type_error, "Cannot convert object to primitive value", .{});
         }
     }
@@ -308,9 +311,9 @@ pub fn ordinaryToPrimitive(self: *Interpreter, v: JSValue, hint: OrdinaryHint) a
         const method = try self.getProperty(v, method_name);
         defer method.deinit();
         if (method != .function and method != .proxy) continue;
+        // May be borrowed -- same ownership rule as in `toPrimitive`.
         const result = try self.callValue(method, v, &.{}, method_name);
-        if (isPrimitiveTag(result)) return result;
-        result.deinit();
+        if (isPrimitiveTag(result)) return result.retain();
     }
     return self.throwError(.type_error, "Cannot convert object to primitive value", .{});
 }
@@ -355,6 +358,19 @@ pub fn toNumberJS(self: *Interpreter, v: JSValue) anyerror!f64 {
         if (prim == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a number", .{});
         return try coercion.toNumber(prim);
     };
+}
+
+/// ECMA-262 7.1.3 ToNumeric: ToPrimitive (hint "number"), then a BigInt
+/// stays a BigInt and anything else goes through ToNumber (a Symbol is a
+/// TypeError). Always returns an owned `.number` or `.bigint`.
+pub fn toNumericJS(self: *Interpreter, v: JSValue) anyerror!JSValue {
+    if (v == .number) return v;
+    if (v == .bigint) return v.retain();
+    const prim = try toPrimitive(self, v, .number);
+    if (prim == .bigint) return prim;
+    defer prim.deinit();
+    if (prim == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a number", .{});
+    return JSValue.fromNumber(try coercion.toNumber(prim));
 }
 
 /// `coercion.looseEquals` plus a real-ToPrimitive fallback: ECMA-262
