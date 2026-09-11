@@ -167,6 +167,51 @@ test "values returned by reference from conversion methods survive repeated coer
     , "Symbol(x) 0aaa aaa s 1 symbol\n");
 }
 
+// Phase 3: ToPropertyKey -- object keys go through ToPrimitive(string).
+
+test "object keys are converted with ToPrimitive(string) everywhere a key is used" {
+    try helpers.expectStdout(
+        \\var log = [];
+        \\function K(t, s) { return { toString() { log.push(t); return s; }, valueOf() { log.push(t + ".vo"); return "V"; } }; }
+        \\var o = {}; o[K("a", "key")] = 1;
+        \\var r = [Object.keys(o).join(), ({ key: 5 })[K("b", "key")], K("c", "x") in { x: 1 }, [10, 20][K("d", "1")]];
+        \\var s = Symbol("s"); var o2 = {}; o2[{ toString() { return s; } }] = 2; r.push(o2[s]);
+        \\var o3 = {}; o3[{ toString: undefined, valueOf() { return "vv"; } }] = 3; r.push(Object.keys(o3).join());
+        \\r.push(Object.keys({ [K("f", "lit")]: 1 }).join());
+        \\var o4 = { key: 1 }; r.push(delete o4[K("g", "key")], Object.keys(o4).length);
+        \\console.log(r.join(","));
+        \\console.log(log.join(","));
+    , "key,5,true,20,2,vv,lit,true,0\na,b,c,d,f,g\n");
+}
+
+test "builtins taking a property key apply ToPropertyKey" {
+    try helpers.expectStdout(
+        \\var log = [];
+        \\function K(t, s) { return { toString() { log.push(t); return s; } }; }
+        \\var r = [];
+        \\var o = {}; Object.defineProperty(o, K("a", "d"), { value: 1, enumerable: true }); r.push(Object.keys(o).join());
+        \\r.push(({ h: 1 }).hasOwnProperty(K("b", "h")), Object.getOwnPropertyDescriptor({ g: 4 }, K("c", "g")).value, Reflect.get({ r: 6 }, K("d", "r")));
+        \\var a = [1, 2]; a[K("e", "0")] = 9; r.push(a.join(""));
+        \\var hints = []; var o5 = {}; o5[{ [Symbol.toPrimitive](h) { hints.push(h); return "p"; } }] = 1; r.push(hints.join(), Object.keys(o5).join());
+        \\console.log(r.join(","));
+        \\console.log(log.join(","));
+    , "d,true,4,6,92,string,p\na,b,c,d,e\n");
+}
+
+test "ToPropertyKey order and abrupt completions" {
+    try helpers.expectStdout(
+        \\var log = [];
+        \\function K(t, s) { return { toString() { log.push(t); return s; } }; }
+        \\var o = {}; o[K("k1", "key")] = (log.push("rhs1"), 1);
+        \\var o2 = { key: 1 }; o2[K("k2", "key")] += (log.push("rhs2"), 1);
+        \\var r = [o2.key];
+        \\try { var o3 = {}; o3[{ [Symbol.toPrimitive]() { throw new RangeError("K"); } }] = 1; } catch (e) { r.push(e.name); }
+        \\try { var o4 = {}; o4[{ toString() { return {}; }, valueOf() { return {}; } }] = 1; } catch (e) { r.push(e.name); }
+        \\console.log(r.join(","));
+        \\console.log(log.join(","));
+    , "2,RangeError,TypeError\nrhs1,k1,k2,rhs2,k2\n");
+}
+
 test "a throwing left operand stops before the right one is converted" {
     try helpers.expectStdout(
         \\var log = [];

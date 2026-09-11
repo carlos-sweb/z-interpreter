@@ -266,24 +266,31 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
     }
 }
 
-/// A property key that a symbol value can also produce. Symbols
-/// encode to a reserved `\x00S<ptr>` string (invisible to string
+/// ECMA-262 ToPropertyKey, encoded. An object key is first reduced with
+/// ToPrimitive (hint "string"), which may itself produce a symbol.
+/// Symbols encode to a reserved `\x00S<ptr>` string (invisible to string
 /// iteration; registered for getOwnPropertySymbols); everything else
 /// goes through ToString. Always returns a FRESH, caller-owned
 /// allocation (even for a symbol seen before) -- `self.symbol_keys`
 /// keeps its own independent copy as the map key, so the two owners
 /// never alias the same buffer.
 pub fn encodeKey(self: *Interpreter, value: JSValue) anyerror![]const u8 {
-    if (value == .symbol) {
-        const arena = self.gc_allocator;
-        const key = try std.fmt.allocPrint(arena, "\x00S{x}", .{@intFromPtr(value.symbol)});
-        if (!self.symbol_keys.contains(key)) {
-            const stored_key = try arena.dupe(u8, key);
-            try self.symbol_keys.put(arena, stored_key, value.retain());
-        }
-        return key;
+    if (value == .symbol) return encodeSymbolKey(self, value);
+    if (Interpreter.isPrimitiveTag(value)) return coercion.toDisplayString(self.gc_allocator, value);
+    const prim = try self.toPrimitive(value, .string);
+    defer prim.deinit();
+    if (prim == .symbol) return encodeSymbolKey(self, prim);
+    return coercion.toDisplayString(self.gc_allocator, prim);
+}
+
+fn encodeSymbolKey(self: *Interpreter, sym: JSValue) anyerror![]const u8 {
+    const arena = self.gc_allocator;
+    const key = try std.fmt.allocPrint(arena, "\x00S{x}", .{@intFromPtr(sym.symbol)});
+    if (!self.symbol_keys.contains(key)) {
+        const stored_key = try arena.dupe(u8, key);
+        try self.symbol_keys.put(arena, stored_key, sym.retain());
     }
-    return coercion.toDisplayString(self.gc_allocator, value);
+    return key;
 }
 
 /// True for the reserved symbol-key encoding -- these must stay
