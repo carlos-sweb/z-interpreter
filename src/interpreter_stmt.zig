@@ -48,6 +48,17 @@ pub fn deliver(self: *Interpreter, outcome: Outcome) anyerror!Completion {
     };
 }
 
+/// Releases an Outcome's owned JSValue payload (a completion's value,
+/// or a thrown exception) -- for a `try`/`finally` merge point about to
+/// discard/replace it. A no-op for break/continue (their value is
+/// always UNDEFINED).
+fn deinitOutcome(outcome: Outcome) void {
+    switch (outcome) {
+        .completion => |c| c.value.deinit(),
+        .thrown => |ex| ex.deinit(),
+    }
+}
+
 /// The raw statement loop -- no hoisting. Callers go through
 /// `evalBody` (function/script bodies: var + lexical pre-passes) or
 /// `evalStatementList` (blocks: lexical pre-pass only).
@@ -415,6 +426,12 @@ pub fn evalStatement(self: *Interpreter, env: *Environment, stmt: *zstatements.S
                 const h = s.handler.?;
                 const catch_env = try self.gcChildEnv(env);
                 if (h.param) |p| try self.bindPattern(catch_env, p, result.thrown, .define);
+                // bindPattern only BORROWS the exception (retains its
+                // own copy for the catch binding) -- the caught
+                // exception itself is now fully delivered (bound or,
+                // with no catch param, simply discarded per spec), and
+                // `result` is about to be replaced, so release it.
+                result.thrown.deinit();
                 // A throw from the catch body becomes the new .thrown
                 // result; the original exception is dropped
                 // (spec-correct).
@@ -431,9 +448,18 @@ pub fn evalStatement(self: *Interpreter, env: *Environment, stmt: *zstatements.S
                 const fin_outcome = try self.runCapturing(env, fin);
                 switch (fin_outcome) {
                     .completion => |fc| if (fc.type != .normal) {
+                        deinitOutcome(result);
+                        result = fin_outcome;
+                    } else {
+                        // Normal finally: `result` is kept as-is: only
+                        // the finalizer's own (unobserved) completion
+                        // value is discarded.
+                        fc.value.deinit();
+                    },
+                    .thrown => {
+                        deinitOutcome(result);
                         result = fin_outcome;
                     },
-                    .thrown => result = fin_outcome,
                 }
             }
 
