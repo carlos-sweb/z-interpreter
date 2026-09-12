@@ -208,7 +208,15 @@ const BindMode = enum { define, assign };
 /// this. Defaults are evaluated in `env` itself, so a later element's
 /// default can reference an earlier binding (`[a, b = a]` -- real
 /// spec order). Ownership: the caller keeps its reference to `value`;
-/// identifier bindings retain.
+/// identifier bindings retain. Tried making this a straight ownership
+/// TRANSFER instead (uniform-ownership-contract.md, Etapa 2) -- broke
+/// callers that pass native-call arguments through bindPattern (e.g.
+/// function parameters bound from `args[]`) and then free their OWN
+/// copy of those same arguments afterward, a widespread, pre-existing
+/// convention across builtins (confirmed: string_builtins.zig's
+/// replace callback explicitly `.deinit()`s every `call_args` entry
+/// after the call). Reverted -- the retain here is load-bearing, not
+/// redundant, given that wider convention.
 pub fn bindPattern(self: *Interpreter, env: *Environment, pattern: *const zstatements.BindingPattern, value: JSValue, mode: BindMode) anyerror!void {
     const arena = self.gc_allocator;
     switch (pattern.*) {

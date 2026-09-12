@@ -45,7 +45,10 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
         .boolean_literal => |b| return JSValue.fromBool(b),
         .null_literal => return JSValue.NULL,
         .identifier => |name| switch (env.lookup(name)) {
-            .value => |v| return v,
+            // Etapa 1 de uniform-ownership-contract.md: todo productor
+            // entrega una referencia propia -- antes esto devolvía la
+            // caja cruda del binding, sin retener (referencia PRESTADA).
+            .value => |v| return v.retain(),
             .tdz => return self.throwError(.reference_error, "Cannot access '{s}' before initialization", .{name}),
             .not_found => return self.throwError(.reference_error, "{s} is not defined", .{name}),
         },
@@ -63,6 +66,7 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                 try buf.appendSlice(arena, quasi);
                 if (i < t.expressions.len) {
                     const v = try self.evalExpression(env, t.expressions[i]);
+                    defer v.deinit();
                     const s = try self.toDisplayStringJS(arena, v);
                     defer arena.free(s);
                     try buf.appendSlice(arena, s);
@@ -79,6 +83,7 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                 };
                 if (el.data == .spread) {
                     const spread_val = try self.evalExpression(env, el.data.spread);
+                    defer spread_val.deinit();
                     const items = try self.iterableItems(spread_val);
                     defer arena.free(items);
                     for (items) |item| _ = try arr.array.value.push(item.retain());
@@ -127,6 +132,7 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                     },
                     .spread => |spread_node| {
                         const spread_val = try self.evalExpression(env, spread_node.data.spread);
+                        defer spread_val.deinit();
                         if (spread_val == .proxy) {
                             // ownKeys trap (or delegate) for the key
                             // list, `get` trap (or delegate) per key
@@ -160,10 +166,13 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
             // (that would be a ReferenceError); intercept on the node.
             if (b.op == .in and b.left.data == .identifier and b.left.data.identifier.len > 0 and b.left.data.identifier[0] == '#') {
                 const r = try self.evalExpression(env, b.right);
+                defer r.deinit();
                 return JSValue.fromBool(try self.privateHas(env, r, b.left.data.identifier));
             }
             const l = try self.evalExpression(env, b.left);
+            defer l.deinit();
             const r = try self.evalExpression(env, b.right);
+            defer r.deinit();
             // instanceof/in need the throw machinery and the prototype
             // chain, which coercion.zig doesn't have -- intercepted
             // here, never delegated.
@@ -175,15 +184,21 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
         },
         .logical => |l| {
             const left = try self.evalExpression(env, l.left);
-            return switch (l.op) {
-                .and_op => if (!coercion.isTruthy(left)) left else try self.evalExpression(env, l.right),
-                .or_op => if (coercion.isTruthy(left)) left else try self.evalExpression(env, l.right),
-                .nullish => if (left != .@"undefined" and left != .@"null") left else try self.evalExpression(env, l.right),
+            const take_right = switch (l.op) {
+                .and_op => coercion.isTruthy(left),
+                .or_op => !coercion.isTruthy(left),
+                .nullish => left == .@"undefined" or left == .@"null",
             };
+            if (!take_right) return left;
+            left.deinit();
+            return try self.evalExpression(env, l.right);
         },
         .assignment => |a| return self.evalAssignment(env, a),
         .conditional => |c| {
-            if (coercion.isTruthy(try self.evalExpression(env, c.test_expr))) return self.evalExpression(env, c.consequent);
+            const test_v = try self.evalExpression(env, c.test_expr);
+            const truthy = coercion.isTruthy(test_v);
+            test_v.deinit();
+            if (truthy) return self.evalExpression(env, c.consequent);
             return self.evalExpression(env, c.alternate);
         },
         .call => |c| return self.evalCall(env, c),
@@ -202,6 +217,7 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                 // below (a fixed snapshot). Checked first since the two
                 // are mutually exclusive.
                 if (env.resolveSuperHome()) |home| {
+                    defer home.deinit();
                     const p = home.object.value.getPrototype();
                     const sproto: JSValue = if (p) |pp| blk: {
                         const Box = @TypeOf(home.object.*);
@@ -213,6 +229,7 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                 }
                 const sproto = env.resolveSuperProto() orelse
                     return self.throwError(.syntax_error, "'super' keyword unexpected here", .{});
+                defer sproto.deinit();
                 return try self.getProperty(sproto, pk.key);
             }
             const obj = try self.evalExpression(env, m.object);
@@ -318,15 +335,12 @@ pub const PropKey = struct {
 
 pub fn memberKeyString(self: *Interpreter, env: *Environment, m: anytype) anyerror!PropKey {
     if (m.computed) {
-        // NOT `defer k.deinit()`: evalExpression's ownership isn't
-        // uniform -- an `.identifier` read returns the binding's
-        // value BORROWED (env.lookup's `.value` case, no retain;
-        // see evalExpression's own `.identifier` arm), while other
-        // node kinds (literals, calls, getProperty reads) return an
-        // owned value. Releasing unconditionally here double-frees
-        // the extremely common `obj[someVar]` case (refcount
-        // underflow, confirmed via Test262 nested for-in crash).
+        // Etapa 1 de uniform-ownership-contract.md made evalExpression
+        // uniformly owned (including `.identifier`), so this is now
+        // safe -- previously NOT deiniting `k` was the workaround for
+        // exactly the non-uniformity that migration fixed at the root.
         const k = try self.evalExpression(env, m.property);
+        defer k.deinit();
         return .{ .key = try self.encodeKey(k), .owned = true };
     }
     return switch (m.property.data) {
@@ -335,10 +349,11 @@ pub fn memberKeyString(self: *Interpreter, env: *Environment, m: anytype) anyerr
     };
 }
 
-/// Same borrowed/owned contract as `memberKeyString`.
+/// Same ownership contract as `memberKeyString` (see its comment).
 pub fn propertyKeyString(self: *Interpreter, env: *Environment, computed: bool, key: *zparser.Node) anyerror!PropKey {
     if (computed) {
         const v = try self.evalExpression(env, key);
+        defer v.deinit();
         return .{ .key = try self.encodeKey(v), .owned = true };
     }
     return switch (key.data) {
@@ -456,9 +471,15 @@ pub fn evalIn(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
 
 pub fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSValue {
     switch (u.op) {
-        .not => return JSValue.fromBool(!coercion.isTruthy(try self.evalExpression(env, u.operand))),
+        .not => {
+            const v = try self.evalExpression(env, u.operand);
+            defer v.deinit();
+            return JSValue.fromBool(!coercion.isTruthy(v));
+        },
         .minus => {
-            const n = try self.toNumericJS(try self.evalExpression(env, u.operand));
+            const v = try self.evalExpression(env, u.operand);
+            defer v.deinit();
+            const n = try self.toNumericJS(v);
             if (n == .bigint) {
                 defer n.deinit();
                 return try self.gcNewBigIntValue(try n.bigint.value.negate());
@@ -473,6 +494,7 @@ pub fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSV
             // coercion.toNumber (which intentionally allows the
             // explicit-conversion case).
             const v = try self.evalExpression(env, u.operand);
+            defer v.deinit();
             if (v == .bigint) return self.throwError(.type_error, "Cannot convert a BigInt value to a number", .{});
             return JSValue.fromNumber(try self.toNumberJS(v));
         },
@@ -480,7 +502,11 @@ pub fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSV
             // typeof on an undeclared identifier is "undefined", not a
             // ReferenceError -- a real, deliberate spec quirk. But a
             // TDZ binding still throws (`typeof x; let x;` is the real
-            // ReferenceError).
+            // ReferenceError). Bypasses evalExpression's `.identifier`
+            // case on purpose (undeclared must not throw here), so `v`
+            // here is `env.lookup`'s own raw result -- still genuinely
+            // BORROWED (Etapa 1 only retained at the evalExpression call
+            // site, not inside `lookup` itself) -- do not deinit it.
             if (u.operand.data == .identifier) {
                 const name = u.operand.data.identifier;
                 switch (env.lookup(name)) {
@@ -490,14 +516,17 @@ pub fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSV
                 }
             }
             const v = try self.evalExpression(env, u.operand);
+            defer v.deinit();
             return try self.gcNewString(v.typeOf());
         },
         .void_op => {
-            _ = try self.evalExpression(env, u.operand);
+            (try self.evalExpression(env, u.operand)).deinit();
             return JSValue.UNDEFINED;
         },
         .pre_inc, .pre_dec => {
-            const old_num = try self.toNumericJS(try self.evalExpression(env, u.operand));
+            const v = try self.evalExpression(env, u.operand);
+            defer v.deinit();
+            const old_num = try self.toNumericJS(v);
             defer old_num.deinit();
             const new_val = try self.incDecOne(old_num, u.op == .pre_inc);
             try self.assignTo(env, u.operand, new_val);
@@ -505,6 +534,7 @@ pub fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSV
         },
         .post_inc, .post_dec => {
             const old = try self.evalExpression(env, u.operand);
+            defer old.deinit();
             // ToNumeric exactly once: the conversion (e.g. a user
             // valueOf) is observable, and its result is both the
             // increment's input and the expression's value.
@@ -514,14 +544,12 @@ pub fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSV
             // Real spec: the EXPRESSION's value is `old` already
             // ToNumeric'd, not the raw pre-coercion operand (e.g.
             // `let x = "1"; x++` evaluates to the number 1, not the
-            // string "1"). For bigint, a fresh independently-owned
-            // box holding the same value -- `old`'s own box's
-            // ownership (borrowed vs retained) depends on what kind
-            // of expression `u.operand` was, same pre-existing
-            // non-uniformity `evalExpression` has everywhere else in
-            // this engine, so it's left untouched rather than
-            // guessed at; this returns a value of its own instead of
-            // trying to share `old`'s.
+            // string "1"). `old_num` is always independently owned now
+            // (toNumericJS's own contract, Etapa 1): either a fresh
+            // number/bigint clone, or `old` itself when `old` was
+            // already `.number` (harmless alias -- numbers aren't
+            // refcounted, so `old`'s own `defer .deinit()` above is a
+            // no-op either way).
             if (old_num == .bigint) {
                 defer old_num.deinit();
                 return try self.gcNewBigIntValue(try old_num.bigint.value.clone());
@@ -529,7 +557,9 @@ pub fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSV
             return old_num;
         },
         .bitnot => {
-            const n = try self.toNumericJS(try self.evalExpression(env, u.operand));
+            const v = try self.evalExpression(env, u.operand);
+            defer v.deinit();
+            const n = try self.toNumericJS(v);
             if (n == .bigint) {
                 defer n.deinit();
                 return try self.gcNewBigIntValue(try zbigint.ZBigInt.not(self.gc_allocator, n.bigint.value));
@@ -551,11 +581,12 @@ pub fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSV
                     return self.throwError(.syntax_error, "Private fields can not be deleted: {s}", .{pn});
                 }
                 const obj = try self.evalExpression(env, m.object);
+                defer obj.deinit();
                 const pk = try self.memberKeyString(env, m);
                 defer pk.free(self.gc_allocator);
                 return JSValue.fromBool(try self.deletePropertyOnValue(obj, pk.key));
             }
-            _ = try self.evalExpression(env, u.operand);
+            (try self.evalExpression(env, u.operand)).deinit();
             return JSValue.fromBool(true);
         },
     }
@@ -590,13 +621,16 @@ pub fn evalAssignment(self: *Interpreter, env: *Environment, a: anytype) anyerro
                 else => unreachable,
             };
             if (!should_assign) return current;
+            current.deinit();
             const value = try self.evalExpression(env, a.value);
             try self.assignTo(env, a.target, value);
             return value;
         },
         else => {
             const current = try self.evalExpression(env, a.target);
+            defer current.deinit();
             const rhs = try self.evalExpression(env, a.value);
+            defer rhs.deinit();
             const result = try applyBinaryOp(self, compoundToBinary(a.op), current, rhs);
             try self.assignTo(env, a.target, result);
             return result;
@@ -683,19 +717,24 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
     if (c.callee.data == .super_expr) {
         const sctor = env.resolveSuperCtor() orelse
             return self.throwError(.syntax_error, "'super' keyword unexpected here", .{});
+        defer sctor.deinit();
         const args = try self.evalArgs(env, c.args);
         defer self.gc_allocator.free(args);
         const prev_target = self.construct_target;
         self.construct_target = sctor.function.value.ctx;
         defer self.construct_target = prev_target;
-        const result = try sctor.function.value.call(sctor.function.value.ctx, arena, env.resolveThis(), args);
+        const this_v = env.resolveThis();
+        defer this_v.deinit();
+        const result = try sctor.function.value.call(sctor.function.value.ctx, arena, this_v, args);
         // The derived class's own instance fields initialize exactly
         // when super() returns (spec order: parent fields ran during
         // the parent ctor; own fields now; rest of the body after).
         if (self.pending_field_init) |p| {
             self.pending_field_init = null;
             const pc: *ClassCtx = @ptrCast(@alignCast(p));
-            try self.runInstanceFields(pc, env.resolveThis());
+            const this_v2 = env.resolveThis();
+            defer this_v2.deinit();
+            try self.runInstanceFields(pc, this_v2);
         }
         return result;
     }
@@ -712,6 +751,7 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
         // enclosing `this`, not the prototype.
         const sproto: JSValue = blk: {
             if (env.resolveSuperHome()) |home| {
+                defer home.deinit();
                 const p = home.object.value.getPrototype();
                 break :blk if (p) |pp| inner: {
                     const Box = @TypeOf(home.object.*);
@@ -719,24 +759,33 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
                     break :inner (JSValue{ .object = box }).retain();
                 } else JSValue.NULL;
             }
-            break :blk (env.resolveSuperProto() orelse
-                return self.throwError(.syntax_error, "'super' keyword unexpected here", .{})).retain();
+            // resolveSuperProto already returns an owned reference
+            // (Etapa 1) -- no extra .retain() needed here anymore.
+            break :blk env.resolveSuperProto() orelse
+                return self.throwError(.syntax_error, "'super' keyword unexpected here", .{});
         };
         defer sproto.deinit();
         const method = try self.getProperty(sproto, pk.key);
+        defer method.deinit();
         if (method != .function) {
             return self.throwError(.type_error, "(intermediate value).{s} is not a function", .{pk.key});
         }
         const args = try self.evalArgs(env, c.args);
         defer self.gc_allocator.free(args);
-        return try method.function.value.call(method.function.value.ctx, arena, env.resolveThis(), args);
+        const this_v = env.resolveThis();
+        defer this_v.deinit();
+        return try method.function.value.call(method.function.value.ctx, arena, this_v, args);
     }
     var this_value: JSValue = JSValue.UNDEFINED;
+    defer this_value.deinit();
     var callee_val: JSValue = undefined;
     if (c.callee.data == .member) {
         const m = c.callee.data.member;
         const obj = try self.evalExpression(env, m.object);
-        if (m.optional and (obj == .@"undefined" or obj == .@"null")) return JSValue.UNDEFINED;
+        if (m.optional and (obj == .@"undefined" or obj == .@"null")) {
+            obj.deinit();
+            return JSValue.UNDEFINED;
+        }
         this_value = obj;
         if (privateMemberName(m)) |pn| {
             // `this.#m(args)` -- private method/field call, `this`
@@ -750,6 +799,7 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
     } else {
         callee_val = try self.evalExpression(env, c.callee);
     }
+    defer callee_val.deinit();
     if (c.optional and (callee_val == .@"undefined" or callee_val == .@"null")) return JSValue.UNDEFINED;
     // Best-effort callee name for the "is not a function" message --
     // no expression printer, just the two cheap cases. Needed both

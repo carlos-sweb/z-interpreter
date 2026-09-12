@@ -56,6 +56,10 @@ pub fn evalProgram(self: *Interpreter, env: *Environment, program: []const *zsta
     for (program) |stmt| {
         const c = try self.evalStatement(env, stmt);
         if (c.type != .normal) return c;
+        // Etapa 2 de uniform-ownership-contract.md: solo la última
+        // sentencia sobrevive; cada valor anterior es una referencia
+        // propia (garantizado por la Etapa 1) que nadie más liberará.
+        last_value.deinit();
         last_value = c.value;
     }
     return .{ .type = .normal, .value = last_value };
@@ -322,7 +326,9 @@ pub fn evalStatement(self: *Interpreter, env: *Environment, stmt: *zstatements.S
         },
         .if_stmt => |s| {
             const test_v = try self.evalExpression(env, s.test_expr);
-            if (coercion.isTruthy(test_v)) return self.evalStatement(env, s.consequent);
+            const truthy = coercion.isTruthy(test_v);
+            test_v.deinit();
+            if (truthy) return self.evalStatement(env, s.consequent);
             if (s.alternate) |alt| return self.evalStatement(env, alt);
             return .{};
         },
@@ -441,6 +447,7 @@ pub fn evalStatement(self: *Interpreter, env: *Environment, stmt: *zstatements.S
         // when the match came before it (real JS semantics).
         .switch_stmt => |s| {
             const disc = try self.evalExpression(env, s.discriminant); // evaluated ONCE
+            defer disc.deinit();
             // The whole CaseBlock is ONE lexical scope (a let in one
             // case is visible in later ones -- real JS quirk), so the
             // lexical pre-pass runs over every case's consequent
@@ -452,6 +459,7 @@ pub fn evalStatement(self: *Interpreter, env: *Environment, stmt: *zstatements.S
             for (s.cases, 0..) |case, i| {
                 const t = case.test_expr orelse continue;
                 const v = try self.evalExpression(switch_env, t);
+                defer v.deinit();
                 if (zvalue.equality.strictEquals(disc, v)) {
                     start_index = i;
                     break;
@@ -472,7 +480,10 @@ pub fn evalStatement(self: *Interpreter, env: *Environment, stmt: *zstatements.S
                     for (case.consequent) |case_stmt| {
                         const c = try self.evalStatement(switch_env, case_stmt);
                         switch (c.type) {
-                            .normal => last_value = c.value,
+                            .normal => {
+                                last_value.deinit();
+                                last_value = c.value;
+                            },
                             .break_completion => {
                                 if (c.target == null) return .{ .type = .normal, .value = last_value };
                                 return c; // labelled break: handled by the labelled wrapper/loop
@@ -500,8 +511,14 @@ pub fn loopOwns(target: ?[]const u8, labels: []const []const u8) bool {
     return labelIn(t, labels);
 }
 
+fn evalTruthy(self: *Interpreter, env: *Environment, expr: anytype) anyerror!bool {
+    const v = try self.evalExpression(env, expr);
+    defer v.deinit();
+    return coercion.isTruthy(v);
+}
+
 pub fn evalWhile(self: *Interpreter, env: *Environment, s: anytype, labels: []const []const u8) anyerror!Completion {
-    while (coercion.isTruthy(try self.evalExpression(env, s.test_expr))) {
+    while (try evalTruthy(self, env, s.test_expr)) {
         const c = try self.evalStatement(env, s.body);
         switch (c.type) {
             .break_completion => {
@@ -512,7 +529,7 @@ pub fn evalWhile(self: *Interpreter, env: *Environment, s: anytype, labels: []co
                 if (!loopOwns(c.target, labels)) return c;
             },
             .return_completion => return c,
-            .normal => {},
+            .normal => c.value.deinit(),
         }
     }
     return .{};
@@ -530,9 +547,9 @@ pub fn evalDoWhile(self: *Interpreter, env: *Environment, s: anytype, labels: []
                 if (!loopOwns(c.target, labels)) return c;
             },
             .return_completion => return c,
-            .normal => {},
+            .normal => c.value.deinit(),
         }
-        if (!coercion.isTruthy(try self.evalExpression(env, s.test_expr))) break;
+        if (!try evalTruthy(self, env, s.test_expr)) break;
     }
     return .{};
 }
@@ -553,12 +570,12 @@ pub fn evalForStatement(self: *Interpreter, env: *Environment, s: anytype, label
                             try self.bindPattern(loop_env, decl.pattern, value, if (d.kind == .@"var") .assign else .define);
                         }
                     },
-                    .expr => |e| _ = try self.evalExpression(loop_env, e),
+                    .expr => |e| (try self.evalExpression(loop_env, e)).deinit(),
                 }
             }
             while (true) {
                 if (head.test_expr) |t| {
-                    if (!coercion.isTruthy(try self.evalExpression(loop_env, t))) break;
+                    if (!try evalTruthy(self, loop_env, t)) break;
                 }
                 const c = try self.evalStatement(loop_env, s.body);
                 switch (c.type) {
@@ -570,9 +587,9 @@ pub fn evalForStatement(self: *Interpreter, env: *Environment, s: anytype, label
                         if (!loopOwns(c.target, labels)) return c;
                     },
                     .return_completion => return c,
-                    .normal => {},
+                    .normal => c.value.deinit(),
                 }
-                if (head.update) |u| _ = try self.evalExpression(loop_env, u);
+                if (head.update) |u| (try self.evalExpression(loop_env, u)).deinit();
             }
             return .{};
         },

@@ -133,7 +133,10 @@ pub const Environment = struct {
     pub fn resolveThis(self: *Environment) JSValue {
         var env: ?*Environment = self;
         while (env) |e| : (env = e.parent) {
-            if (e.this_value) |v| return v;
+            // Etapa 1 de uniform-ownership-contract.md: todo productor
+            // entrega una referencia propia (antes prestaba `this_value`
+            // crudo).
+            if (e.this_value) |v| return v.retain();
         }
         return JSValue.UNDEFINED;
     }
@@ -143,7 +146,9 @@ pub const Environment = struct {
     pub fn resolveSuperProto(self: *Environment) ?JSValue {
         var env: ?*Environment = self;
         while (env) |e| : (env = e.parent) {
-            if (e.super_proto) |v| return v;
+            // Etapa 1 de uniform-ownership-contract.md: mismo tratamiento
+            // que resolveThis.
+            if (e.super_proto) |v| return v.retain();
         }
         return null;
     }
@@ -157,7 +162,7 @@ pub const Environment = struct {
     pub fn resolveSuperHome(self: *Environment) ?JSValue {
         var env: ?*Environment = self;
         while (env) |e| : (env = e.parent) {
-            if (e.home_object) |v| return v;
+            if (e.home_object) |v| return v.retain();
         }
         return null;
     }
@@ -177,7 +182,7 @@ pub const Environment = struct {
     pub fn resolveSuperCtor(self: *Environment) ?JSValue {
         var env: ?*Environment = self;
         while (env) |e| : (env = e.parent) {
-            if (e.super_ctor) |v| return v;
+            if (e.super_ctor) |v| return v.retain();
         }
         return null;
     }

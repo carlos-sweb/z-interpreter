@@ -92,7 +92,7 @@ fn generatorNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     const self = fs.interp;
     if (fs.fiber.finished) return iterResult(self, JSValue.UNDEFINED, true);
 
-    fs.resume_value = if (args.len > 0) args[0] else JSValue.UNDEFINED;
+    fs.resume_value = if (args.len > 0) args[0].retain() else JSValue.UNDEFINED;
     fs.resume_is_throw = false;
     fs.yielded = null;
     try self.resumeFiber(fs);
@@ -125,8 +125,12 @@ fn asyncGeneratorNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     if (fs.fiber.finished) return self.fulfilledPromise(try iterResult(self, JSValue.UNDEFINED, true));
 
     const p = try self.gcNewPromise();
-    fs.pending_result_promise = p;
-    fs.resume_value = if (args.len > 0) args[0] else JSValue.UNDEFINED;
+    // `fs` keeps its own reference (settled later from inside
+    // resumeFiber) and this call ALSO returns `p` as its own owned
+    // result -- same double-ownership shape as runAsyncFunction's
+    // `fs.promise`/promiseConstructor's `cap.promise`.
+    fs.pending_result_promise = p.retain();
+    fs.resume_value = if (args.len > 0) args[0].retain() else JSValue.UNDEFINED;
     fs.resume_is_throw = false;
     try self.resumeFiber(fs);
     return p;
@@ -148,7 +152,7 @@ fn awaitOnFulfilled(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     _ = allocator;
     _ = this_value;
     const fs: *FiberState = @ptrCast(@alignCast(ctx));
-    fs.resume_value = if (args.len > 0) args[0] else JSValue.UNDEFINED;
+    fs.resume_value = if (args.len > 0) args[0].retain() else JSValue.UNDEFINED;
     fs.resume_is_throw = false;
     try fs.interp.resumeFiber(fs);
     return JSValue.UNDEFINED;
@@ -158,7 +162,7 @@ fn awaitOnRejected(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     _ = allocator;
     _ = this_value;
     const fs: *FiberState = @ptrCast(@alignCast(ctx));
-    fs.resume_value = if (args.len > 0) args[0] else JSValue.UNDEFINED;
+    fs.resume_value = if (args.len > 0) args[0].retain() else JSValue.UNDEFINED;
     fs.resume_is_throw = true;
     try fs.interp.resumeFiber(fs);
     return JSValue.UNDEFINED;
@@ -184,7 +188,7 @@ pub fn run(self: *Interpreter, source: []const u8) anyerror!JSValue {
         // unlike runModule(), so there's no module-vs-script ambiguity
         // to resolve here at all. Confirmed against real Node this was
         // simply missing (this === undefined before this fix).
-        self.script_env.?.this_value = self.global_object;
+        if (self.global_object) |go| self.script_env.?.this_value = go.retain();
     }
     if (self.global_var_env == null) self.global_var_env = self.script_env;
     // AST nodes stay on the arena (immutable, bulk-freed with the
@@ -337,7 +341,10 @@ pub fn subscribePromise(self: *Interpreter, p: JSValue, on_fulfilled: ?JSValue, 
         .handler = if (settled.state == .fulfilled) on_fulfilled else on_rejected,
         .argument = settled.result,
         .rejected = settled.state == .rejected,
-        .derived = derived,
+        // Same double-ownership shape as the pending branch above
+        // (which already retains): `derived` is also promiseThen's own
+        // return value, so this job needs its own copy too.
+        .derived = if (derived) |d| d.retain() else null,
     });
 }
 
@@ -446,7 +453,7 @@ pub fn makeGeneratorObject(self: *Interpreter, fnode: *zfunctions.FunctionNode, 
         .fiber = undefined,
         .fnode = fnode,
         .closure_env = closure_env,
-        .this_value = this_value,
+        .this_value = if (this_value) |tv| tv.retain() else null,
         .private_ctx = private_ctx,
         .args = try arena.dupe(JSValue, args),
     };
@@ -478,7 +485,7 @@ pub fn runAsyncFunction(self: *Interpreter, fnode: *zfunctions.FunctionNode, clo
         .fiber = undefined,
         .fnode = fnode,
         .closure_env = closure_env,
-        .this_value = this_value,
+        .this_value = if (this_value) |tv| tv.retain() else null,
         .private_ctx = private_ctx,
         .args = try arena.dupe(JSValue, args),
         .promise = try self.gcNewPromise(),
@@ -486,7 +493,14 @@ pub fn runAsyncFunction(self: *Interpreter, fnode: *zfunctions.FunctionNode, clo
     fs.fiber = try fiber_mod.Fiber.init(arena, fiberEntry, fs);
     try self.gcTrackFiberState(fs);
     try self.resumeFiber(fs);
-    return fs.promise.?;
+    // `fs` keeps its own reference (used later by resolvePromise/
+    // rejectPromiseValue when the body settles) -- the caller gets an
+    // independent one. Before uniform-ownership-contract.md's Etapa 1,
+    // this call's result was implicitly borrowed by convention (nobody
+    // freed a discarded call result), so aliasing the same box was
+    // invisible; now that discarded values are freed, this needs its
+    // own copy like every other "producer" in the migration.
+    return fs.promise.?.retain();
 }
 
 /// Calling `async function*`/`async *method(){}` builds an async
@@ -506,7 +520,7 @@ pub fn makeAsyncGeneratorObject(self: *Interpreter, fnode: *zfunctions.FunctionN
         .fiber = undefined,
         .fnode = fnode,
         .closure_env = closure_env,
-        .this_value = this_value,
+        .this_value = if (this_value) |tv| tv.retain() else null,
         .private_ctx = private_ctx,
         .args = try arena.dupe(JSValue, args),
     };

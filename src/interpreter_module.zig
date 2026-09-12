@@ -114,7 +114,9 @@ pub fn loadModule(self: *Interpreter, specifier: []const u8, referrer: ?[]const 
                 break;
             }
         }
-        if (!has_module_syntax) module_env.this_value = self.global_object;
+        if (!has_module_syntax) {
+            if (self.global_object) |go| module_env.this_value = go.retain();
+        }
     }
 
     // Import pre-pass: dependencies evaluate first (DFS), then their

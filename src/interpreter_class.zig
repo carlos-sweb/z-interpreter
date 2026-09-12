@@ -150,7 +150,11 @@ pub fn makeClosure(self: *Interpreter, env: *Environment, fnode: *zfunctions.Fun
 pub fn makeMethodClosure(self: *Interpreter, env: *Environment, fnode: *zfunctions.FunctionNode, super_proto: ?JSValue, private_ctx: ?*anyopaque) anyerror!JSValue {
     const v = try self.makeClosure(env, fnode);
     const cc: *ClosureCtx = @ptrCast(@alignCast(v.function.value.ctx));
-    cc.super_proto = super_proto;
+    // Etapa 2 de uniform-ownership-contract.md: ClosureCtx lives as
+    // long as the function value itself, same "no dedicated release"
+    // shape as Environment's this_value/super_proto -- needs its own
+    // retained copy now that a discarded value can actually be freed.
+    if (super_proto) |sp| cc.super_proto = sp.retain();
     cc.private_ctx = private_ctx;
     return v;
 }
@@ -165,7 +169,7 @@ pub fn makeMethodClosure(self: *Interpreter, env: *Environment, fnode: *zfunctio
 pub fn makeObjectMethodClosure(self: *Interpreter, env: *Environment, fnode: *zfunctions.FunctionNode, home: JSValue) anyerror!JSValue {
     const v = try self.makeClosure(env, fnode);
     const cc: *ClosureCtx = @ptrCast(@alignCast(v.function.value.ctx));
-    cc.home_object = home;
+    cc.home_object = home.retain();
     return v;
 }
 
@@ -279,8 +283,15 @@ pub fn runInstanceFields(self: *Interpreter, cctx: *ClassCtx, instance: JSValue)
     if (cctx.instance_fields.len == 0) return;
     if (instance != .object) return; // exotic `this` -- nothing to define on
     const field_env = try self.gcChildEnv(cctx.closure_env);
-    field_env.this_value = instance;
-    field_env.super_proto = cctx.super_proto;
+    // Etapa 2 de uniform-ownership-contract.md: Environment.this_value/
+    // super_proto are plain JSValue fields with no release mechanism of
+    // their own (they live until the whole Environment is torn down at
+    // interpreter teardown) -- since a discarded value can now actually
+    // be freed elsewhere (Etapa 1+2), storing a borrowed alias here is
+    // no longer safe. Retain a copy, matching the "consumer keeps its
+    // own reference" convention every other storage site already uses.
+    field_env.this_value = instance.retain();
+    if (cctx.super_proto) |sp| field_env.super_proto = sp.retain();
     field_env.private_ctx = cctx;
     for (cctx.instance_fields) |fd| {
         const v = if (fd.value) |vexpr| try self.evalExpression(field_env, vexpr) else JSValue.UNDEFINED;
@@ -367,8 +378,11 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
         .ctor_fnode = ctor_fnode,
         .closure_env = closure_env,
         .name = cnode.name orelse "",
-        .super_ctor = super_ctor,
-        .super_proto = super_proto,
+        // Etapa 2 de uniform-ownership-contract.md: ClassCtx lives as
+        // long as the class function itself -- its own retained copy,
+        // same reasoning as ClosureCtx/Environment's fields above.
+        .super_ctor = if (super_ctor) |sc| sc.retain() else null,
+        .super_proto = if (super_proto) |sp| sp.retain() else null,
     };
     try self.gcTrackClassCtx(cctx);
     const class_fn = try self.gcNewFunction(.{
@@ -417,18 +431,22 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
             .computed => |expr| blk: {
                 // encodeKey handles BOTH symbols (`[Symbol.iterator]`,
                 // encoded like any symbol-keyed property) and ordinary
-                // values (ToPropertyKey string form). Neither `kv` nor
-                // the encoded key itself is freed here: evalExpression's
-                // ownership isn't uniform (an `.identifier` read is
-                // BORROWED, no retain -- see memberKeyString's doc
-                // comment for the Test262-confirmed crash this caused
-                // once already), and the encoded key must outlive this
-                // loop iteration anyway (stored in `instance_fields`
-                // for per-construction use; freeGarbageNode's
-                // `.class_ctx` case only frees the array, not each
-                // key's content -- documented residual gap, narrow/
-                // one-time-per-class, not chased further here).
+                // values (ToPropertyKey string form). `kv` itself is
+                // disposed once encoded (uniform ownership since
+                // uniform-ownership-contract.md's Etapa 1 -- previously
+                // left un-freed as a workaround for the non-uniformity
+                // that migration fixed at the root; see
+                // memberKeyString's comment for the Test262 crash this
+                // once caused). The ENCODED key string still must
+                // outlive this loop iteration (stored in
+                // `instance_fields` for per-construction use;
+                // freeGarbageNode's `.class_ctx` case only frees the
+                // array, not each key's content -- documented residual
+                // gap, narrow/one-time-per-class, not chased further
+                // here) -- that part is unrelated to `kv`'s own
+                // lifetime and stays as-is.
                 const kv = try self.evalExpression(closure_env, expr);
+                defer kv.deinit();
                 break :blk try self.encodeKey(kv);
             },
         };
@@ -451,8 +469,10 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
                 // Static fields initialize at DEFINITION time, in
                 // order, with this = the class function.
                 const field_env = try self.gcChildEnv(closure_env);
-                field_env.this_value = class_fn;
-                field_env.super_proto = super_proto;
+                // Etapa 2 de uniform-ownership-contract.md -- ver el
+                // mismo comentario en runInstanceFields.
+                field_env.this_value = class_fn.retain();
+                if (super_proto) |sp| field_env.super_proto = sp.retain();
                 field_env.private_ctx = cctx;
                 const v = if (el.value) |vexpr| try self.evalExpression(field_env, vexpr) else JSValue.UNDEFINED;
                 // NamedEvaluation: `class C { static x = AnonFn }` names
@@ -528,11 +548,18 @@ pub fn invokeFunctionNode(
     home_object: ?JSValue,
 ) anyerror!JSValue {
     const call_env = try self.gcChildEnv(closure_env);
-    if (this_value) |tv| call_env.this_value = tv;
-    call_env.super_proto = super_proto;
-    call_env.super_ctor = super_ctor;
+    // Etapa 2 de uniform-ownership-contract.md: estos 4 campos son
+    // JSValue planos sin mecanismo de liberación propio (viven hasta
+    // que el Environment entero se destruye en el teardown del
+    // intérprete) -- antes era seguro guardarlos sin retener porque
+    // nada liberaba un valor descartado; ahora sí, así que cada
+    // call_env necesita su propia copia retenida (mismo patrón que
+    // cualquier otro sitio de guardado del motor).
+    if (this_value) |tv| call_env.this_value = tv.retain();
+    if (super_proto) |sp| call_env.super_proto = sp.retain();
+    if (super_ctor) |sc| call_env.super_ctor = sc.retain();
     call_env.private_ctx = private_ctx;
-    call_env.home_object = home_object;
+    if (home_object) |ho| call_env.home_object = ho.retain();
 
     // `arguments`: every non-arrow call gets one (arrows inherit the
     // enclosing function's via the scope chain -- no binding here).

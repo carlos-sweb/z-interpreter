@@ -71,7 +71,12 @@ fn promiseConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     const p = try interp(ctx).gcNewPromise();
 
     const cap = try allocator.create(PromiseCapCtx);
-    cap.* = .{ .interp = self, .promise = p };
+    // `cap` outlives this call (used later by capResolve/capReject) and
+    // `p` is ALSO returned as this constructor's own result -- each
+    // needs its own reference now that a discarded/superseded value can
+    // actually be freed (uniform-ownership-contract.md's Etapa 1+2;
+    // same bug shape as runAsyncFunction's `fs.promise`).
+    cap.* = .{ .interp = self, .promise = p.retain() };
     try self.gcTrackPromiseCapCtx(cap);
     const resolve_fn = try interp(ctx).gcNewFunction(.{ .ctx = cap, .name = "resolve", .arity = 1, .call = capResolve });
     const reject_fn = try interp(ctx).gcNewFunction(.{ .ctx = cap, .name = "reject", .arity = 1, .call = capReject });
@@ -219,7 +224,10 @@ fn promiseAll(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
         .interp = self,
         .remaining = items.len,
         .results = try allocator.alloc(JSValue, items.len),
-        .derived = derived,
+        // `all` outlives this call and `derived` is ALSO this
+        // function's own return value -- same double-ownership shape
+        // as promiseConstructor's `cap.promise`/promiseRace's `rc.derived`.
+        .derived = derived.retain(),
     };
     try self.gcTrackAllCtx(all);
     for (all.results) |*r| r.* = JSValue.UNDEFINED;
@@ -271,7 +279,7 @@ fn promiseRace(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
 
     const derived = try interp(ctx).gcNewPromise();
     const rc = try allocator.create(RaceCtx);
-    rc.* = .{ .interp = self, .derived = derived };
+    rc.* = .{ .interp = self, .derived = derived.retain() };
     try self.gcTrackRaceCtx(rc);
     const on_f = try interp(ctx).gcNewFunction(.{ .ctx = rc, .name = "", .call = raceFulfilled });
     const on_r = try interp(ctx).gcNewFunction(.{ .ctx = rc, .name = "", .call = raceRejected });
