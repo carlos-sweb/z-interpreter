@@ -309,24 +309,20 @@ pub fn ordinaryToPrimitive(self: *Interpreter, v: JSValue, hint: OrdinaryHint) a
     const order: [2][]const u8 = if (hint == .string) .{ "toString", "valueOf" } else .{ "valueOf", "toString" };
     for (order) |method_name| {
         const method = try self.getProperty(v, method_name);
-        // NOT `defer method.deinit()`: getProperty's ownership isn't
-        // uniform -- a data property gives a fresh retained reference,
-        // but an ACCESSOR property returns whatever its getter's `return`
-        // produced, which (same non-uniform contract as evalExpression's
-        // `.identifier` case) can be a value BORROWED from a closure's
-        // own captured variable. Test262 exposed this concretely: a
-        // getter shared across many property reads that always
-        // `return`s the SAME outer-scoped function value -- deinit'ing
-        // that "fresh-looking" result here drove its real refcount to 0
-        // while the outer closure still held it, a real
-        // Rc.decref-underflow crash on the NEXT read. Leaving `method`
-        // un-deinited leaks one function-value reference per ToPrimitive
-        // call in the (common) data-property case -- an accepted
-        // tradeoff here, same "leak over crash" call already made
-        // elsewhere in this engine (see the GC session's computed-key
-        // leak note) -- not attempted to distinguish the two cases,
-        // since a bare JSValue carries no ownership tag to tell them
-        // apart.
+        // `defer method.deinit()` used to be unsafe here (an ACCESSOR
+        // property could hand back a value BORROWED from a getter's own
+        // closure, causing a real Rc.decref-underflow crash -- see the
+        // Fase 4 note in toprimitive-coercion.md and
+        // ordinarytoprimitive-method-leak.md for the full history).
+        // Fixed for free by uniform-ownership-contract.md's Etapa 1:
+        // evalExpression's `.identifier` (the leaf that produced the
+        // borrowed reference in the crashing case) now always retains,
+        // so every `return` from an interpreted getter is genuinely
+        // owned. Re-verified: the exact regression test that crashed
+        // before (removed-symbol-wrapper-ordinary-toprimitive.js)
+        // passes clean, and the full suite stays at 533/543 (same
+        // known leak groups), 0 crashes.
+        defer method.deinit();
         if (method != .function and method != .proxy) continue;
         const result = try self.callValue(method, v, &.{}, method_name);
         if (isPrimitiveTag(result)) return result.retain();
