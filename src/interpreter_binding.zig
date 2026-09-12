@@ -156,19 +156,30 @@ pub fn drainIterator(self: *Interpreter, iter: JSValue) anyerror![]const JSValue
 pub fn evalYieldDelegate(self: *Interpreter, env: *Environment, fs: *FiberState, arg_node: *zparser.Node) anyerror!JSValue {
     const arena = self.gc_allocator;
     const iterable = try self.evalExpression(env, arg_node);
+    defer iterable.deinit();
 
     // Iterator-protocol object: forward next(resume), return the
     // completion value.
     if (iterable == .object) {
         const next_fn = try self.getProperty(iterable, "next");
+        defer next_fn.deinit();
         if (next_fn == .function) {
             var resume_value = JSValue.UNDEFINED;
             while (true) {
                 const step = try next_fn.function.value.call(next_fn.function.value.ctx, arena, iterable, &.{resume_value});
+                defer step.deinit();
                 if (step != .object) return self.throwError(.type_error, "Iterator result {s} is not an object", .{step.typeOf()});
-                if (coercion.isTruthy(try self.getProperty(step, "done"))) {
+                const done = try self.getProperty(step, "done");
+                defer done.deinit();
+                if (coercion.isTruthy(done)) {
                     return self.getProperty(step, "value");
                 }
+                // fs.yielded's own disposal contract is shared with the
+                // plain `yield expr` path (interpreter_expr.zig's
+                // `.yield_expr` case) and the resumeFiber/generatorNext
+                // consumers that read it back out -- not touched here,
+                // see statement-completion-value-leak.md-adjacent note
+                // in this session's plan docs.
                 fs.yielded = try self.getProperty(step, "value");
                 fs.fiber.suspendSelf();
                 if (fs.resume_is_throw) {
@@ -483,7 +494,10 @@ pub fn forIterationStep(self: *Interpreter, env: *Environment, binding: zstateme
             return null;
         },
         .return_completion => return c,
-        .normal => return null,
+        .normal => {
+            c.value.deinit();
+            return null;
+        },
     }
 }
 
@@ -503,6 +517,7 @@ pub fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zs
     // contract as `.await_expr`/`.yield_expr`.
     const fs: ?*FiberState = if (is_await) (self.current_fiber orelse return error.NotImplemented) else null;
     const iterable = try self.evalExpression(env, head.iterable);
+    defer iterable.deinit();
     switch (iterable) {
         .array => |box| {
             // Live iteration (ArrayIterator semantics): re-read length
@@ -512,16 +527,28 @@ pub fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zs
             var i: usize = 0;
             while (i < box.value.length()) : (i += 1) {
                 var item = box.value.get(i).retain();
-                if (is_await) item = try self.awaitValue(fs.?, item);
-                if (try self.forIterationStep(env, head.binding, item, body, labels)) |c| return c;
+                if (is_await) {
+                    const awaited = try self.awaitValue(fs.?, item);
+                    item.deinit();
+                    item = awaited;
+                }
+                const step = try self.forIterationStep(env, head.binding, item, body, labels);
+                item.deinit();
+                if (step) |c| return c;
             }
         },
         .string => |box| {
             var it = std.unicode.Utf8Iterator{ .bytes = box.value.data, .i = 0 };
             while (it.nextCodepointSlice()) |cp| {
                 var ch = try self.gcNewString(cp);
-                if (is_await) ch = try self.awaitValue(fs.?, ch);
-                if (try self.forIterationStep(env, head.binding, ch, body, labels)) |c| return c;
+                if (is_await) {
+                    const awaited = try self.awaitValue(fs.?, ch);
+                    ch.deinit();
+                    ch = awaited;
+                }
+                const step = try self.forIterationStep(env, head.binding, ch, body, labels);
+                ch.deinit();
+                if (step) |c| return c;
             }
         },
         .map => |box| {
@@ -538,8 +565,14 @@ pub fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zs
                 var entry = try self.gcNewArray();
                 _ = try entry.array.value.push(k);
                 _ = try entry.array.value.push(v);
-                if (is_await) entry = try self.awaitValue(fs.?, entry);
-                if (try self.forIterationStep(env, head.binding, entry, body, labels)) |c| return c;
+                if (is_await) {
+                    const awaited = try self.awaitValue(fs.?, entry);
+                    entry.deinit();
+                    entry = awaited;
+                }
+                const step = try self.forIterationStep(env, head.binding, entry, body, labels);
+                entry.deinit();
+                if (step) |c| return c;
             }
         },
         .set => |box| {
@@ -553,8 +586,14 @@ pub fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zs
                 if (i >= vals.len) break;
                 var v = vals[i].retain();
                 i += 1;
-                if (is_await) v = try self.awaitValue(fs.?, v);
-                if (try self.forIterationStep(env, head.binding, v, body, labels)) |c| return c;
+                if (is_await) {
+                    const awaited = try self.awaitValue(fs.?, v);
+                    v.deinit();
+                    v = awaited;
+                }
+                const step = try self.forIterationStep(env, head.binding, v, body, labels);
+                v.deinit();
+                if (step) |c| return c;
             }
         },
         // The iterator protocol: a user iterable via Symbol.iterator
@@ -566,7 +605,7 @@ pub fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zs
             const iter = if (is_await) try self.resolveAsyncIterator(iterable) else try self.resolveIterator(iterable);
             const next_fn = try self.getProperty(iter, "next");
             while (true) {
-                var step = try next_fn.function.value.call(next_fn.function.value.ctx, arena, iter, &.{});
+                var step_result = try next_fn.function.value.call(next_fn.function.value.ctx, arena, iter, &.{});
                 // A real async iterator's next() returns a PROMISE of
                 // {value,done}; the AsyncFromSyncIterator fallback
                 // (plain Symbol.iterator) returns the {value,done}
@@ -574,19 +613,32 @@ pub fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zs
                 // is a harmless one-tick round trip, so this one check
                 // handles both without needing to track which case
                 // resolveAsyncIterator picked.
-                if (is_await and step == .promise) step = try self.awaitValue(fs.?, step);
-                if (step != .object) {
-                    return self.throwError(.type_error, "Iterator result {s} is not an object", .{step.typeOf()});
+                if (is_await and step_result == .promise) {
+                    const awaited = try self.awaitValue(fs.?, step_result);
+                    step_result.deinit();
+                    step_result = awaited;
                 }
-                if (coercion.isTruthy(try self.getProperty(step, "done"))) break;
-                var value = try self.getProperty(step, "value");
+                defer step_result.deinit();
+                if (step_result != .object) {
+                    return self.throwError(.type_error, "Iterator result {s} is not an object", .{step_result.typeOf()});
+                }
+                const done = try self.getProperty(step_result, "done");
+                defer done.deinit();
+                if (coercion.isTruthy(done)) break;
+                var value = try self.getProperty(step_result, "value");
                 // Spec: for-await-of also Awaits the extracted VALUE
                 // itself (AsyncFromSyncIteratorContinuation, for the
                 // sync-fallback case). Awaiting an already-resolved
                 // value from a genuine async iterator is a no-op
                 // extra tick -- documented, narrowed simplification.
-                if (is_await) value = try self.awaitValue(fs.?, value);
-                if (try self.forIterationStep(env, head.binding, value, body, labels)) |c| return c;
+                if (is_await) {
+                    const awaited = try self.awaitValue(fs.?, value);
+                    value.deinit();
+                    value = awaited;
+                }
+                const step = try self.forIterationStep(env, head.binding, value, body, labels);
+                value.deinit();
+                if (step) |c| return c;
             }
         },
         else => return self.throwError(.type_error, "{s} is not iterable", .{iterable.typeOf()}),
@@ -603,6 +655,7 @@ pub fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zs
 pub fn evalForIn(self: *Interpreter, env: *Environment, head: anytype, body: *zstatements.Statement, labels: []const []const u8) anyerror!Completion {
     const arena = self.gc_allocator;
     const target = try self.evalExpression(env, head.object);
+    defer target.deinit();
     switch (target) {
         .object => |box| {
             var seen: std.StringHashMapUnmanaged(void) = .empty;
@@ -646,7 +699,9 @@ pub fn evalForIn(self: *Interpreter, env: *Environment, head: anytype, body: *zs
             }
             for (keys_list.items) |k| {
                 const kv = try self.gcNewString(k);
-                if (try self.forIterationStep(env, head.binding, kv, body, labels)) |c| return c;
+                const step = try self.forIterationStep(env, head.binding, kv, body, labels);
+                kv.deinit();
+                if (step) |c| return c;
             }
         },
         .array => |box| {
@@ -656,7 +711,9 @@ pub fn evalForIn(self: *Interpreter, env: *Environment, head: anytype, body: *zs
                 const key_str = try std.fmt.allocPrint(arena, "{d}", .{i});
                 defer arena.free(key_str);
                 const kv = try self.gcNewString(key_str);
-                if (try self.forIterationStep(env, head.binding, kv, body, labels)) |c| return c;
+                const step = try self.forIterationStep(env, head.binding, kv, body, labels);
+                kv.deinit();
+                if (step) |c| return c;
             }
         },
         .string => |box| {
@@ -667,7 +724,9 @@ pub fn evalForIn(self: *Interpreter, env: *Environment, head: anytype, body: *zs
                 const key_str = try std.fmt.allocPrint(arena, "{d}", .{i});
                 defer arena.free(key_str);
                 const kv = try self.gcNewString(key_str);
-                if (try self.forIterationStep(env, head.binding, kv, body, labels)) |c| return c;
+                const step = try self.forIterationStep(env, head.binding, kv, body, labels);
+                kv.deinit();
+                if (step) |c| return c;
             }
         },
         // Narrowing: only the proxy's own (trap-aware) keys -- unlike
@@ -682,7 +741,9 @@ pub fn evalForIn(self: *Interpreter, env: *Environment, head: anytype, body: *zs
             for (ks) |k| {
                 if (Interpreter.isSymbolKey(k)) continue;
                 const kv = try self.gcNewString(k);
-                if (try self.forIterationStep(env, head.binding, kv, body, labels)) |c| return c;
+                const step = try self.forIterationStep(env, head.binding, kv, body, labels);
+                kv.deinit();
+                if (step) |c| return c;
             }
         },
         else => {}, // incl. null/undefined: zero iterations, no error (spec)
