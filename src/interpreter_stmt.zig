@@ -199,6 +199,32 @@ fn markGlobalVarName(self: *Interpreter, env: *Environment, name: []const u8) an
     }
 }
 
+/// Same DIRECT-statements-only scope as `hoistLexical` (mirrors every
+/// branch that would actually touch `env`): true if this StatementList
+/// itself introduces a function/class/let/const name. Lets `.block`
+/// skip allocating a child Environment when the answer is false --
+/// with nothing to bind, `hoistLexical`'s own redeclaration check
+/// (`checkVarNotShadowingLexical`) is vacuously a no-op (the block's
+/// own tdz map would stay empty regardless), so reusing the parent env
+/// changes nothing observable. statement-completion-value-leak.md
+/// Parte B2: every block-bodied loop iteration otherwise leaks one
+/// Environment forever (never freed -- `collectGarbage()` is not
+/// wired into any real execution path).
+fn blockDeclaresLexically(stmts: []const *zstatements.Statement) bool {
+    for (stmts) |stmt| {
+        switch (stmt.data) {
+            .function_declaration, .class_declaration => return true,
+            .variable => |v| if (v.kind != .@"var") return true,
+            .export_decl => |e| switch (e) {
+                .declaration => |inner| if (blockDeclaresLexically(&.{inner})) return true,
+                else => {},
+            },
+            else => {},
+        }
+    }
+    return false;
+}
+
 /// The per-StatementList lexical pre-pass, over DIRECT statements
 /// only (nested blocks get their own on entry). Function declarations
 /// hoist fully (mutual recursion, call-before-declaration);
@@ -309,6 +335,14 @@ pub fn evalStatement(self: *Interpreter, env: *Environment, stmt: *zstatements.S
             return .{ .type = .normal, .value = v };
         },
         .block => |stmts| {
+            // Parte B2 (statement-completion-value-leak.md): a block
+            // that binds no name of its own (the overwhelmingly common
+            // loop-body shape, e.g. `for(...) { var s = o+""; }` --
+            // `var` doesn't even bind here, it's function-scoped) has
+            // nothing for a child Environment to hold, so run its
+            // statements directly in the parent scope instead of
+            // leaking one Environment per execution forever.
+            if (!blockDeclaresLexically(stmts)) return self.evalProgram(env, stmts);
             const block_env = try self.gcChildEnv(env);
             return self.evalStatementList(block_env, stmts);
         },
@@ -414,11 +448,11 @@ pub fn evalStatement(self: *Interpreter, env: *Environment, stmt: *zstatements.S
         },
         // ECMA-262 14.15.3 TryStatement evaluation. h.body/s.block/
         // s.finalizer are always `.block` statements, so the existing
-        // `.block` arm supplies each fresh scope (the catch_env holding
-        // the param becomes its parent -- spec-correct nesting for
-        // free). Completion.target rides along inside
-        // Outcome.completion untouched, so future labelled-break
-        // support changes nothing here.
+        // `.block` arm supplies a fresh scope whenever one is actually
+        // needed (the catch_env holding the param becomes its parent
+        // -- spec-correct nesting for free). Completion.target rides
+        // along inside Outcome.completion untouched, so future
+        // labelled-break support changes nothing here.
         .try_stmt => |s| {
             var result = try self.runCapturing(env, s.block);
 
