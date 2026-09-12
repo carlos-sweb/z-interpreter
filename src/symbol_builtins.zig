@@ -10,7 +10,6 @@ const JSValue = zvalue.JSValue;
 
 const interpreter_mod = @import("interpreter.zig");
 const Interpreter = interpreter_mod.Interpreter;
-const coercion = @import("coercion.zig");
 const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
 
@@ -39,7 +38,7 @@ fn symbolConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     }
     const desc: ?[]const u8 = switch (arg(args, 0)) {
         .undefined => null,
-        else => |v| try coercion.toDisplayString(allocator, v),
+        else => |v| try self.toDisplayStringJS(allocator, v),
     };
     defer if (desc) |d| allocator.free(d);
     return self.gcNewSymbol(desc);
@@ -66,7 +65,7 @@ fn symbolValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
 fn symbolFor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
     const self = interp(ctx);
-    const key = try coercion.toDisplayString(allocator, arg(args, 0));
+    const key = try self.toDisplayStringJS(allocator, arg(args, 0));
     if (self.symbol_registry.get(key)) |sym| {
         allocator.free(key);
         return sym.retain();

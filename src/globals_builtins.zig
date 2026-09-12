@@ -17,7 +17,6 @@ const JSValue = zvalue.JSValue;
 
 const interpreter_mod = @import("interpreter.zig");
 const Interpreter = interpreter_mod.Interpreter;
-const coercion = @import("coercion.zig");
 const inspect = @import("inspect.zig");
 const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
@@ -56,7 +55,7 @@ fn consoleError(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 fn globalPrint(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
     const self = interp(ctx);
-    const msg = try coercion.toDisplayString(allocator, arg(args, 0));
+    const msg = try self.toDisplayStringJS(allocator, arg(args, 0));
     defer allocator.free(msg);
     try self.console_writer.writeAll(msg);
     try self.console_writer.writeByte('\n');
@@ -66,39 +65,36 @@ fn globalPrint(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
 // ===== Loose globals =====
 
 pub fn globalParseInt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
     _ = this_value;
-    const s = try argString(allocator, args, 0);
+    const self = interp(ctx);
+    const s = try argString(self, allocator, args, 0);
     defer allocator.free(s);
     const radix: ?u8 = if (arg(args, 1) == .undefined) null else blk: {
         // Clamp into u8; out-of-[2,36] values are left for parseInt to reject
         // (as NaN). Avoids @intFromFloat panicking on NaN/Infinity/huge radix.
-        const r = toIntSat(try coercion.toNumber(arg(args, 1)));
+        const r = toIntSat(try self.toNumberJS(arg(args, 1)));
         break :blk if (r >= 0 and r <= 36) @intCast(r) else 255;
     };
     return JSValue.fromNumber(znumber.ParsingMethods.parseInt(allocator, s, radix));
 }
 
 pub fn globalParseFloat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
     _ = this_value;
-    const s = try argString(allocator, args, 0);
+    const s = try argString(interp(ctx), allocator, args, 0);
     defer allocator.free(s);
     return JSValue.fromNumber(znumber.ParsingMethods.parseFloat(s));
 }
 
 fn globalIsNaN(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
     _ = allocator;
     _ = this_value;
-    return JSValue.fromBool(std.math.isNan(try coercion.toNumber(arg(args, 0))));
+    return JSValue.fromBool(std.math.isNan(try interp(ctx).toNumberJS(arg(args, 0))));
 }
 
 fn globalIsFinite(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
     _ = allocator;
     _ = this_value;
-    const n = try coercion.toNumber(arg(args, 0));
+    const n = try interp(ctx).toNumberJS(arg(args, 0));
     return JSValue.fromBool(!std.math.isNan(n) and !std.math.isInf(n));
 }
 
@@ -106,7 +102,7 @@ fn globalIsFinite(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
 /// uriReserved+uriUnescaped+"#".
 fn globalEncodeURI(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
-    const s = try argString(allocator, args, 0);
+    const s = try argString(interp(ctx), allocator, args, 0);
     defer allocator.free(s);
     const encoded = zurlcode.encode(allocator, s, .uri) catch |err| switch (err) {
         error.InvalidUtf8 => unreachable, // ZString's data is always valid UTF-8
@@ -120,7 +116,7 @@ fn globalEncodeURI(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
 /// uriUnescaped (uriReserved gets encoded too, unlike encodeURI).
 fn globalEncodeURIComponent(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
-    const s = try argString(allocator, args, 0);
+    const s = try argString(interp(ctx), allocator, args, 0);
     defer allocator.free(s);
     const encoded = zurlcode.encode(allocator, s, .component) catch |err| switch (err) {
         error.InvalidUtf8 => unreachable, // ZString's data is always valid UTF-8
@@ -134,7 +130,7 @@ fn globalEncodeURIComponent(ctx: *anyopaque, allocator: Allocator, this_value: J
 /// reserved-set (uriReserved+"#") %XY literal rather than decoding it.
 fn globalDecodeURI(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
-    const s = try argString(allocator, args, 0);
+    const s = try argString(interp(ctx), allocator, args, 0);
     defer allocator.free(s);
     const decoded = zurlcode.decode(allocator, s, true) catch |err| switch (err) {
         error.MalformedUri => return interp(ctx).throwError(.uri_error, "URI malformed", .{}),
@@ -147,7 +143,7 @@ fn globalDecodeURI(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
 /// ECMA-262 19.2.6.3/19.2.6.1: unescape every %XY sequence, no exceptions.
 fn globalDecodeURIComponent(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
-    const s = try argString(allocator, args, 0);
+    const s = try argString(interp(ctx), allocator, args, 0);
     defer allocator.free(s);
     const decoded = zurlcode.decode(allocator, s, false) catch |err| switch (err) {
         error.MalformedUri => return interp(ctx).throwError(.uri_error, "URI malformed", .{}),

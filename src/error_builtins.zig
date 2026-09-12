@@ -12,7 +12,6 @@ const JSValue = zvalue.JSValue;
 
 const interpreter_mod = @import("interpreter.zig");
 const Interpreter = interpreter_mod.Interpreter;
-const coercion = @import("coercion.zig");
 const native_helpers = @import("native_helpers.zig");
 
 const interp = native_helpers.interp;
@@ -60,7 +59,7 @@ fn errorConstructor(comptime kind: zvalue.ErrorKind) NativeFn {
         fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
             _ = this_value;
             const has_msg = arg(args, 0) != .undefined;
-            const msg: []const u8 = if (has_msg) try coercion.toDisplayString(allocator, arg(args, 0)) else "";
+            const msg: []const u8 = if (has_msg) try interp(ctx).toDisplayStringJS(allocator, arg(args, 0)) else "";
             defer if (has_msg) allocator.free(msg);
             return interp(ctx).gcNewError(kind, msg);
         }

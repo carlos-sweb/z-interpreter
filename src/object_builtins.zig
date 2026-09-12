@@ -915,6 +915,7 @@ fn objectHasOwn(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 /// Narrowed to an array of pair-arrays (the common case); other iterables
 /// are a documented gap.
 fn objectFromEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
     _ = this_value;
     const self = interp(ctx);
     const src = arg(args, 0);
@@ -925,8 +926,10 @@ fn objectFromEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
         const p = &pair.array.value;
         const k = if (p.length() > 0) p.get(0) else JSValue.UNDEFINED;
         const v = if (p.length() > 1) p.get(1) else JSValue.UNDEFINED;
-        const ks = try coercion.toDisplayString(allocator, k);
-        defer allocator.free(ks);
+        // Real spec: the entry's key goes through ToPropertyKey (a Symbol
+        // pair-key stays a real symbol-keyed property), not plain ToString.
+        const ks = try self.encodeKey(k);
+        defer self.gc_allocator.free(ks);
         try result.object.value.set(ks, v.retain());
     }
     return result;

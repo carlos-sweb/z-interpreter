@@ -38,7 +38,16 @@ pub const bigint_methods = std.StaticStringMap(MethodSpec).initComptime(.{
 fn globalBigInt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
     const self = interp(ctx);
-    const a = arg(args, 0);
+    const a_in = arg(args, 0);
+    // Real spec (21.2.1.1): ToPrimitive(value, number) FIRST, then a
+    // Number result gets this function's own special NumberToBigInt
+    // (integer-only, RangeError otherwise) -- unlike plain ToBigInt
+    // (toBigIntValue below), which rejects a Number outright. An
+    // already-primitive argument (including a bare Number) skips the
+    // ToPrimitive call entirely, same as `toPrimitive`'s own fast path.
+    const owned = !Interpreter.isPrimitiveTag(a_in);
+    const a = if (owned) try self.toPrimitive(a_in, .number) else a_in;
+    defer if (owned) a.deinit();
     if (a == .number) {
         if (std.math.isNan(a.number) or std.math.isInf(a.number) or @floor(a.number) != a.number) {
             const shown = try coercion.toDisplayString(allocator, a);
@@ -62,7 +71,7 @@ fn bigintToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     const v = try requireBigInt(ctx, this_value, "toString");
     var radix: u8 = 10;
     if (arg(args, 0) != .undefined) {
-        const r = toIntSat(try coercion.toNumber(arg(args, 0)));
+        const r = toIntSat(try interp(ctx).toNumberJS(arg(args, 0)));
         if (r < 2 or r > 36) return interp(ctx).throwError(.range_error, "toString() radix argument must be between 2 and 36", .{});
         radix = @intCast(r);
     }
@@ -83,7 +92,7 @@ fn bigintValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
 /// low-`bits`-bits mask) -- caller owns the returned `ZBigInt`.
 fn bigintAsNArgs(ctx: *anyopaque, args: []const JSValue) anyerror!struct { bits: usize, x: JSValue, mask: zbigint.ZBigInt } {
     const self = interp(ctx);
-    const bits_n = try coercion.toNumber(arg(args, 0));
+    const bits_n = try self.toNumberJS(arg(args, 0));
     if (std.math.isNan(bits_n) or std.math.isInf(bits_n) or bits_n < 0 or @floor(bits_n) != bits_n) {
         return self.throwError(.range_error, "Invalid value: not (convertible to) a safe integer", .{});
     }

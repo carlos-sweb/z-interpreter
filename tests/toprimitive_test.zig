@@ -212,6 +212,24 @@ test "ToPropertyKey order and abrupt completions" {
     , "2,RangeError,TypeError\nrhs1,k1,k2,rhs2,k2\n");
 }
 
+test "a valueOf/toString read via a shared accessor getter does not corrupt refcounts" {
+    // Regression: ordinaryToPrimitive used to `deinit()` the result of
+    // reading `valueOf`/`toString`, assuming getProperty always hands
+    // back a fresh reference. An ACCESSOR property's getter can instead
+    // return a value borrowed from its own closure (here, the same
+    // `fn` returned on every read) -- deinit'ing it crashed (Rc.decref
+    // underflow) on the second coercion. Found by test262
+    // Symbol.prototype/Symbol.toPrimitive/removed-symbol-wrapper-ordinary-toprimitive.js.
+    try helpers.expectStdout(
+        \\var calls = 0;
+        \\var fn = function () { calls++; return 5; };
+        \\Object.defineProperty(Object.prototype, "valueOf", { get() { return fn; } });
+        \\var o1 = {};
+        \\var o2 = {};
+        \\console.log(o1 + 1, o2 * 2, calls);
+    , "6 10 2\n");
+}
+
 test "a throwing left operand stops before the right one is converted" {
     try helpers.expectStdout(
         \\var log = [];

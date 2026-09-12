@@ -13,7 +13,6 @@ const JSValue = zvalue.JSValue;
 
 const interpreter_mod = @import("interpreter.zig");
 const Interpreter = interpreter_mod.Interpreter;
-const coercion = @import("coercion.zig");
 const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
 
@@ -58,11 +57,11 @@ fn regexpConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
         source = st.source;
         flags = st.flags;
     } else if (pat_arg != .undefined) {
-        owned_source = try coercion.toDisplayString(allocator, pat_arg);
+        owned_source = try self.toDisplayStringJS(allocator, pat_arg);
         source = owned_source.?;
     }
     if (arg(args, 1) != .undefined) {
-        owned_flags = try coercion.toDisplayString(allocator, arg(args, 1));
+        owned_flags = try self.toDisplayStringJS(allocator, arg(args, 1));
         flags = owned_flags.?;
     }
     return self.makeRegex(source, flags);
@@ -132,7 +131,7 @@ fn regexTest(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     const re = try requireRegex(ctx, this_value, "test");
     const self = interp(ctx);
     const is_str = arg(args, 0) == .string;
-    const input = if (is_str) arg(args, 0).string.value.data else try coercion.toDisplayString(allocator, arg(args, 0));
+    const input = if (is_str) arg(args, 0).string.value.data else try self.toDisplayStringJS(allocator, arg(args, 0));
     defer if (!is_str) allocator.free(input);
     const st = self.regexState(re);
     const stateful = st.global or st.sticky;
@@ -150,7 +149,7 @@ fn regexExec(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     const re = try requireRegex(ctx, this_value, "exec");
     const self = interp(ctx);
     const is_str = arg(args, 0) == .string;
-    const input = if (is_str) arg(args, 0).string.value.data else try coercion.toDisplayString(allocator, arg(args, 0));
+    const input = if (is_str) arg(args, 0).string.value.data else try self.toDisplayStringJS(allocator, arg(args, 0));
     defer if (!is_str) allocator.free(input);
     const st = self.regexState(re);
     const stateful = st.global or st.sticky;

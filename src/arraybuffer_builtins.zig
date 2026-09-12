@@ -157,7 +157,7 @@ fn dataViewSetInt8(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     const self = interp(ctx);
     const dv = try requireDataView(self, this_value, "setInt8");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
-    const value = try toInt8Wrap(arg(args, 1));
+    const value = try toInt8Wrap(self, arg(args, 1));
     dv.setInt8(offset, value) catch |e| return self.bufferErr(e);
     return JSValue.UNDEFINED;
 }
@@ -166,7 +166,7 @@ fn dataViewSetUint8(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     const self = interp(ctx);
     const dv = try requireDataView(self, this_value, "setUint8");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
-    const value = try toUint8Wrap(arg(args, 1));
+    const value = try toUint8Wrap(self, arg(args, 1));
     dv.setUint8(offset, value) catch |e| return self.bufferErr(e);
     return JSValue.UNDEFINED;
 }
@@ -192,7 +192,7 @@ fn dataViewSetInt16(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     const self = interp(ctx);
     const dv = try requireDataView(self, this_value, "setInt16");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
-    const value = try toInt16Wrap(arg(args, 1));
+    const value = try toInt16Wrap(self, arg(args, 1));
     dv.setInt16(offset, value, coercion.isTruthy(arg(args, 2))) catch |e| return self.bufferErr(e);
     return JSValue.UNDEFINED;
 }
@@ -201,7 +201,7 @@ fn dataViewSetUint16(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     const self = interp(ctx);
     const dv = try requireDataView(self, this_value, "setUint16");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
-    const value = try toUint16Wrap(arg(args, 1));
+    const value = try toUint16Wrap(self, arg(args, 1));
     dv.setUint16(offset, value, coercion.isTruthy(arg(args, 2))) catch |e| return self.bufferErr(e);
     return JSValue.UNDEFINED;
 }
@@ -227,7 +227,7 @@ fn dataViewSetInt32(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     const self = interp(ctx);
     const dv = try requireDataView(self, this_value, "setInt32");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
-    const value: i32 = try coercion.toInt32(arg(args, 1));
+    const value: i32 = try self.toInt32JS(arg(args, 1));
     dv.setInt32(offset, value, coercion.isTruthy(arg(args, 2))) catch |e| return self.bufferErr(e);
     return JSValue.UNDEFINED;
 }
@@ -236,7 +236,7 @@ fn dataViewSetUint32(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     const self = interp(ctx);
     const dv = try requireDataView(self, this_value, "setUint32");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
-    const value: u32 = try coercion.toUint32(arg(args, 1));
+    const value: u32 = try self.toUint32JS(arg(args, 1));
     dv.setUint32(offset, value, coercion.isTruthy(arg(args, 2))) catch |e| return self.bufferErr(e);
     return JSValue.UNDEFINED;
 }
@@ -254,7 +254,7 @@ fn dataViewSetFloat32(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     const self = interp(ctx);
     const dv = try requireDataView(self, this_value, "setFloat32");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
-    const value: f32 = @floatCast(try coercion.toNumber(arg(args, 1)));
+    const value: f32 = @floatCast(try self.toNumberJS(arg(args, 1)));
     dv.setFloat32(offset, value, coercion.isTruthy(arg(args, 2))) catch |e| return self.bufferErr(e);
     return JSValue.UNDEFINED;
 }
@@ -272,7 +272,7 @@ fn dataViewSetFloat64(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     const self = interp(ctx);
     const dv = try requireDataView(self, this_value, "setFloat64");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
-    const value: f64 = try coercion.toNumber(arg(args, 1));
+    const value: f64 = try self.toNumberJS(arg(args, 1));
     dv.setFloat64(offset, value, coercion.isTruthy(arg(args, 2))) catch |e| return self.bufferErr(e);
     return JSValue.UNDEFINED;
 }
@@ -667,7 +667,7 @@ fn taAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []cons
     try requireTypedArray(ctx, this_value, "at");
     const self = interp(ctx);
     const len: isize = @intCast(taLen(this_value));
-    const rel = toIntSat(try coercion.toNumber(arg(args, 0)));
+    const rel = toIntSat(try self.toNumberJS(arg(args, 0)));
     const idx = if (rel < 0) len + rel else rel;
     if (idx < 0 or idx >= len) return JSValue.UNDEFINED;
     return taGet(self, this_value, @intCast(idx));
@@ -689,8 +689,16 @@ fn taJoinWith(self: *Interpreter, allocator: Allocator, this_value: JSValue, sep
 
 fn taJoin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireTypedArray(ctx, this_value, "join");
-    const sep = if (arg(args, 0) == .string) arg(args, 0).string.value.data else ",";
-    return taJoinWith(interp(ctx), allocator, this_value, sep);
+    const self = interp(ctx);
+    // Real spec: `undefined` (including not passed) is the only case
+    // that means the default ",", same real-ToString-of-the-separator
+    // rule as Array.prototype.join (see array_builtins.zig's arrayJoin
+    // and its comment -- `[1,2].join(null)` is "1null2", not "1,2").
+    const sep_arg = arg(args, 0);
+    const owned_sep: ?[]const u8 = if (sep_arg == .undefined) null else try self.toDisplayStringJS(allocator, sep_arg);
+    defer if (owned_sep) |s| allocator.free(s);
+    const sep = owned_sep orelse ",";
+    return taJoinWith(self, allocator, this_value, sep);
 }
 
 fn taToStringMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -705,8 +713,8 @@ fn taFill(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     const self = interp(ctx);
     const len = taLen(this_value);
     const val = arg(args, 0);
-    const start = if (arg(args, 1) == .undefined) 0 else normIndex(try coercion.toNumber(arg(args, 1)), len);
-    const end = if (arg(args, 2) == .undefined) len else normIndex(try coercion.toNumber(arg(args, 2)), len);
+    const start = if (arg(args, 1) == .undefined) 0 else normIndex(try self.toNumberJS(arg(args, 1)), len);
+    const end = if (arg(args, 2) == .undefined) len else normIndex(try self.toNumberJS(arg(args, 2)), len);
     var i = start;
     while (i < end) : (i += 1) try taWrite(self, this_value, i, val);
     return this_value.retain();
@@ -716,9 +724,9 @@ fn taCopyWithin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     try requireTypedArray(ctx, this_value, "copyWithin");
     const self = interp(ctx);
     const len = taLen(this_value);
-    const target = normIndex(try coercion.toNumber(arg(args, 0)), len);
-    const start = if (arg(args, 1) == .undefined) 0 else normIndex(try coercion.toNumber(arg(args, 1)), len);
-    const end = if (arg(args, 2) == .undefined) len else normIndex(try coercion.toNumber(arg(args, 2)), len);
+    const target = normIndex(try self.toNumberJS(arg(args, 0)), len);
+    const start = if (arg(args, 1) == .undefined) 0 else normIndex(try self.toNumberJS(arg(args, 1)), len);
+    const end = if (arg(args, 2) == .undefined) len else normIndex(try self.toNumberJS(arg(args, 2)), len);
     if (start >= end or target >= len) return this_value.retain();
     const count = @min(end - start, len - target);
     // Snapshot first so overlapping source/destination ranges are always
@@ -757,10 +765,10 @@ fn taReverse(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
 /// Default (no-comparator) ordering is NUMERIC ascending -- unlike
 /// `Array.prototype.sort`'s default STRING order -- with NaN always
 /// sorting last (real spec's SortCompare); BigInt kinds compare exactly.
-fn taSortLess(allocator: Allocator, cmp: JSValue, kind: zvalue.TypedKind, a: JSValue, b: JSValue) anyerror!bool {
+fn taSortLess(self: *Interpreter, allocator: Allocator, cmp: JSValue, kind: zvalue.TypedKind, a: JSValue, b: JSValue) anyerror!bool {
     if (cmp == .function) {
         const r = try cmp.function.value.call(cmp.function.value.ctx, allocator, JSValue.UNDEFINED, &.{ a, b });
-        return (try coercion.toNumber(r)) < 0;
+        return (try self.toNumberJS(r)) < 0;
     }
     if (kind.isBigInt()) return a.bigint.value.cmp(b.bigint.value) == .lt;
     if (std.math.isNan(a.number)) return false;
@@ -786,7 +794,7 @@ fn taSort(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
         const key = tmp[i];
         var j = i;
         while (j > 0) {
-            const before = try taSortLess(allocator, cmp, box.kind, key, tmp[j - 1]);
+            const before = try taSortLess(self, allocator, cmp, box.kind, key, tmp[j - 1]);
             if (!before) break;
             tmp[j] = tmp[j - 1];
             j -= 1;
@@ -809,7 +817,7 @@ fn taSetMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     const self = interp(ctx);
     const len = taLen(this_value);
     const source = arg(args, 0);
-    const offset_n = if (arg(args, 1) == .undefined) 0 else try coercion.toNumber(arg(args, 1));
+    const offset_n = if (arg(args, 1) == .undefined) 0 else try self.toNumberJS(arg(args, 1));
     if (std.math.isNan(offset_n) or offset_n < 0 or offset_n > @as(f64, @floatFromInt(len))) {
         return self.throwError(.range_error, "Offset is out of bounds", .{});
     }
@@ -839,8 +847,8 @@ fn taSubarray(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     const self = interp(ctx);
     const box = this_value.typed_array.value;
     const len = box.len;
-    const start = if (arg(args, 0) == .undefined) 0 else normIndex(try coercion.toNumber(arg(args, 0)), len);
-    const end = if (arg(args, 1) == .undefined) len else normIndex(try coercion.toNumber(arg(args, 1)), len);
+    const start = if (arg(args, 0) == .undefined) 0 else normIndex(try self.toNumberJS(arg(args, 0)), len);
+    const end = if (arg(args, 1) == .undefined) len else normIndex(try self.toNumberJS(arg(args, 1)), len);
     const count = if (end > start) end - start else 0;
     const new_byte_offset = box.byte_offset + start * box.kind.elemSize();
     return self.gcNewTypedArray(box.owner.retain(), new_byte_offset, count, box.kind) catch |e| self.bufferErr(e);
@@ -853,8 +861,8 @@ fn taSlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const self = interp(ctx);
     const box = this_value.typed_array.value;
     const len = box.len;
-    const start = if (arg(args, 0) == .undefined) 0 else normIndex(try coercion.toNumber(arg(args, 0)), len);
-    const end = if (arg(args, 1) == .undefined) len else normIndex(try coercion.toNumber(arg(args, 1)), len);
+    const start = if (arg(args, 0) == .undefined) 0 else normIndex(try self.toNumberJS(arg(args, 0)), len);
+    const end = if (arg(args, 1) == .undefined) len else normIndex(try self.toNumberJS(arg(args, 1)), len);
     const count = if (end > start) end - start else 0;
     const result = try newSameKindTypedArray(self, box.kind, count);
     var i: usize = 0;

@@ -280,10 +280,9 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
 /// (truncate/extend). Any other key is NotImplemented (arrays have no
 /// general property bag here).
 pub fn setArrayProperty(self: *Interpreter, obj: JSValue, key: []const u8, value: JSValue) anyerror!void {
-    _ = self;
     const arr = &obj.array.value;
     if (std.mem.eql(u8, key, "length")) {
-        const n = try coercion.toUint32(value);
+        const n = try self.toUint32JS(value);
         const cur = arr.length();
         if (n < cur) {
             var i = cur;
@@ -456,7 +455,7 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
         // NotImplemented that silently poisoned huge swaths of
         // otherwise-passing tests across many areas.
         if (std.mem.eql(u8, key, "message")) {
-            const s = try coercion.toDisplayString(self.gc_allocator, value);
+            const s = try self.toDisplayStringJS(self.gc_allocator, value);
             defer self.gc_allocator.free(s);
             const box = obj.@"error";
             box.value.allocator.free(box.value.message);
@@ -467,6 +466,20 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
     }
     if (obj == .regex) {
         if (std.mem.eql(u8, key, "lastIndex")) {
+            // NOT upgraded to a real-ToPrimitive-aware conversion despite
+            // this being exactly the pattern ~/.plans/pendientes/
+            // toprimitive-coercion.md's Phase 4 otherwise fixes:
+            // confirmed against real Node that `lastIndex` is a PLAIN
+            // data property with no coercion at assignment time at all
+            // (`r.lastIndex = {valueOf(){...}}` stores the raw object,
+            // never calling valueOf; coercion happens lazily inside
+            // exec/test's own read of it). This engine instead
+            // eagerly coerces to a `usize` at write time -- a real
+            // architectural difference, not just a missing ToPrimitive
+            // call, so fixing it properly means storing `lastIndex` as a
+            // JSValue and moving the conversion into regexTest/regexExec,
+            // not swapping this one call. Left as a pre-existing
+            // narrowing (rejects an object outright, same as before).
             const n = try coercion.toNumber(value);
             // `lastIndex` may be set to any Number, including
             // Infinity, Number.MAX_VALUE or values beyond usize
@@ -867,6 +880,17 @@ pub fn materializeProtos(self: *Interpreter) !void {
         try proto.object.value.setPrototype(&typed_array_base.object.value);
         try proto.object.value.defineProperty("constructor", ctor.retain(), proto_attrs);
         try proto.object.value.defineProperty("BYTES_PER_ELEMENT", JSValue.fromNumber(@floatFromInt(e[2])), bpe_attrs);
+        // Real spec (23.2.6.1): BYTES_PER_ELEMENT lives on the
+        // CONSTRUCTOR too, not just its prototype (`Int8Array
+        // .BYTES_PER_ELEMENT`, not just `Int8Array.prototype
+        // .BYTES_PER_ELEMENT`) -- found missing while chasing a
+        // test262 regression from ~/.plans/pendientes/
+        // toprimitive-coercion.md's Phase 4: `bpe undefined` used to
+        // accidentally still throw (any-NaN-length was a RangeError,
+        // spec-incorrectly) once toByteIndexArg started doing real
+        // ToIntegerOrInfinity (NaN -> 0, matching real JS).
+        const ctor_statics = try self.functionStatics(ctor);
+        try ctor_statics.object.value.defineProperty("BYTES_PER_ELEMENT", JSValue.fromNumber(@floatFromInt(e[2])), bpe_attrs);
         @field(self.protos, e[0]) = proto;
     }
 }

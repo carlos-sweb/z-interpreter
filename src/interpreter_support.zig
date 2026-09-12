@@ -309,9 +309,25 @@ pub fn ordinaryToPrimitive(self: *Interpreter, v: JSValue, hint: OrdinaryHint) a
     const order: [2][]const u8 = if (hint == .string) .{ "toString", "valueOf" } else .{ "valueOf", "toString" };
     for (order) |method_name| {
         const method = try self.getProperty(v, method_name);
-        defer method.deinit();
+        // NOT `defer method.deinit()`: getProperty's ownership isn't
+        // uniform -- a data property gives a fresh retained reference,
+        // but an ACCESSOR property returns whatever its getter's `return`
+        // produced, which (same non-uniform contract as evalExpression's
+        // `.identifier` case) can be a value BORROWED from a closure's
+        // own captured variable. Test262 exposed this concretely: a
+        // getter shared across many property reads that always
+        // `return`s the SAME outer-scoped function value -- deinit'ing
+        // that "fresh-looking" result here drove its real refcount to 0
+        // while the outer closure still held it, a real
+        // Rc.decref-underflow crash on the NEXT read. Leaving `method`
+        // un-deinited leaks one function-value reference per ToPrimitive
+        // call in the (common) data-property case -- an accepted
+        // tradeoff here, same "leak over crash" call already made
+        // elsewhere in this engine (see the GC session's computed-key
+        // leak note) -- not attempted to distinguish the two cases,
+        // since a bare JSValue carries no ownership tag to tell them
+        // apart.
         if (method != .function and method != .proxy) continue;
-        // May be borrowed -- same ownership rule as in `toPrimitive`.
         const result = try self.callValue(method, v, &.{}, method_name);
         if (isPrimitiveTag(result)) return result.retain();
     }
@@ -322,6 +338,19 @@ pub fn isPrimitiveTag(v: JSValue) bool {
     return switch (v) {
         .undefined, .null, .boolean, .number, .string, .bigint, .symbol => true,
         else => false,
+    };
+}
+
+/// `coercion.joinElementToString`, but real ToPrimitive-aware (an element
+/// with a custom `.toString()`/`.valueOf()`/`@@toPrimitive` works) --
+/// z-array's `joinWith` takes this as its comptime stringify callback
+/// when the context type is `*Interpreter` (Array.prototype.join/
+/// toString) instead of `void` (the pure `coercion.toDisplayString`
+/// caller, which can't run user code).
+pub fn joinElementToStringJS(self: *Interpreter, item: JSValue, allocator: std.mem.Allocator) anyerror![]u8 {
+    return switch (item) {
+        .undefined, .null => try allocator.dupe(u8, ""),
+        else => self.toDisplayStringJS(allocator, item),
     };
 }
 
@@ -358,6 +387,21 @@ pub fn toNumberJS(self: *Interpreter, v: JSValue) anyerror!f64 {
         if (prim == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a number", .{});
         return try coercion.toNumber(prim);
     };
+}
+
+/// `coercion.toInt32`/`toUint32` plus the same real-ToPrimitive fallback,
+/// for contexts that need a genuine ToInt32/ToUint32 (DataView setters,
+/// bitwise operators via toNumericJS's ToNumber fallback) rather than
+/// ToNumeric's BigInt-preserving behavior.
+pub fn toUint32JS(self: *Interpreter, v: JSValue) anyerror!u32 {
+    const n = try toNumberJS(self, v);
+    if (std.math.isNan(n) or std.math.isInf(n) or n == 0) return 0;
+    const wrapped = @mod(@trunc(n), 4294967296.0);
+    return @intFromFloat(wrapped);
+}
+
+pub fn toInt32JS(self: *Interpreter, v: JSValue) anyerror!i32 {
+    return @bitCast(try toUint32JS(self, v));
 }
 
 /// ECMA-262 7.1.3 ToNumeric: ToPrimitive (hint "number"), then a BigInt

@@ -122,21 +122,32 @@ fn arrayIncludes(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
 
 fn arrayJoin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArray(ctx, this_value, "join");
-    const sep = if (arg(args, 0) == .string) arg(args, 0).string.value.data else ",";
+    const self = interp(ctx);
+    // Real spec: `undefined` (including not passed) means the default
+    // ",", but any OTHER separator -- a number, `null`, an object with
+    // a custom toString() -- goes through real ToString, same as every
+    // other argument in this file (confirmed against Node:
+    // `[1,2].join(null)` joins with the literal string "null", not ",").
+    const sep_arg = arg(args, 0);
+    const owned_sep: ?[]const u8 = if (sep_arg == .undefined) null else try self.toDisplayStringJS(allocator, sep_arg);
+    defer if (owned_sep) |s| allocator.free(s);
+    const sep = owned_sep orelse ",";
     // z-array's joinWith() does the mechanical loop/separator-placement;
-    // coercion.joinElementToString supplies the per-element stringify
-    // policy (holes become "", same rule as toDisplayString's own `.array`
-    // case) -- see ~/.plans/builtins-consolidation-analysis.md.
-    const s = try this_value.array.value.joinWith(sep, allocator, {}, coercion.joinElementToString);
+    // joinElementToStringJS supplies the per-element stringify policy
+    // (holes become "", same rule as toDisplayString's own `.array`
+    // case, but real ToPrimitive-aware unlike the pure coercion.zig
+    // version -- see ~/.plans/builtins-consolidation-analysis.md and
+    // ~/.plans/pendientes/toprimitive-coercion.md).
+    const s = try this_value.array.value.joinWith(sep, allocator, self, Interpreter.joinElementToStringJS);
     defer allocator.free(s);
-    return interp(ctx).gcNewString(s);
+    return self.gcNewString(s);
 }
 
 fn arraySlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     try requireArray(ctx, this_value, "slice");
-    const start: ?isize = if (arg(args, 0) == .undefined) null else toIntSat(try coercion.toNumber(arg(args, 0)));
-    const end: ?isize = if (arg(args, 1) == .undefined) null else toIntSat(try coercion.toNumber(arg(args, 1)));
+    const start: ?isize = if (arg(args, 0) == .undefined) null else toIntSat(try interp(ctx).toNumberJS(arg(args, 0)));
+    const end: ?isize = if (arg(args, 1) == .undefined) null else toIntSat(try interp(ctx).toNumberJS(arg(args, 1)));
     // z-array's own slice() does the negative-index/clamping arithmetic
     // (same rules ECMA-262 wants); it just copies the raw JSValue bytes
     // without retaining (it doesn't know T might be refcounted), so we
@@ -447,7 +458,7 @@ fn arrayAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     _ = allocator;
     try requireArray(ctx, this_value, "at");
     const len: isize = @intCast(this_value.array.value.length());
-    const rel = toIntSat(try coercion.toNumber(arg(args, 0)));
+    const rel = toIntSat(try interp(ctx).toNumberJS(arg(args, 0)));
     const idx = if (rel < 0) len + rel else rel;
     if (idx < 0 or idx >= len) return JSValue.UNDEFINED;
     return this_value.array.value.get(@intCast(idx)).retain();
@@ -546,8 +557,8 @@ fn arrayFill(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     try requireArray(ctx, this_value, "fill");
     const arr = &this_value.array.value;
     const val = arg(args, 0);
-    const start: ?isize = if (arg(args, 1) == .undefined) null else toIntSat(try coercion.toNumber(arg(args, 1)));
-    const end: ?isize = if (arg(args, 2) == .undefined) null else toIntSat(try coercion.toNumber(arg(args, 2)));
+    const start: ?isize = if (arg(args, 1) == .undefined) null else toIntSat(try interp(ctx).toNumberJS(arg(args, 1)));
+    const end: ?isize = if (arg(args, 2) == .undefined) null else toIntSat(try interp(ctx).toNumberJS(arg(args, 2)));
     // z-array's fill() copies `val`'s raw bytes into every touched slot
     // without retaining (doesn't know T is refcounted) and without
     // releasing what was there before. Use slice() as a read-only probe
@@ -568,9 +579,9 @@ fn arrayCopyWithin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     try requireArray(ctx, this_value, "copyWithin");
     const arr = &this_value.array.value;
     const len = arr.length();
-    const target = normIndex(try coercion.toNumber(arg(args, 0)), len);
-    const start = if (arg(args, 1) == .undefined) 0 else normIndex(try coercion.toNumber(arg(args, 1)), len);
-    const end = if (arg(args, 2) == .undefined) len else normIndex(try coercion.toNumber(arg(args, 2)), len);
+    const target = normIndex(try interp(ctx).toNumberJS(arg(args, 0)), len);
+    const start = if (arg(args, 1) == .undefined) 0 else normIndex(try interp(ctx).toNumberJS(arg(args, 1)), len);
+    const end = if (arg(args, 2) == .undefined) len else normIndex(try interp(ctx).toNumberJS(arg(args, 2)), len);
     if (start >= end or start == target) return this_value.retain();
     // Matches z-array's own copyWithin()'s clamp: the shifted range
     // can't run past the end of the array.
@@ -620,7 +631,7 @@ fn flattenInto(result: *JSValue, allocator: Allocator, slice: []const JSValue, d
 
 fn arrayFlat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArray(ctx, this_value, "flat");
-    const depth: i64 = if (arg(args, 0) == .undefined) 1 else toIntSat(try coercion.toNumber(arg(args, 0)));
+    const depth: i64 = if (arg(args, 0) == .undefined) 1 else toIntSat(try interp(ctx).toNumberJS(arg(args, 0)));
     var result = try interp(ctx).gcNewArray();
     try flattenInto(&result, allocator, this_value.array.value.toSlice(), depth);
     return result;
@@ -629,7 +640,7 @@ fn arrayFlat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
 fn arraySplice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArray(ctx, this_value, "splice");
     const arr = &this_value.array.value;
-    const start: isize = if (args.len == 0) 0 else toIntSat(try coercion.toNumber(arg(args, 0)));
+    const start: isize = if (args.len == 0) 0 else toIntSat(try interp(ctx).toNumberJS(arg(args, 0)));
     // Spec nuance z-array's own `null` default doesn't capture: with
     // ZERO arguments at all, deleteCount is 0 (not "delete the rest");
     // with exactly one argument (start only, no deleteCount), it IS
@@ -639,7 +650,7 @@ fn arraySplice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     else if (args.len == 1)
         null
     else blk: {
-        const dc = try coercion.toNumber(arg(args, 1));
+        const dc = try interp(ctx).toNumberJS(arg(args, 1));
         if (dc <= 0) break :blk 0;
         break :blk @intCast(toIntSat(dc));
     };
@@ -678,7 +689,7 @@ fn arraySort(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
         const key = mut[i];
         var j = i;
         while (j > 0) {
-            const before = try sortLess(allocator, cmp, key, mut[j - 1]);
+            const before = try sortLess(self, allocator, cmp, key, mut[j - 1]);
             if (!before) break;
             mut[j] = mut[j - 1];
             j -= 1;
@@ -690,16 +701,16 @@ fn arraySort(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
 
 /// Whether `a` should sort before `b` (comparator < 0, or default string
 /// order). undefined always sorts last (spec).
-fn sortLess(allocator: Allocator, cmp: JSValue, a: JSValue, b: JSValue) anyerror!bool {
+fn sortLess(self: *Interpreter, allocator: Allocator, cmp: JSValue, a: JSValue, b: JSValue) anyerror!bool {
     if (a == .undefined) return false;
     if (b == .undefined) return true;
     if (cmp == .function) {
         const r = try cmp.function.value.call(cmp.function.value.ctx, allocator, JSValue.UNDEFINED, &.{ a, b });
-        return (try coercion.toNumber(r)) < 0;
+        return (try self.toNumberJS(r)) < 0;
     }
-    const sa = try coercion.toDisplayString(allocator, a);
+    const sa = try self.toDisplayStringJS(allocator, a);
     defer allocator.free(sa);
-    const sb = try coercion.toDisplayString(allocator, b);
+    const sb = try self.toDisplayStringJS(allocator, b);
     defer allocator.free(sb);
     return std.mem.order(u8, sa, sb) == .lt;
 }
@@ -707,11 +718,13 @@ fn sortLess(allocator: Allocator, cmp: JSValue, a: JSValue, b: JSValue) anyerror
 fn arrayToStringMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
     try requireArray(ctx, this_value, "toString");
+    const self = interp(ctx);
     // Array.prototype.toString() === Array.prototype.join(",") per spec --
-    // same delegation coercion.toDisplayString's own `.array` case uses.
-    const s = try this_value.array.value.joinWith(",", allocator, {}, coercion.joinElementToString);
+    // same delegation coercion.toDisplayString's own `.array` case uses,
+    // but real ToPrimitive-aware (see arrayJoin/joinElementToStringJS).
+    const s = try this_value.array.value.joinWith(",", allocator, self, Interpreter.joinElementToStringJS);
     defer allocator.free(s);
-    return interp(ctx).gcNewString(s);
+    return self.gcNewString(s);
 }
 
 fn arrayKeys(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {

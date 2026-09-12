@@ -8,7 +8,6 @@ const JSValue = zvalue.JSValue;
 
 const interpreter_mod = @import("interpreter.zig");
 const Interpreter = interpreter_mod.Interpreter;
-const coercion = @import("coercion.zig");
 const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
 
@@ -91,8 +90,8 @@ const INVALID_DATE_MS: i64 = std.math.maxInt(i64);
 /// null when the value is NaN/±Infinity or outside i32, so the caller can
 /// produce an Invalid Date instead of `@intFromFloat` panicking on an
 /// out-of-range float (matching TimeClip ultimately yielding NaN).
-fn dateField(v: JSValue) !?i32 {
-    const n = try coercion.toNumber(v);
+fn dateField(self: *Interpreter, v: JSValue) !?i32 {
+    const n = try self.toNumberJS(v);
     if (!std.math.isFinite(n)) return null;
     const t = @trunc(n);
     if (t > @as(f64, std.math.maxInt(i32)) or t < @as(f64, std.math.minInt(i32))) return null;
@@ -123,15 +122,21 @@ fn dateConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
             return interp(ctx).gcNewDate(zvalue.ZDate.fromString(first.string.value.data).timestamp);
         }
         if (first == .date) return interp(ctx).gcNewDate(first.date.value.getTime());
-        return interp(ctx).gcNewDate(timeClip(try coercion.toNumber(first)));
+        return interp(ctx).gcNewDate(timeClip(try interp(ctx).toNumberJS(first)));
     }
     // Multi-arg form: read up to 7 fields; a present-but-invalid field (NaN,
-    // Infinity, out of i32) makes the whole Date Invalid.
-    var fields: [7]?i32 = .{ null, null, null, null, null, null, null };
+    // Infinity, out of i32) makes the whole Date Invalid. Real spec converts
+    // every field via ToNumber before checking any of them for validity
+    // (confirmed against Node: all valueOf's run even if an early field is
+    // already NaN) -- read them all first, THEN decide.
+    const self = interp(ctx);
+    var raw: [7]?i32 = .{ null, null, null, null, null, null, null };
     var i: usize = 0;
     while (i < args.len and i < 7) : (i += 1) {
-        fields[i] = (try dateField(args[i])) orelse return interp(ctx).gcNewDate(INVALID_DATE_MS);
+        raw[i] = try dateField(self, args[i]);
     }
+    var fields: [7]?i32 = .{ null, null, null, null, null, null, null };
+    for (raw[0..i], 0..) |f, k| fields[k] = f orelse return self.gcNewDate(INVALID_DATE_MS);
     // year and month are always present here (args.len >= 2).
     const d = zvalue.ZDate.fromComponents(fields[0].?, fields[1].?, fields[2], fields[3], fields[4], fields[5], fields[6]);
     return interp(ctx).gcNewDate(d.timestamp);
@@ -161,15 +166,18 @@ fn dateParse(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
 /// `Date.UTC(y, m, d?, h?, min?, s?, ms?)` -> ms from UTC components, or NaN
 /// if any provided field is non-finite / out of range.
 fn dateUTC(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
     _ = allocator;
     _ = this_value;
-    // `Date.UTC()` with no args, and a NaN year, are both NaN.
-    var fields: [7]?i32 = .{ null, null, null, null, null, null, null };
+    // `Date.UTC()` with no args, and a NaN year, are both NaN. Every
+    // provided field is ToNumber'd regardless of an earlier one already
+    // being invalid (confirmed against Node: every valueOf still runs) --
+    // convert them all first, THEN decide.
+    const self = interp(ctx);
+    var raw: [7]?i32 = .{ null, null, null, null, null, null, null };
     var i: usize = 0;
-    while (i < args.len and i < 7) : (i += 1) {
-        fields[i] = (try dateField(args[i])) orelse return JSValue.fromNumber(std.math.nan(f64));
-    }
+    while (i < args.len and i < 7) : (i += 1) raw[i] = try dateField(self, args[i]);
+    var fields: [7]?i32 = .{ null, null, null, null, null, null, null };
+    for (raw[0..i], 0..) |f, k| fields[k] = f orelse return JSValue.fromNumber(std.math.nan(f64));
     if (fields[0] == null) return JSValue.fromNumber(std.math.nan(f64));
     // Month defaults to 0 when only the year is given.
     const ms = zvalue.ZDate.UTC(fields[0].?, fields[1] orelse 0, fields[2], fields[3], fields[4], fields[5], fields[6]);
@@ -288,7 +296,7 @@ fn dateLocale(comptime method: []const u8) NativeFn {
 fn dateSetTime(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const d = try requireDate(ctx, this_value, "setTime");
-    _ = d.date.value.setTime(timeClip(try coercion.toNumber(arg(args, 0))));
+    _ = d.date.value.setTime(timeClip(try interp(ctx).toNumberJS(arg(args, 0))));
     return msToNumber(d.date.value.getTime());
 }
 
@@ -300,9 +308,19 @@ fn dateSetter(comptime method: []const u8, comptime n_optional: usize) NativeFn 
     return struct {
         fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
             _ = allocator;
+            const self = interp(ctx);
             const d = try requireDate(ctx, this_value, method);
             const p = &d.date.value;
-            const first = (try dateField(arg(args, 0))) orelse {
+            // Every provided field is ToNumber'd regardless of an earlier
+            // one already being invalid (confirmed against Node: every
+            // valueOf still runs) -- convert them all first, THEN decide.
+            const raw_first = try dateField(self, arg(args, 0));
+            var raw_opt: [n_optional]?i32 = undefined;
+            inline for (0..n_optional) |k| {
+                const a = arg(args, k + 1);
+                raw_opt[k] = if (a == .undefined) null else try dateField(self, a);
+            }
+            const first = raw_first orelse {
                 p.* = zvalue.ZDate.fromTimestamp(INVALID_DATE_MS);
                 return JSValue.fromNumber(std.math.nan(f64));
             };
@@ -312,7 +330,7 @@ fn dateSetter(comptime method: []const u8, comptime n_optional: usize) NativeFn 
                 if (a == .undefined) {
                     opt[k] = null;
                 } else {
-                    opt[k] = (try dateField(a)) orelse {
+                    opt[k] = raw_opt[k] orelse {
                         p.* = zvalue.ZDate.fromTimestamp(INVALID_DATE_MS);
                         return JSValue.fromNumber(std.math.nan(f64));
                     };

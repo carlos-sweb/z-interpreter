@@ -15,7 +15,6 @@ const JSValue = zvalue.JSValue;
 
 const interpreter_mod = @import("interpreter.zig");
 const Interpreter = interpreter_mod.Interpreter;
-const coercion = @import("coercion.zig");
 const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
 const globals_builtins = @import("globals_builtins.zig");
@@ -47,7 +46,7 @@ fn numberToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     const n = try requireNumber(ctx, this_value, "toString");
     var radix: ?u8 = null;
     if (arg(args, 0) != .undefined) {
-        const r = toIntSat(try coercion.toNumber(arg(args, 0)));
+        const r = toIntSat(try interp(ctx).toNumberJS(arg(args, 0)));
         if (r < 2 or r > 36) return interp(ctx).throwError(.range_error, "toString() radix must be between 2 and 36", .{});
         radix = @intCast(r);
     }
@@ -67,7 +66,7 @@ fn numberValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
 /// precision). `lo` is the minimum (0 for fixed/exponential, 1 for precision).
 fn digitArg(ctx: *anyopaque, args: []const JSValue, lo: i64) anyerror!?usize {
     if (arg(args, 0) == .undefined) return null;
-    const d = toIntSat(try coercion.toNumber(arg(args, 0)));
+    const d = toIntSat(try interp(ctx).toNumberJS(arg(args, 0)));
     if (d < lo or d > 100) return interp(ctx).throwError(.range_error, "toFixed() digits argument must be between 0 and 100", .{});
     return @intCast(d);
 }

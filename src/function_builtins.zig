@@ -11,7 +11,6 @@ const JSValue = zvalue.JSValue;
 
 const interpreter_mod = @import("interpreter.zig");
 const Interpreter = interpreter_mod.Interpreter;
-const coercion = @import("coercion.zig");
 const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
 
@@ -123,14 +122,14 @@ fn functionConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
     if (args.len > 1) {
         for (args[0 .. args.len - 1], 0..) |a, i| {
             if (i != 0) try src.appendSlice(allocator, ", ");
-            const s = try coercion.toDisplayString(allocator, a);
+            const s = try self.toDisplayStringJS(allocator, a);
             defer allocator.free(s);
             try src.appendSlice(allocator, s);
         }
     }
     try src.appendSlice(allocator, "\n) {\n");
     if (args.len > 0) {
-        const body = try coercion.toDisplayString(allocator, args[args.len - 1]);
+        const body = try self.toDisplayStringJS(allocator, args[args.len - 1]);
         defer allocator.free(body);
         try src.appendSlice(allocator, body);
     }

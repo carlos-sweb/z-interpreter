@@ -174,7 +174,17 @@ pub fn toIntSat(n: f64) isize {
 /// TypeError (`BigInt.asUintN(8, 5)` really does throw in Node) --
 /// Number only converts via the DIFFERENT NumberToBigInt algorithm the
 /// `BigInt(value)` constructor call runs instead, never through this.
-pub fn toBigIntValue(self: *Interpreter, allocator: Allocator, a: JSValue) anyerror!JSValue {
+/// ECMA-262 ToBigInt: reduce a non-primitive `a_in` via ToPrimitive(hint
+/// number) FIRST -- this is what makes an object's `.valueOf()` returning
+/// a bigint directly succeed, and makes an unconvertible plain object
+/// fall through to the SAME SyntaxError a literal `"[object Object]"`
+/// string already gets below (confirmed against real Node: both give the
+/// identical error). `a_in` is borrowed; the reduced primitive is freed
+/// here if this function produced it.
+pub fn toBigIntValue(self: *Interpreter, allocator: Allocator, a_in: JSValue) anyerror!JSValue {
+    const owned = !Interpreter.isPrimitiveTag(a_in);
+    const a = if (owned) try self.toPrimitive(a_in, .number) else a_in;
+    defer if (owned) a.deinit();
     return switch (a) {
         .bigint => a.retain(),
         .boolean => |b| self.gcNewBigIntValue(try zbigint.ZBigInt.fromInt(self.gc_allocator, if (b) 1 else 0)),
@@ -192,50 +202,51 @@ pub fn toBigIntValue(self: *Interpreter, allocator: Allocator, a: JSValue) anyer
             defer allocator.free(shown);
             return self.throwError(.type_error, "Cannot convert {s} to a BigInt", .{shown});
         },
-        // Real ToPrimitive for array/object (valueOf/toString/
-        // Symbol.toPrimitive) doesn't exist in this ecosystem yet --
-        // same narrowing as coercion.toNumber's own object arm -- so
-        // every non-primitive collapses to one generic TypeError rather
-        // than real JS's more specific per-shape SyntaxError.
-        else => self.throwError(.type_error, "Cannot convert an object to a BigInt", .{}),
+        .symbol => |box| {
+            const shown = try box.value.toString(allocator);
+            defer allocator.free(shown);
+            return self.throwError(.type_error, "Cannot convert {s} to a BigInt", .{shown});
+        },
+        else => unreachable, // `a` is a ToPrimitive result: always primitive.
     };
 }
 
-/// ECMA-262 ToIndex, narrowed: this engine's constructors/DataView
-/// methods only ever pass an already-`.number` JSValue through here
-/// (no ToNumber coercion of strings/objects) -- matches the existing
-/// narrowing `arrayConstructor` uses for its own length argument.
+/// ECMA-262 ToIndex: ToIntegerOrInfinity (real ToNumber, so an object
+/// with valueOf/@@toPrimitive works, a fractional number truncates
+/// toward zero, and NaN becomes +0 -- NOT "must already be an integer
+/// Number", which is what this function used to require, rejecting
+/// strings/objects outright and rejecting fractional/NaN numbers with a
+/// RangeError instead of ECMA's own conversion rules) -- then range-check
+/// against [0, 2^53-1]. Checked BEFORE @intFromFloat, which panics (not
+/// an error) on a magnitude that doesn't fit in the target type.
 pub fn toByteIndexArg(self: *Interpreter, v: JSValue, what: []const u8) anyerror!usize {
-    if (v != .number) return self.throwError(.type_error, "{s} must be a number", .{what});
-    const n = v.number;
-    // Real ToIndex's own defined upper bound (2^53 - 1) -- checked
-    // BEFORE @intFromFloat, which panics (not an error) on a magnitude
-    // that doesn't fit in the target type (e.g. Number.MAX_VALUE).
+    const n = try self.toNumberJS(v);
+    const integer: f64 = if (std.math.isNan(n)) 0 else @trunc(n);
     const max_index: f64 = 9007199254740991.0;
-    if (std.math.isNan(n) or n < 0 or n != @trunc(n) or n > max_index) {
+    if (integer < 0 or integer > max_index) {
         return self.throwError(.range_error, "Invalid {s}: must be a non-negative safe integer", .{what});
     }
-    return @intFromFloat(n);
+    return @intFromFloat(integer);
 }
 
 /// ECMA-262 ToInt8/ToUint8/ToInt16/ToUint16: same modulo-2^n wraparound
 /// technique as `coercion.toInt32`/`toUint32` (NOT saturating, NOT
 /// clamping -- `DataView` has no "clamped" variant, that's
 /// `Uint8ClampedArray`-only and belongs to the future TypedArray phase).
-pub fn toUint8Wrap(v: JSValue) anyerror!u8 {
-    return @truncate(try coercion.toUint32(v));
+pub fn toUint8Wrap(self: *Interpreter, v: JSValue) anyerror!u8 {
+    return @truncate(try self.toUint32JS(v));
 }
 
-pub fn toInt8Wrap(v: JSValue) anyerror!i8 {
-    return @bitCast(try toUint8Wrap(v));
+pub fn toInt8Wrap(self: *Interpreter, v: JSValue) anyerror!i8 {
+    return @bitCast(try toUint8Wrap(self, v));
 }
 
-pub fn toUint16Wrap(v: JSValue) anyerror!u16 {
-    return @truncate(try coercion.toUint32(v));
+pub fn toUint16Wrap(self: *Interpreter, v: JSValue) anyerror!u16 {
+    return @truncate(try self.toUint32JS(v));
 }
 
-pub fn toInt16Wrap(v: JSValue) anyerror!i16 {
-    return @bitCast(try toUint16Wrap(v));
+pub fn toInt16Wrap(self: *Interpreter, v: JSValue) anyerror!i16 {
+    return @bitCast(try toUint16Wrap(self, v));
 }
 
 /// ECMA-262 ToUint8Clamp: NaN -> 0, clamped to [0,255], round-half-to-
@@ -244,8 +255,8 @@ pub fn toInt16Wrap(v: JSValue) anyerror!i16 {
 /// this engine has built yet (plain `Uint8Array` WRAPS modulo 256 via
 /// `toUint8Wrap` above; `Uint8ClampedArray` CLAMPS -- two genuinely
 /// different algorithms sharing the same 1-byte storage).
-pub fn toUint8Clamp(v: JSValue) anyerror!u8 {
-    const n = try coercion.toNumber(v);
+pub fn toUint8Clamp(self: *Interpreter, v: JSValue) anyerror!u8 {
+    const n = try self.toNumberJS(v);
     if (std.math.isNan(n) or n <= 0) return 0;
     if (n >= 255) return 255;
     const f = @floor(n);
@@ -338,39 +349,39 @@ pub fn typedElemSet(self: *Interpreter, kind: zvalue.TypedKind, buffer: *zbuffer
     if (value == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a {s}", .{if (kind.isBigInt()) "BigInt" else "number"});
     switch (kind) {
         .i8 => {
-            const v = try toInt8Wrap(value);
+            const v = try toInt8Wrap(self, value);
             typedView(i8, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
         },
         .u8 => {
-            const v = try toUint8Wrap(value);
+            const v = try toUint8Wrap(self, value);
             typedView(u8, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
         },
         .u8_clamped => {
-            const v = try toUint8Clamp(value);
+            const v = try toUint8Clamp(self, value);
             typedView(u8, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
         },
         .i16 => {
-            const v = try toInt16Wrap(value);
+            const v = try toInt16Wrap(self, value);
             typedView(i16, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
         },
         .u16 => {
-            const v = try toUint16Wrap(value);
+            const v = try toUint16Wrap(self, value);
             typedView(u16, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
         },
         .i32 => {
-            const v = try coercion.toInt32(value);
+            const v = try self.toInt32JS(value);
             typedView(i32, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
         },
         .u32 => {
-            const v = try coercion.toUint32(value);
+            const v = try self.toUint32JS(value);
             typedView(u32, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
         },
         .f32 => {
-            const v: f32 = @floatCast(try coercion.toNumber(value));
+            const v: f32 = @floatCast(try self.toNumberJS(value));
             typedView(f32, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
         },
         .f64 => {
-            const v = try coercion.toNumber(value);
+            const v = try self.toNumberJS(value);
             typedView(f64, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
         },
         .i64 => {
@@ -410,7 +421,7 @@ pub fn oobIsNoop(e: zbuffer.BufferError) anyerror!void {
 /// only has an uncatchable `error.NotImplemented` for that today, so it
 /// must be mapped to a real, catchable TypeError here.
 pub fn toLength(self: *Interpreter, v: JSValue) anyerror!usize {
-    const n = coercion.toNumber(v) catch return self.throwError(.type_error, "Cannot convert a {s} value to a number", .{v.typeOf()});
+    const n = try self.toNumberJS(v);
     if (std.math.isNan(n) or n <= 0) return 0;
     return @intFromFloat(@min(@floor(n), 9007199254740991.0));
 }
