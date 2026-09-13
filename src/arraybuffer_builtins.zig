@@ -57,6 +57,10 @@ pub const array_buffer_methods = std.StaticStringMap(MethodSpec).initComptime(.{
     .{ "slice", MethodSpec{ .call = arrayBufferSlice, .arity = 2 } },
 });
 
+pub const shared_array_buffer_methods = std.StaticStringMap(MethodSpec).initComptime(.{
+    .{ "slice", MethodSpec{ .call = arrayBufferSlice, .arity = 2 } },
+});
+
 pub const dataview_methods = std.StaticStringMap(MethodSpec).initComptime(.{
     .{ "getInt8", MethodSpec{ .call = dataViewGetInt8, .arity = 1 } },
     .{ "getUint8", MethodSpec{ .call = dataViewGetUint8, .arity = 1 } },
@@ -96,6 +100,27 @@ fn arrayBufferConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSV
     return self.gcNewArrayBuffer(byte_length);
 }
 
+/// `SharedArrayBuffer` -- see atomics-sharedarraybuffer.md: this engine
+/// has no real cross-agent memory model, so it's `ArrayBuffer` storage
+/// with `is_shared = true` (dispatched to a different prototype, see
+/// `arrayBufferProto`).
+fn sharedArrayBufferConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const self = interp(ctx);
+    if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor SharedArrayBuffer requires 'new'", .{});
+    const len_arg = arg(args, 0);
+    const byte_length: usize = if (len_arg == .undefined) 0 else try toByteIndexArg(self, len_arg, "length");
+    return self.gcNewSharedArrayBuffer(byte_length);
+}
+
+/// Shared by `ArrayBuffer.prototype.slice` and
+/// `SharedArrayBuffer.prototype.slice` (installed as two distinct
+/// native function objects, one per prototype -- see `materializeProtos`
+/// -- but the algorithm is identical): a NEW buffer holding a COPY,
+/// same sharedness as the receiver (`is_shared` propagated onto the
+/// copy since `zbuffer.ArrayBuffer.slice`'s own copy always starts
+/// unshared).
 fn arrayBufferSlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const self = interp(ctx);
@@ -111,7 +136,8 @@ fn arrayBufferSlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     // already-in-range indices, matching this repo's existing ToIndex
     // narrowing elsewhere; out-of-range is a real RangeError here rather
     // than a silent clamp.
-    const copy = src.slice(self.gc_allocator, @min(start, len), @min(end, len)) catch |e| return self.bufferErr(e);
+    var copy = src.slice(self.gc_allocator, @min(start, len), @min(end, len)) catch |e| return self.bufferErr(e);
+    copy.is_shared = src.is_shared;
     return self.gcNewArrayBufferFromValue(copy);
 }
 
@@ -953,6 +979,7 @@ pub fn install(self: *Interpreter) !void {
     // Proxy above. TypedArray constructors are a separate, not-yet-
     // started follow-up phase.
     _ = try installBuiltin(self, .{ .name = "ArrayBuffer", .ctor = .{ .arity = 1, .call = arrayBufferConstructor, .constructable = true } });
+    _ = try installBuiltin(self, .{ .name = "SharedArrayBuffer", .ctor = .{ .arity = 1, .call = sharedArrayBufferConstructor, .constructable = true } });
     _ = try installBuiltin(self, .{ .name = "DataView", .ctor = .{ .arity = 1, .call = dataViewConstructor, .constructable = true } });
 
     // The 10 JS-visible TypedArray constructors (roadmap item 19, phase

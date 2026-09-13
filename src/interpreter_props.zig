@@ -207,7 +207,7 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
         // array/string's own special-cased `.length`.
         .array_buffer => |box| blk: {
             if (std.mem.eql(u8, key, "byteLength")) break :blk JSValue.fromNumber(@floatFromInt(box.value.byteLength()));
-            if (try self.getFromProto(obj, self.protos.array_buffer, key)) |m| break :blk m;
+            if (try self.getFromProto(obj, self.arrayBufferProto(box.value.is_shared), key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
         // `.buffer`/`.byteOffset`/`.byteLength` are all real spec
@@ -677,6 +677,14 @@ pub fn ordinaryObject(self: *Interpreter) !JSValue {
 /// and `u8_clamped` deliberately resolve to DIFFERENT prototypes
 /// despite sharing storage (real JS: `Uint8Array.prototype !==
 /// Uint8ClampedArray.prototype`).
+/// `ArrayBuffer.prototype` or `SharedArrayBuffer.prototype`, dispatched
+/// on the single `.array_buffer` tag's `is_shared` flag -- same pattern
+/// as `typedArrayProto` (one JSValue tag, several JS-visible
+/// prototypes), see atomics-sharedarraybuffer.md.
+pub fn arrayBufferProto(self: *Interpreter, is_shared: bool) JSValue {
+    return if (is_shared) self.protos.shared_array_buffer else self.protos.array_buffer;
+}
+
 pub fn typedArrayProto(self: *Interpreter, kind: zvalue.TypedKind) JSValue {
     return switch (kind) {
         .i8 => self.protos.int8_array,
@@ -771,6 +779,7 @@ pub fn materializeProtos(self: *Interpreter) !void {
         .{ "boolean", "Boolean", builtins.boolean_methods },
         .{ "bigint", "BigInt", builtins.bigint_methods },
         .{ "array_buffer", "ArrayBuffer", builtins.array_buffer_methods },
+        .{ "shared_array_buffer", "SharedArrayBuffer", builtins.shared_array_buffer_methods },
         .{ "data_view", "DataView", builtins.dataview_methods },
     }) |e| {
         const ctor = g.get(e[1]).?;
@@ -829,6 +838,16 @@ pub fn materializeProtos(self: *Interpreter) !void {
         // take effect on Object.prototype.toString.call(Math/JSON).
         if (self.global_env.get("Math")) |math_obj| try math_obj.object.value.defineProperty(tag_key, try self.gcNewString("Math"), tag_attrs);
         if (self.global_env.get("JSON")) |json_obj| try json_obj.object.value.defineProperty(tag_key, try self.gcNewString("JSON"), tag_attrs);
+        // Atomics: plain namespace object, same as Math/JSON above.
+        // SharedArrayBuffer.prototype: real own accessor per spec
+        // (25.1.5.4-equivalent, 25.2.5.6) -- same shape as Map/Set/etc.
+        if (self.global_env.get("Atomics")) |atomics_obj| try atomics_obj.object.value.defineProperty(tag_key, try self.gcNewString("Atomics"), tag_attrs);
+        // ArrayBuffer.prototype's own toStringTag was a pre-existing
+        // gap (objToString's `.array_buffer` case fell to a hardcoded
+        // "Object" before this) -- fixed alongside SharedArrayBuffer's
+        // since both now go through the same dynamic-Get case.
+        try self.protos.array_buffer.object.value.defineProperty(tag_key, try self.gcNewString("ArrayBuffer"), tag_attrs);
+        try self.protos.shared_array_buffer.object.value.defineProperty(tag_key, try self.gcNewString("SharedArrayBuffer"), tag_attrs);
     }
 
     // Real spec: Array.prototype/Map.prototype/Set.prototype's

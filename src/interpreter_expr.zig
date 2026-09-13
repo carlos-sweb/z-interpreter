@@ -430,7 +430,7 @@ pub fn evalInstanceof(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSVal
         .map => &self.protos.map.object.value,
         .set => &self.protos.set.object.value,
         .promise => &self.protos.promise.object.value,
-        .array_buffer => &self.protos.array_buffer.object.value,
+        .array_buffer => |box| &self.arrayBufferProto(box.value.is_shared).object.value,
         .data_view => &self.protos.data_view.object.value,
         .@"error" => &self.protos.@"error".object.value,
         .temporal => |box| &self.protos.temporalProtoFor(box.value).object.value,

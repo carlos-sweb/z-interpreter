@@ -348,7 +348,14 @@ pub fn objToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
         // Neither type has a builtinTag entry in the spec's internal-
         // slot list, so the fallback (no tag installed, or a non-string
         // tag) is "Object", not "Symbol"/"BigInt".
-        .symbol, .bigint => blk: {
+        // ArrayBuffer.prototype/SharedArrayBuffer.prototype[Symbol.
+        // toStringTag] are real own accessor properties too (spec
+        // 25.1.5.4 / 25.2.5.6) -- same dynamic-Get fallback as
+        // .symbol/.bigint/.object below, so it naturally distinguishes
+        // the two via whichever prototype `arrayBufferProto` dispatched
+        // this value's [[Prototype]] to (materializeProtos installs a
+        // different string on each).
+        .array_buffer, .symbol, .bigint => blk: {
             if (self.symbol_to_string_tag) |tag_sym| {
                 const tag_key = try self.encodeKey(tag_sym);
                 defer self.gc_allocator.free(tag_key);
@@ -1008,7 +1015,7 @@ pub fn objectGetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: J
         .symbol => self.protos.symbol.retain(),
         .promise => self.protos.promise.retain(),
         .bigint => self.protos.bigint.retain(),
-        .array_buffer => self.protos.array_buffer.retain(),
+        .array_buffer => |box| self.arrayBufferProto(box.value.is_shared).retain(),
         .data_view => self.protos.data_view.retain(),
         .typed_array => |box| self.typedArrayProto(box.value.kind).retain(),
         .temporal => |box| self.protos.temporalProtoFor(box.value).retain(),

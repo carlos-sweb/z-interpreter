@@ -46,6 +46,7 @@ pub const Protos = struct {
     promise: JSValue = JSValue.UNDEFINED,
     bigint: JSValue = JSValue.UNDEFINED,
     array_buffer: JSValue = JSValue.UNDEFINED,
+    shared_array_buffer: JSValue = JSValue.UNDEFINED,
     data_view: JSValue = JSValue.UNDEFINED,
     /// The abstract, non-exposed `%TypedArray%.prototype` every concrete
     /// kind's own prototype chains to (real spec: `Int8Array.prototype
@@ -728,6 +729,7 @@ pub const Interpreter = struct {
     pub const gcNewBigIntValue = interpreter_gc.gcNewBigIntValue;
     pub const gcNewProxy = interpreter_gc.gcNewProxy;
     pub const gcNewArrayBuffer = interpreter_gc.gcNewArrayBuffer;
+    pub const gcNewSharedArrayBuffer = interpreter_gc.gcNewSharedArrayBuffer;
     pub const gcNewArrayBufferFromValue = interpreter_gc.gcNewArrayBufferFromValue;
     pub const gcNewDataView = interpreter_gc.gcNewDataView;
     pub const gcNewTypedArray = interpreter_gc.gcNewTypedArray;
@@ -873,6 +875,7 @@ pub const Interpreter = struct {
     pub const functionPrototype = interpreter_props.functionPrototype;
     pub const ordinaryObject = interpreter_props.ordinaryObject;
     pub const typedArrayProto = interpreter_props.typedArrayProto;
+    pub const arrayBufferProto = interpreter_props.arrayBufferProto;
     pub const getFromProto = interpreter_props.getFromProto;
     pub const installProto = interpreter_props.installProto;
     pub const aliasSymbolIterator = interpreter_props.aliasSymbolIterator;

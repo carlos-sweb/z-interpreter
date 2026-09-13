@@ -518,6 +518,11 @@ pub fn gcNewArrayBuffer(self: *Interpreter, byte_length: usize) !JSValue {
     try self.gcTrack(v);
     return v;
 }
+pub fn gcNewSharedArrayBuffer(self: *Interpreter, byte_length: usize) !JSValue {
+    const v = try JSValue.newSharedArrayBuffer(self.gc_allocator, byte_length);
+    try self.gcTrack(v);
+    return v;
+}
 /// For an `ArrayBuffer` already computed by an operation (e.g.
 /// `ArrayBuffer.prototype.slice`'s copy), not freshly zero-allocated
 /// -- same shape as `gcNewBigIntValue` for an already-computed

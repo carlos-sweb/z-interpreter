@@ -147,6 +147,7 @@ pub const nowMs = date_builtins.nowMs;
 // internals directly.
 const arraybuffer_builtins = @import("arraybuffer_builtins.zig");
 pub const array_buffer_methods = arraybuffer_builtins.array_buffer_methods;
+pub const shared_array_buffer_methods = arraybuffer_builtins.shared_array_buffer_methods;
 pub const dataview_methods = arraybuffer_builtins.dataview_methods;
 pub const typed_array_methods = arraybuffer_builtins.typed_array_methods;
 
@@ -193,6 +194,10 @@ pub const freeOwnedKeys = object_builtins.freeOwnedKeys;
 // Reflect's sake) are no longer needed here -- reflect_builtins.zig now
 // imports object_builtins.zig directly for them.
 const reflect_builtins = @import("reflect_builtins.zig");
+
+// atomics-sharedarraybuffer.md: Atomics (statics-only, no constructor
+// -- same shape as Reflect/Math above).
+const atomics_builtins = @import("atomics_builtins.zig");
 
 // z-interpreter-refactor.md, Step 5 Phase A batch 9: the Error constructor
 // family (Error/TypeError/RangeError/SyntaxError/ReferenceError/
@@ -242,6 +247,7 @@ pub fn setupGlobals(self: *Interpreter) !void {
     try proxy_builtins.install(self);
 
     try arraybuffer_builtins.install(self);
+    try atomics_builtins.install(self);
 
     try error_builtins.install(self);
 
