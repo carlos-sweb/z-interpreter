@@ -532,9 +532,25 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
     }
     if (obj != .object) return error.NotImplemented;
     // Writing a property on `globalThis` creates/updates a global
-    // binding (`globalThis.foo = 1` makes `foo` a global).
+    // binding (`globalThis.foo = 1` makes `foo` a global) -- UNLESS
+    // `key` already names one (`undefined`/`NaN`/`Infinity`, marked
+    // `consts` in setupGlobals): then this must go through `assign()`
+    // so the immutable-binding check fires (real TypeError, matching
+    // Node's "Cannot assign to read only property ... of object
+    // '#<Object>'"), same as delete's own already-existing hardcoded
+    // non-configurable check for these same 3 names just above.
+    // Blindly `define`-ing over an existing binding was a real bug:
+    // `globalThis.undefined = 5` silently succeeded (test262
+    // built-ins/undefined+NaN+Infinity/prop-desc.js).
     if (self.global_object) |go| {
         if (obj.object == go.object) {
+            if (self.global_env.bindings.contains(key)) {
+                self.global_env.assign(key, value.retain()) catch |e| switch (e) {
+                    error.ImmutableBinding => return self.throwError(.type_error, "Cannot assign to read only property '{s}' of object '#<Object>'", .{key}),
+                    else => return e,
+                };
+                return;
+            }
             // `Environment.define` stores `key` BY REFERENCE (never
             // dupes -- every other call site passes an AST-borrowed,
             // forever-valid name). `key` here can be a caller-owned

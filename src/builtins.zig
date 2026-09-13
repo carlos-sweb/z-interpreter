@@ -221,9 +221,20 @@ pub fn setupGlobals(self: *Interpreter) !void {
     const arena = self.gc_allocator;
     const g = self.global_env;
 
+    // Real spec: all 3 are { writable: false, enumerable: false,
+    // configurable: false } (18.1.1/18.1.2/18.1.3) -- markConst makes
+    // `undefined = 1`/`globalThis.undefined = 1` a real TypeError
+    // (always-strict here), matching delete's own already-existing
+    // hardcoded non-configurable check for these same 3 names
+    // (interpreter_props.zig's evalDelete) and globalPropertyDescriptor's
+    // already-correct { writable: false, ... } report (object_builtins.zig)
+    // -- only the actual WRITE path was still unchecked before this.
     try g.define(arena, "undefined", JSValue.UNDEFINED);
+    try g.markConst(arena, "undefined");
     try g.define(arena, "NaN", JSValue.fromNumber(std.math.nan(f64)));
+    try g.markConst(arena, "NaN");
     try g.define(arena, "Infinity", JSValue.fromNumber(std.math.inf(f64)));
+    try g.markConst(arena, "Infinity");
 
     // Object comes first: see object_builtins.zig's module doc comment for
     // why (every other builtin's ordinaryObject() calls need real
