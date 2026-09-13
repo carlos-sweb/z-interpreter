@@ -682,11 +682,18 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, thi
             }
             return JSValue.UNDEFINED;
         },
-        // Arrays: `length` and in-bounds indices are own data properties.
+        // Arrays: `length` and in-bounds indices are own data properties;
+        // any other named key (mirrors Function's statics-bag branch
+        // above) comes from the array_props side table, if populated.
         .array => |box| {
             if (std.mem.eql(u8, key, "length"))
                 return dataDescObj(self, JSValue.fromNumber(@floatFromInt(box.value.length())), true, false, false);
-            const idx = std.fmt.parseInt(usize, key, 10) catch return JSValue.UNDEFINED;
+            const idx = std.fmt.parseInt(usize, key, 10) catch {
+                if (self.array_props.get(@intFromPtr(box))) |bag| {
+                    if (bag.object.value.getOwnRecord(key)) |rec| return descFromRecord(self, rec);
+                }
+                return JSValue.UNDEFINED;
+            };
             if (idx >= box.value.length()) return JSValue.UNDEFINED;
             return dataDescObj(self, box.value.get(idx).retain(), true, true, true);
         },
@@ -817,55 +824,88 @@ fn objectCreate(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     return obj;
 }
 
+/// Function/Array have no [[Extensible]]/[[Frozen]]/[[Sealed]] slots of
+/// their own -- `Callable`/`ZArray` aren't real ZObjects -- but each
+/// already has a lazily-created real-`.object` side bag for named
+/// properties (`Callable.statics`, and the interpreter's `array_props`
+/// side table for arrays), which as a genuine ZObject already carries
+/// these three flags for free. Read-only: returns the existing bag
+/// WITHOUT creating one, so querying a never-touched Function/Array
+/// doesn't allocate -- absence means "still at the default" (handled
+/// by each caller below), not "not an object".
+fn extensibilityBag(self: *Interpreter, v: JSValue) ?JSValue {
+    return switch (v) {
+        .object => v,
+        .function => |box| box.value.statics,
+        .array => |box| self.array_props.get(@intFromPtr(box)),
+        else => null,
+    };
+}
+
+/// Same, but creates the bag on first touch -- for freeze/seal/
+/// preventExtensions, which must have somewhere to record the new
+/// state even for a Function/Array that never had a named property.
+fn extensibilityBagForWrite(self: *Interpreter, v: JSValue) anyerror!?JSValue {
+    return switch (v) {
+        .object => v,
+        .function => try self.functionStatics(v),
+        .array => try self.arrayPropsObject(v),
+        else => null,
+    };
+}
+
 fn objectFreeze(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
     _ = allocator;
     _ = this_value;
+    const self = interp(ctx);
     const v = arg(args, 0);
-    if (v == .object) v.object.value.freeze();
+    if (try extensibilityBagForWrite(self, v)) |bag| bag.object.value.freeze();
     return v.retain();
 }
 
 fn objectIsFrozen(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
     _ = allocator;
     _ = this_value;
+    const self = interp(ctx);
     const v = arg(args, 0);
-    return JSValue.fromBool(if (v == .object) v.object.value.is_frozen else true);
+    if (extensibilityBag(self, v)) |bag| return JSValue.fromBool(bag.object.value.is_frozen);
+    return JSValue.fromBool(!(v == .array or v == .function));
 }
 
 fn objectSeal(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
     _ = allocator;
     _ = this_value;
+    const self = interp(ctx);
     const v = arg(args, 0);
-    if (v == .object) v.object.value.seal();
+    if (try extensibilityBagForWrite(self, v)) |bag| bag.object.value.seal();
     return v.retain();
 }
 
 fn objectIsSealed(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
     _ = allocator;
     _ = this_value;
+    const self = interp(ctx);
     const v = arg(args, 0);
-    return JSValue.fromBool(if (v == .object) v.object.value.is_sealed or v.object.value.is_frozen else true);
+    if (extensibilityBag(self, v)) |bag| return JSValue.fromBool(bag.object.value.is_sealed or bag.object.value.is_frozen);
+    return JSValue.fromBool(!(v == .array or v == .function));
 }
 
 fn objectPreventExtensions(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
     _ = allocator;
     _ = this_value;
+    const self = interp(ctx);
     const v = arg(args, 0);
-    if (v == .object) v.object.value.preventExtensions();
+    if (try extensibilityBagForWrite(self, v)) |bag| bag.object.value.preventExtensions();
     return v.retain();
 }
 
 fn objectIsExtensible(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
     _ = allocator;
     _ = this_value;
+    const self = interp(ctx);
     const v = arg(args, 0);
-    return JSValue.fromBool(if (v == .object) v.object.value.is_extensible else false);
+    if (extensibilityBag(self, v)) |bag| return JSValue.fromBool(bag.object.value.is_extensible);
+    return JSValue.fromBool(v == .array or v == .function);
 }
 
 fn objectSetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {

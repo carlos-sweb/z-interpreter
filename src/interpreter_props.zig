@@ -295,7 +295,15 @@ pub fn setArrayProperty(self: *Interpreter, obj: JSValue, key: []const u8, value
         }
         return;
     }
-    const idx = std.fmt.parseInt(usize, key, 10) catch return error.NotImplemented;
+    // A non-index, non-"length" key (`arr.foo = 1`) has nowhere to
+    // live in ZArray itself (it's a bare index vector, no named-
+    // property storage) -- goes into the array's array_props bag, a
+    // real `.object` created lazily, exactly like `Object.defineProperty`
+    // already targets for this same case (see `arrayDefineProperty`).
+    // Reusing `setObjectProperty` on it gets frozen/sealed/non-
+    // extensible enforcement and the old-value disposal for free.
+    const idx = std.fmt.parseInt(usize, key, 10) catch
+        return self.setObjectProperty(try self.arrayPropsObject(obj), key, value);
     const cur = arr.length();
     if (idx < cur) {
         arr.toSliceMut()[idx].deinit();
@@ -619,6 +627,15 @@ pub fn deletePropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8) 
                 return true;
             }
         }
+    }
+    // Same bug class as the `.function` fix above, now reachable for
+    // real since `setArrayProperty` started routing named keys into
+    // array_props: `delete arr.foo` on a sealed/frozen array must
+    // actually consult that bag's configurability, not vacuously
+    // succeed. No bag yet means nothing was ever defined there.
+    if (obj == .array) {
+        if (self.array_props.get(@intFromPtr(obj.array))) |bag| return self.deleteObjectProperty(bag, key);
+        return true;
     }
     if (obj != .object) return true;
     return self.deleteObjectProperty(obj, key);
