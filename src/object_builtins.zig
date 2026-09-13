@@ -308,7 +308,15 @@ fn objPropertyIsEnumerable(ctx: *anyopaque, allocator: Allocator, this_value: JS
 /// `new Boolean(x)` wrapper objects are `.object` with no internal-slot
 /// concept of their own (see `unboxPrimitiveWrapper`'s doc comment),
 /// so their tag comes from the boxed primitive's own JSValue tag.
-fn objToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+/// `pub`: array-generic-methods.md's `Array.prototype.toString`
+/// reaches this directly (not via a live `Get(Object.prototype,
+/// "toString")`) for its %Object.prototype.toString% intrinsic
+/// fallback -- real spec means the FIXED intrinsic here, not
+/// whatever currently lives at that property (which a test can and
+/// does delete: `delete Object.prototype.toString` must not change
+/// this fallback's behavior). Same reach-back pattern as
+/// `reflect_builtins.zig`'s `object_builtins.X` aliases.
+pub fn objToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     _ = args;
     const self = interp(ctx);
