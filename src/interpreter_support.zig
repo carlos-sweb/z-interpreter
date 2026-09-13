@@ -11,6 +11,7 @@ const zparser = @import("zparser");
 const zregex = @import("zregex");
 const zbigint = @import("zbigint");
 const zbuffer = @import("zbuffer");
+const zstring = @import("zstring");
 
 const coercion = @import("coercion.zig");
 const native_helpers = @import("native_helpers.zig");
@@ -255,7 +256,13 @@ pub fn stringConcat(self: *Interpreter, left: JSValue, right: JSValue) anyerror!
     defer self.gc_allocator.free(ls);
     const rs = try toDisplayStringJS(self, self.gc_allocator, right);
     defer self.gc_allocator.free(rs);
-    const joined = try std.mem.concat(self.gc_allocator, u8, &.{ ls, rs });
+    // z-string-surrogate-charat.md: canonicalize a high+low WTF-8
+    // surrogate pair meeting exactly at this boundary back into real
+    // UTF-8, so the same logical string always has one byte
+    // representation regardless of how it was built (real spec:
+    // `String.fromCharCode(0xD83D) + String.fromCharCode(0xDE00) ===
+    // "😀"`).
+    const joined = try zstring.utf16.concatUtf8(self.gc_allocator, ls, rs);
     defer self.gc_allocator.free(joined);
     return try self.gcNewString(joined);
 }

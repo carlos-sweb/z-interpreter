@@ -21,6 +21,7 @@ const zobject = @import("zobject");
 const znumber = @import("znumber");
 const zfunctions = @import("zfunctions");
 const zbigint = @import("zbigint");
+const zstring = @import("zstring");
 
 const coercion = @import("coercion.zig");
 const builtins = @import("builtins.zig");
@@ -29,6 +30,21 @@ const interpreter_mod = @import("interpreter.zig");
 const Interpreter = interpreter_mod.Interpreter;
 const ClassCtx = interpreter_mod.ClassCtx;
 const Environment = interpreter_mod.Environment;
+
+/// Appends `chunk` to `buf`, merging a WTF-8 high-surrogate tail with a
+/// WTF-8 low-surrogate head into the real 4-byte UTF-8 astral sequence --
+/// see z-string-surrogate-charat.md. Needed anywhere string pieces are
+/// joined byte-by-byte (template literals here; String.prototype.concat
+/// and the `+` operator have their own call sites in z-string/z-interpreter).
+fn appendWtf8Merged(buf: *std.ArrayList(u8), allocator: Allocator, chunk: []const u8) !void {
+    if (zstring.utf16.mergeSurrogateBoundary(buf.items, chunk)) |merged| {
+        buf.items.len -= 3;
+        try buf.appendSlice(allocator, &merged);
+        try buf.appendSlice(allocator, chunk[3..]);
+    } else {
+        try buf.appendSlice(allocator, chunk);
+    }
+}
 
 pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node) anyerror!JSValue {
     // The stack-depth guard (byte-based: adapts to Debug/Release
@@ -63,13 +79,13 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
             var buf: std.ArrayList(u8) = .empty;
             defer buf.deinit(arena);
             for (t.quasis, 0..) |quasi, i| {
-                try buf.appendSlice(arena, quasi);
+                try appendWtf8Merged(&buf, arena, quasi);
                 if (i < t.expressions.len) {
                     const v = try self.evalExpression(env, t.expressions[i]);
                     defer v.deinit();
                     const s = try self.toDisplayStringJS(arena, v);
                     defer arena.free(s);
-                    try buf.appendSlice(arena, s);
+                    try appendWtf8Merged(&buf, arena, s);
                 }
             }
             return try self.gcNewString(buf.items);

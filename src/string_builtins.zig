@@ -550,6 +550,33 @@ fn stringFromCharCode(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
         const num = try self.toNumberJS(a);
         const wrapped: f64 = if (std.math.isFinite(num)) @mod(@trunc(num), 65536.0) else 0;
         const code: u21 = @intFromFloat(wrapped);
+        // A lone surrogate (0xD800-0xDFFF) is a real, legal UTF-16
+        // code unit -- `fromCharCode` just encodes each argument as
+        // its own code unit, no pairing/validation at all (real spec
+        // never checks; confirmed against Node:
+        // `String.fromCharCode(0xD800).length === 1`). std.unicode's
+        // own encoder rejects it as an invalid Unicode scalar value,
+        // so WTF-8-encode it directly instead (z-string's
+        // encodeSurrogateWtf8; z-string-surrogate-charat.md) -- this
+        // used to silently DROP the argument entirely (`catch
+        // continue`).
+        if (code >= 0xD800 and code <= 0xDFFF) {
+            var tmp: [3]u8 = undefined;
+            zstring.utf16.encodeSurrogateWtf8(&tmp, @intCast(code));
+            // Building up one code unit per argument is really the
+            // same as repeated concatenation -- a high surrogate
+            // argument immediately followed by a low surrogate one
+            // must canonicalize into real UTF-8 at that boundary too,
+            // same as `+`/String.prototype.concat (confirmed against
+            // Node: `String.fromCharCode(0xD83D, 0xDE00) === "😀"`).
+            if (zstring.utf16.mergeSurrogateBoundary(buf.items, &tmp)) |merged| {
+                buf.items.len -= 3;
+                try buf.appendSlice(allocator, &merged);
+            } else {
+                try buf.appendSlice(allocator, &tmp);
+            }
+            continue;
+        }
         var tmp: [4]u8 = undefined;
         const n = std.unicode.utf8Encode(code, &tmp) catch continue;
         try buf.appendSlice(allocator, tmp[0..n]);
@@ -568,6 +595,27 @@ fn stringFromCodePoint(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
         if (!std.math.isFinite(num) or num != @trunc(num) or num < 0 or num > 0x10FFFF)
             return interp(ctx).throwError(.range_error, "Invalid code point {d}", .{num});
         const cp: u21 = @intFromFloat(num);
+        // Real spec's range check above (0-0x10FFFF) does NOT exclude
+        // the surrogate range -- confirmed against Node:
+        // `String.fromCodePoint(0xD800)` succeeds (length 1, not a
+        // RangeError). std.unicode's own encoder rejects it as an
+        // invalid Unicode scalar value, so WTF-8-encode it directly
+        // instead (same as fromCharCode above; z-string's
+        // encodeSurrogateWtf8; z-string-surrogate-charat.md).
+        if (cp >= 0xD800 and cp <= 0xDFFF) {
+            var tmp: [3]u8 = undefined;
+            zstring.utf16.encodeSurrogateWtf8(&tmp, @intCast(cp));
+            // Same boundary canonicalization as fromCharCode above
+            // (confirmed against Node: `String.fromCodePoint(0xD83D,
+            // 0xDE00) === "😀"`).
+            if (zstring.utf16.mergeSurrogateBoundary(buf.items, &tmp)) |merged| {
+                buf.items.len -= 3;
+                try buf.appendSlice(allocator, &merged);
+            } else {
+                try buf.appendSlice(allocator, &tmp);
+            }
+            continue;
+        }
         var tmp: [4]u8 = undefined;
         const n = std.unicode.utf8Encode(cp, &tmp) catch continue;
         try buf.appendSlice(allocator, tmp[0..n]);

@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const zvalue = @import("zvalue");
 const znumber = @import("znumber");
 const ztemporal = @import("ztemporal");
+const zstring = @import("zstring");
 const JSValue = zvalue.JSValue;
 
 /// Appends a Temporal `toIsoString` result, freeing the allocation and
@@ -40,7 +41,17 @@ pub fn inspect(allocator: Allocator, buf: *std.ArrayList(u8), v: JSValue) !void 
                 try buf.appendSlice(allocator, s);
             }
         },
-        .string => |box| try buf.appendSlice(allocator, box.value.data),
+        .string => |box| {
+            // z-string-surrogate-charat.md: a string can internally
+            // hold a lone WTF-8-encoded surrogate (from splitting an
+            // astral pair via charAt/at, or from an unpaired \u
+            // escape) -- real UTF-8 (which stdout actually needs)
+            // can't express that, so it comes out as U+FFFD here,
+            // same as real Node writing such a string to a terminal.
+            const sanitized = try zstring.utf16.sanitizeWtf8ToUtf8(allocator, box.value.data);
+            defer allocator.free(sanitized);
+            try buf.appendSlice(allocator, sanitized);
+        },
         .array => |box| {
             try buf.append(allocator, '[');
             for (box.value.toSlice(), 0..) |item, i| {

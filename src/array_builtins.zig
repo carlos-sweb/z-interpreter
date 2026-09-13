@@ -10,6 +10,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const zvalue = @import("zvalue");
 const JSValue = zvalue.JSValue;
+const zstring = @import("zstring");
 
 const interpreter_mod = @import("interpreter.zig");
 const Interpreter = interpreter_mod.Interpreter;
@@ -32,6 +33,21 @@ const toLength = builtin_helpers.toLength;
 const hasIteratorMethod = builtin_helpers.hasIteratorMethod;
 const arrayLikeToList = builtin_helpers.arrayLikeToList;
 const makeArrayIterator = builtin_helpers.makeArrayIterator;
+
+/// See interpreter_expr.zig's twin of this helper: merges a WTF-8
+/// high-surrogate tail with a low-surrogate head into the real 4-byte
+/// UTF-8 astral sequence instead of leaving two lone WTF-8 surrogate
+/// halves adjacent (z-string-surrogate-charat.md). Duplicated locally
+/// rather than made pub+shared across files for one 8-line helper.
+fn appendWtf8Merged(buf: *std.ArrayList(u8), allocator: Allocator, chunk: []const u8) !void {
+    if (zstring.utf16.mergeSurrogateBoundary(buf.items, chunk)) |merged| {
+        buf.items.len -= 3;
+        try buf.appendSlice(allocator, &merged);
+        try buf.appendSlice(allocator, chunk[3..]);
+    } else {
+        try buf.appendSlice(allocator, chunk);
+    }
+}
 
 pub const array_methods = std.StaticStringMap(MethodSpec).initComptime(.{
     .{ "push", MethodSpec{ .call = arrayPush, .arity = 1 } },
@@ -203,15 +219,24 @@ fn arrayJoin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     defer if (owned_sep) |s| allocator.free(s);
     const sep = owned_sep orelse ",";
     if (this_value == .array) {
-        // z-array's joinWith() does the mechanical loop/separator-placement;
+        // Not z-array's joinWith(): that's a generic container with no
+        // zstring dependency, so it can't merge a WTF-8 surrogate pair
+        // split across a separator/element boundary (z-string-surrogate-
+        // charat.md). Same loop by hand instead, via appendWtf8Merged.
         // joinElementToStringJS supplies the per-element stringify policy
         // (holes become "", same rule as toDisplayString's own `.array`
         // case, but real ToPrimitive-aware unlike the pure coercion.zig
         // version -- see ~/.plans/builtins-consolidation-analysis.md and
         // ~/.plans/pendientes/toprimitive-coercion.md).
-        const s = try this_value.array.value.joinWith(sep, allocator, self, Interpreter.joinElementToStringJS);
-        defer allocator.free(s);
-        return self.gcNewString(s);
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(allocator);
+        for (this_value.array.value.toSlice(), 0..) |item, i| {
+            if (i > 0) try appendWtf8Merged(&buf, allocator, sep);
+            const piece = try Interpreter.joinElementToStringJS(self, item, allocator);
+            defer allocator.free(piece);
+            try appendWtf8Merged(&buf, allocator, piece);
+        }
+        return self.gcNewString(buf.items);
     }
     // No ZArray to call joinWith() on -- same loop by hand, same
     // per-element stringify policy.
@@ -220,11 +245,11 @@ fn arrayJoin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     defer buf.deinit(allocator);
     var i: usize = 0;
     while (i < len) : (i += 1) {
-        if (i > 0) try buf.appendSlice(allocator, sep);
+        if (i > 0) try appendWtf8Merged(&buf, allocator, sep);
         const item = (try arrayLikeElem(ctx, allocator, this_value, i)) orelse JSValue.UNDEFINED;
         const piece = try Interpreter.joinElementToStringJS(self, item, allocator);
         defer allocator.free(piece);
-        try buf.appendSlice(allocator, piece);
+        try appendWtf8Merged(&buf, allocator, piece);
     }
     return self.gcNewString(buf.items);
 }
@@ -877,9 +902,17 @@ fn arrayToStringMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
     // same delegation coercion.toDisplayString's own `.array` case uses,
     // but real ToPrimitive-aware (see arrayJoin/joinElementToStringJS).
     if (this_value == .array) {
-        const s = try this_value.array.value.joinWith(",", allocator, self, Interpreter.joinElementToStringJS);
-        defer allocator.free(s);
-        return self.gcNewString(s);
+        // See arrayJoin: bypasses z-array's joinWith() for the same
+        // WTF-8 surrogate-boundary-merge reason.
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(allocator);
+        for (this_value.array.value.toSlice(), 0..) |item, i| {
+            if (i > 0) try appendWtf8Merged(&buf, allocator, ",");
+            const piece = try Interpreter.joinElementToStringJS(self, item, allocator);
+            defer allocator.free(piece);
+            try appendWtf8Merged(&buf, allocator, piece);
+        }
+        return self.gcNewString(buf.items);
     }
     // Real spec: Get(O, "join"); if that's not callable, fall back to
     // the %Object.prototype.toString% intrinsic instead of joining at
