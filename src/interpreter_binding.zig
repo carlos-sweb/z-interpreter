@@ -457,6 +457,7 @@ pub fn bindForIteration(self: *Interpreter, env: *Environment, binding: zstateme
             }
             const iter_env = try self.gcChildEnv(env);
             try self.bindPattern(iter_env, d.pattern, value, .define);
+            if (d.kind == .@"const") try self.markPatternConst(iter_env, d.pattern);
             return iter_env;
         },
         .existing => |name| {
@@ -465,6 +466,7 @@ pub fn bindForIteration(self: *Interpreter, env: *Environment, binding: zstateme
             env.assign(name.name, value.retain()) catch |err| return switch (err) {
                 error.ReferenceError => self.throwError(.reference_error, "{s} is not defined", .{name.name}),
                 error.BeforeInitialization => self.throwError(.reference_error, "Cannot access '{s}' before initialization", .{name.name}),
+                error.ImmutableBinding => self.throwError(.type_error, "Assignment to constant variable.", .{}),
             };
             return env;
         },

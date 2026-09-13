@@ -798,6 +798,7 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
             // Sweeper.environment's doc comment) -- nothing to release.
             e.bindings.deinit(self.gc_allocator);
             e.tdz.deinit(self.gc_allocator);
+            e.consts.deinit(self.gc_allocator);
             self.gc_allocator.destroy(e);
         },
         .closure_ctx => |cc| {

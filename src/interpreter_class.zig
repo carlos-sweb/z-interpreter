@@ -138,7 +138,14 @@ pub fn makeClosure(self: *Interpreter, env: *Environment, fnode: *zfunctions.Fun
             .function_decl, .function_expr => true,
         },
     });
-    if (self_name) |n| try closure_env.define(arena, n, fn_value.retain());
+    if (self_name) |n| {
+        try closure_env.define(arena, n, fn_value.retain());
+        // immutable-bindings.md: a named function expression's own
+        // self-reference is a CreateImmutableBinding (ECMA-262
+        // InstantiateOrdinaryFunctionExpression) -- `(function g(){
+        // g = 1; })()` is a real TypeError, confirmed against Node.
+        try closure_env.markConst(arena, n);
+    }
     return fn_value;
 }
 
@@ -409,7 +416,17 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
     // The class's own name binds BEFORE static elements run (spec:
     // ClassDefinitionEvaluation initializes the inner binding before
     // static fields/blocks execute, so `static { C.x = 1 }` works).
-    if (cnode.name) |n| try closure_env.define(arena, n, class_fn.retain());
+    // immutable-bindings.md: this binds ONLY the class's internal
+    // self-reference (visible inside the class body) as immutable --
+    // NOT the outer binding a `class C {}` DECLARATION creates in the
+    // enclosing scope (interpreter_stmt.zig's `.class_declaration`
+    // case, untouched): confirmed against Node that `class C {} C =
+    // 5;` does NOT throw (IsConstantDeclaration is false for
+    // ClassDeclaration), only the inner self-reference does.
+    if (cnode.name) |n| {
+        try closure_env.define(arena, n, class_fn.retain());
+        try closure_env.markConst(arena, n);
+    }
 
     // One pass, in declaration order (the spec's order matters for
     // computed-key evaluation, static field initializers, and static

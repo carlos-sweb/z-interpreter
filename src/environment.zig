@@ -4,7 +4,7 @@ const zvalue = @import("zvalue");
 const JSValue = zvalue.JSValue;
 
 pub const EnvError = error{ReferenceError};
-pub const AssignError = error{ ReferenceError, BeforeInitialization };
+pub const AssignError = error{ ReferenceError, BeforeInitialization, ImmutableBinding };
 
 /// Result of a chain lookup: a live value, a binding that exists but is
 /// still in its temporal dead zone (`x; let x = 1;`), or nothing at all.
@@ -23,6 +23,11 @@ pub const Environment = struct {
     /// hoisting pre-pass at scope entry; cleared by `define` when the
     /// declaration actually executes.
     tdz: std.StringHashMapUnmanaged(void) = .empty,
+    /// Names bound as immutable in this scope (`const`, a named
+    /// function/class expression's own self-reference, `import`
+    /// bindings) -- same parallel-set shape as `tdz`, checked by
+    /// `assign()` before overwriting. immutable-bindings.md.
+    consts: std.StringHashMapUnmanaged(void) = .empty,
     /// Non-null only at a function-call boundary -- see Interpreter's
     /// this-binding handling. Falls through to JSValue.UNDEFINED at the
     /// global environment via `resolveThis`.
@@ -73,6 +78,13 @@ pub const Environment = struct {
         try self.tdz.put(arena, name, {});
     }
 
+    /// Marks `name` as an immutable binding in this scope -- any later
+    /// `assign()` to it is a real TypeError (ECMA-262's
+    /// SetMutableBinding step 5b, always-strict in this engine).
+    pub fn markConst(self: *Environment, arena: Allocator, name: []const u8) !void {
+        try self.consts.put(arena, name, {});
+    }
+
     /// True when this environment itself already declares the name (as a
     /// live binding or a TDZ mark) -- the redeclaration check.
     pub fn declaresLocally(self: *Environment, name: []const u8) bool {
@@ -120,6 +132,7 @@ pub const Environment = struct {
         while (env) |e| : (env = e.parent) {
             if (e.tdz.contains(name)) return AssignError.BeforeInitialization;
             if (e.bindings.getPtr(name)) |slot| {
+                if (e.consts.contains(name)) return AssignError.ImmutableBinding;
                 slot.deinit();
                 slot.* = value;
                 return;

@@ -696,6 +696,7 @@ pub fn assignTo(self: *Interpreter, env: *Environment, target: *zparser.Node, va
         .identifier => |name| env.assign(name, value.retain()) catch |err| return switch (err) {
             error.ReferenceError => self.throwError(.reference_error, "{s} is not defined", .{name}),
             error.BeforeInitialization => self.throwError(.reference_error, "Cannot access '{s}' before initialization", .{name}),
+            error.ImmutableBinding => self.throwError(.type_error, "Assignment to constant variable.", .{}),
         },
         .paren => |inner| try self.assignTo(env, inner, value),
         .member => |m| {

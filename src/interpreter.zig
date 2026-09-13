@@ -806,6 +806,7 @@ pub const Interpreter = struct {
     pub const hoistVarPattern = interpreter_stmt.hoistVarPattern;
     pub const hoistLexical = interpreter_stmt.hoistLexical;
     pub const markPatternTDZ = interpreter_stmt.markPatternTDZ;
+    pub const markPatternConst = interpreter_stmt.markPatternConst;
     pub const checkVarNotShadowingLexical = interpreter_stmt.checkVarNotShadowingLexical;
     pub const evalStatement = interpreter_stmt.evalStatement;
     pub const loopOwns = interpreter_stmt.loopOwns;

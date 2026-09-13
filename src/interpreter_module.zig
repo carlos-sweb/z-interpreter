@@ -125,18 +125,25 @@ pub fn loadModule(self: *Interpreter, specifier: []const u8, referrer: ?[]const 
         if (stmt.data != .import_decl) continue;
         const imp = stmt.data.import_decl;
         const dep = try self.loadModule(imp.source, rec.path);
+        // immutable-bindings.md: every import binding is immutable in
+        // the importing module's scope (confirmed against real Node
+        // ESM: `import {x} from './dep.mjs'; x = 5;` is a runtime
+        // TypeError there too, not a static SyntaxError).
         if (imp.namespace_local) |ns| {
             try module_env.define(gc, ns, dep.exports.retain());
+            try module_env.markConst(gc, ns);
         }
         if (imp.default_local) |dl| {
             const v = dep.exports.object.value.get("default") orelse
                 return self.throwError(.syntax_error, "The requested module '{s}' does not provide an export named 'default'", .{imp.source});
             try module_env.define(gc, dl, v.retain());
+            try module_env.markConst(gc, dl);
         }
         for (imp.named) |spec| {
             const v = dep.exports.object.value.get(spec.imported) orelse
                 return self.throwError(.syntax_error, "The requested module '{s}' does not provide an export named '{s}'", .{ imp.source, spec.imported });
             try module_env.define(gc, spec.local, v.retain());
+            try module_env.markConst(gc, spec.local);
         }
     }
 

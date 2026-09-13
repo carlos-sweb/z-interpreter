@@ -257,6 +257,9 @@ pub fn hoistLexical(self: *Interpreter, env: *Environment, stmts: []const *zstat
                     continue;
                 }
                 for (v.declarators) |decl| try self.markPatternTDZ(env, decl.pattern);
+                if (v.kind == .@"const") {
+                    for (v.declarators) |decl| try self.markPatternConst(env, decl.pattern);
+                }
             },
             .class_declaration => |ptr| {
                 const cnode = zfunctions.asClassNode(ptr);
@@ -274,6 +277,29 @@ pub fn hoistLexical(self: *Interpreter, env: *Environment, stmts: []const *zstat
             },
             else => {},
         }
+    }
+}
+
+/// Marks each identifier of `pattern` as immutable in `env` -- same
+/// walk as `markPatternTDZ` but without the redeclaration check
+/// (`markPatternTDZ` already did that for this exact pattern, when
+/// this is called right after it; the for-loop call sites don't need
+/// it either, since `bindPattern` already defined the name fresh in a
+/// brand-new env there). immutable-bindings.md.
+pub fn markPatternConst(self: *Interpreter, env: *Environment, pattern: *const zstatements.BindingPattern) anyerror!void {
+    const arena = self.gc_allocator;
+    switch (pattern.*) {
+        .identifier => |id| try env.markConst(arena, id.name),
+        .array => |arr| {
+            for (arr.elements) |maybe_el| {
+                if (maybe_el) |el| try self.markPatternConst(env, el.pattern);
+            }
+            if (arr.rest) |r| try self.markPatternConst(env, r);
+        },
+        .object => |obj| {
+            for (obj.properties) |p| try self.markPatternConst(env, p.value);
+            if (obj.rest) |r| try env.markConst(arena, r.name);
+        },
     }
 }
 
@@ -628,6 +654,7 @@ pub fn evalForStatement(self: *Interpreter, env: *Environment, s: anytype, label
                             if (d.kind == .@"var" and decl.init == null) continue;
                             const value = if (decl.init) |e| try self.evalExpression(loop_env, e) else JSValue.UNDEFINED;
                             try self.bindPattern(loop_env, decl.pattern, value, if (d.kind == .@"var") .assign else .define);
+                            if (d.kind == .@"const") try self.markPatternConst(loop_env, decl.pattern);
                         }
                     },
                     .expr => |e| (try self.evalExpression(loop_env, e)).deinit(),
