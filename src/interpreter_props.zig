@@ -263,7 +263,7 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             if (std.mem.eql(u8, key, "unicode")) break :blk JSValue.fromBool(st.unicode);
             if (std.mem.eql(u8, key, "hasIndices")) break :blk JSValue.fromBool(st.has_indices);
             if (std.mem.eql(u8, key, "unicodeSets")) break :blk JSValue.fromBool(st.unicode_sets);
-            if (std.mem.eql(u8, key, "lastIndex")) break :blk JSValue.fromNumber(@floatFromInt(st.last_index));
+            if (std.mem.eql(u8, key, "lastIndex")) break :blk st.last_index.retain();
             if (try self.getFromProto(obj, self.protos.regex, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
@@ -474,36 +474,19 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
     }
     if (obj == .regex) {
         if (std.mem.eql(u8, key, "lastIndex")) {
-            // NOT upgraded to a real-ToPrimitive-aware conversion despite
-            // this being exactly the pattern ~/.plans/pendientes/
-            // toprimitive-coercion.md's Phase 4 otherwise fixes:
-            // confirmed against real Node that `lastIndex` is a PLAIN
-            // data property with no coercion at assignment time at all
-            // (`r.lastIndex = {valueOf(){...}}` stores the raw object,
-            // never calling valueOf; coercion happens lazily inside
-            // exec/test's own read of it). This engine instead
-            // eagerly coerces to a `usize` at write time -- a real
-            // architectural difference, not just a missing ToPrimitive
-            // call, so fixing it properly means storing `lastIndex` as a
-            // JSValue and moving the conversion into regexTest/regexExec,
-            // not swapping this one call. Left as a pre-existing
-            // narrowing (rejects an object outright, same as before).
-            const n = try coercion.toNumber(value);
-            // `lastIndex` may be set to any Number, including
-            // Infinity, Number.MAX_VALUE or values beyond usize
-            // (Test262 exercises exactly these). A bare
-            // @intFromFloat would panic on an out-of-range float, so
-            // saturate: anything at/above usize's range (and NaN,
-            // which fails both comparisons) is stored as the max,
-            // which always exceeds the subject length, so exec/test
-            // correctly find no match and reset it to 0.
-            const max_usize_f: f64 = @floatFromInt(std.math.maxInt(usize));
-            self.regexState(obj).last_index = if (n >= max_usize_f)
-                std.math.maxInt(usize)
-            else if (n > 0)
-                @intFromFloat(n)
-            else
-                0;
+            // A real, plain data property: confirmed against Node that
+            // `r.lastIndex = {valueOf(){...}}` stores the raw object,
+            // never calling valueOf -- no coercion at write time at all
+            // (ToLength happens lazily inside exec/test's own read).
+            // This used to eagerly coerce to a `usize` here instead, a
+            // real architectural difference (not just a missing
+            // ToPrimitive call) that made `re.lastIndex = "x"` silently
+            // become `0` -- found via test262 literals/regexp/
+            // lastIndex.js's verifyProperty, which does a real write-
+            // probe, not just a descriptor read.
+            const st = self.regexState(obj);
+            st.last_index.deinit();
+            st.last_index = value.retain();
             return;
         }
         return error.NotImplemented;

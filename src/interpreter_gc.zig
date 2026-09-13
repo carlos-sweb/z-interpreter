@@ -313,6 +313,7 @@ pub fn gcOnBoxDestroyed(ctx: *anyopaque, box: *anyopaque) void {
     if (self.regex_state.fetchRemove(@intFromPtr(box))) |kv| {
         self.gc_allocator.free(kv.value.source);
         self.gc_allocator.free(kv.value.flags);
+        kv.value.last_index.deinit();
     }
 }
 

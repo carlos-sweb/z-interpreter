@@ -109,7 +109,13 @@ pub const RegexState = struct {
     unicode: bool,
     has_indices: bool,
     unicode_sets: bool,
-    last_index: usize = 0,
+    // A plain, uncoerced data property (real spec) -- ANY JSValue can be
+    // stored here (`re.lastIndex = {}` really does store the object,
+    // confirmed against Node), with ToLength applied lazily by
+    // regexTest/regexExec's own read, not at assignment time. Owned:
+    // retained on every write, released in gcOnBoxDestroyed alongside
+    // this regex's other regex_state cleanup.
+    last_index: JSValue = JSValue.fromNumber(0),
 };
 
 /// `delete f.name`/`delete f.length` state -- see `deleted_fn_props`.

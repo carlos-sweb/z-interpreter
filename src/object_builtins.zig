@@ -288,6 +288,10 @@ fn objHasOwnProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
             const idx = std.fmt.parseInt(usize, key, 10) catch break :blk JSValue.fromBool(false);
             break :blk JSValue.fromBool(idx < zstring.utf16.lengthUtf16(box.value.data));
         },
+        // `lastIndex` is the only own property this model gives a regex
+        // literal (mirrors getProperty/objectGetOwnPropertyDescriptor's
+        // own `.regex` cases).
+        .regex => JSValue.fromBool(std.mem.eql(u8, key, "lastIndex")),
         else => JSValue.fromBool(false),
     };
 }
@@ -722,7 +726,20 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, thi
             }
             return objectGetOwnPropertyDescriptor(ctx, allocator, this_value, &.{ box.value.target, arg(args, 1) });
         },
-        // Other object-likes (date/regex/map/...) have no string-keyed own
+        // A regex literal's `lastIndex` (spec: RegExpAlloc's
+        // DefinePropertyOrThrow -- {writable:true, enumerable:false,
+        // configurable:false}). Confirmed against Node this descriptor
+        // is real (test262 literals/regexp/lastIndex.js's verifyProperty
+        // does an actual write-attempt probe, not just a descriptor
+        // read, so this and objHasOwnProperty's matching `.regex` case
+        // both need to agree with the already-correct interceptor in
+        // getProperty/setPropertyOnValue).
+        .regex => {
+            if (std.mem.eql(u8, key, "lastIndex"))
+                return dataDescObj(self, self.regexState(obj).last_index.retain(), true, false, false);
+            return JSValue.UNDEFINED;
+        },
+        // Other object-likes (date/map/...) have no string-keyed own
         // data properties in this model yet.
         else => return JSValue.UNDEFINED,
     }

@@ -27,6 +27,7 @@ const requireTag = builtin_helpers.requireTag;
 const installBuiltin = builtin_helpers.installBuiltin;
 
 const isObjectLike = builtin_helpers.isObjectLike;
+const toLength = builtin_helpers.toLength;
 
 pub const regex_methods = std.StaticStringMap(MethodSpec).initComptime(.{
     .{ "test", MethodSpec{ .call = regexTest, .arity = 1 } },
@@ -135,13 +136,23 @@ fn regexTest(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     defer if (!is_str) allocator.free(input);
     const st = self.regexState(re);
     const stateful = st.global or st.sticky;
-    const hit = try regexFindFrom(re, input, if (stateful) st.last_index else 0);
+    // Real spec (RegExpBuiltinExec): ToLength(Get(R, "lastIndex")) is
+    // applied HERE, at read time -- not eagerly coerced/clamped when
+    // `lastIndex` was assigned (lastIndex.md's fix; see setPropertyOnValue).
+    const start_index = if (stateful) try toLength(self, st.last_index) else 0;
+    const hit = try regexFindFrom(re, input, start_index);
     if (hit) |h| {
         defer h.match.deinit();
-        if (stateful) st.last_index = h.base + h.match.end;
+        if (stateful) {
+            st.last_index.deinit();
+            st.last_index = JSValue.fromNumber(@floatFromInt(h.base + h.match.end));
+        }
         return JSValue.fromBool(true);
     }
-    if (stateful) st.last_index = 0;
+    if (stateful) {
+        st.last_index.deinit();
+        st.last_index = JSValue.fromNumber(0);
+    }
     return JSValue.fromBool(false);
 }
 
@@ -153,14 +164,21 @@ fn regexExec(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     defer if (!is_str) allocator.free(input);
     const st = self.regexState(re);
     const stateful = st.global or st.sticky;
-    const hit = try regexFindFrom(re, input, if (stateful) st.last_index else 0);
+    const start_index = if (stateful) try toLength(self, st.last_index) else 0;
+    const hit = try regexFindFrom(re, input, start_index);
     if (hit) |h| {
         defer h.match.deinit();
         const abs_end = h.base + h.match.end;
-        if (stateful) st.last_index = if (h.match.end > h.match.start) abs_end else abs_end + 1;
+        if (stateful) {
+            st.last_index.deinit();
+            st.last_index = JSValue.fromNumber(@floatFromInt(if (h.match.end > h.match.start) abs_end else abs_end + 1));
+        }
         return makeMatchArray(self, allocator, h);
     }
-    if (stateful) st.last_index = 0;
+    if (stateful) {
+        st.last_index.deinit();
+        st.last_index = JSValue.fromNumber(0);
+    }
     return JSValue.NULL;
 }
 
