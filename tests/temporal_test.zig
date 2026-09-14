@@ -3,22 +3,25 @@
 //! largest FAIL bucket, 0% pass, because the already-built z-temporal
 //! library was never connected). Same discipline as date_test.zig: real
 //! JS scripts through the whole engine, not just the Zig glue in
-//! isolation. ZonedDateTime and I/O-dependent `Temporal.now.*` beyond
-//! `.instant()` are deliberately not wired (see temporal_builtins.zig's
-//! top doc comment) -- no tests for them here.
+//! isolation. `ZonedDateTime` arithmetic (`add`/`subtract`/`until`/
+//! `since`/`round`/`with*`) isn't wired -- z-temporal's own library
+//! doesn't implement it yet (see temporal_builtins.zig's top doc
+//! comment and temporal-zoneddatetime-now-wiring.md) -- no tests for
+//! it here.
 const std = @import("std");
 const testing = std.testing;
 const helpers = @import("helpers.zig");
 
-test "Temporal global exists with all 7 wired types" {
+test "Temporal global exists with all 8 wired types" {
     try helpers.expectStdout(
         \\console.log(
         \\  typeof Temporal, typeof Temporal.PlainDate, typeof Temporal.PlainTime,
         \\  typeof Temporal.PlainDateTime, typeof Temporal.PlainYearMonth,
         \\  typeof Temporal.PlainMonthDay, typeof Temporal.Instant,
-        \\  typeof Temporal.Duration, typeof Temporal.now.instant
+        \\  typeof Temporal.Duration, typeof Temporal.ZonedDateTime,
+        \\  typeof Temporal.Now, typeof Temporal.Now.instant
         \\);
-    , "object function function function function function function function function\n");
+    , "object function function function function function function function function object function\n");
 }
 
 test "PlainDate: construction, getters, leap year" {
@@ -127,9 +130,9 @@ test "Duration.compare and Duration.add" {
     , "-1 0\n3\n");
 }
 
-test "Temporal.now.instant returns a real, current-ish time" {
+test "Temporal.Now.instant returns a real, current-ish time" {
     try helpers.expectStdout(
-        \\console.log(Temporal.now.instant().epochMilliseconds > 1700000000000);
+        \\console.log(Temporal.Now.instant().epochMilliseconds > 1700000000000);
     , "true\n");
 }
 

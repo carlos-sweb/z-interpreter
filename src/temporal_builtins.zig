@@ -1,20 +1,29 @@
 //! The `Temporal.*` global (TC39, ECMA-262-adjacent) -- wires the
 //! already-built `z-temporal` library (PlainDate/PlainTime/PlainDateTime/
-//! PlainYearMonth/PlainMonthDay/Instant/Duration + `Temporal.now.instant`)
-//! into the engine as real constructable types with accessor getters and
-//! instance methods. See `/home/sweb/z-test262/REPORT.md`'s analysis: this
-//! was the single largest FAIL bucket (0% pass, ~4600 tests) precisely
-//! because the underlying library existed but was never connected.
+//! PlainYearMonth/PlainMonthDay/Instant/Duration/ZonedDateTime +
+//! `Temporal.Now`) into the engine as real constructable types with
+//! accessor getters and instance methods. See
+//! `/home/sweb/z-test262/REPORT.md`'s analysis: this was the single
+//! largest FAIL bucket (0% pass, ~4600 tests) precisely because the
+//! underlying library existed but was never connected.
 //!
-//! Deliberately NOT wired here (documented, not an oversight):
-//! `Temporal.ZonedDateTime` and the I/O-dependent `Temporal.now.*`
-//! functions beyond `instant()` -- both need real `std.Io` (reading IANA
-//! tzdata), and this engine's core (unlike z-run, its host) has no ambient
-//! `Io` available in native-function context. Wiring them would need
-//! either threading `Io` through `Interpreter` (a bigger, separate
-//! architectural change) or the self-contained-`Io.Threaded`-per-call
-//! trick z-print's `stdio.zig` already established as this ecosystem's
-//! answer to the same problem -- left for a follow-up pass.
+//! `ZonedDateTime`/`Temporal.Now`'s I/O-dependent functions (real IANA
+//! tzdata reads) needed `std.Io`, which this engine's core has no
+//! ambient instance of in native-function context -- see `ioHandle()`
+//! below (temporal-zoneddatetime-now-wiring.md): a self-contained, lazy
+//! `Io.Threaded`, the same trick `z-print`'s `stdio.zig` already
+//! established for this ecosystem's identical problem, rather than
+//! threading `Io` through `Interpreter` itself (a bigger, separate
+//! architectural change this plan deliberately avoided).
+//!
+//! Still NOT wired (z-temporal's own library gap, not a wiring gap --
+//! see the plan's "Alcance NO"): `ZonedDateTime.prototype.add/subtract/
+//! until/since/round/with/withCalendar/withPlainTime/withTimeZone` --
+//! z-temporal's Phase 7a doesn't implement `ZonedDateTime` arithmetic
+//! yet (confirmed reading `zoned_date_time.zig` in full: zero `pub fn`
+//! for any of these). `toLocaleString` (no other Temporal type here has
+//! it either -- would need real locale-aware formatting this engine
+//! doesn't have).
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const zvalue = @import("zvalue");
@@ -129,6 +138,63 @@ fn readOverflow(self: *Interpreter, options: JSValue) anyerror!Overflow {
     if (std.mem.eql(u8, s, "constrain")) return .constrain;
     if (std.mem.eql(u8, s, "reject")) return .reject;
     return self.throwError(.range_error, "overflow must be \"constrain\" or \"reject\"", .{});
+}
+
+/// Self-contained, lazy `std.Io` for `ZonedDateTime`/`Temporal.Now`'s
+/// timezone-dependent functions (real IANA tzdata I/O) -- Zig 0.16 has
+/// no ambient `Io` this interpreter threads down to native-function
+/// context, and adding that just for these few call sites would be
+/// exactly the interpreter-architecture change the wiring plan ruled
+/// out. Same pattern `z-print/src/stdio.zig` already established for
+/// this ecosystem's identical problem (`async_limit`/`concurrent_limit`
+/// = `.nothing` since nothing here is ever actually async).
+var temporal_io_threaded: ?std.Io.Threaded = null;
+fn ioHandle() std.Io {
+    if (temporal_io_threaded == null) {
+        temporal_io_threaded = std.Io.Threaded.init(std.heap.page_allocator, .{
+            .async_limit = .nothing,
+            .concurrent_limit = .nothing,
+        });
+    }
+    return temporal_io_threaded.?.io();
+}
+
+/// Reads `options.disambiguation` ("compatible"/"earlier"/"later"/
+/// "reject"), defaulting to `.compatible` (real spec default). `options`
+/// may be `undefined`.
+fn readDisambiguation(self: *Interpreter, options: JSValue) anyerror!ztemporal.Disambiguation {
+    if (options != .object) return .compatible;
+    const v = options.object.value.get("disambiguation") orelse return .compatible;
+    if (v == .undefined) return .compatible;
+    if (v != .string) return self.throwError(.type_error, "disambiguation must be a string", .{});
+    const s = v.string.value.data;
+    if (std.mem.eql(u8, s, "compatible")) return .compatible;
+    if (std.mem.eql(u8, s, "earlier")) return .earlier;
+    if (std.mem.eql(u8, s, "later")) return .later;
+    if (std.mem.eql(u8, s, "reject")) return .reject;
+    return self.throwError(.range_error, "disambiguation must be \"compatible\", \"earlier\", \"later\", or \"reject\"", .{});
+}
+
+/// Reads `options.offset` ("use"/"prefer"/"ignore"/"reject"), defaulting
+/// to `.reject` (real spec default -- a DIFFERENT default axis than
+/// `disambiguation`'s own). `options` may be `undefined`.
+fn readOffsetOption(self: *Interpreter, options: JSValue) anyerror!ztemporal.OffsetOption {
+    if (options != .object) return .reject;
+    const v = options.object.value.get("offset") orelse return .reject;
+    if (v == .undefined) return .reject;
+    if (v != .string) return self.throwError(.type_error, "offset must be a string", .{});
+    const s = v.string.value.data;
+    if (std.mem.eql(u8, s, "use")) return .use;
+    if (std.mem.eql(u8, s, "prefer")) return .prefer;
+    if (std.mem.eql(u8, s, "ignore")) return .ignore;
+    if (std.mem.eql(u8, s, "reject")) return .reject;
+    return self.throwError(.range_error, "offset must be \"use\", \"prefer\", \"ignore\", or \"reject\"", .{});
+}
+
+fn transitionDirectionFromString(self: *Interpreter, s: []const u8) anyerror!ztemporal.ZonedDateTime.TransitionDirection {
+    if (std.mem.eql(u8, s, "next")) return .next;
+    if (std.mem.eql(u8, s, "previous")) return .previous;
+    return self.throwError(.range_error, "direction must be \"next\" or \"previous\"", .{});
 }
 
 fn unitFromString(self: *Interpreter, s: []const u8, what: []const u8) anyerror!Unit {
@@ -1086,6 +1152,19 @@ fn instToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     return self.gcNewString(s);
 }
 
+/// Closes out the item z-temporal's own README documents as "deferred
+/// since Phase 5" -- an exact instant needs no disambiguation, so this
+/// was always trivial once `ZonedDateTime`'s own `Io` story (`ioHandle`
+/// above) existed.
+fn instToZonedDateTimeISO(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self = interp(ctx);
+    const inst = try instSelf(self, this_value);
+    const tz_arg = arg(args, 0);
+    if (tz_arg != .string) return self.throwError(.type_error, "timeZone must be a string", .{});
+    const zdt = inst.toZonedDateTimeISO(allocator, ioHandle(), tz_arg.string.value.data) catch |e| return temporalErr(self, e);
+    return self.gcNewTemporal(.{ .zoned_date_time = zdt });
+}
+
 fn installInstant(self: *Interpreter, temporal_ns: JSValue) !void {
     const ctor = try self.gcNewFunction(.{ .ctx = self, .name = "Instant", .arity = 1, .call = instantConstructor, .constructable = true });
     const statics = try self.functionStatics(ctor);
@@ -1104,6 +1183,7 @@ fn installInstant(self: *Interpreter, temporal_ns: JSValue) !void {
     try dneMethod(proto, "round", try native(self, "round", 1, instRound));
     try dneMethod(proto, "equals", try native(self, "equals", 1, instEquals));
     try dneMethod(proto, "toString", try native(self, "toString", 0, instToString));
+    try dneMethod(proto, "toZonedDateTimeISO", try native(self, "toZonedDateTimeISO", 1, instToZonedDateTimeISO));
 
     self.protos.temporal_instant = proto;
     try dneMethod(temporal_ns, "Instant", ctor);
@@ -1608,6 +1688,401 @@ fn installPlainMonthDay(self: *Interpreter, temporal_ns: JSValue) !void {
     try dneMethod(temporal_ns, "PlainMonthDay", ctor);
 }
 
+// ===================== ZonedDateTime =====================
+// temporal-zoneddatetime-now-wiring.md: the one type needing real I/O
+// (IANA tzdata) -- see `ioHandle()`'s doc comment above.
+
+fn zdtSelf(self: *Interpreter, this_value: JSValue) anyerror!ztemporal.ZonedDateTime {
+    return requireTemporal(self, this_value, .zoned_date_time, "Temporal.ZonedDateTime");
+}
+
+/// `new Temporal.ZonedDateTime(epochNanoseconds, timeZone, calendar?)`.
+/// The `calendar` argument is accepted but not read/validated -- same
+/// precedent every other wired Temporal type here already has (none
+/// reads its own trailing `calendar` constructor argument; the library
+/// only supports iso8601, so there is nothing else to select).
+/// The `calendar` argument, real spec: `undefined`/omitted defaults to
+/// `"iso8601"`; anything else must be a string equal to a recognized
+/// calendar ID -- narrowed here to exactly `"iso8601"`, the only one
+/// this library supports (its own README: "non-iso8601 calendar
+/// annotations are rejected"). A non-string throws TypeError the same
+/// observable way real ToTemporalCalendarIdentifier would (a Symbol
+/// can't even be ToString'd; a number/bigint/object stringifies to
+/// something that isn't a valid calendar ID either way).
+fn requireIso8601Calendar(self: *Interpreter, v: JSValue) anyerror!void {
+    if (v == .undefined) return;
+    if (v == .string and std.mem.eql(u8, v.string.value.data, "iso8601")) return;
+    return self.throwError(.type_error, "Invalid calendar", .{});
+}
+
+fn zonedDateTimeConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor Temporal.ZonedDateTime requires 'new'", .{});
+    const ns = try coerceEpochNanoseconds(self, arg(args, 0), "epochNanoseconds");
+    const tz_arg = arg(args, 1);
+    if (tz_arg != .string) return self.throwError(.type_error, "timeZone must be a string", .{});
+    try requireIso8601Calendar(self, arg(args, 2));
+    const zdt = ztemporal.ZonedDateTime.create(allocator, ioHandle(), ns, tz_arg.string.value.data) catch |e| return temporalErr(self, e);
+    return self.gcNewTemporal(.{ .zoned_date_time = zdt });
+}
+
+fn zonedDateTimeFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const item = arg(args, 0);
+    const options = arg(args, 1);
+    if (item == .temporal and item.temporal.value == .zoned_date_time) return self.gcNewTemporal(.{ .zoned_date_time = item.temporal.value.zoned_date_time });
+    const disambiguation = try readDisambiguation(self, options);
+    if (item == .string) {
+        const offset_option = try readOffsetOption(self, options);
+        const zdt = ztemporal.ZonedDateTime.parseIso(allocator, ioHandle(), item.string.value.data, offset_option, disambiguation) catch |e| return temporalErr(self, e);
+        return self.gcNewTemporal(.{ .zoned_date_time = zdt });
+    }
+    if (item != .object) return self.throwError(.type_error, "Temporal.ZonedDateTime.from requires a string or an object", .{});
+    const overflow = try readOverflow(self, options);
+    const tz_v = item.object.value.get("timeZone") orelse return self.throwError(.type_error, "timeZone is required", .{});
+    if (tz_v != .string) return self.throwError(.type_error, "timeZone must be a string", .{});
+    const year = (try optionalI32(self, item, "year")) orelse return self.throwError(.type_error, "year is required", .{});
+    const month = (try optionalI32(self, item, "month")) orelse return self.throwError(.type_error, "month is required", .{});
+    const day = (try optionalI32(self, item, "day")) orelse return self.throwError(.type_error, "day is required", .{});
+    const zdt = ztemporal.ZonedDateTime.fromFields(
+        allocator,
+        ioHandle(),
+        year,
+        month,
+        day,
+        (try optionalI32(self, item, "hour")) orelse 0,
+        (try optionalI32(self, item, "minute")) orelse 0,
+        (try optionalI32(self, item, "second")) orelse 0,
+        (try optionalI32(self, item, "millisecond")) orelse 0,
+        (try optionalI32(self, item, "microsecond")) orelse 0,
+        (try optionalI32(self, item, "nanosecond")) orelse 0,
+        tz_v.string.value.data,
+        overflow,
+        disambiguation,
+    ) catch |e| return temporalErr(self, e);
+    return self.gcNewTemporal(.{ .zoned_date_time = zdt });
+}
+
+fn zonedDateTimeCompare(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const self = interp(ctx);
+    const a = try requireTemporal(self, arg(args, 0), .zoned_date_time, "Temporal.ZonedDateTime");
+    const b = try requireTemporal(self, arg(args, 1), .zoned_date_time, "Temporal.ZonedDateTime");
+    return JSValue.fromNumber(orderToJs(ztemporal.ZonedDateTime.compare(a, b)));
+}
+
+// ----- Getters needing real I/O (via ioHandle()) -----
+
+fn zdtGetYear(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    const zdt = try zdtSelf(self, this_value);
+    return JSValue.fromNumber(@floatFromInt(zdt.year(allocator, ioHandle()) catch |e| return temporalErr(self, e)));
+}
+fn zdtGetMonth(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    const zdt = try zdtSelf(self, this_value);
+    return JSValue.fromNumber(@floatFromInt(zdt.month(allocator, ioHandle()) catch |e| return temporalErr(self, e)));
+}
+fn zdtGetDay(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    const zdt = try zdtSelf(self, this_value);
+    return JSValue.fromNumber(@floatFromInt(zdt.day(allocator, ioHandle()) catch |e| return temporalErr(self, e)));
+}
+fn zdtGetHour(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    const zdt = try zdtSelf(self, this_value);
+    return JSValue.fromNumber(@floatFromInt(zdt.hour(allocator, ioHandle()) catch |e| return temporalErr(self, e)));
+}
+fn zdtGetMinute(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    const zdt = try zdtSelf(self, this_value);
+    return JSValue.fromNumber(@floatFromInt(zdt.minute(allocator, ioHandle()) catch |e| return temporalErr(self, e)));
+}
+fn zdtGetSecond(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    const zdt = try zdtSelf(self, this_value);
+    return JSValue.fromNumber(@floatFromInt(zdt.second(allocator, ioHandle()) catch |e| return temporalErr(self, e)));
+}
+fn zdtGetMillisecond(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    const zdt = try zdtSelf(self, this_value);
+    return JSValue.fromNumber(@floatFromInt(zdt.millisecond(allocator, ioHandle()) catch |e| return temporalErr(self, e)));
+}
+fn zdtGetMicrosecond(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    const zdt = try zdtSelf(self, this_value);
+    return JSValue.fromNumber(@floatFromInt(zdt.microsecond(allocator, ioHandle()) catch |e| return temporalErr(self, e)));
+}
+fn zdtGetNanosecond(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    const zdt = try zdtSelf(self, this_value);
+    return JSValue.fromNumber(@floatFromInt(zdt.nanosecond(allocator, ioHandle()) catch |e| return temporalErr(self, e)));
+}
+fn zdtGetDayOfWeek(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    const zdt = try zdtSelf(self, this_value);
+    return JSValue.fromNumber(@floatFromInt(zdt.dayOfWeek(allocator, ioHandle()) catch |e| return temporalErr(self, e)));
+}
+fn zdtGetOffsetNanoseconds(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    const zdt = try zdtSelf(self, this_value);
+    return JSValue.fromNumber(@floatFromInt(zdt.offsetNanoseconds(allocator, ioHandle()) catch |e| return temporalErr(self, e)));
+}
+fn zdtGetHoursInDay(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    const zdt = try zdtSelf(self, this_value);
+    return JSValue.fromNumber(zdt.hoursInDay(allocator, ioHandle()) catch |e| return temporalErr(self, e));
+}
+/// Real spec's ISO-8601-string offset (e.g. `"-05:00"`), distinct from
+/// the numeric `offsetNanoseconds` -- z-temporal has no dedicated
+/// getter for this (only its internal `toIsoString` formats one), so
+/// this duplicates that formatting inline rather than adding a new
+/// z-temporal function for one call site.
+fn zdtGetOffset(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    const zdt = try zdtSelf(self, this_value);
+    const offset_ns = zdt.offsetNanoseconds(allocator, ioHandle()) catch |e| return temporalErr(self, e);
+    const sign: u8 = if (offset_ns < 0) '-' else '+';
+    const mag_ns = @abs(offset_ns);
+    const mag_min: u32 = @intCast(@divTrunc(mag_ns, 60_000_000_000));
+    var buf: [7]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, "{c}{d:0>2}:{d:0>2}", .{ sign, mag_min / 60, mag_min % 60 }) catch unreachable;
+    return self.gcNewString(s);
+}
+
+/// The remaining calendar-derived getters (real spec has them on
+/// `ZonedDateTime` too, not just `PlainDate`) -- z-temporal's
+/// `ZonedDateTime` doesn't implement them itself, but `PlainDate`
+/// already does, so each delegates through `toPlainDate` rather than
+/// duplicating calendar math. `daysInWeek`/`yearOfWeek`/`era`/`eraYear`
+/// are NOT wired here -- confirmed `PlainDate`'s own wiring doesn't
+/// have them either (pre-existing, shared gap; `era`/`eraYear` are
+/// `undefined` for iso8601 on real Node, `daysInWeek` is trivially 7,
+/// `yearOfWeek` is `weekOfYear().year` -- easy to add later alongside
+/// fixing PlainDate's own gap, out of scope here).
+fn zdtGetMonthCode(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    const zdt = try zdtSelf(self, this_value);
+    const pd = zdt.toPlainDate(allocator, ioHandle()) catch |e| return temporalErr(self, e);
+    var buf: [3]u8 = undefined;
+    return self.gcNewString(pd.monthCode(&buf));
+}
+fn zdtGetDayOfYear(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    const zdt = try zdtSelf(self, this_value);
+    const pd = zdt.toPlainDate(allocator, ioHandle()) catch |e| return temporalErr(self, e);
+    return JSValue.fromNumber(@floatFromInt(pd.dayOfYear()));
+}
+fn zdtGetDaysInMonth(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    const zdt = try zdtSelf(self, this_value);
+    const pd = zdt.toPlainDate(allocator, ioHandle()) catch |e| return temporalErr(self, e);
+    return JSValue.fromNumber(@floatFromInt(pd.daysInMonth()));
+}
+fn zdtGetDaysInYear(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    const zdt = try zdtSelf(self, this_value);
+    const pd = zdt.toPlainDate(allocator, ioHandle()) catch |e| return temporalErr(self, e);
+    return JSValue.fromNumber(@floatFromInt(pd.daysInYear()));
+}
+fn zdtGetMonthsInYear(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    const zdt = try zdtSelf(self, this_value);
+    const pd = zdt.toPlainDate(allocator, ioHandle()) catch |e| return temporalErr(self, e);
+    return JSValue.fromNumber(@floatFromInt(pd.monthsInYear()));
+}
+fn zdtGetInLeapYear(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    const zdt = try zdtSelf(self, this_value);
+    const pd = zdt.toPlainDate(allocator, ioHandle()) catch |e| return temporalErr(self, e);
+    return JSValue.fromBool(pd.inLeapYear());
+}
+fn zdtGetWeekOfYear(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    const zdt = try zdtSelf(self, this_value);
+    const pd = zdt.toPlainDate(allocator, ioHandle()) catch |e| return temporalErr(self, e);
+    return JSValue.fromNumber(@floatFromInt(pd.weekOfYear().week));
+}
+
+// ----- Pure getters (no I/O: derived from epochNanoseconds/the fixed timeZoneId) -----
+
+fn zdtGetEpochMilliseconds(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = args;
+    return JSValue.fromNumber(@floatFromInt((try zdtSelf(interp(ctx), this_value)).toInstant().epochMilliseconds()));
+}
+fn zdtGetEpochNanoseconds(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = args;
+    return JSValue.fromNumber(@floatFromInt((try zdtSelf(interp(ctx), this_value)).toInstant().epochNanoseconds()));
+}
+fn zdtGetTimeZoneId(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = args;
+    const self = interp(ctx);
+    var zdt = try zdtSelf(self, this_value);
+    return self.gcNewString(zdt.timeZoneId());
+}
+fn zdtGetCalendarId(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = args;
+    return interp(ctx).gcNewString((try zdtSelf(interp(ctx), this_value)).calendarId());
+}
+
+// ----- Methods -----
+
+fn zdtToInstant(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = args;
+    const self = interp(ctx);
+    return self.gcNewTemporal(.{ .instant = (try zdtSelf(self, this_value)).toInstant() });
+}
+fn zdtToPlainDate(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    const zdt = try zdtSelf(self, this_value);
+    const pd = zdt.toPlainDate(allocator, ioHandle()) catch |e| return temporalErr(self, e);
+    return self.gcNewTemporal(.{ .plain_date = pd });
+}
+fn zdtToPlainTime(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    const zdt = try zdtSelf(self, this_value);
+    const pt = zdt.toPlainTime(allocator, ioHandle()) catch |e| return temporalErr(self, e);
+    return self.gcNewTemporal(.{ .plain_time = pt });
+}
+fn zdtToPlainDateTime(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    const zdt = try zdtSelf(self, this_value);
+    const pdt = zdt.toPlainDateTime(allocator, ioHandle()) catch |e| return temporalErr(self, e);
+    return self.gcNewTemporal(.{ .plain_date_time = pdt });
+}
+fn zdtEquals(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const zdt = try zdtSelf(self, this_value);
+    const other = try requireTemporal(self, arg(args, 0), .zoned_date_time, "Temporal.ZonedDateTime");
+    return JSValue.fromBool(ztemporal.ZonedDateTime.equals(zdt, other));
+}
+fn zdtStartOfDay(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    const zdt = try zdtSelf(self, this_value);
+    const result = zdt.startOfDay(allocator, ioHandle()) catch |e| return temporalErr(self, e);
+    return self.gcNewTemporal(.{ .zoned_date_time = result });
+}
+fn zdtGetTimeZoneTransition(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self = interp(ctx);
+    const zdt = try zdtSelf(self, this_value);
+    const dir_arg = arg(args, 0);
+    if (dir_arg != .string) return self.throwError(.type_error, "direction must be a string", .{});
+    const direction = try transitionDirectionFromString(self, dir_arg.string.value.data);
+    const result = zdt.getTimeZoneTransition(allocator, ioHandle(), direction) catch |e| return temporalErr(self, e);
+    const found = result orelse return JSValue.NULL;
+    return self.gcNewTemporal(.{ .zoned_date_time = found });
+}
+fn zdtToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    var zdt = try zdtSelf(self, this_value);
+    // Real spec default (confirmed against Node): show the offset and
+    // the time zone name, but not a `[u-ca=iso8601]` calendar
+    // annotation (iso8601 is implicit). `toString`'s options object
+    // (`offset`/`timeZoneName`/`calendarName`) isn't read here --
+    // same "don't chase every formatting option" precedent this
+    // engine's other Temporal `toString`s already have.
+    // `toIsoString`'s inferred error set also includes `error.NoSpaceLeft`
+    // from its internal fixed-size offset buffer -- unreachable in
+    // practice (the buffer is sized exactly for "+HH:MM"), but Zig's
+    // inferred set still requires handling it to narrow the rest back
+    // down to `TemporalError` for `temporalErr`.
+    const s = zdt.toIsoString(allocator, ioHandle(), true, true, false) catch |e| switch (e) {
+        error.NoSpaceLeft => unreachable,
+        else => |te| return temporalErr(self, te),
+    };
+    defer allocator.free(s);
+    return self.gcNewString(s);
+}
+fn zdtToJSON(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    return zdtToString(ctx, allocator, this_value, args);
+}
+fn zdtValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    _ = args;
+    return interp(ctx).throwError(.type_error, "Cannot convert a Temporal.ZonedDateTime to a primitive value", .{});
+}
+
+fn installZonedDateTime(self: *Interpreter, temporal_ns: JSValue) !void {
+    const ctor = try self.gcNewFunction(.{ .ctx = self, .name = "ZonedDateTime", .arity = 2, .call = zonedDateTimeConstructor, .constructable = true });
+    const statics = try self.functionStatics(ctor);
+    try dneMethod(statics, "from", try native(self, "from", 1, zonedDateTimeFrom));
+    try dneMethod(statics, "compare", try native(self, "compare", 2, zonedDateTimeCompare));
+
+    const proto = try self.functionPrototype(ctor);
+    try installGetter(self, proto, "year", zdtGetYear);
+    try installGetter(self, proto, "month", zdtGetMonth);
+    try installGetter(self, proto, "day", zdtGetDay);
+    try installGetter(self, proto, "hour", zdtGetHour);
+    try installGetter(self, proto, "minute", zdtGetMinute);
+    try installGetter(self, proto, "second", zdtGetSecond);
+    try installGetter(self, proto, "millisecond", zdtGetMillisecond);
+    try installGetter(self, proto, "microsecond", zdtGetMicrosecond);
+    try installGetter(self, proto, "nanosecond", zdtGetNanosecond);
+    try installGetter(self, proto, "dayOfWeek", zdtGetDayOfWeek);
+    try installGetter(self, proto, "offsetNanoseconds", zdtGetOffsetNanoseconds);
+    try installGetter(self, proto, "hoursInDay", zdtGetHoursInDay);
+    try installGetter(self, proto, "epochMilliseconds", zdtGetEpochMilliseconds);
+    try installGetter(self, proto, "epochNanoseconds", zdtGetEpochNanoseconds);
+    try installGetter(self, proto, "timeZoneId", zdtGetTimeZoneId);
+    try installGetter(self, proto, "calendarId", zdtGetCalendarId);
+    try installGetter(self, proto, "offset", zdtGetOffset);
+    try installGetter(self, proto, "monthCode", zdtGetMonthCode);
+    try installGetter(self, proto, "dayOfYear", zdtGetDayOfYear);
+    try installGetter(self, proto, "daysInMonth", zdtGetDaysInMonth);
+    try installGetter(self, proto, "daysInYear", zdtGetDaysInYear);
+    try installGetter(self, proto, "monthsInYear", zdtGetMonthsInYear);
+    try installGetter(self, proto, "inLeapYear", zdtGetInLeapYear);
+    try installGetter(self, proto, "weekOfYear", zdtGetWeekOfYear);
+    try dneMethod(proto, "toInstant", try native(self, "toInstant", 0, zdtToInstant));
+    try dneMethod(proto, "toPlainDate", try native(self, "toPlainDate", 0, zdtToPlainDate));
+    try dneMethod(proto, "toPlainTime", try native(self, "toPlainTime", 0, zdtToPlainTime));
+    try dneMethod(proto, "toPlainDateTime", try native(self, "toPlainDateTime", 0, zdtToPlainDateTime));
+    try dneMethod(proto, "equals", try native(self, "equals", 1, zdtEquals));
+    try dneMethod(proto, "startOfDay", try native(self, "startOfDay", 0, zdtStartOfDay));
+    try dneMethod(proto, "getTimeZoneTransition", try native(self, "getTimeZoneTransition", 1, zdtGetTimeZoneTransition));
+    try dneMethod(proto, "toString", try native(self, "toString", 0, zdtToString));
+    try dneMethod(proto, "toJSON", try native(self, "toJSON", 0, zdtToJSON));
+    try dneMethod(proto, "valueOf", try native(self, "valueOf", 0, zdtValueOf));
+
+    self.protos.temporal_zoned_date_time = proto;
+    try dneMethod(temporal_ns, "ZonedDateTime", ctor);
+}
+
 // ===================== Temporal.now =====================
 
 fn nowInstant(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1618,8 +2093,68 @@ fn nowInstant(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     return self.gcNewTemporal(.{ .instant = ztemporal.Now.instant() });
 }
 
+/// A `timeZoneLike` argument, real spec: when given, must be a string
+/// (this repo's existing "explicit parameter, no object-with-
+/// getOffsetNanosecondsFor style custom time zones" narrowing); when
+/// omitted, falls back to the system's configured zone. Always returns
+/// an allocator-owned copy (even for the given-string case) so every
+/// caller has one uniform ownership rule to `defer allocator.free`,
+/// rather than branching on which path produced it. `environ` is
+/// always `null` here -- this interpreter has no `std.process.Environ`
+/// threaded down to native-function context, so the `TZ` env var isn't
+/// consulted; only `/etc/localtime` resolution (z-temporal's fallback)
+/// applies.
+fn resolveTimeZoneArg(self: *Interpreter, allocator: Allocator, tz_arg: JSValue) anyerror![]u8 {
+    if (tz_arg != .undefined) {
+        if (tz_arg != .string) return self.throwError(.type_error, "timeZone must be a string", .{});
+        return try allocator.dupe(u8, tz_arg.string.value.data);
+    }
+    return ztemporal.Now.timeZoneId(allocator, ioHandle(), null) catch |e| return temporalErr(self, e);
+}
+
+fn nowZonedDateTimeISO(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const tz = try resolveTimeZoneArg(self, allocator, arg(args, 0));
+    defer allocator.free(tz);
+    const zdt = ztemporal.Now.zonedDateTimeISO(allocator, ioHandle(), tz) catch |e| return temporalErr(self, e);
+    return self.gcNewTemporal(.{ .zoned_date_time = zdt });
+}
+fn nowPlainDateISO(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const tz = try resolveTimeZoneArg(self, allocator, arg(args, 0));
+    defer allocator.free(tz);
+    const pd = ztemporal.Now.plainDateISO(allocator, ioHandle(), tz) catch |e| return temporalErr(self, e);
+    return self.gcNewTemporal(.{ .plain_date = pd });
+}
+fn nowPlainTimeISO(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const tz = try resolveTimeZoneArg(self, allocator, arg(args, 0));
+    defer allocator.free(tz);
+    const pt = ztemporal.Now.plainTimeISO(allocator, ioHandle(), tz) catch |e| return temporalErr(self, e);
+    return self.gcNewTemporal(.{ .plain_time = pt });
+}
+fn nowPlainDateTimeISO(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const tz = try resolveTimeZoneArg(self, allocator, arg(args, 0));
+    defer allocator.free(tz);
+    const pdt = ztemporal.Now.plainDateTimeISO(allocator, ioHandle(), tz) catch |e| return temporalErr(self, e);
+    return self.gcNewTemporal(.{ .plain_date_time = pdt });
+}
+fn nowTimeZoneId(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    _ = args;
+    const self = interp(ctx);
+    const s = ztemporal.Now.timeZoneId(allocator, ioHandle(), null) catch |e| return temporalErr(self, e);
+    defer allocator.free(s);
+    return self.gcNewString(s);
+}
+
 /// Installs the `Temporal` global: one ordinary object holding each
-/// wired type's constructor, plus `Temporal.now.instant()`. Call from
+/// wired type's constructor, plus `Temporal.Now`. Call from
 /// `builtins.setupGlobals` alongside Date/Math/JSON.
 pub fn install(self: *Interpreter) !void {
     const temporal_ns = try self.ordinaryObject();
@@ -1630,12 +2165,19 @@ pub fn install(self: *Interpreter) !void {
     try installPlainMonthDay(self, temporal_ns);
     try installInstant(self, temporal_ns);
     try installDuration(self, temporal_ns);
+    try installZonedDateTime(self, temporal_ns);
 
-    // `Temporal.now` -- only `.instant()` (see this file's top doc
-    // comment for why the other `Now.*` functions stay deferred).
+    // `Temporal.Now` -- real spec name is capital-N `Now` (this engine
+    // previously defined lowercase `now`, silently never matching any
+    // real code or test that reads `Temporal.Now`).
     const now_obj = try self.ordinaryObject();
     try dneMethod(now_obj, "instant", try native(self, "instant", 0, nowInstant));
-    try dneMethod(temporal_ns, "now", now_obj);
+    try dneMethod(now_obj, "zonedDateTimeISO", try native(self, "zonedDateTimeISO", 0, nowZonedDateTimeISO));
+    try dneMethod(now_obj, "plainDateISO", try native(self, "plainDateISO", 0, nowPlainDateISO));
+    try dneMethod(now_obj, "plainTimeISO", try native(self, "plainTimeISO", 0, nowPlainTimeISO));
+    try dneMethod(now_obj, "plainDateTimeISO", try native(self, "plainDateTimeISO", 0, nowPlainDateTimeISO));
+    try dneMethod(now_obj, "timeZoneId", try native(self, "timeZoneId", 0, nowTimeZoneId));
+    try dneMethod(temporal_ns, "Now", now_obj);
 
     try self.global_env.define(self.gc_allocator, "Temporal", temporal_ns);
 }

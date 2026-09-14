@@ -67,9 +67,7 @@ pub const Protos = struct {
     biguint64_array: JSValue = JSValue.UNDEFINED,
     // Temporal (TC39, see /home/sweb/.plans -- z-temporal wiring): one
     // prototype per wrapped type, dispatched by `TemporalValue`'s inner
-    // tag (see `temporalProtoFor` in temporal_builtins.zig). ZonedDateTime
-    // is deliberately not wired yet (needs real I/O for tzdata, unlike
-    // every other Temporal type here).
+    // tag (see `temporalProtoFor` in temporal_builtins.zig).
     temporal_plain_date: JSValue = JSValue.UNDEFINED,
     temporal_plain_time: JSValue = JSValue.UNDEFINED,
     temporal_plain_date_time: JSValue = JSValue.UNDEFINED,
@@ -77,8 +75,9 @@ pub const Protos = struct {
     temporal_plain_month_day: JSValue = JSValue.UNDEFINED,
     temporal_instant: JSValue = JSValue.UNDEFINED,
     temporal_duration: JSValue = JSValue.UNDEFINED,
+    temporal_zoned_date_time: JSValue = JSValue.UNDEFINED,
 
-    /// Picks the right one of the 7 prototypes above for a given
+    /// Picks the right one of the 8 prototypes above for a given
     /// `TemporalValue`'s inner tag -- the single dispatch point every
     /// `.temporal` case elsewhere (`getProperty`, `objectGetPrototypeOf`,
     /// ...) goes through, so the tag-to-prototype mapping lives in exactly
@@ -92,7 +91,7 @@ pub const Protos = struct {
             .plain_month_day => self.temporal_plain_month_day,
             .instant => self.temporal_instant,
             .duration => self.temporal_duration,
-            .zoned_date_time => JSValue.UNDEFINED, // not wired yet
+            .zoned_date_time => self.temporal_zoned_date_time,
         };
     }
 };
