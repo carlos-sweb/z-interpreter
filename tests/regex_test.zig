@@ -92,3 +92,53 @@ test "repeated flags and u together with v are SyntaxErrors" {
     try helpers.expectUncaught("new RegExp('a', 'gg');", .syntax_error, "Invalid flags supplied to RegExp constructor 'gg'");
     try helpers.expectUncaught("new RegExp('a', 'uv');", .syntax_error, "Invalid flags supplied to RegExp constructor 'uv'");
 }
+
+test "index, lastIndex and search are UTF-16 code units" {
+    try helpers.expectStdout(
+        \\const s = 'héllo wörld 😀 x😀y';
+        \\const g = /o/g; g.exec(s);
+        \\console.log(/w/.exec(s).index, /x/.exec(s).index, s.search(/y/), g.lastIndex);
+        \\const y = /l/y; y.lastIndex = 2;
+        \\console.log(y.test(s), y.lastIndex);
+    , "6 15 18 5\ntrue 3\n");
+}
+
+test "lastIndex > 0 searches the whole string: ^, \\b and lookbehind see what precedes it" {
+    try helpers.expectStdout(
+        \\const a = /^b/g; a.lastIndex = 1;
+        \\const b = /\bb/g; b.lastIndex = 1;
+        \\const c = /(?<=a)b/g; c.lastIndex = 1;
+        \\console.log(a.exec('ab'), b.exec('ab'), c.exec('ab')[0], c.lastIndex);
+    , "null null b 2\n");
+}
+
+test "lastIndex is read even when neither global nor sticky, and left alone" {
+    try helpers.expectStdout(
+        \\let gets = 0; const counter = { valueOf() { gets++; return 0; } };
+        \\const r = /./; r.lastIndex = counter;
+        \\console.log(r.exec('abc')[0], r.lastIndex === counter, gets);
+    , "a true 1\n");
+}
+
+test "without u, a match can cut a surrogate pair; with u it can't" {
+    try helpers.expectStdout(
+        \\const m = /\uDE00/.exec('😀');
+        \\console.log(m.index, m[0].length, m[0].charCodeAt(0), /\uDE00/u.exec('😀'));
+        \\console.log('😀a'.split(/(?:)/).length, '😀😀'.split(/(?:)/u).length);
+    , "1 1 56832 null\n3 2\n");
+}
+
+test "matchAll, global match, split and a replacer's offset use UTF-16 positions" {
+    try helpers.expectStdout(
+        \\console.log([...'é😀é😀'.matchAll(/é/g)].map(m => m.index).join(), 'a😀b😀c'.match(/[a-c]/g).join());
+        \\const o = []; 'ñ😀ñ'.replace(/ñ/g, (m, off) => { o.push(off); return m; });
+        \\console.log(o.join(), 'a😀b😀c'.split(/😀/).join(), 'é1é2é'.split(/(\d)/).join());
+    , "0,3 a,b,c\n0,3 a,b,c é,1,é,2,é\n");
+}
+
+test "a replacer that cuts a surrogate pair rejoins it into one character" {
+    try helpers.expectStdout(
+        \\const r = '😀'.replace(/\uDE00/, m => m);
+        \\console.log(r === '😀', r.length, '😀'.replace(/\uDE00/g, () => '\uDE01').codePointAt(0));
+    , "true 2 128513\n");
+}

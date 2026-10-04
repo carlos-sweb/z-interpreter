@@ -87,7 +87,7 @@ const isObjectLike = builtin_helpers.isObjectLike;
 // RegExp). Method tables and any pub type interpreter.zig reaches into
 // via `builtins.X` are re-exported here so every existing external call
 // site (interpreter.zig's materializeProtos/gcTrack*/typedElem*) keeps
-// working unchanged. `regexFindFrom`/`makeMatchArray`/`regexSplit` are
+// working unchanged. `makeMatchArray`/`regexSplit` are
 // re-aliased too: String.prototype's regex-pattern methods (still living
 // in this file until String's own extraction pass) call them by bare
 // name.
@@ -105,7 +105,6 @@ pub const AllCtx = promise_builtins.AllCtx;
 pub const AllElemCtx = promise_builtins.AllElemCtx;
 pub const RaceCtx = promise_builtins.RaceCtx;
 pub const BoundCtx = function_builtins.BoundCtx;
-const regexFindFrom = regex_builtins.regexFindFrom;
 const makeMatchArray = regex_builtins.makeMatchArray;
 const regexSplit = regex_builtins.regexSplit;
 

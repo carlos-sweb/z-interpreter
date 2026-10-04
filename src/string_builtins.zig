@@ -31,8 +31,14 @@ const arg = native_helpers.arg;
 const native = native_helpers.native;
 const installBuiltin = builtin_helpers.installBuiltin;
 const toIntSat = builtin_helpers.toIntSat;
+const toLength = builtin_helpers.toLength;
 const makeArrayIterator = builtin_helpers.makeArrayIterator;
-const regexFindFrom = regex_builtins.regexFindFrom;
+const execRaw = regex_builtins.execRaw;
+const builtinExec = regex_builtins.builtinExec;
+const advancePos = regex_builtins.advancePos;
+const posToUtf16 = regex_builtins.posToUtf16;
+const utf16ToPos = regex_builtins.utf16ToPos;
+const sliceValue = regex_builtins.sliceValue;
 const makeMatchArray = regex_builtins.makeMatchArray;
 const regexSplit = regex_builtins.regexSplit;
 
@@ -413,8 +419,9 @@ fn stringToStringMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
 
 // ===== String methods with RegExp patterns =====
 
-/// str.match(re): non-global -> a match array (or null); global -> an
-/// array of all whole-match strings (or null).
+/// str.match(re): non-global -> RegExpBuiltinExec's match array (or
+/// null); global -> an array of all whole-match strings (or null), with
+/// `lastIndex` left at 0.
 fn stringMatch(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const data = try requireString(ctx, allocator, this_value, "match");
     defer allocator.free(data);
@@ -422,38 +429,37 @@ fn stringMatch(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     const re = try coerceToRegex(self, allocator, arg(args, 0));
     const st = self.regexState(re);
     if (!st.global) {
-        const hit = try regexFindFrom(re, data, 0);
-        if (hit) |h| {
-            defer h.match.deinit();
-            return makeMatchArray(self, allocator, h);
-        }
-        return JSValue.NULL;
+        const m = try builtinExec(self, allocator, re, data) orelse return JSValue.NULL;
+        defer m.deinit();
+        return makeMatchArray(self, allocator, m);
     }
-    var all = try re.regex.value.findAll(data);
-    defer {
-        for (all.items) |*mm| mm.deinit();
-        all.deinit(allocator);
+    st.last_index.deinit();
+    st.last_index = JSValue.fromNumber(0);
+    var result: ?JSValue = null;
+    var pos: usize = 0;
+    while (try execRaw(allocator, re, data, pos)) |m| {
+        defer m.deinit();
+        if (result == null) result = try self.gcNewArray();
+        _ = try result.?.array.value.push(try sliceValue(self, allocator, data, m.start(), m.end()));
+        pos = if (m.end() == m.start()) advancePos(re, data, m.end()) else m.end();
     }
-    if (all.items.len == 0) return JSValue.NULL;
-    var result = try interp(ctx).gcNewArray();
-    for (all.items) |match| _ = try result.array.value.push(try interp(ctx).gcNewString(match.group(data)));
-    return result;
+    return result orelse JSValue.NULL;
 }
 
-/// str.matchAll(re): an iterator of match arrays.
+/// str.matchAll(re): an iterator of match arrays, from the regex's
+/// `lastIndex` (UTF-16 units) on.
 fn stringMatchAll(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const data = try requireString(ctx, allocator, this_value, "matchAll");
     defer allocator.free(data);
     const self = interp(ctx);
     const re = try coerceToRegex(self, allocator, arg(args, 0));
-    var all = try re.regex.value.findAll(data);
-    defer {
-        for (all.items) |*mm| mm.deinit();
-        all.deinit(allocator);
-    }
     var arr = try interp(ctx).gcNewArray();
-    for (all.items) |match| {
-        _ = try arr.array.value.push(try makeMatchArray(self, allocator, .{ .match = match, .sub = data, .base = 0, .full = data, .group_count = re.regex.value.compiled.group_count }));
+    const from = try toLength(self, self.regexState(re).last_index);
+    var pos: usize = utf16ToPos(data, from) orelse data.len + 1;
+    while (try execRaw(allocator, re, data, pos)) |m| {
+        defer m.deinit();
+        _ = try arr.array.value.push(try makeMatchArray(self, allocator, m));
+        pos = if (m.end() == m.start()) advancePos(re, data, m.end()) else m.end();
     }
     return makeArrayIterator(self, allocator, arr, .values);
 }
@@ -463,12 +469,9 @@ fn stringSearch(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     defer allocator.free(data);
     const self = interp(ctx);
     const re = try coerceToRegex(self, allocator, arg(args, 0));
-    const m = try re.regex.value.find(data);
-    if (m) |match| {
-        defer match.deinit();
-        return JSValue.fromNumber(@floatFromInt(match.start));
-    }
-    return JSValue.fromNumber(-1);
+    const m = try execRaw(allocator, re, data, 0) orelse return JSValue.fromNumber(-1);
+    defer m.deinit();
+    return JSValue.fromNumber(@floatFromInt(posToUtf16(data, m.start())));
 }
 
 /// Coerce a match/replace/search/split argument to a `.regex` (a plain
@@ -499,43 +502,59 @@ fn regexReplace(self: *Interpreter, allocator: Allocator, data: []const u8, re: 
         return self.gcNewString(out);
     }
     // Function replacement: build the result splicing each match's
-    // fn(match, ...captures, offset, input) result.
+    // fn(match, ...captures, offset, input) result; offset in UTF-16 units.
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
-    var pos: usize = 0;
-    while (pos <= data.len) {
-        const m = try re.regex.value.findAt(data, pos);
-        const match = m orelse break;
+    var last: usize = 0; // end of the text already copied
+    var pos: usize = 0; // where the next search starts
+    while (try execRaw(allocator, re, data, pos)) |match| {
         defer match.deinit();
-        try buf.appendSlice(allocator, data[pos..match.start]);
+        try appendSlice(self, allocator, &buf, data, last, match.start());
         // callback args: (match, cap1, cap2, ..., offset, input)
         var call_args: std.ArrayList(JSValue) = .empty;
         defer {
             for (call_args.items) |a| a.deinit();
             call_args.deinit(allocator);
         }
-        try call_args.append(allocator, try self.gcNewString(match.group(data)));
-        var i: usize = 1;
-        while (i <= re.regex.value.compiled.group_count) : (i += 1) {
-            const cap = if (match.getCapture(i, data)) |c| try self.gcNewString(c) else JSValue.UNDEFINED;
-            try call_args.append(allocator, cap);
-        }
-        try call_args.append(allocator, JSValue.fromNumber(@floatFromInt(match.start)));
+        var i: usize = 0;
+        while (i <= match.groupCount()) : (i += 1) try call_args.append(allocator, try match.capture(self, i));
+        try call_args.append(allocator, JSValue.fromNumber(@floatFromInt(posToUtf16(data, match.start()))));
         try call_args.append(allocator, try self.gcNewString(data));
         const r = try repl.function.value.call(repl.function.value.ctx, allocator, JSValue.UNDEFINED, call_args.items);
         defer r.deinit();
         const rs = try self.toDisplayStringJS(allocator, r);
         defer allocator.free(rs);
-        try buf.appendSlice(allocator, rs);
-        // advance past the match (empty match -> step one to avoid a loop)
-        pos = if (match.end > match.start) match.end else match.end + 1;
-        if (!replace_all) {
-            try buf.appendSlice(allocator, data[match.end..]);
-            return self.gcNewString(buf.items);
-        }
+        try appendWtf8Merged(&buf, allocator, rs);
+        last = match.end();
+        if (!replace_all) break;
+        // advance past the match (an empty one steps one character)
+        pos = if (match.end() == match.start()) advancePos(re, data, match.end()) else match.end();
     }
-    if (pos < data.len) try buf.appendSlice(allocator, data[pos..]);
+    try appendSlice(self, allocator, &buf, data, last, data.len);
     return self.gcNewString(buf.items);
+}
+
+/// Appends the text at subject positions [a, b) (either end may cut a
+/// surrogate pair; see `sliceValue`).
+fn appendSlice(self: *Interpreter, allocator: Allocator, buf: *std.ArrayList(u8), data: []const u8, a: usize, b: usize) anyerror!void {
+    if (a >= b) return;
+    const v = try sliceValue(self, allocator, data, a, b);
+    defer v.deinit();
+    try appendWtf8Merged(buf, allocator, v.string.value.data);
+}
+
+/// Appends `chunk` to `buf`, merging a WTF-8 high-surrogate tail with a
+/// WTF-8 low-surrogate head into the real 4-byte UTF-8 astral sequence --
+/// see z-string-surrogate-charat.md (same helper as interpreter_expr.zig's
+/// and array_builtins.zig's).
+fn appendWtf8Merged(buf: *std.ArrayList(u8), allocator: Allocator, chunk: []const u8) !void {
+    if (zstring.utf16.mergeSurrogateBoundary(buf.items, chunk)) |merged| {
+        buf.items.len -= 3;
+        try buf.appendSlice(allocator, &merged);
+        try buf.appendSlice(allocator, chunk[3..]);
+    } else {
+        try buf.appendSlice(allocator, chunk);
+    }
 }
 
 // ===== String statics (fromCharCode/fromCodePoint) =====
