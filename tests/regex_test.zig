@@ -259,3 +259,47 @@ test "search restores lastIndex; global match leaves it at 0" {
         \\console.log(x, r.lastIndex, m.join(), g.lastIndex);
     , "1 2 a,a 0\n");
 }
+
+test "d flag: indices are [start, end] pairs in UTF-16 units, with groups" {
+    try helpers.expectStdout(
+        \\const m = /a(b)?(?<x>c)/d.exec('zzac');
+        \\console.log(JSON.stringify(m.indices), JSON.stringify(m.indices.groups), m.indices.groups.x === m.indices[2]);
+        \\console.log(JSON.stringify(/😀(é)/d.exec('x😀é').indices), /a/d.exec('a').indices.groups, 'indices' in /a/.exec('a'));
+        \\console.log(JSON.stringify(/(?<a>x)|(?<a>y)/d.exec('y').indices.groups.a));
+    , "[[2,4],null,[3,4]] {\"x\":[3,4]} true\n[[1,4],[3,4]] undefined false\n[0,1]\n");
+}
+
+test "RegExp.escape" {
+    try helpers.expectStdout(
+        \\console.log(RegExp.escape('abc'), RegExp.escape('a.b*c/d'), RegExp.escape('_x é'), RegExp.escape('x,y-z'));
+        \\console.log(RegExp.escape(' \t\n'), RegExp.escape('\ud800'), RegExp.escape('[]{}()|^$\\'));
+        \\const s = 'a.b*c (x) [y] {z} $1 \\ / ,-=<>#&!%:;@~\'`"';
+        \\console.log(new RegExp('^' + RegExp.escape(s) + '$').test(s), new RegExp('^' + RegExp.escape(s) + '$', 'u').test(s), new RegExp('^' + RegExp.escape(s) + '$', 'v').test(s));
+    , "\\x61bc \\x61\\.b\\*c\\/d _x\\x20é \\x78\\x2cy\\x2dz\n\\x20\\t\\n \\ud800 \\[\\]\\{\\}\\(\\)\\|\\^\\$\\\\\ntrue true true\n");
+    try helpers.expectUncaught("RegExp.escape(1);", .type_error, "RegExp.escape requires a string");
+}
+
+test "matchAll returns a lazy %RegExpStringIterator%" {
+    try helpers.expectStdout(
+        \\const it = 'xaxa'.matchAll(/a/g); const p = Object.getPrototypeOf(it);
+        \\console.log(Object.prototype.toString.call(it), p.next.name, p.next.length, it[Symbol.iterator]() === it);
+        \\console.log(it.next().value.index, it.next().value.index, it.next().done, it.next().done);
+        \\const orig = RegExp.prototype.exec; let calls = 0;
+        \\const it2 = 'aaa'.matchAll(/a/g); const a = it2.next().value.index;
+        \\RegExp.prototype.exec = function (s) { calls++; return orig.call(this, s); };
+        \\const b = it2.next().value.index; RegExp.prototype.exec = orig;
+        \\console.log(a, b, it2.next().value.index, calls, [...'😀'.matchAll(/(?:)/gu)].map(m => m.index).join());
+    , "[object RegExp String Iterator] next 0 true\n1 3 true true\n0 1 2 1 0,2\n");
+    try helpers.expectUncaught("Object.getPrototypeOf('a'.matchAll(/a/g)).next.call({});", .type_error, "%RegExpStringIterator%.next called on an incompatible receiver");
+}
+
+test "RegExp.prototype.compile (Annex B)" {
+    try helpers.expectStdout(
+        \\const r = /a/g; r.lastIndex = 3; const x = r.compile('b+', 'i');
+        \\console.log(x === r, r.source, r.flags, r.lastIndex, r.test('BB'));
+        \\r.compile(/c/m); console.log(r.source, r.flags);
+        \\try { r.compile('('); } catch (e) { console.log(e.name, r.source); }
+        \\const q = /(a)(b)/g; console.log('abab'.replace(q, (m, a, b) => { q.compile('z'); return b + a; }));
+    , "true b+ i 0 true\nc m\nSyntaxError c\nbaba\n");
+    try helpers.expectUncaught("/a/.compile(/c/, 'g');", .type_error, "Cannot supply flags when constructing one RegExp from another");
+}

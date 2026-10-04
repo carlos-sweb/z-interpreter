@@ -168,7 +168,7 @@ pub fn regExpExec(self: *Interpreter, allocator: Allocator, r: JSValue, s: JSVal
     // The original RegExp.prototype.exec on a RegExp is RegExpBuiltinExec
     // itself: skip the call.
     if (r == .regex and exec == .function and exec.function.value.call == rb.regexExecFn) {
-        return builtinExecValue(self, allocator, r, s.string.value.data);
+        return builtinExecValue(self, allocator, r, s);
     }
     if (isCallable(exec)) {
         const result = try self.callValue(exec, r, &.{s}, "exec");
@@ -179,13 +179,13 @@ pub fn regExpExec(self: *Interpreter, allocator: Allocator, r: JSValue, s: JSVal
         return result;
     }
     if (r != .regex) return self.throwError(.type_error, "RegExp exec method called on an incompatible receiver", .{});
-    return builtinExecValue(self, allocator, r, s.string.value.data);
+    return builtinExecValue(self, allocator, r, s);
 }
 
-fn builtinExecValue(self: *Interpreter, allocator: Allocator, r: JSValue, data: []const u8) anyerror!JSValue {
-    const m = try rb.builtinExec(self, allocator, r, data) orelse return JSValue.NULL;
+fn builtinExecValue(self: *Interpreter, allocator: Allocator, r: JSValue, s: JSValue) anyerror!JSValue {
+    const m = try rb.builtinExec(self, allocator, r, s.string.value.data) orelse return JSValue.NULL;
     defer m.deinit();
-    return rb.makeMatchArray(self, allocator, m);
+    return rb.makeMatchArray(self, allocator, m, s);
 }
 
 /// GetSubstitution(matched, str, position, captures, namedCaptures,
@@ -294,6 +294,14 @@ fn deinitList(allocator: Allocator, list: *std.ArrayList(JSValue)) void {
 // lastIndex <-> UTF-16 on every exec.
 
 fn pristine(self: *Interpreter, rx: JSValue, flags: JSValue) bool {
+    if (!pristineExec(self, rx)) return false;
+    var buf: [8]u8 = undefined;
+    return std.mem.eql(u8, Interpreter.canonicalFlags(self.regexState(rx), &buf), flags.string.value.data);
+}
+
+/// A RegExp whose `exec` is the original builtin (inherited as a data
+/// property, not overridden on it) and whose lastIndex is writable.
+fn pristineExec(self: *Interpreter, rx: JSValue) bool {
     if (rx != .regex) return false;
     const st = self.regexState(rx);
     if (!st.last_index_writable) return false;
@@ -301,9 +309,7 @@ fn pristine(self: *Interpreter, rx: JSValue, flags: JSValue) bool {
         if (bag.object.value.getOwnRecord("exec") != null) return false;
     }
     const rec = self.protos.regex.object.value.getOwnRecord("exec") orelse return false;
-    if (rec.isAccessor() or rec.value != .function or rec.value.function.value.call != rb.regexExecFn) return false;
-    var buf: [8]u8 = undefined;
-    return std.mem.eql(u8, Interpreter.canonicalFlags(st, &buf), flags.string.value.data);
+    return !rec.isAccessor() and rec.value == .function and rec.value.function.value.call == rb.regexExecFn;
 }
 
 /// Every match of a global search from position 0 (RegexMatch slots in
@@ -339,32 +345,46 @@ fn replaceFast(self: *Interpreter, allocator: Allocator, rx: JSValue, s: JSValue
     var list: std.ArrayList(rb.RegexMatch) = .empty;
     defer deinitMatches(allocator, &list);
     try allMatches(self, allocator, rx, data, &list);
+    // Every match's captures and groups before any replacer runs (one
+    // may recompile rx; the matches must not depend on its program).
+    const Prepared = struct { captures: []JSValue, named: JSValue, position: usize };
+    var prepared = try allocator.alloc(Prepared, list.items.len);
+    var n_prepared: usize = 0;
+    defer {
+        for (prepared[0..n_prepared]) |pr| {
+            for (pr.captures) |c| c.deinit();
+            allocator.free(pr.captures);
+            pr.named.deinit();
+        }
+        allocator.free(prepared);
+    }
     var cursor: rb.Utf16Cursor = .{ .data = data };
+    for (list.items, 0..) |m, k| {
+        const caps = try allocator.alloc(JSValue, m.groupCount() + 1);
+        var g: usize = 0;
+        while (g < caps.len) : (g += 1) caps[g] = try m.capture(self, g);
+        prepared[k] = .{ .captures = caps, .named = try rb.matchGroups(self, m), .position = cursor.at(m.start()) };
+        n_prepared += 1;
+    }
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     var last: usize = 0;
-    for (list.items) |m| {
+    for (list.items, prepared) |m, pr| {
         try appendValue(self, allocator, &buf, data, last, m.start());
-        var captures: std.ArrayList(JSValue) = .empty;
-        defer deinitList(allocator, &captures);
-        var g: usize = 0;
-        while (g <= m.groupCount()) : (g += 1) try captures.append(allocator, try m.capture(self, g));
-        const named = try rb.matchGroups(self, m);
-        defer named.deinit();
         if (functional) {
             var call_args: std.ArrayList(JSValue) = .empty;
             defer call_args.deinit(allocator);
-            try call_args.appendSlice(allocator, captures.items);
-            try call_args.append(allocator, JSValue.fromNumber(@floatFromInt(cursor.at(m.start()))));
+            try call_args.appendSlice(allocator, pr.captures);
+            try call_args.append(allocator, JSValue.fromNumber(@floatFromInt(pr.position)));
             try call_args.append(allocator, s);
-            if (named != .undefined) try call_args.append(allocator, named);
+            if (pr.named != .undefined) try call_args.append(allocator, pr.named);
             const r = try self.callValue(repl, JSValue.UNDEFINED, call_args.items, "replacer");
             defer r.deinit();
             const rs = try toStringValue(self, allocator, r);
             defer rs.deinit();
             try appendWtf8Merged(&buf, allocator, rs.string.value.data);
         } else {
-            try getSubstitution(self, allocator, &buf, repl.string.value.data, captures.items[0].string.value.data, data, m.start(), m.end(), captures.items[1..], named);
+            try getSubstitution(self, allocator, &buf, repl.string.value.data, pr.captures[0].string.value.data, data, m.start(), m.end(), pr.captures[1..], pr.named);
         }
         last = m.end();
     }
@@ -672,36 +692,93 @@ pub fn symbolMatchAll(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     defer matcher.deinit();
     const last_index = try getLength(self, r, "lastIndex");
     try setNumber(self, matcher, "lastIndex", last_index);
-    const global = hasFlag(flags, 'g');
-    const full_unicode = hasFlag(flags, 'u') or hasFlag(flags, 'v');
+    return createRegExpStringIterator(self, matcher, s, hasFlag(flags, 'g'), hasFlag(flags, 'u') or hasFlag(flags, 'v'));
+}
 
-    var arr = try self.gcNewArray();
-    defer arr.deinit();
-    if (global and pristine(self, matcher, flags)) {
-        const data = s.string.value.data;
-        var cursor: rb.Utf16Cursor = .{ .data = data };
-        var pos = rb.utf16ToPos(data, last_index) orelse data.len + 1;
-        while (try rb.execRaw(allocator, matcher, data, pos)) |m| {
-            defer m.deinit();
-            _ = try arr.array.value.push(try rb.makeMatchArrayAt(self, allocator, m, cursor.at(m.start())));
-            pos = if (m.end() == m.start()) rb.advancePos(matcher, data, m.end()) else m.end();
-        }
-        try setNumber(self, matcher, "lastIndex", 0);
-        return makeArrayIterator(self, allocator, arr, .values);
+// ===== %RegExpStringIterator% =====
+
+/// CreateRegExpStringIterator(R, S, global, fullUnicode): an object
+/// inheriting %RegExpStringIteratorPrototype%, its slots in the
+/// interpreter's regexp_string_iters table.
+fn createRegExpStringIterator(self: *Interpreter, r: JSValue, s: JSValue, global: bool, unicode: bool) anyerror!JSValue {
+    const it = try self.gcNewObject();
+    errdefer it.deinit();
+    try it.object.value.setPrototype(&self.regexp_string_iterator_proto.?.object.value);
+    try self.regexp_string_iters.put(self.gc_allocator, @intFromPtr(it.object), .{ .r = r.retain(), .s = s.retain(), .global = global, .unicode = unicode });
+    return it;
+}
+
+/// CreateIterResultObject(value, done); takes ownership of `value`.
+fn iterResult(self: *Interpreter, value: JSValue, done: bool) anyerror!JSValue {
+    const o = try self.ordinaryObject();
+    try o.object.value.set("value", value);
+    try o.object.value.set("done", JSValue.fromBool(done));
+    return o;
+}
+
+/// %RegExpStringIteratorPrototype%.next(). For a matcher only this
+/// iterator holds (it was constructed by @@matchAll) and whose exec is
+/// still the original, a global iteration keeps its own position instead
+/// of round-tripping lastIndex through UTF-16 on every step (nothing can
+/// observe the difference); the moment exec is replaced it writes
+/// lastIndex back and follows the spec steps.
+pub fn regExpStringIteratorNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    if (!isObjectLike(this_value)) return self.throwError(.type_error, "%RegExpStringIterator%.next called on a non-object", .{});
+    if (this_value != .object or self.regexp_string_iters.getPtr(@intFromPtr(this_value.object)) == null)
+        return self.throwError(.type_error, "%RegExpStringIterator%.next called on an incompatible receiver", .{});
+    const key = @intFromPtr(this_value.object);
+    const snap = self.regexp_string_iters.get(key).?;
+    if (snap.done) return iterResult(self, JSValue.UNDEFINED, true);
+    const r = snap.r;
+    const s = snap.s;
+    const data = s.string.value.data;
+
+    if (snap.global and pristineExec(self, r)) {
+        const st = self.regexp_string_iters.getPtr(key).?;
+        const pos = st.pos orelse (rb.utf16ToPos(data, try getLength(self, r, "lastIndex")) orelse data.len + 1);
+        const m = try rb.execRaw(allocator, r, data, pos) orelse {
+            const st2 = self.regexp_string_iters.getPtr(key).?;
+            st2.done = true;
+            st2.pos = null;
+            try setNumber(self, r, "lastIndex", 0);
+            return iterResult(self, JSValue.UNDEFINED, true);
+        };
+        defer m.deinit();
+        var cursor: rb.Utf16Cursor = .{ .data = data, .pos = st.cursor_pos, .index = st.cursor_index };
+        const arr = try rb.makeMatchArrayAt(self, allocator, m, cursor.at(m.start()), s);
+        const st2 = self.regexp_string_iters.getPtr(key).?;
+        st2.cursor_pos = cursor.pos;
+        st2.cursor_index = cursor.index;
+        st2.pos = if (m.end() == m.start()) rb.advancePos(r, data, m.end()) else m.end();
+        return iterResult(self, arr, false);
     }
-    while (true) {
-        const m = try regExpExec(self, allocator, matcher, s);
-        if (m == .null) break;
-        _ = try arr.array.value.push(m);
-        if (!global) break;
-        const match_str = try getString(self, allocator, m, "0");
+
+    // The spec steps. A position the fast path kept goes back into
+    // lastIndex first.
+    if (snap.pos) |pos| {
+        const st = self.regexp_string_iters.getPtr(key).?;
+        st.pos = null;
+        try setNumber(self, r, "lastIndex", rb.posToUtf16(data, pos));
+    }
+    const match = try regExpExec(self, allocator, r, s);
+    if (match == .null) {
+        self.regexp_string_iters.getPtr(key).?.done = true;
+        return iterResult(self, JSValue.UNDEFINED, true);
+    }
+    errdefer match.deinit();
+    if (snap.global) {
+        const match_str = try getString(self, allocator, match, "0");
         defer match_str.deinit();
         if (match_str.string.value.data.len == 0) {
-            const this_index = try getLength(self, matcher, "lastIndex");
-            try setNumber(self, matcher, "lastIndex", advanceStringIndex(s.string.value.data, this_index, full_unicode));
+            const this_index = try getLength(self, r, "lastIndex");
+            try setNumber(self, r, "lastIndex", advanceStringIndex(data, this_index, snap.unicode));
         }
+        return iterResult(self, match, false);
     }
-    return makeArrayIterator(self, allocator, arr, .values);
+    self.regexp_string_iters.getPtr(key).?.done = true;
+    return iterResult(self, match, false);
 }
 
 // ===== String.prototype methods =====

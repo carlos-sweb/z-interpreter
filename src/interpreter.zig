@@ -125,6 +125,21 @@ pub const RegexState = struct {
     props: ?JSValue = null,
 };
 
+/// A %RegExpStringIterator% object's internal slots ([[IteratingRegExp]],
+/// [[IteratedString]], [[Global]], [[Unicode]], [[Done]]), keyed by the
+/// iterator object's box. `pos`/`cursor_*` are the fast path's own
+/// position (see regex_protocol's regExpStringIteratorNext).
+pub const RegExpStringIterState = struct {
+    r: JSValue,
+    s: JSValue,
+    global: bool,
+    unicode: bool,
+    done: bool = false,
+    pos: ?usize = null,
+    cursor_pos: usize = 0,
+    cursor_index: usize = 0,
+};
+
 /// `delete f.name`/`delete f.length` state -- see `deleted_fn_props`.
 pub const DeletedFnProps = struct {
     name: bool = false,
@@ -626,6 +641,10 @@ pub const Interpreter = struct {
     /// %RegExp%, the original RegExp constructor (SpeciesConstructor's
     /// default), whatever the global `RegExp` binding holds later.
     regexp_ctor: ?JSValue = null,
+    /// %RegExpStringIteratorPrototype% (matchAll's iterators).
+    regexp_string_iterator_proto: ?JSValue = null,
+    /// Its [[Prototype]] (owned here: a prototype link isn't a reference).
+    regexp_string_iterator_parent: ?JSValue = null,
     /// The well-known `Symbol.asyncIterator` -- resolveAsyncIterator's
     /// first choice for `for await`. Set in setupGlobals.
     symbol_async_iterator: ?JSValue = null,
@@ -671,6 +690,8 @@ pub const Interpreter = struct {
     /// release JSValues then (freeAllGcNodes frees each registered box
     /// itself, so releasing one from a hook would free it twice).
     tearing_down: bool = false,
+    /// %RegExpStringIterator% instances' internal slots (see the type).
+    regexp_string_iters: std.AutoHashMapUnmanaged(usize, RegExpStringIterState) = .empty,
     /// Named own properties on array values (arrays have no general
     /// property bag) -- used by exec/match result arrays for
     /// `index`/`input`/`groups`. Keyed by the array Rc box pointer; the
@@ -782,6 +803,7 @@ pub const Interpreter = struct {
     pub const arrayExtra = interpreter_support.arrayExtra;
     pub const arrayPropsObject = interpreter_support.arrayPropsObject;
     pub const regexPropsObject = interpreter_support.regexPropsObject;
+    pub const recompileRegex = interpreter_support.recompileRegex;
     pub const regexProps = interpreter_support.regexProps;
     pub const boxPrimitiveIfConstructed = interpreter_support.boxPrimitiveIfConstructed;
     pub const unboxPrimitiveWrapper = interpreter_support.unboxPrimitiveWrapper;

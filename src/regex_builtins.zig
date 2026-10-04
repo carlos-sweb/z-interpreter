@@ -153,8 +153,10 @@ pub const RegexMatch = struct {
     pub fn end(self: RegexMatch) usize {
         return self.slots[1].?;
     }
+    /// From the match's own slots (not the RegExp's current program,
+    /// which RegExp.prototype.compile can replace).
     pub fn groupCount(self: RegexMatch) usize {
-        return self.re.regex.value.groupCount();
+        return self.slots.len / 2 - 1;
     }
     /// Group g's string, or undefined if it didn't take part.
     pub fn capture(self: RegexMatch, interp_: *Interpreter, g: usize) anyerror!JSValue {
@@ -217,12 +219,14 @@ pub const Utf16Cursor = struct {
 
 /// The JS match-result array: [0]=whole match, [i]=capture i (undefined
 /// if it didn't participate), plus own `index`, `input`, and `groups`.
-pub fn makeMatchArray(self: *Interpreter, allocator: Allocator, m: RegexMatch) anyerror!JSValue {
-    return makeMatchArrayAt(self, allocator, m, posToUtf16(m.data, m.start()));
+/// `input` is the subject as a string value when the caller has one (it
+/// is shared, not copied); null makes a new string of `m.data`.
+pub fn makeMatchArray(self: *Interpreter, allocator: Allocator, m: RegexMatch, input: ?JSValue) anyerror!JSValue {
+    return makeMatchArrayAt(self, allocator, m, posToUtf16(m.data, m.start()), input);
 }
 
 /// `makeMatchArray` with the match's UTF-16 index already known.
-pub fn makeMatchArrayAt(self: *Interpreter, allocator: Allocator, m: RegexMatch, index: usize) anyerror!JSValue {
+pub fn makeMatchArrayAt(self: *Interpreter, allocator: Allocator, m: RegexMatch, index: usize, input: ?JSValue) anyerror!JSValue {
     var result = try self.gcNewArray();
     const groups = try matchGroups(self, m);
     var g: usize = 0;
@@ -231,10 +235,48 @@ pub fn makeMatchArrayAt(self: *Interpreter, allocator: Allocator, m: RegexMatch,
     }
     // exec/match arrays carry extra own properties.
     try setArrayOwn(self, result, "index", JSValue.fromNumber(@floatFromInt(index)));
-    try setArrayOwn(self, result, "input", try self.gcNewString(m.data));
+    try setArrayOwn(self, result, "input", if (input) |v| v.retain() else try self.gcNewString(m.data));
     try setArrayOwn(self, result, "groups", groups);
+    if (self.regexState(m.re).has_indices) try setArrayOwn(self, result, "indices", try matchIndices(self, m));
     _ = allocator;
     return result;
+}
+
+/// The `indices` array of a `d` match (MakeMatchIndicesIndexPairArray):
+/// [start, end] in UTF-16 units per group (undefined if it didn't take
+/// part), with a `groups` object of the named groups' pairs (the same
+/// pair objects) or undefined.
+pub fn matchIndices(self: *Interpreter, m: RegexMatch) anyerror!JSValue {
+    var indices = try self.gcNewArray();
+    var g: usize = 0;
+    while (g <= m.groupCount()) : (g += 1) {
+        const a = m.slots[2 * g];
+        const b = m.slots[2 * g + 1];
+        if (a == null or b == null) {
+            _ = try indices.array.value.push(JSValue.UNDEFINED);
+            continue;
+        }
+        var pair = try self.gcNewArray();
+        _ = try pair.array.value.push(JSValue.fromNumber(@floatFromInt(posToUtf16(m.data, a.?))));
+        _ = try pair.array.value.push(JSValue.fromNumber(@floatFromInt(posToUtf16(m.data, b.?))));
+        _ = try indices.array.value.push(pair);
+    }
+    const named = m.re.regex.value.compiled.named_groups;
+    if (named.len == 0 or named[named.len - 1].index > m.groupCount()) {
+        try setArrayOwn(self, indices, "groups", JSValue.UNDEFINED);
+        return indices;
+    }
+    var groups = try self.gcNewObject();
+    for (named) |ng| {
+        const v = indices.array.value.get(ng.index);
+        if (groups.object.value.getOwn(ng.name)) |old| {
+            if (v == .undefined) continue;
+            old.deinit();
+        }
+        try groups.object.value.set(ng.name, v.retain());
+    }
+    try setArrayOwn(self, indices, "groups", groups);
+    return indices;
 }
 
 /// The `groups` object of a match (undefined without named groups). A
@@ -245,6 +287,7 @@ pub fn matchGroups(self: *Interpreter, m: RegexMatch) anyerror!JSValue {
     if (named.len == 0) return JSValue.UNDEFINED;
     var groups = try self.gcNewObject();
     for (named) |ng| {
+        if (ng.index > m.groupCount()) continue;
         const v = try m.capture(self, ng.index);
         if (groups.object.value.getOwn(ng.name)) |old| {
             if (v == .undefined) continue;
@@ -273,13 +316,16 @@ fn setArrayOwn(self: *Interpreter, array: JSValue, key: []const u8, value: JSVal
 /// match sets `lastIndex` to the match's end; on a failure a global or
 /// sticky regex's `lastIndex` goes back to 0. The caller owns the match.
 pub fn builtinExec(self: *Interpreter, allocator: Allocator, re: JSValue, data: []const u8) anyerror!?RegexMatch {
-    const st = self.regexState(re);
-    const stateful = st.global or st.sticky;
     // Real spec: ToLength(Get(R, "lastIndex")) is applied HERE, at read
     // time -- not eagerly coerced/clamped when `lastIndex` was assigned
     // (lastIndex.md's fix; see setPropertyOnValue) -- and always, even
     // when neither global nor sticky then discards it (step 4 before 8).
-    const read_index = try toLength(self, st.last_index);
+    // The flags are read after it: a valueOf can run
+    // RegExp.prototype.compile (and the state pointer is fetched again,
+    // since creating RegExps there can move the state table).
+    const read_index = try toLength(self, self.regexState(re).last_index);
+    const st = self.regexState(re);
+    const stateful = st.global or st.sticky;
     const last_index = if (stateful) read_index else 0;
     const m = if (utf16ToPos(data, last_index)) |pos| try execRaw(allocator, re, data, pos) else null;
     if (stateful) {
@@ -301,7 +347,7 @@ fn regexExec(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     defer if (!is_str) allocator.free(input);
     const m = try builtinExec(self, allocator, re, input) orelse return JSValue.NULL;
     defer m.deinit();
-    return makeMatchArray(self, allocator, m);
+    return makeMatchArray(self, allocator, m, if (is_str) arg(args, 0) else null);
 }
 
 fn regexToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -502,10 +548,156 @@ pub fn installProtoExtras(self: *Interpreter) !void {
         try proto.object.value.defineProperty(key, f, .{ .writable = true, .enumerable = false, .configurable = true });
     }
 
+    try proto.object.value.defineProperty("compile", try native(self, "compile", 2, regexCompile), .{ .writable = true, .enumerable = false, .configurable = true });
+    try installStringIteratorProto(self);
+
     const species_key = try wellKnownKey(self, "species");
     defer self.gc_allocator.free(species_key);
     const statics = try self.functionStatics(self.global_env.get("RegExp").?);
     try defineGetter(self, statics, species_key, "get [Symbol.species]", speciesGetter);
+    try statics.object.value.defineProperty("escape", try native(self, "escape", 1, regexpEscape), .{ .writable = true, .enumerable = false, .configurable = true });
+}
+
+/// RegExp.prototype.compile(pattern, flags) (Annex B): RegExpInitialize
+/// on this RegExp -- a RegExp pattern lends its source and flags (and
+/// then `flags` must be undefined) -- then lastIndex = 0 (a TypeError if
+/// it is read-only, after the new pattern is in place).
+fn regexCompile(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self = interp(ctx);
+    const re = try requireRegex(ctx, this_value, "compile");
+    const pattern = arg(args, 0);
+    const flags = arg(args, 1);
+    var p: []u8 = undefined;
+    var f: []u8 = undefined;
+    if (pattern == .regex) {
+        if (flags != .undefined) return self.throwError(.type_error, "Cannot supply flags when constructing one RegExp from another", .{});
+        const st = self.regexState(pattern);
+        p = try allocator.dupe(u8, st.source);
+        f = try allocator.dupe(u8, st.flags);
+    } else {
+        p = if (pattern == .undefined) try allocator.dupe(u8, "") else try self.toDisplayStringJS(allocator, pattern);
+        errdefer allocator.free(p);
+        f = if (flags == .undefined) try allocator.dupe(u8, "") else try self.toDisplayStringJS(allocator, flags);
+    }
+    defer allocator.free(p);
+    defer allocator.free(f);
+    try self.recompileRegex(re, p, f);
+    try setLastIndex(self, re, JSValue.fromNumber(0));
+    return re.retain();
+}
+
+/// RegExp.escape(S) (ES2025): S with every character that could mean
+/// something in a pattern escaped, valid with and without u/v.
+fn regexpEscape(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const s = arg(args, 0);
+    if (s != .string) return self.throwError(.type_error, "RegExp.escape requires a string", .{});
+    const data = s.string.value.data;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    var i: usize = 0;
+    while (i < data.len) {
+        const c = decodeWtf8(data, i);
+        // A leading digit or ASCII letter would merge with a preceding
+        // \0, \c, \x... in a larger pattern: always \xHH.
+        if (out.items.len == 0 and c.cp < 0x80 and std.ascii.isAlphanumeric(@intCast(c.cp))) {
+            try appendFmt(allocator, &out, "\\x{x:0>2}", .{c.cp});
+        } else {
+            try encodeForRegExpEscape(allocator, &out, c.cp, data[i .. i + c.len]);
+        }
+        i += c.len;
+    }
+    return self.gcNewString(out.items);
+}
+
+/// `out.print` for an ArrayList(u8) (short formatted pieces).
+fn appendFmt(allocator: Allocator, out: *std.ArrayList(u8), comptime fmt: []const u8, args: anytype) !void {
+    var buf: [32]u8 = undefined;
+    try out.appendSlice(allocator, try std.fmt.bufPrint(&buf, fmt, args));
+}
+
+const FmtAppender = struct {
+    allocator: Allocator,
+    out: *std.ArrayList(u8),
+    fn print(self: FmtAppender, comptime fmt: []const u8, args: anytype) !void {
+        return appendFmt(self.allocator, self.out, fmt, args);
+    }
+    fn writeAll(self: FmtAppender, bytes: []const u8) !void {
+        return self.out.appendSlice(self.allocator, bytes);
+    }
+};
+
+const Decoded = struct { cp: u21, len: usize };
+
+/// One code point of a WTF-8 string (a lone surrogate is its own; an
+/// invalid byte is that byte's value).
+fn decodeWtf8(data: []const u8, i: usize) Decoded {
+    const n = std.unicode.utf8ByteSequenceLength(data[i]) catch return .{ .cp = data[i], .len = 1 };
+    if (i + n > data.len) return .{ .cp = data[i], .len = 1 };
+    if (std.unicode.utf8Decode(data[i .. i + n])) |cp| return .{ .cp = cp, .len = n } else |_| {}
+    if (n == 3) {
+        if (zstring.utf16.decodeSurrogateWtf8(data[i .. i + 3])) |u| return .{ .cp = u, .len = 3 };
+    }
+    return .{ .cp = data[i], .len = 1 };
+}
+
+/// EncodeForRegExpEscape(c), appended to `out` (`raw` is c's own bytes).
+fn encodeForRegExpEscape(allocator: Allocator, out: *std.ArrayList(u8), cp: u21, raw: []const u8) !void {
+    const w = FmtAppender{ .allocator = allocator, .out = out };
+    // SyntaxCharacter or `/`: a backslash before it.
+    if (cp < 0x80 and std.mem.indexOfScalar(u8, "^$\\.*+?()[]{}|/", @intCast(cp)) != null) {
+        try w.print("\\{c}", .{@as(u8, @intCast(cp))});
+        return;
+    }
+    // ControlEscape.
+    switch (cp) {
+        0x09 => return w.writeAll("\\t"),
+        0x0A => return w.writeAll("\\n"),
+        0x0B => return w.writeAll("\\v"),
+        0x0C => return w.writeAll("\\f"),
+        0x0D => return w.writeAll("\\r"),
+        else => {},
+    }
+    const other_punctuator = cp < 0x80 and std.mem.indexOfScalar(u8, ",-=<>#&!%:;@~'`\"", @intCast(cp)) != null;
+    if (other_punctuator or isWhiteSpaceOrLineTerminator(cp) or (cp >= 0xD800 and cp <= 0xDFFF)) {
+        if (cp <= 0xFF) return w.print("\\x{x:0>2}", .{cp});
+        if (cp <= 0xFFFF) return w.print("\\u{x:0>4}", .{cp});
+        const v = cp - 0x10000;
+        return w.print("\\u{x:0>4}\\u{x:0>4}", .{ 0xD800 + (v >> 10), 0xDC00 + (v & 0x3FF) });
+    }
+    try out.appendSlice(allocator, raw);
+}
+
+/// WhiteSpace or LineTerminator (ECMA-262 12.2, 12.3).
+fn isWhiteSpaceOrLineTerminator(cp: u21) bool {
+    return switch (cp) {
+        0x09, 0x0B, 0x0C, 0x20, 0xA0, 0xFEFF, 0x0A, 0x0D, 0x2028, 0x2029, 0x1680, 0x202F, 0x205F, 0x3000 => true,
+        0x2000...0x200A => true,
+        else => false,
+    };
+}
+
+/// Installs %RegExpStringIteratorPrototype%: `next`, @@toStringTag "RegExp
+/// String Iterator", and (no shared %IteratorPrototype% exists in this
+/// engine yet) a parent object with @@iterator returning the receiver.
+fn installStringIteratorProto(self: *Interpreter) !void {
+    const parent = try self.ordinaryObject();
+    if (self.symbol_iterator) |sym| {
+        const key = try self.encodeKey(sym);
+        defer self.gc_allocator.free(key);
+        try parent.object.value.defineProperty(key, try native(self, "[Symbol.iterator]", 0, builtin_helpers.iteratorSelfBuiltin), .{ .writable = true, .enumerable = false, .configurable = true });
+    }
+    const proto = try self.gcNewObject();
+    try proto.object.value.setPrototype(&parent.object.value);
+    try proto.object.value.defineProperty("next", try native(self, "next", 0, regex_protocol.regExpStringIteratorNext), .{ .writable = true, .enumerable = false, .configurable = true });
+    const tag_key = try wellKnownKey(self, "toStringTag");
+    defer self.gc_allocator.free(tag_key);
+    try proto.object.value.defineProperty(tag_key, try self.gcNewString("RegExp String Iterator"), .{ .writable = false, .enumerable = false, .configurable = true });
+    // [[Prototype]] is a raw pointer, not a counted reference: the
+    // interpreter field owns `parent`.
+    self.regexp_string_iterator_parent = parent;
+    self.regexp_string_iterator_proto = proto;
 }
 
 /// SameValue (Object.is).
