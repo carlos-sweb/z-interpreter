@@ -482,7 +482,9 @@ pub fn evalIn(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
         },
         // A RegExp's own `lastIndex`, or anything on RegExp.prototype's
         // chain (source, flags, global, ... are accessors there).
-        .regex => JSValue.fromBool(std.mem.eql(u8, key, "lastIndex") or self.protos.regex.object.value.has(key)),
+        .regex => JSValue.fromBool(std.mem.eql(u8, key, "lastIndex") or
+            (if (self.regexProps(r)) |bag| bag.object.value.hasOwnProperty(key) else false) or
+            self.protos.regex.object.value.has(key)),
         .function, .symbol, .map, .set, .@"error", .date, .promise, .bigint, .array_buffer, .data_view, .typed_array, .temporal => error.NotImplemented,
     };
 }

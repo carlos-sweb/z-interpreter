@@ -118,6 +118,11 @@ pub const RegexState = struct {
     // `lastIndex` is writable until `Object.defineProperty(re, "lastIndex",
     // {writable: false})`; it is never enumerable nor configurable.
     last_index_writable: bool = true,
+    // Own properties other than `lastIndex` (`re.exec = f`,
+    // Object.defineProperty(re, "flags", ...)): a prototype-less object
+    // created on first write, holding full descriptors. Lives and dies
+    // with the RegExp (released in gcOnBoxDestroyed).
+    props: ?JSValue = null,
 };
 
 /// `delete f.name`/`delete f.length` state -- see `deleted_fn_props`.
@@ -618,6 +623,9 @@ pub const Interpreter = struct {
     /// The well-known `Symbol.iterator` value (the only one wired into
     /// real behavior). Set in setupGlobals.
     symbol_iterator: ?JSValue = null,
+    /// %RegExp%, the original RegExp constructor (SpeciesConstructor's
+    /// default), whatever the global `RegExp` binding holds later.
+    regexp_ctor: ?JSValue = null,
     /// The well-known `Symbol.asyncIterator` -- resolveAsyncIterator's
     /// first choice for `for await`. Set in setupGlobals.
     symbol_async_iterator: ?JSValue = null,
@@ -659,6 +667,10 @@ pub const Interpreter = struct {
     /// string, and the boolean flag set live here (the symbol_keys
     /// pattern).
     regex_state: std.AutoHashMapUnmanaged(usize, RegexState) = .empty,
+    /// Set while `deinit` frees every GC node: a destroy hook must not
+    /// release JSValues then (freeAllGcNodes frees each registered box
+    /// itself, so releasing one from a hook would free it twice).
+    tearing_down: bool = false,
     /// Named own properties on array values (arrays have no general
     /// property bag) -- used by exec/match result arrays for
     /// `index`/`input`/`groups`. Keyed by the array Rc box pointer; the
@@ -769,6 +781,8 @@ pub const Interpreter = struct {
     pub const setArrayExtra = interpreter_support.setArrayExtra;
     pub const arrayExtra = interpreter_support.arrayExtra;
     pub const arrayPropsObject = interpreter_support.arrayPropsObject;
+    pub const regexPropsObject = interpreter_support.regexPropsObject;
+    pub const regexProps = interpreter_support.regexProps;
     pub const boxPrimitiveIfConstructed = interpreter_support.boxPrimitiveIfConstructed;
     pub const unboxPrimitiveWrapper = interpreter_support.unboxPrimitiveWrapper;
 

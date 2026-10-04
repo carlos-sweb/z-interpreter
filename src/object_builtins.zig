@@ -292,7 +292,8 @@ fn objHasOwnProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
         // `lastIndex` is the only own property this model gives a regex
         // literal (mirrors getProperty/objectGetOwnPropertyDescriptor's
         // own `.regex` cases).
-        .regex => JSValue.fromBool(std.mem.eql(u8, key, "lastIndex")),
+        .regex => JSValue.fromBool(std.mem.eql(u8, key, "lastIndex") or
+            (if (interp(ctx).regexProps(this_value)) |bag| bag.object.value.hasOwnProperty(key) else false)),
         else => JSValue.fromBool(false),
     };
 }
@@ -539,7 +540,10 @@ pub fn definePropertyOn(self: *Interpreter, what: []const u8, obj: JSValue, key:
         .object => try definePropertyFromJs(self, obj, key, desc),
         .function => try definePropertyFromJs(self, try self.functionStatics(obj), key, desc),
         .array => try arrayDefineProperty(self, obj, key, desc),
-        .regex => try regex_builtins.regexDefineProperty(self, obj, key, desc),
+        .regex => if (std.mem.eql(u8, key, "lastIndex"))
+            try regex_builtins.regexDefineProperty(self, obj, key, desc)
+        else
+            try definePropertyFromJs(self, try self.regexPropsObject(obj), key, desc),
         .proxy => |box| {
             if (try self.proxyTrap(box, "defineProperty")) |trap_fn| {
                 defer trap_fn.deinit();
@@ -739,6 +743,9 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, thi
         .regex => {
             if (std.mem.eql(u8, key, "lastIndex"))
                 return dataDescObj(self, self.regexState(obj).last_index.retain(), self.regexState(obj).last_index_writable, false, false);
+            if (self.regexProps(obj)) |bag| {
+                if (bag.object.value.getOwnRecord(key)) |rec| return descFromRecord(self, rec);
+            }
             return JSValue.UNDEFINED;
         },
         // Other object-likes (date/map/...) have no string-keyed own
@@ -872,6 +879,7 @@ fn extensibilityBag(self: *Interpreter, v: JSValue) ?JSValue {
         .object => v,
         .function => |box| box.value.statics,
         .array => |box| self.array_props.get(@intFromPtr(box)),
+        .regex => self.regexProps(v),
         else => null,
     };
 }
@@ -884,6 +892,7 @@ fn extensibilityBagForWrite(self: *Interpreter, v: JSValue) anyerror!?JSValue {
         .object => v,
         .function => try self.functionStatics(v),
         .array => try self.arrayPropsObject(v),
+        .regex => try self.regexPropsObject(v),
         else => null,
     };
 }
@@ -894,6 +903,8 @@ fn objectFreeze(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     const self = interp(ctx);
     const v = arg(args, 0);
     if (try extensibilityBagForWrite(self, v)) |bag| bag.object.value.freeze();
+    // A RegExp's lastIndex lives outside its bag; freezing makes it read-only too.
+    if (v == .regex) self.regexState(v).last_index_writable = false;
     return v.retain();
 }
 

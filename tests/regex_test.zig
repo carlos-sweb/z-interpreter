@@ -205,3 +205,57 @@ test "RegExp.prototype[Symbol.match/matchAll/replace/search/split] and RegExp[Sy
 test "a static getter's this is the class" {
     try helpers.expectStdout("class A { static get x() { return this; } } console.log(A.x === A);", "true\n");
 }
+
+test "GetSubstitution: $$, $&, $`, $', $n, $nn, $<name>" {
+    try helpers.expectStdout(
+        \\console.log('abcde'.replace(/(b)(c)(?<n>d)/, "[$$|$&|$`|$'|$1|$3|$4|$01|$10|$<n>|$<x>|$0|$]"));
+        \\console.log('abcdefghijkl'.replace(/(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)(k)/, '$11-$10-$1$0-$12'));
+        \\console.log('abc'.replace(/(b)/, '[$<n>]'), 'abc'.replace('b', "[$&$`$'$$]"));
+    , "a[$|bcd|a|e|b|d|$4|b|b0|d||$0|$]e\nk-j-a$0-a2l\na[$<n>]c a[bac$]c\n");
+}
+
+test "a RegExp can have own properties, and an own exec is what the protocol calls" {
+    try helpers.expectStdout(
+        \\const r = /a/g; let calls = 0;
+        \\r.exec = function (s) { calls++; return null; };
+        \\console.log(r.test('a'), 'aaa'.replace(r, 'b'), calls, r.hasOwnProperty('exec'));
+        \\const f = /a/; Object.defineProperty(f, 'flags', { value: 'g', configurable: true });
+        \\console.log(f.flags, Object.getOwnPropertyDescriptor(f, 'flags').writable, delete f.flags, f.flags);
+    , "false aaa 2 true\ng false true \n");
+}
+
+test "Symbol.replace/match are generic over any object with exec" {
+    try helpers.expectStdout(
+        \\const o = { flags: '', exec() { return { 0: 'zz', length: 1, index: 3 }; } };
+        \\console.log(RegExp.prototype[Symbol.replace].call(o, 'abcdefg', 'X'));
+        \\console.log('abc'.match({ [Symbol.match](s) { return 'custom:' + s; } }));
+    , "abcXfg\ncustom:abc\n");
+}
+
+test "split: limit, captures, empty separators, species" {
+    try helpers.expectStdout(
+        \\console.log('a,b,c'.split(',', 2).join('|'), 'a1b2c'.split(/(\d)/, 3).join('|'), 'ab😀'.split('').length);
+        \\console.log(''.split(/x/).length, ''.split(/(?:)/).length, 'a,b'.split(',', 0).length, 'ab'.split(undefined)[0]);
+        \\const log = []; const r = /,/;
+        \\r.constructor = { [Symbol.species]: function (src, f) { log.push(f); return new RegExp(src, f); } };
+        \\console.log('a,b'.split(r).join('|'), log.join());
+    , "a|b a|1|b 4\n1 0 0 ab\na|b y\n");
+}
+
+test "replaceAll and matchAll require a global RegExp" {
+    try helpers.expectStdout(
+        \\console.log('a.b.c'.replaceAll('.', '$&$&'), 'ab'.replaceAll('', '_'), 'aXa'.replaceAll(/a/g, '$&$&'));
+        \\const li = /a/g; li.lastIndex = 1;
+        \\console.log([...'a1a2'.matchAll('a')].map(m => m.index).join(), [...'aaa'.matchAll(li)].length);
+    , "a..b..c _a_b_ aaXaa\n0,2 2\n");
+    try helpers.expectUncaught("'a'.replaceAll(/a/, 'b');", .type_error, "String.prototype.replaceAll called with a non-global RegExp argument");
+    try helpers.expectUncaught("'a'.matchAll(/a/);", .type_error, "String.prototype.matchAll called with a non-global RegExp argument");
+}
+
+test "search restores lastIndex; global match leaves it at 0" {
+    try helpers.expectStdout(
+        \\const r = /b/g; r.lastIndex = 2; const x = 'abc'.search(r);
+        \\const g = /a/g; g.lastIndex = 5; const m = 'aXa'.match(g);
+        \\console.log(x, r.lastIndex, m.join(), g.lastIndex);
+    , "1 2 a,a 0\n");
+}

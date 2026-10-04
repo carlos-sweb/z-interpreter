@@ -30,7 +30,7 @@ const isObjectLike = builtin_helpers.isObjectLike;
 const toLength = builtin_helpers.toLength;
 
 pub const regex_methods = std.StaticStringMap(MethodSpec).initComptime(.{
-    .{ "test", MethodSpec{ .call = regexTest, .arity = 1 } },
+    .{ "test", MethodSpec{ .call = regex_protocol.regexTest, .arity = 1 } },
     .{ "exec", MethodSpec{ .call = regexExec, .arity = 1 } },
     .{ "toString", MethodSpec{ .call = regexToString, .arity = 0 } },
 });
@@ -38,7 +38,7 @@ pub const regex_methods = std.StaticStringMap(MethodSpec).initComptime(.{
 const zregex = @import("zregex");
 const zstring = @import("zstring");
 const coercion = @import("coercion.zig");
-const string_builtins = @import("string_builtins.zig");
+const regex_protocol = @import("regex_protocol.zig");
 
 fn requireRegex(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {
     return requireTag(ctx, this_value, .regex, "Method RegExp.prototype.{s} called on incompatible receiver", method);
@@ -193,36 +193,66 @@ pub fn advancePos(re: JSValue, data: []const u8, pos: usize) usize {
     return re.regex.value.advanceIndex(subjectOf(data), pos);
 }
 
+/// UTF-16 indices of increasing subject positions in O(total length):
+/// each call walks on from the previous position (a position before it
+/// starts over).
+pub const Utf16Cursor = struct {
+    data: []const u8,
+    pos: usize = 0,
+    index: usize = 0,
+
+    pub fn at(self: *Utf16Cursor, p: usize) usize {
+        const mid = isMidPair(self.data, p);
+        const base = if (mid) p - 2 else p;
+        if (base < self.pos) {
+            self.pos = 0;
+            self.index = 0;
+        }
+        const piece = self.data[self.pos..base];
+        self.index += zstring.utf16.byteIndexToUtf16(piece, piece.len) catch piece.len;
+        self.pos = base;
+        return self.index + @intFromBool(mid);
+    }
+};
+
 /// The JS match-result array: [0]=whole match, [i]=capture i (undefined
 /// if it didn't participate), plus own `index`, `input`, and `groups`.
 pub fn makeMatchArray(self: *Interpreter, allocator: Allocator, m: RegexMatch) anyerror!JSValue {
-    _ = allocator;
+    return makeMatchArrayAt(self, allocator, m, posToUtf16(m.data, m.start()));
+}
+
+/// `makeMatchArray` with the match's UTF-16 index already known.
+pub fn makeMatchArrayAt(self: *Interpreter, allocator: Allocator, m: RegexMatch, index: usize) anyerror!JSValue {
     var result = try self.gcNewArray();
+    const groups = try matchGroups(self, m);
     var g: usize = 0;
     while (g <= m.groupCount()) : (g += 1) {
         _ = try result.array.value.push(try m.capture(self, g));
     }
     // exec/match arrays carry extra own properties.
-    try setArrayOwn(self, result, "index", JSValue.fromNumber(@floatFromInt(posToUtf16(m.data, m.start()))));
+    try setArrayOwn(self, result, "index", JSValue.fromNumber(@floatFromInt(index)));
     try setArrayOwn(self, result, "input", try self.gcNewString(m.data));
-    const named = m.re.regex.value.compiled.named_groups;
-    if (named.len > 0) {
-        var groups = try self.gcNewObject();
-        // A duplicate name (`(?<x>a)|(?<x>b)`) takes whichever of its
-        // groups took part; the property keeps its first position.
-        for (named) |ng| {
-            const v = try m.capture(self, ng.index);
-            if (groups.object.value.getOwn(ng.name)) |old| {
-                if (v == .undefined) continue;
-                old.deinit();
-            }
-            try groups.object.value.set(ng.name, v);
-        }
-        try setArrayOwn(self, result, "groups", groups);
-    } else {
-        try setArrayOwn(self, result, "groups", JSValue.UNDEFINED);
-    }
+    try setArrayOwn(self, result, "groups", groups);
+    _ = allocator;
     return result;
+}
+
+/// The `groups` object of a match (undefined without named groups). A
+/// duplicate name (`(?<x>a)|(?<x>b)`) takes whichever of its groups took
+/// part; the property keeps its first position.
+pub fn matchGroups(self: *Interpreter, m: RegexMatch) anyerror!JSValue {
+    const named = m.re.regex.value.compiled.named_groups;
+    if (named.len == 0) return JSValue.UNDEFINED;
+    var groups = try self.gcNewObject();
+    for (named) |ng| {
+        const v = try m.capture(self, ng.index);
+        if (groups.object.value.getOwn(ng.name)) |old| {
+            if (v == .undefined) continue;
+            old.deinit();
+        }
+        try groups.object.value.set(ng.name, v);
+    }
+    return groups;
 }
 
 /// Set a named own property on an array value (arrays here have no
@@ -259,16 +289,9 @@ pub fn builtinExec(self: *Interpreter, allocator: Allocator, re: JSValue, data: 
     return m;
 }
 
-fn regexTest(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    const re = try requireRegex(ctx, this_value, "test");
-    const self = interp(ctx);
-    const is_str = arg(args, 0) == .string;
-    const input = if (is_str) arg(args, 0).string.value.data else try self.toDisplayStringJS(allocator, arg(args, 0));
-    defer if (!is_str) allocator.free(input);
-    const m = try builtinExec(self, allocator, re, input) orelse return JSValue.fromBool(false);
-    m.deinit();
-    return JSValue.fromBool(true);
-}
+/// RegExp.prototype.exec, identified by RegExpExec to skip the call
+/// when it is the method a RegExp would run.
+pub const regexExecFn = regexExec;
 
 fn regexExec(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const re = try requireRegex(ctx, this_value, "exec");
@@ -293,37 +316,10 @@ fn regexToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     return interp(ctx).gcNewString(s);
 }
 
-/// String.prototype.split with a regex separator: splits at each match,
-/// interleaving the separator's captures (SplitMatcher's loop). A match
-/// that ends where the previous piece ended (an empty one there) is
-/// stepped over by one character; a match at the very end never splits.
-/// `pub`: String.prototype.split calls this.
-pub fn regexSplit(self: *Interpreter, allocator: Allocator, data: []const u8, re: JSValue) anyerror!JSValue {
-    var result = try self.gcNewArray();
-    var p: usize = 0; // end of the last piece
-    var q: usize = 0; // where the next search starts
-    while (q < data.len) {
-        const m = try execRaw(allocator, re, data, q) orelse break;
-        defer m.deinit();
-        if (m.start() >= data.len) break;
-        const e = @min(m.end(), data.len);
-        if (e == p) {
-            q = advancePos(re, data, m.start());
-            continue;
-        }
-        _ = try result.array.value.push(try sliceValue(self, allocator, data, p, m.start()));
-        var g: usize = 1;
-        while (g <= m.groupCount()) : (g += 1) _ = try result.array.value.push(try m.capture(self, g));
-        p = e;
-        q = p;
-    }
-    _ = try result.array.value.push(try sliceValue(self, allocator, data, p, data.len));
-    return result;
-}
-
 /// Installs the `RegExp` constructor (no statics).
 pub fn install(self: *Interpreter) !void {
-    _ = try installBuiltin(self, .{ .name = "RegExp", .ctor = .{ .arity = 2, .call = regexpConstructor, .constructable = true } });
+    const ctor = try installBuiltin(self, .{ .name = "RegExp", .ctor = .{ .arity = 2, .call = regexpConstructor, .constructable = true } });
+    self.regexp_ctor = ctor.retain();
 }
 
 // ===== RegExp.prototype accessors, Symbol methods, RegExp[Symbol.species] =====
@@ -455,39 +451,6 @@ fn flagsGetter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     return self.gcNewString(buf[0..n]);
 }
 
-/// The RegExp a `RegExp.prototype[Symbol.*]` method runs on. Their
-/// generic form (any object with an `exec`) is RegExp protocol work
-/// still to do; until then a non-RegExp object is a TypeError too.
-fn symbolReceiver(self: *Interpreter, this_value: JSValue, comptime method: []const u8) anyerror!JSValue {
-    if (this_value == .regex) return this_value;
-    if (!isObjectLike(this_value))
-        return self.throwError(.type_error, "RegExp.prototype[" ++ method ++ "] called on non-object", .{});
-    return self.throwError(.type_error, "RegExp.prototype[" ++ method ++ "] on a non-RegExp object is not supported yet", .{});
-}
-
-/// ToString(arg) as a string JSValue (owned by the caller).
-fn stringArgValue(self: *Interpreter, allocator: Allocator, v: JSValue) anyerror!JSValue {
-    if (v == .string) return v.retain();
-    const s = try self.toDisplayStringJS(allocator, v);
-    defer allocator.free(s);
-    return self.gcNewString(s);
-}
-
-/// `RegExp.prototype[Symbol.<name>](string, ...rest)`: the String method
-/// of the same algorithm, run with this RegExp as its pattern.
-fn symbolMethod(comptime method: []const u8, comptime string_fn: NativeFn) NativeFn {
-    return struct {
-        fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-            const self = interp(ctx);
-            const re = try symbolReceiver(self, this_value, method);
-            const s = try stringArgValue(self, allocator, arg(args, 0));
-            defer s.deinit();
-            var forwarded: [2]JSValue = .{ re, arg(args, 1) };
-            return string_fn(ctx, allocator, s, forwarded[0..2]);
-        }
-    }.call;
-}
-
 /// `get [Symbol.species]`: returns the receiver.
 fn speciesGetter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = ctx;
@@ -507,7 +470,7 @@ fn defineGetter(self: *Interpreter, target: JSValue, key: []const u8, name: []co
 }
 
 /// A well-known symbol (`Symbol.match`, ...) as a property key.
-fn wellKnownKey(self: *Interpreter, comptime name: []const u8) ![]const u8 {
+pub fn wellKnownKey(self: *Interpreter, comptime name: []const u8) ![]const u8 {
     const symbol_ctor = self.global_env.get("Symbol").?;
     const sym = (try self.functionStatics(symbol_ctor)).object.value.get(name).?;
     return self.encodeKey(sym);
@@ -527,15 +490,15 @@ pub fn installProtoExtras(self: *Interpreter) !void {
     try defineGetter(self, proto, "source", "get source", sourceGetter);
 
     inline for (.{
-        .{ "match", 1, string_builtins.stringMatch },
-        .{ "matchAll", 1, string_builtins.stringMatchAll },
-        .{ "replace", 2, string_builtins.stringReplace },
-        .{ "search", 1, string_builtins.stringSearch },
-        .{ "split", 2, string_builtins.stringSplit },
+        .{ "match", 1, regex_protocol.symbolMatch },
+        .{ "matchAll", 1, regex_protocol.symbolMatchAll },
+        .{ "replace", 2, regex_protocol.symbolReplace },
+        .{ "search", 1, regex_protocol.symbolSearch },
+        .{ "split", 2, regex_protocol.symbolSplit },
     }) |e| {
         const key = try wellKnownKey(self, e[0]);
         defer self.gc_allocator.free(key);
-        const f = try native(self, "[Symbol." ++ e[0] ++ "]", e[1], symbolMethod("Symbol." ++ e[0], e[2]));
+        const f = try native(self, "[Symbol." ++ e[0] ++ "]", e[1], e[2]);
         try proto.object.value.defineProperty(key, f, .{ .writable = true, .enumerable = false, .configurable = true });
     }
 
@@ -546,7 +509,7 @@ pub fn installProtoExtras(self: *Interpreter) !void {
 }
 
 /// SameValue (Object.is).
-fn sameValue(a: JSValue, b: JSValue) bool {
+pub fn sameValue(a: JSValue, b: JSValue) bool {
     if (a == .number and b == .number) {
         const x = a.number;
         const y = b.number;
@@ -556,15 +519,13 @@ fn sameValue(a: JSValue, b: JSValue) bool {
     return zvalue.equality.sameValueZero(a, b);
 }
 
-/// `Object.defineProperty(re, key, desc)` on a RegExp. Its only own
-/// property is `lastIndex`, a data property that is never enumerable nor
-/// configurable: a descriptor may make it non-writable and set its value
-/// (ValidateAndApplyPropertyDescriptor), nothing else. Other own
-/// properties on a RegExp aren't supported yet.
+/// `Object.defineProperty(re, "lastIndex", desc)`: `lastIndex` is a data
+/// property that is never enumerable nor configurable, so a descriptor may
+/// make it non-writable and set its value (ValidateAndApplyPropertyDescriptor),
+/// nothing else. (Other keys go to the RegExp's own-property bag.)
 pub fn regexDefineProperty(self: *Interpreter, re: JSValue, key: []const u8, desc: JSValue) anyerror!void {
+    _ = key;
     if (desc != .object) return self.throwError(.type_error, "Property description must be an object", .{});
-    if (!std.mem.eql(u8, key, "lastIndex"))
-        return self.throwError(.type_error, "Cannot define property {s} on a RegExp: own properties other than lastIndex are not supported yet", .{key});
     const d = &desc.object.value;
     const st = self.regexState(re);
     const redefine = d.hasOwnProperty("get") or d.hasOwnProperty("set") or

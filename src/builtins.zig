@@ -87,10 +87,7 @@ const isObjectLike = builtin_helpers.isObjectLike;
 // RegExp). Method tables and any pub type interpreter.zig reaches into
 // via `builtins.X` are re-exported here so every existing external call
 // site (interpreter.zig's materializeProtos/gcTrack*/typedElem*) keeps
-// working unchanged. `makeMatchArray`/`regexSplit` are
-// re-aliased too: String.prototype's regex-pattern methods (still living
-// in this file until String's own extraction pass) call them by bare
-// name.
+// working unchanged.
 const promise_builtins = @import("promise_builtins.zig");
 const function_builtins = @import("function_builtins.zig");
 const symbol_builtins = @import("symbol_builtins.zig");
@@ -105,8 +102,6 @@ pub const AllCtx = promise_builtins.AllCtx;
 pub const AllElemCtx = promise_builtins.AllElemCtx;
 pub const RaceCtx = promise_builtins.RaceCtx;
 pub const BoundCtx = function_builtins.BoundCtx;
-const makeMatchArray = regex_builtins.makeMatchArray;
-const regexSplit = regex_builtins.regexSplit;
 
 // z-interpreter-refactor.md, Step 5 Phase A batch 2: Math/JSON/Proxy
 // (statics-only or ctor-only, no cross-domain deps beyond

@@ -152,6 +152,22 @@ pub fn arrayPropsObject(self: *Interpreter, array: JSValue) !JSValue {
     return gop.value_ptr.*;
 }
 
+/// A RegExp's own-property bag (other than `lastIndex`), if it has one.
+pub fn regexProps(self: *Interpreter, re: JSValue) ?JSValue {
+    return self.regexState(re).props;
+}
+
+/// The RegExp's own-property bag, created on first use: a real
+/// `.object` with no prototype (lookups on it see own properties only;
+/// the RegExp's inherited ones come from RegExp.prototype).
+pub fn regexPropsObject(self: *Interpreter, re: JSValue) !JSValue {
+    const st = self.regexState(re);
+    if (st.props) |bag| return bag;
+    const bag = try self.gcNewObject();
+    st.props = bag;
+    return bag;
+}
+
 /// `new String(...)`/`new Number(...)`/`new Boolean(...)`: JSValue's
 /// `.object` variant has no internal-slot concept, so the wrapped
 /// primitive a boxed constructor computes has nowhere to live inside

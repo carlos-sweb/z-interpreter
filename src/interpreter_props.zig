@@ -255,6 +255,9 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             // `lastIndex` is a RegExp's only own property; source, flags,
             // global, ... are accessors on RegExp.prototype (found below).
             if (std.mem.eql(u8, key, "lastIndex")) break :blk self.regexState(obj).last_index.retain();
+            if (self.regexProps(obj)) |bag| {
+                if (try self.getFromProto(obj, bag, key)) |m| break :blk m;
+            }
             if (try self.getFromProto(obj, self.protos.regex, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
@@ -477,6 +480,19 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
             // probe, not just a descriptor read.
             return regex_builtins.setLastIndex(self, obj, value.retain());
         }
+        // An own property (the bag): an own accessor runs with the RegExp
+        // as `this`; an own data property is written with its writable /
+        // frozen checks.
+        if (self.regexProps(obj)) |bag| {
+            if (bag.object.value.getOwnRecord(key)) |rec| {
+                if (rec.isAccessor()) {
+                    const setter = rec.setter orelse return self.throwError(.type_error, "Cannot set property {s} of [object RegExp] which has only a getter", .{key});
+                    _ = try setter.function.value.call(setter.function.value.ctx, self.gc_allocator, obj, &.{value});
+                    return;
+                }
+                return self.setObjectProperty(bag, key, value);
+            }
+        }
         // An inherited accessor (source, flags, global, ... or a user
         // one on RegExp.prototype): its setter runs; a getter-only one is
         // a TypeError (always-strict [[Set]] failure).
@@ -488,7 +504,9 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
             _ = try setter.function.value.call(setter.function.value.ctx, self.gc_allocator, obj, &.{value});
             return;
         }
-        return error.NotImplemented;
+        // Otherwise a new own data property (`re.exec = f` shadows the
+        // inherited method).
+        return self.setObjectProperty(try self.regexPropsObject(obj), key, value);
     }
     if (obj == .proxy) {
         const box = obj.proxy;
@@ -633,6 +651,13 @@ pub fn deletePropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8) 
     // succeed. No bag yet means nothing was ever defined there.
     if (obj == .array) {
         if (self.array_props.get(@intFromPtr(obj.array))) |bag| return self.deleteObjectProperty(bag, key);
+        return true;
+    }
+    // A RegExp: `lastIndex` is non-configurable; anything else lives in
+    // its own-property bag.
+    if (obj == .regex) {
+        if (std.mem.eql(u8, key, "lastIndex")) return false;
+        if (self.regexProps(obj)) |bag| return self.deleteObjectProperty(bag, key);
         return true;
     }
     if (obj != .object) return true;

@@ -257,6 +257,7 @@ pub fn init(backing_allocator: Allocator, console_writer: *std.Io.Writer) !Inter
 /// key strings, then each map/list's internal array) -- touching any
 /// JSValue still stored in them again would be a double-free.
 pub fn deinit(self: *Interpreter) void {
+    self.tearing_down = true;
     self.freeAllGcNodes();
     self.gc_registry.deinit(self.gc_allocator);
 
@@ -313,7 +314,12 @@ pub fn gcOnBoxDestroyed(ctx: *anyopaque, box: *anyopaque) void {
     if (self.regex_state.fetchRemove(@intFromPtr(box))) |kv| {
         self.gc_allocator.free(kv.value.source);
         self.gc_allocator.free(kv.value.flags);
-        kv.value.last_index.deinit();
+        // During deinit's freeAllGcNodes every registered box (these
+        // included) is freed by the sweep itself.
+        if (!self.tearing_down) {
+            kv.value.last_index.deinit();
+            if (kv.value.props) |bag| bag.deinit();
+        }
     }
 }
 
@@ -671,6 +677,13 @@ pub fn markRoots(self: *Interpreter, marker: *Marker) void {
     while (srit.next()) |v| marker.value(v.*);
     var apit = self.array_props.valueIterator();
     while (apit.next()) |v| marker.value(v.*);
+    // A live RegExp's lastIndex and own-property bag (released by the
+    // RegExp's destroy hook, so marking them here is always safe).
+    var rsit = self.regex_state.valueIterator();
+    while (rsit.next()) |st| {
+        marker.value(st.last_index);
+        if (st.props) |bag| marker.value(bag);
+    }
     var pwit = self.primitive_wrapper_data.valueIterator();
     while (pwit.next()) |v| marker.value(v.*);
     var mcit = self.method_cache.valueIterator();
@@ -678,6 +691,7 @@ pub fn markRoots(self: *Interpreter, marker: *Marker) void {
     if (self.global_object) |v| marker.value(v);
     if (self.eval_fn) |v| marker.value(v);
     if (self.symbol_iterator) |v| marker.value(v);
+    if (self.regexp_ctor) |v| marker.value(v);
     if (self.symbol_async_iterator) |v| marker.value(v);
     if (self.symbol_to_primitive) |v| marker.value(v);
     inline for (std.meta.fields(Protos)) |f| marker.value(@field(self.protos, f.name));
@@ -944,6 +958,7 @@ pub fn freeAllGcNodes(self: *Interpreter) void {
     if (self.global_object) |v| sweeper.value(v);
     if (self.eval_fn) |v| sweeper.value(v);
     if (self.symbol_iterator) |v| sweeper.value(v);
+    if (self.regexp_ctor) |v| sweeper.value(v);
     if (self.symbol_async_iterator) |v| sweeper.value(v);
     if (self.symbol_to_primitive) |v| sweeper.value(v);
     inline for (std.meta.fields(Protos)) |f| sweeper.value(@field(self.protos, f.name));
