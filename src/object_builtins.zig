@@ -29,6 +29,7 @@ const JSValue = zvalue.JSValue;
 const interpreter_mod = @import("interpreter.zig");
 const Interpreter = interpreter_mod.Interpreter;
 const coercion = @import("coercion.zig");
+const regex_builtins = @import("regex_builtins.zig");
 const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
 
@@ -538,6 +539,7 @@ pub fn definePropertyOn(self: *Interpreter, what: []const u8, obj: JSValue, key:
         .object => try definePropertyFromJs(self, obj, key, desc),
         .function => try definePropertyFromJs(self, try self.functionStatics(obj), key, desc),
         .array => try arrayDefineProperty(self, obj, key, desc),
+        .regex => try regex_builtins.regexDefineProperty(self, obj, key, desc),
         .proxy => |box| {
             if (try self.proxyTrap(box, "defineProperty")) |trap_fn| {
                 defer trap_fn.deinit();
@@ -588,7 +590,7 @@ fn objectDefineProperties(ctx: *anyopaque, allocator: Allocator, this_value: JSV
     _ = this_value;
     const self = interp(ctx);
     const obj = arg(args, 0);
-    if (obj != .object and obj != .function and obj != .array)
+    if (obj != .object and obj != .function and obj != .array and obj != .regex)
         return self.throwError(.type_error, "Object.defineProperties called on non-object", .{});
     const props = arg(args, 1);
     if (props != .object) return self.throwError(.type_error, "Property description must be an object", .{});
@@ -736,7 +738,7 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, thi
         // getProperty/setPropertyOnValue).
         .regex => {
             if (std.mem.eql(u8, key, "lastIndex"))
-                return dataDescObj(self, self.regexState(obj).last_index.retain(), true, false, false);
+                return dataDescObj(self, self.regexState(obj).last_index.retain(), self.regexState(obj).last_index_writable, false, false);
             return JSValue.UNDEFINED;
         },
         // Other object-likes (date/map/...) have no string-keyed own

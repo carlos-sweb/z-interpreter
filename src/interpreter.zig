@@ -115,6 +115,9 @@ pub const RegexState = struct {
     // retained on every write, released in gcOnBoxDestroyed alongside
     // this regex's other regex_state cleanup.
     last_index: JSValue = JSValue.fromNumber(0),
+    // `lastIndex` is writable until `Object.defineProperty(re, "lastIndex",
+    // {writable: false})`; it is never enumerable nor configurable.
+    last_index_writable: bool = true,
 };
 
 /// `delete f.name`/`delete f.length` state -- see `deleted_fn_props`.

@@ -37,6 +37,8 @@ pub const regex_methods = std.StaticStringMap(MethodSpec).initComptime(.{
 
 const zregex = @import("zregex");
 const zstring = @import("zstring");
+const coercion = @import("coercion.zig");
+const string_builtins = @import("string_builtins.zig");
 
 fn requireRegex(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {
     return requireTag(ctx, this_value, .regex, "Method RegExp.prototype.{s} called on incompatible receiver", method);
@@ -251,8 +253,8 @@ pub fn builtinExec(self: *Interpreter, allocator: Allocator, re: JSValue, data: 
     const last_index = if (stateful) read_index else 0;
     const m = if (utf16ToPos(data, last_index)) |pos| try execRaw(allocator, re, data, pos) else null;
     if (stateful) {
-        st.last_index.deinit();
-        st.last_index = JSValue.fromNumber(if (m) |mm| @floatFromInt(posToUtf16(data, mm.end())) else 0);
+        errdefer if (m) |mm| mm.deinit();
+        try setLastIndex(self, re, JSValue.fromNumber(if (m) |mm| @floatFromInt(posToUtf16(data, mm.end())) else 0));
     }
     return m;
 }
@@ -284,7 +286,9 @@ fn regexToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     const re = try requireRegex(ctx, this_value, "toString");
     const st = interp(ctx).regexState(re);
     var flags_buf: [8]u8 = undefined;
-    const s = try std.fmt.allocPrint(allocator, "/{s}/{s}", .{ st.source, Interpreter.canonicalFlags(st, &flags_buf) });
+    const src = try escapePattern(allocator, st.source);
+    defer allocator.free(src);
+    const s = try std.fmt.allocPrint(allocator, "/{s}/{s}", .{ src, Interpreter.canonicalFlags(st, &flags_buf) });
     defer allocator.free(s);
     return interp(ctx).gcNewString(s);
 }
@@ -321,3 +325,263 @@ pub fn regexSplit(self: *Interpreter, allocator: Allocator, data: []const u8, re
 pub fn install(self: *Interpreter) !void {
     _ = try installBuiltin(self, .{ .name = "RegExp", .ctor = .{ .arity = 2, .call = regexpConstructor, .constructable = true } });
 }
+
+// ===== RegExp.prototype accessors, Symbol methods, RegExp[Symbol.species] =====
+
+/// `lastIndex` [[Set]] with Throw = true: a TypeError once
+/// `Object.defineProperty` made it non-writable. Takes ownership of
+/// `value` (released on the TypeError path too).
+pub fn setLastIndex(self: *Interpreter, re: JSValue, value: JSValue) anyerror!void {
+    const st = self.regexState(re);
+    if (!st.last_index_writable) {
+        value.deinit();
+        return self.throwError(.type_error, "Cannot assign to read only property 'lastIndex' of object '[object RegExp]'", .{});
+    }
+    st.last_index.deinit();
+    st.last_index = value;
+}
+
+/// EscapeRegExpPattern: the source text as `/source/flags` can show it.
+/// An empty pattern is `(?:)`; a `/` outside a class becomes `\/`; a line
+/// terminator (escaped or not) becomes `\n`, `\r`, ` ` or ` `.
+/// The same output as V8.
+pub fn escapePattern(allocator: Allocator, src: []const u8) ![]u8 {
+    if (src.len == 0) return allocator.dupe(u8, "(?:)");
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var in_class = false;
+    var i: usize = 0;
+    while (i < src.len) {
+        const lt = lineTerminatorEscape(src[i..]);
+        if (lt.len > 0) {
+            try out.appendSlice(allocator, lt.escape);
+            i += lt.len;
+            continue;
+        }
+        const c = src[i];
+        if (c == '\\' and i + 1 < src.len) {
+            // An escaped line terminator is the same escape: `\` + LF -> `\n`.
+            const next = lineTerminatorEscape(src[i + 1 ..]);
+            if (next.len > 0) {
+                try out.appendSlice(allocator, next.escape);
+                i += 1 + next.len;
+                continue;
+            }
+            try out.appendSlice(allocator, src[i .. i + 2]);
+            i += 2;
+            continue;
+        }
+        if (c == '[') in_class = true;
+        if (c == ']') in_class = false;
+        if (c == '/' and !in_class) {
+            try out.appendSlice(allocator, "\\/");
+        } else {
+            try out.append(allocator, c);
+        }
+        i += 1;
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+const LineTerminator = struct { len: usize, escape: []const u8 };
+
+fn lineTerminatorEscape(rest: []const u8) LineTerminator {
+    if (rest.len == 0) return .{ .len = 0, .escape = "" };
+    if (rest[0] == '\n') return .{ .len = 1, .escape = "\\n" };
+    if (rest[0] == '\r') return .{ .len = 1, .escape = "\\r" };
+    if (std.mem.startsWith(u8, rest, "\u{2028}")) return .{ .len = 3, .escape = "\\u2028" };
+    if (std.mem.startsWith(u8, rest, "\u{2029}")) return .{ .len = 3, .escape = "\\u2029" };
+    return .{ .len = 0, .escape = "" };
+}
+
+/// The receiver of a flag or `source` getter: the RegExp, or null for
+/// %RegExp.prototype% itself (which has no [[OriginalFlags]] but answers
+/// undefined / "(?:)"). Anything else is a TypeError.
+fn flagReceiver(self: *Interpreter, this_value: JSValue, comptime getter: []const u8) anyerror!?JSValue {
+    if (this_value == .regex) return this_value;
+    if (!isObjectLike(this_value))
+        return self.throwError(.type_error, "RegExp.prototype." ++ getter ++ " getter called on non-object", .{});
+    if (this_value == .object and this_value.object == self.protos.regex.object) return null;
+    return self.throwError(.type_error, "RegExp.prototype." ++ getter ++ " getter called on non-RegExp object", .{});
+}
+
+/// `get global`, `get ignoreCase`, ...: the flag from [[OriginalFlags]].
+fn flagGetter(comptime field: []const u8, comptime getter: []const u8) NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+            _ = allocator;
+            _ = args;
+            const self = interp(ctx);
+            const re = try flagReceiver(self, this_value, getter) orelse return JSValue.UNDEFINED;
+            return JSValue.fromBool(@field(self.regexState(re).*, field));
+        }
+    }.call;
+}
+
+/// `get source`: EscapeRegExpPattern of [[OriginalSource]].
+fn sourceGetter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    const re = try flagReceiver(self, this_value, "source") orelse return self.gcNewString("(?:)");
+    const src = try escapePattern(allocator, self.regexState(re).source);
+    defer allocator.free(src);
+    return self.gcNewString(src);
+}
+
+/// `get flags`: generic over any object -- reads each flag property
+/// (hasIndices, global, ignoreCase, multiline, dotAll, unicode,
+/// unicodeSets, sticky, in that order) and concatenates the letters of
+/// the truthy ones.
+fn flagsGetter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = args;
+    const self = interp(ctx);
+    if (!isObjectLike(this_value))
+        return self.throwError(.type_error, "RegExp.prototype.flags getter called on non-object", .{});
+    const order = [_]struct { []const u8, u8 }{
+        .{ "hasIndices", 'd' }, .{ "global", 'g' },  .{ "ignoreCase", 'i' },  .{ "multiline", 'm' },
+        .{ "dotAll", 's' },     .{ "unicode", 'u' }, .{ "unicodeSets", 'v' }, .{ "sticky", 'y' },
+    };
+    var buf: [order.len]u8 = undefined;
+    var n: usize = 0;
+    for (order) |e| {
+        const v = try self.getProperty(this_value, e[0]);
+        defer v.deinit();
+        if (coercion.isTruthy(v)) {
+            buf[n] = e[1];
+            n += 1;
+        }
+    }
+    return self.gcNewString(buf[0..n]);
+}
+
+/// The RegExp a `RegExp.prototype[Symbol.*]` method runs on. Their
+/// generic form (any object with an `exec`) is RegExp protocol work
+/// still to do; until then a non-RegExp object is a TypeError too.
+fn symbolReceiver(self: *Interpreter, this_value: JSValue, comptime method: []const u8) anyerror!JSValue {
+    if (this_value == .regex) return this_value;
+    if (!isObjectLike(this_value))
+        return self.throwError(.type_error, "RegExp.prototype[" ++ method ++ "] called on non-object", .{});
+    return self.throwError(.type_error, "RegExp.prototype[" ++ method ++ "] on a non-RegExp object is not supported yet", .{});
+}
+
+/// ToString(arg) as a string JSValue (owned by the caller).
+fn stringArgValue(self: *Interpreter, allocator: Allocator, v: JSValue) anyerror!JSValue {
+    if (v == .string) return v.retain();
+    const s = try self.toDisplayStringJS(allocator, v);
+    defer allocator.free(s);
+    return self.gcNewString(s);
+}
+
+/// `RegExp.prototype[Symbol.<name>](string, ...rest)`: the String method
+/// of the same algorithm, run with this RegExp as its pattern.
+fn symbolMethod(comptime method: []const u8, comptime string_fn: NativeFn) NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+            const self = interp(ctx);
+            const re = try symbolReceiver(self, this_value, method);
+            const s = try stringArgValue(self, allocator, arg(args, 0));
+            defer s.deinit();
+            var forwarded: [2]JSValue = .{ re, arg(args, 1) };
+            return string_fn(ctx, allocator, s, forwarded[0..2]);
+        }
+    }.call;
+}
+
+/// `get [Symbol.species]`: returns the receiver.
+fn speciesGetter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = ctx;
+    _ = allocator;
+    _ = args;
+    return this_value.retain();
+}
+
+/// A getter-only accessor, non-enumerable and configurable (the
+/// attributes of every builtin accessor property).
+fn defineGetter(self: *Interpreter, target: JSValue, key: []const u8, name: []const u8, call: NativeFn) !void {
+    const getter = try native(self, name, 0, call);
+    try target.object.value.defineAccessor(key, getter, null, JSValue.UNDEFINED);
+    const rec = target.object.value.getOwnRecordMut(key).?;
+    rec.descriptor.enumerable = false;
+    rec.descriptor.configurable = true;
+}
+
+/// A well-known symbol (`Symbol.match`, ...) as a property key.
+fn wellKnownKey(self: *Interpreter, comptime name: []const u8) ![]const u8 {
+    const symbol_ctor = self.global_env.get("Symbol").?;
+    const sym = (try self.functionStatics(symbol_ctor)).object.value.get(name).?;
+    return self.encodeKey(sym);
+}
+
+/// Installs RegExp.prototype's accessors (flags, global, ..., source) and
+/// [Symbol.match/matchAll/replace/search/split] methods, and
+/// RegExp[Symbol.species]. Runs once RegExp.prototype exists
+/// (materializeProtos).
+pub fn installProtoExtras(self: *Interpreter) !void {
+    const proto = self.protos.regex;
+    inline for (.{
+        .{ "hasIndices", "has_indices" }, .{ "global", "global" },  .{ "ignoreCase", "ignore_case" },     .{ "multiline", "multiline" },
+        .{ "dotAll", "dot_all" },         .{ "unicode", "unicode" }, .{ "unicodeSets", "unicode_sets" }, .{ "sticky", "sticky" },
+    }) |e| try defineGetter(self, proto, e[0], "get " ++ e[0], flagGetter(e[1], e[0]));
+    try defineGetter(self, proto, "flags", "get flags", flagsGetter);
+    try defineGetter(self, proto, "source", "get source", sourceGetter);
+
+    inline for (.{
+        .{ "match", 1, string_builtins.stringMatch },
+        .{ "matchAll", 1, string_builtins.stringMatchAll },
+        .{ "replace", 2, string_builtins.stringReplace },
+        .{ "search", 1, string_builtins.stringSearch },
+        .{ "split", 2, string_builtins.stringSplit },
+    }) |e| {
+        const key = try wellKnownKey(self, e[0]);
+        defer self.gc_allocator.free(key);
+        const f = try native(self, "[Symbol." ++ e[0] ++ "]", e[1], symbolMethod("Symbol." ++ e[0], e[2]));
+        try proto.object.value.defineProperty(key, f, .{ .writable = true, .enumerable = false, .configurable = true });
+    }
+
+    const species_key = try wellKnownKey(self, "species");
+    defer self.gc_allocator.free(species_key);
+    const statics = try self.functionStatics(self.global_env.get("RegExp").?);
+    try defineGetter(self, statics, species_key, "get [Symbol.species]", speciesGetter);
+}
+
+/// SameValue (Object.is).
+fn sameValue(a: JSValue, b: JSValue) bool {
+    if (a == .number and b == .number) {
+        const x = a.number;
+        const y = b.number;
+        if (std.math.isNan(x) and std.math.isNan(y)) return true;
+        return x == y and std.math.signbit(x) == std.math.signbit(y);
+    }
+    return zvalue.equality.sameValueZero(a, b);
+}
+
+/// `Object.defineProperty(re, key, desc)` on a RegExp. Its only own
+/// property is `lastIndex`, a data property that is never enumerable nor
+/// configurable: a descriptor may make it non-writable and set its value
+/// (ValidateAndApplyPropertyDescriptor), nothing else. Other own
+/// properties on a RegExp aren't supported yet.
+pub fn regexDefineProperty(self: *Interpreter, re: JSValue, key: []const u8, desc: JSValue) anyerror!void {
+    if (desc != .object) return self.throwError(.type_error, "Property description must be an object", .{});
+    if (!std.mem.eql(u8, key, "lastIndex"))
+        return self.throwError(.type_error, "Cannot define property {s} on a RegExp: own properties other than lastIndex are not supported yet", .{key});
+    const d = &desc.object.value;
+    const st = self.regexState(re);
+    const redefine = d.hasOwnProperty("get") or d.hasOwnProperty("set") or
+        (if (d.get("enumerable")) |v| coercion.isTruthy(v) else false) or
+        (if (d.get("configurable")) |v| coercion.isTruthy(v) else false);
+    if (redefine) return self.throwError(.type_error, "Cannot redefine property: lastIndex", .{});
+    const writable = if (d.get("writable")) |v| coercion.isTruthy(v) else st.last_index_writable;
+    const value = d.get("value");
+    if (!st.last_index_writable) {
+        if (writable) return self.throwError(.type_error, "Cannot redefine property: lastIndex", .{});
+        if (value) |v| if (!sameValue(v, st.last_index)) return self.throwError(.type_error, "Cannot redefine property: lastIndex", .{});
+        return;
+    }
+    if (value) |v| {
+        st.last_index.deinit();
+        st.last_index = v.retain();
+    }
+    st.last_index_writable = writable;
+}
+

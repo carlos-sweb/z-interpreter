@@ -142,3 +142,66 @@ test "a replacer that cuts a surrogate pair rejoins it into one character" {
         \\console.log(r === '😀', r.length, '😀'.replace(/\uDE00/g, () => '\uDE01').codePointAt(0));
     , "true 2 128513\n");
 }
+
+test "flag and source getters are accessors on RegExp.prototype, not own properties" {
+    try helpers.expectStdout(
+        \\const d = Object.getOwnPropertyDescriptor(RegExp.prototype, 'global');
+        \\console.log(typeof d.get, d.set, d.enumerable, d.configurable, d.get.name, d.get.length);
+        \\console.log(/x/g.hasOwnProperty('global'), 'global' in /x/, /x/g.global, RegExp.prototype.global);
+        \\console.log(RegExp.prototype.source, RegExp.prototype.flags === '', /a/dgimsuy.flags, /a/v.unicodeSets);
+    , "function undefined false true get global 0\nfalse true true undefined\n(?:) true dgimsuy true\n");
+}
+
+test "a flag getter on a non-RegExp receiver is a TypeError" {
+    try helpers.expectUncaught(
+        "Object.getOwnPropertyDescriptor(RegExp.prototype, 'global').get.call({});",
+        .type_error,
+        "RegExp.prototype.global getter called on non-RegExp object",
+    );
+    try helpers.expectUncaught(
+        "Object.getOwnPropertyDescriptor(RegExp.prototype, 'source').get.call(1);",
+        .type_error,
+        "RegExp.prototype.source getter called on non-object",
+    );
+}
+
+test "flags is generic and reads the flags in spec order" {
+    try helpers.expectStdout(
+        \\const log = []; const o = {};
+        \\['hasIndices', 'global', 'ignoreCase', 'multiline', 'dotAll', 'unicode', 'unicodeSets', 'sticky']
+        \\  .forEach(k => Object.defineProperty(o, k, { get() { log.push(k[0]); return k !== 'dotAll'; } }));
+        \\console.log(Object.getOwnPropertyDescriptor(RegExp.prototype, 'flags').get.call(o), log.join(''));
+    , "dgimuvy hgimduus\n");
+}
+
+test "source escapes / and line terminators; an empty pattern is (?:)" {
+    try helpers.expectStdout(
+        \\console.log(new RegExp('').source, new RegExp('/').source, new RegExp('[/]').source, new RegExp('a\nb').source);
+        \\console.log(new RegExp('/', 'g').toString(), new RegExp('').toString());
+    , "(?:) \\/ [/] a\\nb\n/\\//g /(?:)/\n");
+}
+
+test "lastIndex is an own data property that defineProperty can make read-only" {
+    try helpers.expectStdout(
+        \\const d = Object.getOwnPropertyDescriptor(/x/, 'lastIndex');
+        \\console.log(d.value, d.writable, d.enumerable, d.configurable);
+        \\const r = /c/y; Object.defineProperty(r, 'lastIndex', { value: 1, writable: false });
+        \\console.log(Object.getOwnPropertyDescriptor(r, 'lastIndex').writable, r.lastIndex);
+        \\try { r.exec('abc'); } catch (e) { console.log(e.name); }
+    , "0 true false false\nfalse 1\nTypeError\n");
+    try helpers.expectUncaught("Object.defineProperty(/c/, 'lastIndex', { enumerable: true });", .type_error, "Cannot redefine property: lastIndex");
+}
+
+test "RegExp.prototype[Symbol.match/matchAll/replace/search/split] and RegExp[Symbol.species]" {
+    try helpers.expectStdout(
+        \\const P = RegExp.prototype;
+        \\console.log(['match', 'matchAll', 'replace', 'search', 'split'].map(k => P[Symbol[k]].name + '/' + P[Symbol[k]].length).join(' '));
+        \\console.log(/b+/[Symbol.match]('abbc')[0], /b/g[Symbol.replace]('abcb', 'X'), /c/[Symbol.search]('abc'), /,/[Symbol.split]('a,b').join('|'));
+        \\const s = Object.getOwnPropertyDescriptor(RegExp, Symbol.species);
+        \\console.log(RegExp[Symbol.species] === RegExp, s.get.name, s.set, s.enumerable, s.configurable);
+    , "[Symbol.match]/1 [Symbol.matchAll]/1 [Symbol.replace]/2 [Symbol.search]/1 [Symbol.split]/2\nbb aXcX 2 a|b\ntrue get [Symbol.species] undefined false true\n");
+}
+
+test "a static getter's this is the class" {
+    try helpers.expectStdout("class A { static get x() { return this; } } console.log(A.x === A);", "true\n");
+}

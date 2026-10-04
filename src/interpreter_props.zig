@@ -4,6 +4,7 @@
 //! z-interpreter-refactor.md.
 
 const std = @import("std");
+const regex_builtins = @import("regex_builtins.zig");
 const zvalue = @import("zvalue");
 const zstring = @import("zstring");
 const JSValue = zvalue.JSValue;
@@ -145,7 +146,13 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             // same bag by setPropertyOnValue) must win over the
             // Callable-struct-backed default.
             if (box.value.statics) |bag| {
-                if (bag.object.value.has(key)) break :blk try self.getProperty(bag, key);
+                if (bag.object.value.has(key)) {
+                    // getFromProto walks the same chain as a getProperty
+                    // on the bag, but calls a getter with the function
+                    // itself as `this` (`static get x() { return this }`
+                    // is the class; RegExp[Symbol.species] is RegExp).
+                    if (try self.getFromProto(obj, bag, key)) |v| break :blk v;
+                }
             }
             if (std.mem.eql(u8, key, "name")) break :blk try self.gcNewString(box.value.name);
             if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.arity));
@@ -245,25 +252,9 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             break :blk JSValue.UNDEFINED;
         },
         .regex => blk: {
-            const st = self.regexState(obj);
-            if (std.mem.eql(u8, key, "source")) break :blk try self.gcNewString(st.source);
-            // Real spec: `.flags` is a COMPUTED property, canonical
-            // fixed order (d,g,i,m,s,u,v,y) -- NOT a passthrough of the
-            // source text's own flag order (confirmed against real
-            // Node: `/x/yusmigd`.flags === "dgimsuy", not "yusmigd").
-            if (std.mem.eql(u8, key, "flags")) {
-                var buf: [8]u8 = undefined;
-                break :blk try self.gcNewString(Interpreter.canonicalFlags(st, &buf));
-            }
-            if (std.mem.eql(u8, key, "global")) break :blk JSValue.fromBool(st.global);
-            if (std.mem.eql(u8, key, "ignoreCase")) break :blk JSValue.fromBool(st.ignore_case);
-            if (std.mem.eql(u8, key, "multiline")) break :blk JSValue.fromBool(st.multiline);
-            if (std.mem.eql(u8, key, "dotAll")) break :blk JSValue.fromBool(st.dot_all);
-            if (std.mem.eql(u8, key, "sticky")) break :blk JSValue.fromBool(st.sticky);
-            if (std.mem.eql(u8, key, "unicode")) break :blk JSValue.fromBool(st.unicode);
-            if (std.mem.eql(u8, key, "hasIndices")) break :blk JSValue.fromBool(st.has_indices);
-            if (std.mem.eql(u8, key, "unicodeSets")) break :blk JSValue.fromBool(st.unicode_sets);
-            if (std.mem.eql(u8, key, "lastIndex")) break :blk st.last_index.retain();
+            // `lastIndex` is a RegExp's only own property; source, flags,
+            // global, ... are accessors on RegExp.prototype (found below).
+            if (std.mem.eql(u8, key, "lastIndex")) break :blk self.regexState(obj).last_index.retain();
             if (try self.getFromProto(obj, self.protos.regex, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
@@ -484,9 +475,17 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
             // become `0` -- found via test262 literals/regexp/
             // lastIndex.js's verifyProperty, which does a real write-
             // probe, not just a descriptor read.
-            const st = self.regexState(obj);
-            st.last_index.deinit();
-            st.last_index = value.retain();
+            return regex_builtins.setLastIndex(self, obj, value.retain());
+        }
+        // An inherited accessor (source, flags, global, ... or a user
+        // one on RegExp.prototype): its setter runs; a getter-only one is
+        // a TypeError (always-strict [[Set]] failure).
+        var current: ?*const @TypeOf(self.protos.regex.object.value) = &self.protos.regex.object.value;
+        while (current) |o| : (current = o.getPrototype()) {
+            const rec = o.getOwnRecord(key) orelse continue;
+            if (!rec.isAccessor()) break;
+            const setter = rec.setter orelse return self.throwError(.type_error, "Cannot set property {s} of [object RegExp] which has only a getter", .{key});
+            _ = try setter.function.value.call(setter.function.value.ctx, self.gc_allocator, obj, &.{value});
             return;
         }
         return error.NotImplemented;
@@ -821,6 +820,7 @@ pub fn materializeProtos(self: *Interpreter) !void {
         const tp_fn = try native_helpers.native(self, "[Symbol.toPrimitive]", 1, date_builtins.dateToPrimitive);
         try self.protos.date.object.value.defineProperty(tp_key, tp_fn, .{ .writable = false, .enumerable = false, .configurable = true });
     }
+    try regex_builtins.installProtoExtras(self);
     if (self.symbol_to_string_tag) |tag_sym| {
         const tag_key = try self.encodeKey(tag_sym);
         defer self.gc_allocator.free(tag_key);

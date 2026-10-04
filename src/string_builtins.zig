@@ -196,7 +196,7 @@ fn stringRepeat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     return interp(ctx).gcNewString(out);
 }
 
-fn stringSplit(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+pub fn stringSplit(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const data = try requireString(ctx, allocator, this_value, "split");
     defer allocator.free(data);
     if (arg(args, 0) == .regex) return regexSplit(interp(ctx), allocator, data, arg(args, 0));
@@ -391,7 +391,7 @@ fn stringReplaceImpl(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     return interp(ctx).gcNewString(buf.items);
 }
 
-fn stringReplace(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+pub fn stringReplace(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     return stringReplaceImpl(ctx, allocator, this_value, args, false);
 }
 
@@ -422,7 +422,7 @@ fn stringToStringMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
 /// str.match(re): non-global -> RegExpBuiltinExec's match array (or
 /// null); global -> an array of all whole-match strings (or null), with
 /// `lastIndex` left at 0.
-fn stringMatch(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+pub fn stringMatch(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const data = try requireString(ctx, allocator, this_value, "match");
     defer allocator.free(data);
     const self = interp(ctx);
@@ -433,8 +433,7 @@ fn stringMatch(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
         defer m.deinit();
         return makeMatchArray(self, allocator, m);
     }
-    st.last_index.deinit();
-    st.last_index = JSValue.fromNumber(0);
+    try regex_builtins.setLastIndex(self, re, JSValue.fromNumber(0));
     var result: ?JSValue = null;
     var pos: usize = 0;
     while (try execRaw(allocator, re, data, pos)) |m| {
@@ -448,7 +447,7 @@ fn stringMatch(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
 
 /// str.matchAll(re): an iterator of match arrays, from the regex's
 /// `lastIndex` (UTF-16 units) on.
-fn stringMatchAll(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+pub fn stringMatchAll(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const data = try requireString(ctx, allocator, this_value, "matchAll");
     defer allocator.free(data);
     const self = interp(ctx);
@@ -464,7 +463,7 @@ fn stringMatchAll(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     return makeArrayIterator(self, allocator, arr, .values);
 }
 
-fn stringSearch(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+pub fn stringSearch(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const data = try requireString(ctx, allocator, this_value, "search");
     defer allocator.free(data);
     const self = interp(ctx);

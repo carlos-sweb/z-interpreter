@@ -480,7 +480,10 @@ pub fn evalIn(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
             }
             break :blk try self.evalIn(l, box.value.target);
         },
-        .function, .regex, .symbol, .map, .set, .@"error", .date, .promise, .bigint, .array_buffer, .data_view, .typed_array, .temporal => error.NotImplemented,
+        // A RegExp's own `lastIndex`, or anything on RegExp.prototype's
+        // chain (source, flags, global, ... are accessors there).
+        .regex => JSValue.fromBool(std.mem.eql(u8, key, "lastIndex") or self.protos.regex.object.value.has(key)),
+        .function, .symbol, .map, .set, .@"error", .date, .promise, .bigint, .array_buffer, .data_view, .typed_array, .temporal => error.NotImplemented,
     };
 }
 
