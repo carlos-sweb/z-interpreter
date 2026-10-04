@@ -69,3 +69,26 @@ test "lastIndex is writable" {
         \\console.log(re.exec('a1b2c3')[0], re.lastIndex);
     , "2 4\n");
 }
+
+test "u flag: property escapes, astral code points, Unicode case folding" {
+    try helpers.expectStdout(
+        \\console.log(/\p{L}+/u.exec('123héllo')[0], /\u{1F600}/u.test('😀'), /\u212A/iu.test('k'));
+    , "héllo true true\n");
+}
+
+test "u flag: strict syntax rejects what Annex B allows" {
+    try helpers.expectStdout("console.log(/\\q/.test('q'));", "true\n");
+    try helpers.expectUncaught("new RegExp('\\\\q', 'u');", .syntax_error, "Invalid regular expression: /\\q/");
+}
+
+test "v flag: set difference, intersection, \\q{} and properties of strings" {
+    try helpers.expectStdout(
+        \\console.log(/[\p{L}--[a-z]]+/v.exec('abcÉÑxyz')[0], /[[a-z]&&[aeiou]]+/v.exec('xxaeiyy')[0]);
+        \\console.log(/[\q{abc|d}]/v.exec('zzabc')[0], /^\p{RGI_Emoji}$/v.test('👍🏽'), /x/v.unicodeSets);
+    , "ÉÑ aei\nabc true true\n");
+}
+
+test "repeated flags and u together with v are SyntaxErrors" {
+    try helpers.expectUncaught("new RegExp('a', 'gg');", .syntax_error, "Invalid flags supplied to RegExp constructor 'gg'");
+    try helpers.expectUncaught("new RegExp('a', 'uv');", .syntax_error, "Invalid flags supplied to RegExp constructor 'uv'");
+}

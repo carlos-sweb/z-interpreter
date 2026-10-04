@@ -85,22 +85,32 @@ pub fn makeRegex(self: *Interpreter, pattern: []const u8, flags: []const u8) any
     // two dupes become that copy's own, no-longer-freeable-here data.
     errdefer arena.free(state.source);
     errdefer arena.free(state.flags);
-    for (flags) |f| switch (f) {
-        'g' => state.global = true,
-        'i' => state.ignore_case = true,
-        'm' => state.multiline = true,
-        's' => state.dot_all = true,
-        'y' => state.sticky = true,
-        'u' => state.unicode = true,
-        'd' => state.has_indices = true,
-        'v' => state.unicode_sets = true,
-        else => return self.throwError(.syntax_error, "Invalid flags supplied to RegExp constructor '{s}'", .{flags}),
-    };
+    for (flags) |f| {
+        const slot: *bool = switch (f) {
+            'g' => &state.global,
+            'i' => &state.ignore_case,
+            'm' => &state.multiline,
+            's' => &state.dot_all,
+            'y' => &state.sticky,
+            'u' => &state.unicode,
+            'd' => &state.has_indices,
+            'v' => &state.unicode_sets,
+            else => return self.throwError(.syntax_error, "Invalid flags supplied to RegExp constructor '{s}'", .{flags}),
+        };
+        // A repeated flag is a SyntaxError (RegExpInitialize step 7).
+        if (slot.*) return self.throwError(.syntax_error, "Invalid flags supplied to RegExp constructor '{s}'", .{flags});
+        slot.* = true;
+    }
+    // `u` and `v` together is a SyntaxError too.
+    if (state.unicode and state.unicode_sets)
+        return self.throwError(.syntax_error, "Invalid flags supplied to RegExp constructor '{s}'", .{flags});
     const re = zregex.Regex.compileWithOptions(arena, pattern, .{
         .case_insensitive = state.ignore_case,
         .multiline = state.multiline,
         .dot_all = state.dot_all,
         .sticky = state.sticky,
+        .unicode = state.unicode,
+        .v = state.unicode_sets,
     }) catch {
         return self.throwError(.syntax_error, "Invalid regular expression: /{s}/", .{pattern});
     };
