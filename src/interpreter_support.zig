@@ -276,6 +276,9 @@ pub fn nativeMethod(self: *Interpreter, comptime type_prefix: []const u8, name: 
 /// the returned function and must `.deinit()` it when done (a
 /// `null` result has already released it).
 pub fn proxyTrap(self: *Interpreter, proxy: *zvalue.Rc(zvalue.Proxy), trap_name: []const u8) anyerror!?JSValue {
+    // A revoked proxy (Proxy.revocable) has a null [[ProxyHandler]].
+    if (proxy.value.handler == .null)
+        return self.throwError(.type_error, "Cannot perform '{s}' on a proxy that has been revoked", .{trap_name});
     if (proxy.value.handler != .object) return null;
     const fn_val = try self.getProperty(proxy.value.handler, trap_name);
     if (fn_val != .function) {

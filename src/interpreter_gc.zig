@@ -117,6 +117,8 @@ const GcNode = union(enum) {
     all_ctx: *builtins.AllCtx,
     all_elem_ctx: *builtins.AllElemCtx,
     race_ctx: *builtins.RaceCtx,
+    /// A Proxy.revocable revoke function's proxy (null once revoked).
+    revoke_ctx: *builtins.RevokeCtx,
     array_iter_ctx: *builtins.ArrayIterCtx,
 
     /// The registry key: the node's own address, regardless of kind.
@@ -145,7 +147,7 @@ pub const GcRegistry = std.AutoHashMapUnmanaged(usize, GcNode);
 /// separate switch (Step 1c uses this one as a gate on that one, rather
 /// than merging them, since gcTrack needs a typed `GcNode`, not just an
 /// address).
-fn heapBoxAddress(v: JSValue) ?usize {
+pub fn heapBoxAddress(v: JSValue) ?usize {
     return switch (v) {
         .undefined, .null, .boolean, .number => null,
         .array => |box| @intFromPtr(box),
@@ -289,6 +291,11 @@ pub fn deinit(self: *Interpreter) void {
     self.modules.deinit(self.gc_allocator);
     self.regex_state.deinit(self.gc_allocator);
     self.regexp_string_iters.deinit(self.gc_allocator);
+    // Entries left at teardown: their JSValues went with freeAllGcNodes,
+    // only their storage remains.
+    var osd = self.object_slots.valueIterator();
+    while (osd.next()) |slots| slots.freeStorage(self.gc_allocator);
+    self.object_slots.deinit(self.gc_allocator);
     self.array_props.deinit(self.gc_allocator);
     self.primitive_wrapper_data.deinit(self.gc_allocator);
     self.deleted_fn_props.deinit(self.gc_allocator);
@@ -304,6 +311,14 @@ pub fn deinit(self: *Interpreter) void {
 /// whenever a tracked box's refcount naturally reaches zero mid-run --
 /// the common case for acyclic garbage. Keeps the registry from ever
 /// holding a dangling entry.
+fn releaseValue(_: void, v: JSValue) void {
+    v.deinit();
+}
+
+fn markValue(marker: *Marker, v: JSValue) void {
+    marker.value(v);
+}
+
 pub fn gcOnBoxDestroyed(ctx: *anyopaque, box: *anyopaque) void {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     _ = self.gc_registry.remove(@intFromPtr(box));
@@ -321,6 +336,12 @@ pub fn gcOnBoxDestroyed(ctx: *anyopaque, box: *anyopaque) void {
             kv.value.last_index.deinit();
             if (kv.value.props) |bag| bag.deinit();
         }
+    }
+    // A builtin instance's internal slots (WeakMap & co.).
+    if (self.object_slots.fetchRemove(@intFromPtr(box))) |kv| {
+        var slots = kv.value;
+        if (!self.tearing_down) slots.eachValue({}, releaseValue);
+        slots.freeStorage(self.gc_allocator);
     }
     // Same for a %RegExpStringIterator%'s slots.
     if (self.regexp_string_iters.fetchRemove(@intFromPtr(box))) |kv| {
@@ -437,6 +458,9 @@ pub fn gcTrackAllElemCtx(self: *Interpreter, c: *builtins.AllElemCtx) !void {
 }
 pub fn gcTrackRaceCtx(self: *Interpreter, c: *builtins.RaceCtx) !void {
     try self.gcTrackNode(.{ .race_ctx = c });
+}
+pub fn gcTrackRevokeCtx(self: *Interpreter, c: *builtins.RevokeCtx) !void {
+    try self.gcTrackNode(.{ .revoke_ctx = c });
 }
 pub fn gcTrackArrayIterCtx(self: *Interpreter, c: *builtins.ArrayIterCtx) !void {
     try self.gcTrackNode(.{ .array_iter_ctx = c });
@@ -626,6 +650,7 @@ pub fn traceValueChildren(self: *Interpreter, v: JSValue, visitor: anytype) void
                 // via the shared on_r's ctx) -- nothing owned to trace.
                 .all_elem_ctx => {},
                 .race_ctx => |c| visitor.value(c.derived),
+                .revoke_ctx => |c| visitor.value(c.proxy),
                 .array_iter_ctx => |c| for (c.items) |item| visitor.value(item),
                 else => {},
             };
@@ -702,6 +727,8 @@ pub fn markRoots(self: *Interpreter, marker: *Marker) void {
     if (self.regexp_ctor) |v| marker.value(v);
     if (self.regexp_string_iterator_proto) |v| marker.value(v);
     if (self.regexp_string_iterator_parent) |v| marker.value(v);
+    var osi = self.object_slots.valueIterator();
+    while (osi.next()) |slots| slots.eachValue(marker, markValue);
     var rsi = self.regexp_string_iters.valueIterator();
     while (rsi.next()) |st| {
         marker.value(st.r);
@@ -887,6 +914,10 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
         .all_elem_ctx => |c| self.gc_allocator.destroy(c),
         .race_ctx => |c| {
             sweeper.value(c.derived);
+            self.gc_allocator.destroy(c);
+        },
+        .revoke_ctx => |c| {
+            sweeper.value(c.proxy);
             self.gc_allocator.destroy(c);
         },
         .array_iter_ctx => |c| {

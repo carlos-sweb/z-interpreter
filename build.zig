@@ -132,6 +132,7 @@ pub fn build(b: *std.Build) void {
         "tests/map_set_test.zig",
         "tests/regex_test.zig",
         "tests/accessor_test.zig",
+        "tests/globals_a2_test.zig",
         "tests/bigint_test.zig",
         "tests/proxy_test.zig",
         "tests/buffer_test.zig",

@@ -40,6 +40,9 @@ pub const Protos = struct {
     date: JSValue = JSValue.UNDEFINED,
     regex: JSValue = JSValue.UNDEFINED,
     @"error": JSValue = JSValue.UNDEFINED,
+    /// AggregateError.prototype (its instances are `.object`s chained
+    /// to it, and it to Error.prototype -- see error_builtins).
+    aggregate_error: JSValue = JSValue.UNDEFINED,
     map: JSValue = JSValue.UNDEFINED,
     set: JSValue = JSValue.UNDEFINED,
     symbol: JSValue = JSValue.UNDEFINED,
@@ -138,6 +141,55 @@ pub const RegExpStringIterState = struct {
     pos: ?usize = null,
     cursor_pos: usize = 0,
     cursor_index: usize = 0,
+};
+
+/// One WeakMap/WeakSet entry, keyed (in WeakTable) by the key's box
+/// address. The key is held strongly: this engine never observes it
+/// dying, which the spec permits (a WeakMap need not drop entries).
+pub const WeakEntry = struct { key: JSValue, value: JSValue };
+pub const WeakTable = std.AutoHashMapUnmanaged(usize, WeakEntry);
+/// A FinalizationRegistry registration ([[Cells]] element).
+pub const FinRegCell = struct { target: JSValue, held: JSValue, token: JSValue };
+
+/// The internal slots of an `.object` that is a builtin instance with no
+/// JSValue tag of its own (WeakMap, WeakSet, WeakRef,
+/// FinalizationRegistry); keyed by the box address in `object_slots`.
+pub const ObjectSlots = union(enum) {
+    weak_map: WeakTable,
+    weak_set: WeakTable,
+    weak_ref: JSValue,
+    finalization_registry: struct { cleanup: JSValue, cells: std.ArrayListUnmanaged(FinRegCell) },
+
+    /// Every JSValue the slots hold (GC marking and release).
+    pub fn eachValue(self: *const ObjectSlots, ctx: anytype, comptime f: fn (@TypeOf(ctx), JSValue) void) void {
+        switch (self.*) {
+            .weak_map, .weak_set => |t| {
+                var it = t.valueIterator();
+                while (it.next()) |e| {
+                    f(ctx, e.key);
+                    f(ctx, e.value);
+                }
+            },
+            .weak_ref => |v| f(ctx, v),
+            .finalization_registry => |r| {
+                f(ctx, r.cleanup);
+                for (r.cells.items) |c| {
+                    f(ctx, c.target);
+                    f(ctx, c.held);
+                    f(ctx, c.token);
+                }
+            },
+        }
+    }
+
+    /// Frees the slots' own storage (not the JSValues).
+    pub fn freeStorage(self: *ObjectSlots, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .weak_map, .weak_set => |*t| t.deinit(allocator),
+            .finalization_registry => |*r| r.cells.deinit(allocator),
+            .weak_ref => {},
+        }
+    }
 };
 
 /// `delete f.name`/`delete f.length` state -- see `deleted_fn_props`.
@@ -692,6 +744,9 @@ pub const Interpreter = struct {
     tearing_down: bool = false,
     /// %RegExpStringIterator% instances' internal slots (see the type).
     regexp_string_iters: std.AutoHashMapUnmanaged(usize, RegExpStringIterState) = .empty,
+    /// Internal slots of WeakMap/WeakSet/WeakRef/FinalizationRegistry
+    /// instances (see ObjectSlots).
+    object_slots: std.AutoHashMapUnmanaged(usize, ObjectSlots) = .empty,
     /// Named own properties on array values (arrays have no general
     /// property bag) -- used by exec/match result arrays for
     /// `index`/`input`/`groups`. Keyed by the array Rc box pointer; the
@@ -752,6 +807,7 @@ pub const Interpreter = struct {
     pub const gcTrackAllCtx = interpreter_gc.gcTrackAllCtx;
     pub const gcTrackAllElemCtx = interpreter_gc.gcTrackAllElemCtx;
     pub const gcTrackRaceCtx = interpreter_gc.gcTrackRaceCtx;
+    pub const gcTrackRevokeCtx = interpreter_gc.gcTrackRevokeCtx;
     pub const gcTrackArrayIterCtx = interpreter_gc.gcTrackArrayIterCtx;
     pub const gcChildEnv = interpreter_gc.gcChildEnv;
     pub const gcNewObject = interpreter_gc.gcNewObject;
@@ -839,6 +895,7 @@ pub const Interpreter = struct {
     pub const throwValue = interpreter_gc.throwValue;
     pub const throwError = interpreter_gc.throwError;
     pub const throwIfGap = interpreter_gc.throwIfGap;
+    pub const heapBoxAddress = interpreter_gc.heapBoxAddress;
 
     // z-interpreter-refactor.md, Step 5 Phase C batch 8: statement/
     // hoisting/loop cluster, split into interpreter_stmt.zig.

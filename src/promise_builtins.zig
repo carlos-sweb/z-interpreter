@@ -14,6 +14,7 @@ const Interpreter = interpreter_mod.Interpreter;
 const coercion = @import("coercion.zig");
 const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
+const error_builtins = @import("error_builtins.zig");
 
 pub const NativeFn = native_helpers.NativeFn;
 const MethodSpec = native_helpers.MethodSpec;
@@ -168,32 +169,44 @@ fn promiseRejectStatic(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
     return interp(ctx).rejectedPromise(arg(args, 0));
 }
 
-/// Shared bookkeeping for one Promise.all call.
+/// Shared bookkeeping for one Promise.all / allSettled / any call.
 pub const AllCtx = struct {
     interp: *Interpreter,
     remaining: usize,
+    /// Fulfillment values (all), settlement records (allSettled) or
+    /// rejection reasons (any), by index.
     results: []JSValue,
     derived: JSValue,
+    mode: enum { all, all_settled, any } = .all,
 
     fn completeIfDone(c: *AllCtx) anyerror!void {
         if (c.remaining != 0) return;
+        if (c.mode == .any) {
+            const err = try error_builtins.newAggregateError(c.interp, "All promises were rejected", c.results);
+            defer err.deinit();
+            try c.interp.rejectPromiseValue(c.derived, err);
+            return;
+        }
         var array = try c.interp.gcNewArray();
         for (c.results) |r| _ = try array.array.value.push(r.retain());
         try c.interp.resolvePromise(c.derived, array);
     }
 };
 
-/// Per-element fulfillment handler: stores at its index, resolves the
-/// derived array when the last one lands.
+/// Per-element handler state: its index, and [[AlreadyCalled]] (an
+/// element's resolve/reject functions settle its slot at most once).
 pub const AllElemCtx = struct {
     all: *AllCtx,
     index: usize,
+    called: bool = false,
 };
 
 fn allElemFulfilled(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     _ = this_value;
     const c: *AllElemCtx = @ptrCast(@alignCast(ctx));
+    if (c.called) return JSValue.UNDEFINED;
+    c.called = true;
     c.all.results[c.index] = arg(args, 0).retain();
     c.all.remaining -= 1;
     try c.all.completeIfDone();
@@ -247,6 +260,88 @@ fn promiseAll(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
         _ = try self.promiseThen(p, on_f, on_r);
     }
     return derived;
+}
+
+/// `{ status, value }` / `{ status, reason }` for Promise.allSettled.
+fn settledRecord(self: *Interpreter, fulfilled: bool, v: JSValue) anyerror!JSValue {
+    var o = try self.ordinaryObject();
+    try o.object.value.set("status", try self.gcNewString(if (fulfilled) "fulfilled" else "rejected"));
+    try o.object.value.set(if (fulfilled) "value" else "reason", v.retain());
+    return o;
+}
+
+/// An allSettled element's onFulfilled/onRejected, or an any element's
+/// onRejected: records at the element's index, completes on the last.
+fn settleElem(comptime fulfilled: bool) NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+            _ = allocator;
+            _ = this_value;
+            const c: *AllElemCtx = @ptrCast(@alignCast(ctx));
+            if (c.called) return JSValue.UNDEFINED;
+            c.called = true;
+            const all = c.all;
+            all.results[c.index] = if (all.mode == .all_settled)
+                try settledRecord(all.interp, fulfilled, arg(args, 0))
+            else
+                arg(args, 0).retain();
+            all.remaining -= 1;
+            try all.completeIfDone();
+            return JSValue.UNDEFINED;
+        }
+    }.call;
+}
+
+/// Promise.any's shared onFulfilled: the first fulfillment wins.
+fn anyFulfilled(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const c: *AllCtx = @ptrCast(@alignCast(ctx));
+    try c.interp.resolvePromise(c.derived, arg(args, 0));
+    return JSValue.UNDEFINED;
+}
+
+/// Promise.allSettled / Promise.any over any iterable this engine can
+/// drain (iterableItems). Non-promise items are wrapped as fulfilled.
+fn settleCombinator(comptime mode: @TypeOf(@as(AllCtx, undefined).mode)) NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+            _ = allocator;
+            const self = interp(ctx);
+            // C = this; NewPromiseCapability(C) needs an object.
+            if (!builtin_helpers.isObjectLike(this_value))
+                return self.throwError(.type_error, "Promise.{s} called on non-object", .{if (mode == .any) "any" else "allSettled"});
+            const items = try self.iterableItems(arg(args, 0));
+            defer self.gc_allocator.free(items);
+
+            const derived = try self.gcNewPromise();
+            const all = try self.gc_allocator.create(AllCtx);
+            all.* = .{
+                .interp = self,
+                .remaining = items.len,
+                .results = try self.gc_allocator.alloc(JSValue, items.len),
+                .derived = derived.retain(),
+                .mode = mode,
+            };
+            try self.gcTrackAllCtx(all);
+            for (all.results) |*r| r.* = JSValue.UNDEFINED;
+            if (items.len == 0) {
+                try all.completeIfDone();
+                return derived;
+            }
+            const shared_f: ?JSValue = if (mode == .any) try self.gcNewFunction(.{ .ctx = all, .name = "", .arity = 1, .call = anyFulfilled }) else null;
+            for (items, 0..) |item, i| {
+                const elem = try self.gc_allocator.create(AllElemCtx);
+                elem.* = .{ .all = all, .index = i };
+                try self.gcTrackAllElemCtx(elem);
+                const on_f = shared_f orelse try self.gcNewFunction(.{ .ctx = elem, .name = "", .arity = 1, .call = settleElem(true) });
+                const on_r = try self.gcNewFunction(.{ .ctx = elem, .name = "", .arity = 1, .call = settleElem(false) });
+                const p = if (item == .promise) item else try self.fulfilledPromise(item);
+                _ = try self.promiseThen(p, on_f, on_r);
+            }
+            return derived;
+        }
+    }.call;
 }
 
 /// Per-race resolution handler: first settle of ANY element settles the
@@ -320,6 +415,8 @@ pub fn install(self: *Interpreter) !void {
         .{ .name = "reject", .value = .{ .method = .{ .call = promiseRejectStatic, .arity = 1 } } },
         .{ .name = "all", .value = .{ .method = .{ .call = promiseAll, .arity = 1 } } },
         .{ .name = "race", .value = .{ .method = .{ .call = promiseRace, .arity = 1 } } },
+        .{ .name = "allSettled", .value = .{ .method = .{ .call = settleCombinator(.all_settled), .arity = 1 } } },
+        .{ .name = "any", .value = .{ .method = .{ .call = settleCombinator(.any), .arity = 1 } } },
     } });
 
     try g.define(arena, "setTimeout", try native(self, "setTimeout", 2, globalSetTimeout));

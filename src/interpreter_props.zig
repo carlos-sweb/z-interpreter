@@ -6,6 +6,8 @@
 const std = @import("std");
 const regex_builtins = @import("regex_builtins.zig");
 const accessor_builtins = @import("accessor_builtins.zig");
+const weak_builtins = @import("weak_builtins.zig");
+const error_builtins = @import("error_builtins.zig");
 const zvalue = @import("zvalue");
 const zstring = @import("zstring");
 const JSValue = zvalue.JSValue;
@@ -961,5 +963,9 @@ pub fn materializeProtos(self: *Interpreter) !void {
     // The builtin accessor properties (Map/Set size, buffer/view
     // lengths, Symbol description, species, __proto__).
     try accessor_builtins.install(self);
+    // Globals that need the prototypes above: AggregateError (chained to
+    // Error.prototype) and WeakMap/WeakSet/WeakRef/FinalizationRegistry.
+    try error_builtins.installAggregate(self);
+    try weak_builtins.install(self);
 }
 

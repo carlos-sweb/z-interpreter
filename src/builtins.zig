@@ -101,6 +101,7 @@ pub const FinallyCtx = promise_builtins.FinallyCtx;
 pub const AllCtx = promise_builtins.AllCtx;
 pub const AllElemCtx = promise_builtins.AllElemCtx;
 pub const RaceCtx = promise_builtins.RaceCtx;
+pub const RevokeCtx = proxy_builtins.RevokeCtx;
 pub const BoundCtx = function_builtins.BoundCtx;
 
 // z-interpreter-refactor.md, Step 5 Phase A batch 2: Math/JSON/Proxy
