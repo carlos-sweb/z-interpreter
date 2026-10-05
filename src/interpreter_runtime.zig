@@ -463,6 +463,7 @@ pub fn makeGeneratorObject(self: *Interpreter, fnode: *zfunctions.FunctionNode, 
     fs.fiber = try fiber_mod.Fiber.init(arena, fiberEntry, fs);
     try self.gcTrackFiberState(fs);
     var obj = try self.gcNewObject();
+    if (self.iterator_prototype) |p| try obj.object.value.setPrototype(&p.object.value);
     try obj.object.value.set("next", try self.gcNewFunction(.{ .ctx = fs, .name = "next", .call = generatorNext }));
     // A generator IS its own iterable: `gen()[Symbol.iterator]()`
     // returns the generator itself (so `[...gen()]` works via the

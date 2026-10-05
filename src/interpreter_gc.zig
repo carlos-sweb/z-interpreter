@@ -337,7 +337,7 @@ pub fn gcOnBoxDestroyed(ctx: *anyopaque, box: *anyopaque) void {
             if (kv.value.props) |bag| bag.deinit();
         }
     }
-    // A builtin instance's internal slots (WeakMap & co.).
+    // A builtin instance's internal slots (WeakMap & co., Iterator helpers).
     if (self.object_slots.fetchRemove(@intFromPtr(box))) |kv| {
         var slots = kv.value;
         if (!self.tearing_down) slots.eachValue({}, releaseValue);
@@ -726,7 +726,10 @@ pub fn markRoots(self: *Interpreter, marker: *Marker) void {
     if (self.symbol_iterator) |v| marker.value(v);
     if (self.regexp_ctor) |v| marker.value(v);
     if (self.regexp_string_iterator_proto) |v| marker.value(v);
-    if (self.regexp_string_iterator_parent) |v| marker.value(v);
+    if (self.iterator_prototype) |v| marker.value(v);
+    if (self.iterator_ctor) |v| marker.value(v);
+    if (self.iterator_helper_proto) |v| marker.value(v);
+    if (self.wrap_for_valid_iterator_proto) |v| marker.value(v);
     var osi = self.object_slots.valueIterator();
     while (osi.next()) |slots| slots.eachValue(marker, markValue);
     var rsi = self.regexp_string_iters.valueIterator();
@@ -1006,7 +1009,10 @@ pub fn freeAllGcNodes(self: *Interpreter) void {
     if (self.symbol_iterator) |v| sweeper.value(v);
     if (self.regexp_ctor) |v| sweeper.value(v);
     if (self.regexp_string_iterator_proto) |v| sweeper.value(v);
-    if (self.regexp_string_iterator_parent) |v| sweeper.value(v);
+    if (self.iterator_prototype) |v| sweeper.value(v);
+    if (self.iterator_ctor) |v| sweeper.value(v);
+    if (self.iterator_helper_proto) |v| sweeper.value(v);
+    if (self.wrap_for_valid_iterator_proto) |v| sweeper.value(v);
     if (self.symbol_async_iterator) |v| sweeper.value(v);
     if (self.symbol_to_primitive) |v| sweeper.value(v);
     inline for (std.meta.fields(Protos)) |f| sweeper.value(@field(self.protos, f.name));

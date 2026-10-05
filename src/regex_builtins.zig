@@ -679,8 +679,9 @@ fn isWhiteSpaceOrLineTerminator(cp: u21) bool {
 }
 
 /// Installs %RegExpStringIteratorPrototype%: `next`, @@toStringTag "RegExp
-/// String Iterator", and (no shared %IteratorPrototype% exists in this
-/// engine yet) a parent object with @@iterator returning the receiver.
+/// String Iterator", and its parent %IteratorPrototype% (an object with
+/// @@iterator returning the receiver; iterator_builtins makes it
+/// `Iterator.prototype` and adds the helpers).
 fn installStringIteratorProto(self: *Interpreter) !void {
     const parent = try self.ordinaryObject();
     if (self.symbol_iterator) |sym| {
@@ -696,7 +697,7 @@ fn installStringIteratorProto(self: *Interpreter) !void {
     try proto.object.value.defineProperty(tag_key, try self.gcNewString("RegExp String Iterator"), .{ .writable = false, .enumerable = false, .configurable = true });
     // [[Prototype]] is a raw pointer, not a counted reference: the
     // interpreter field owns `parent`.
-    self.regexp_string_iterator_parent = parent;
+    self.iterator_prototype = parent;
     self.regexp_string_iterator_proto = proto;
 }
 

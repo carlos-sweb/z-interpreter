@@ -151,14 +151,37 @@ pub const WeakTable = std.AutoHashMapUnmanaged(usize, WeakEntry);
 /// A FinalizationRegistry registration ([[Cells]] element).
 pub const FinRegCell = struct { target: JSValue, held: JSValue, token: JSValue };
 
+/// An Iterator helper's state (iterator_builtins.zig): the underlying
+/// iterator record, the callback, and the generator-like run state.
+/// Heap-allocated so a pointer to it survives `object_slots` rehashing
+/// while the callback runs.
+pub const IteratorHelper = struct {
+    kind: enum { map, filter, take, drop, flat_map },
+    state: enum { suspended_start, suspended_yield, executing, completed } = .suspended_start,
+    iterator: JSValue,
+    next: JSValue,
+    func: JSValue = JSValue.UNDEFINED,
+    counter: f64 = 0,
+    /// take/drop's remaining count (+Infinity allowed).
+    remaining: f64 = 0,
+    /// flatMap's current inner iterator record.
+    inner_iterator: JSValue = JSValue.UNDEFINED,
+    inner_next: JSValue = JSValue.UNDEFINED,
+    inner_alive: bool = false,
+};
+
 /// The internal slots of an `.object` that is a builtin instance with no
 /// JSValue tag of its own (WeakMap, WeakSet, WeakRef,
-/// FinalizationRegistry); keyed by the box address in `object_slots`.
+/// FinalizationRegistry, Iterator helpers, Iterator.from's wrappers);
+/// keyed by the box address in `object_slots`.
 pub const ObjectSlots = union(enum) {
     weak_map: WeakTable,
     weak_set: WeakTable,
     weak_ref: JSValue,
     finalization_registry: struct { cleanup: JSValue, cells: std.ArrayListUnmanaged(FinRegCell) },
+    iterator_helper: *IteratorHelper,
+    /// %WrapForValidIteratorPrototype%'s [[Iterated]] record.
+    wrapped_iterator: struct { iterator: JSValue, next: JSValue },
 
     /// Every JSValue the slots hold (GC marking and release).
     pub fn eachValue(self: *const ObjectSlots, ctx: anytype, comptime f: fn (@TypeOf(ctx), JSValue) void) void {
@@ -171,6 +194,17 @@ pub const ObjectSlots = union(enum) {
                 }
             },
             .weak_ref => |v| f(ctx, v),
+            .iterator_helper => |h| {
+                f(ctx, h.iterator);
+                f(ctx, h.next);
+                f(ctx, h.func);
+                f(ctx, h.inner_iterator);
+                f(ctx, h.inner_next);
+            },
+            .wrapped_iterator => |w| {
+                f(ctx, w.iterator);
+                f(ctx, w.next);
+            },
             .finalization_registry => |r| {
                 f(ctx, r.cleanup);
                 for (r.cells.items) |c| {
@@ -187,7 +221,8 @@ pub const ObjectSlots = union(enum) {
         switch (self.*) {
             .weak_map, .weak_set => |*t| t.deinit(allocator),
             .finalization_registry => |*r| r.cells.deinit(allocator),
-            .weak_ref => {},
+            .iterator_helper => |h| allocator.destroy(h),
+            .weak_ref, .wrapped_iterator => {},
         }
     }
 };
@@ -695,8 +730,15 @@ pub const Interpreter = struct {
     regexp_ctor: ?JSValue = null,
     /// %RegExpStringIteratorPrototype% (matchAll's iterators).
     regexp_string_iterator_proto: ?JSValue = null,
-    /// Its [[Prototype]] (owned here: a prototype link isn't a reference).
-    regexp_string_iterator_parent: ?JSValue = null,
+    /// %IteratorPrototype% (`Iterator.prototype`), the [[Prototype]] of
+    /// every builtin iterator and generator object (owned here: a
+    /// prototype link isn't a reference).
+    iterator_prototype: ?JSValue = null,
+    /// %Iterator%, %IteratorHelperPrototype% and
+    /// %WrapForValidIteratorPrototype% (iterator_builtins).
+    iterator_ctor: ?JSValue = null,
+    iterator_helper_proto: ?JSValue = null,
+    wrap_for_valid_iterator_proto: ?JSValue = null,
     /// The well-known `Symbol.asyncIterator` -- resolveAsyncIterator's
     /// first choice for `for await`. Set in setupGlobals.
     symbol_async_iterator: ?JSValue = null,

@@ -512,6 +512,7 @@ pub fn makeArrayIterator(self: *Interpreter, allocator: Allocator, this_value: J
     ic.* = .{ .interp = self, .items = snapshot, .kind = kind };
     try self.gcTrackArrayIterCtx(ic);
     var obj = try self.gcNewObject();
+    if (self.iterator_prototype) |p| try obj.object.value.setPrototype(&p.object.value);
     try obj.object.value.set("next", try self.gcNewFunction(.{ .ctx = ic, .name = "next", .call = arrayIterNext }));
     if (self.symbol_iterator) |sym| {
         const key = try self.encodeKey(sym);
