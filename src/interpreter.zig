@@ -838,6 +838,7 @@ pub const Interpreter = struct {
     // outbound dependency is gcNewError, also there).
     pub const throwValue = interpreter_gc.throwValue;
     pub const throwError = interpreter_gc.throwError;
+    pub const throwIfGap = interpreter_gc.throwIfGap;
 
     // z-interpreter-refactor.md, Step 5 Phase C batch 8: statement/
     // hoisting/loop cluster, split into interpreter_stmt.zig.

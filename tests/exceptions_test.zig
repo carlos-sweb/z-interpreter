@@ -217,13 +217,12 @@ test "console.log renders a caught error legibly" {
     );
 }
 
-// ===== Feature gaps stay uncatchable =====
+// ===== Feature gaps are catchable TypeErrors =====
 
-test "a JS catch must NOT swallow interpreter feature gaps" {
-    // Assigning an arbitrary property on an Error object is
-    // unimplemented (Error has no general property bag, unlike Array's
-    // array_props/Function's statics -- only `.message` is writable)
-    // -- that's NotImplemented, not a JS exception, and it must abort
-    // the run even inside try/catch.
-    try helpers.expectNotImplemented("try { var e = new Error(); e.foo = 2; } catch (e) {}");
+test "a JS catch receives interpreter feature gaps as TypeErrors" {
+    // Assigning an arbitrary property on an Error object is not
+    // supported yet (Error has no general property bag, unlike Array's
+    // array_props/Function's statics -- only `.message` is writable):
+    // a TypeError the script can catch, not an abort of the whole run.
+    try helpers.expectStdout("try { var e = new Error(); e.foo = 2; } catch (x) { console.log(x.name); }", "TypeError\n");
 }

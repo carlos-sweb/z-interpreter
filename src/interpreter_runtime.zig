@@ -50,7 +50,8 @@ fn fiberEntry(arg: *anyopaque) void {
     const fs: *FiberState = @ptrCast(@alignCast(arg));
     const self = fs.interp;
     const arena = self.gc_allocator;
-    const result = invokeFunctionNode(self, fs.fnode, fs.closure_env, arena, fs.this_value, null, null, fs.private_ctx, fs.args, null) catch |err| {
+    const result = invokeFunctionNode(self, fs.fnode, fs.closure_env, arena, fs.this_value, null, null, fs.private_ctx, fs.args, null) catch |err0| {
+        const err = self.throwIfGap(err0);
         if (err == error.JsThrow) {
             const ex = self.pending_exception.?;
             self.pending_exception = null;
@@ -198,7 +199,8 @@ pub fn run(self: *Interpreter, source: []const u8) anyerror!JSValue {
     const parser = try zfunctions.Parser.init(ast_arena, source);
     parser.setStackLimit(self.stack_limit);
     const program = try parser.parseProgram();
-    const c = self.evalBody(self.script_env.?, program) catch |err| {
+    const c = self.evalBody(self.script_env.?, program) catch |err0| {
+        const err = self.throwIfGap(err0);
         if (err != error.JsThrow) return err;
         return error.UncaughtException;
     };
@@ -278,7 +280,8 @@ pub fn runPendingJob(self: *Interpreter) anyerror!void {
         }
         return;
     };
-    const result = handler.function.value.call(handler.function.value.ctx, arena, JSValue.UNDEFINED, &.{job.argument}) catch |err| {
+    const result = handler.function.value.call(handler.function.value.ctx, arena, JSValue.UNDEFINED, &.{job.argument}) catch |err0| {
+        const err = self.throwIfGap(err0);
         if (err != error.JsThrow) return err;
         const ex = self.pending_exception.?;
         self.pending_exception = null;
@@ -587,7 +590,8 @@ pub fn runEventLoop(self: *Interpreter) anyerror!void {
             };
             _ = std.os.linux.nanosleep(&req, null);
         }
-        _ = timer.callback.function.value.call(timer.callback.function.value.ctx, arena, JSValue.UNDEFINED, &.{}) catch |err| {
+        _ = timer.callback.function.value.call(timer.callback.function.value.ctx, arena, JSValue.UNDEFINED, &.{}) catch |err0| {
+            const err = self.throwIfGap(err0);
             if (err != error.JsThrow) return err;
             return error.UncaughtException;
         };

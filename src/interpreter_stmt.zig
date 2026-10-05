@@ -26,12 +26,13 @@ const Outcome = union(enum) {
     thrown: JSValue,
 };
 
-/// Runs a statement, capturing BOTH abrupt channels. Catches ONLY
-/// error.JsThrow; OutOfMemory, NotImplemented, etc. propagate
-/// untouched (a JS `catch` must never swallow an interpreter feature
-/// gap).
+/// Runs a statement, capturing BOTH abrupt channels. Catches
+/// error.JsThrow, and a feature gap (error.NotImplemented) as the
+/// TypeError `throwIfGap` raises for it; OutOfMemory etc. propagate
+/// untouched.
 pub fn runCapturing(self: *Interpreter, env: *Environment, stmt: *zstatements.Statement) anyerror!Outcome {
-    const c = self.evalStatement(env, stmt) catch |err| {
+    const c = self.evalStatement(env, stmt) catch |err0| {
+        const err = self.throwIfGap(err0);
         if (err != error.JsThrow) return err;
         const ex = self.pending_exception orelse unreachable; // raiser invariant
         self.pending_exception = null; // take
@@ -581,7 +582,8 @@ pub fn evalStatement(self: *Interpreter, env: *Environment, stmt: *zstatements.S
             }
             return .{ .type = .normal, .value = last_value };
         },
-        .with_stmt => return error.NotImplemented,
+        // This engine is always strict, where `with` is a SyntaxError.
+        .with_stmt => return self.throwError(.syntax_error, "Strict mode code may not include a with statement", .{}),
     }
 }
 

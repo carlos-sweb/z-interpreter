@@ -163,7 +163,7 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                                 try obj.object.value.set(k, try self.getProperty(spread_val, k));
                             }
                         } else {
-                            if (spread_val != .object) return error.NotImplemented;
+                            if (spread_val != .object) return self.throwError(.type_error, "Spreading a {s} into an object literal is not supported yet", .{@tagName(spread_val)});
                             const keys = try spread_val.object.value.keys(arena);
                             defer arena.free(keys);
                             for (keys) |k| {
@@ -485,7 +485,9 @@ pub fn evalIn(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
         .regex => JSValue.fromBool(std.mem.eql(u8, key, "lastIndex") or
             (if (self.regexProps(r)) |bag| bag.object.value.hasOwnProperty(key) else false) or
             self.protos.regex.object.value.has(key)),
-        .function, .symbol, .map, .set, .@"error", .date, .promise, .bigint, .array_buffer, .data_view, .typed_array, .temporal => error.NotImplemented,
+        // A BigInt is a primitive: the real TypeError.
+        .bigint => self.throwError(.type_error, "Cannot use 'in' operator to search for '{s}' in a BigInt", .{key}),
+        .function, .symbol, .map, .set, .@"error", .date, .promise, .array_buffer, .data_view, .typed_array, .temporal => self.throwError(.type_error, "The 'in' operator on a {s} is not supported yet", .{@tagName(r)}),
     };
 }
 

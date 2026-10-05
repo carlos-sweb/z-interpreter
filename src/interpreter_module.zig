@@ -46,11 +46,13 @@ pub fn runModule(self: *Interpreter, specifier: []const u8) anyerror!JSValue {
         self.globals_ready = true;
     }
     if (self.script_env == null) self.script_env = try self.gcChildEnv(self.global_env);
-    _ = self.loadModule(specifier, null) catch |err| {
+    _ = self.loadModule(specifier, null) catch |err0| {
+        const err = self.throwIfGap(err0);
         if (err != error.JsThrow) return err;
         return error.UncaughtException;
     };
-    self.runEventLoop() catch |err| {
+    self.runEventLoop() catch |err0| {
+        const err = self.throwIfGap(err0);
         if (err != error.JsThrow) return err;
         return error.UncaughtException;
     };

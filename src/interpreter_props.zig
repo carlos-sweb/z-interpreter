@@ -317,7 +317,8 @@ pub fn setArrayProperty(self: *Interpreter, obj: JSValue, key: []const u8, value
 /// has for arrays (no general property bag).
 pub fn setTypedArrayProperty(self: *Interpreter, obj: JSValue, key: []const u8, value: JSValue) anyerror!void {
     const box = obj.typed_array;
-    const idx = std.fmt.parseInt(usize, key, 10) catch return error.NotImplemented;
+    const idx = std.fmt.parseInt(usize, key, 10) catch
+        return self.throwError(.type_error, "Cannot set property {s} of a typed array: named properties are not supported yet", .{key});
     try builtins.typedElemSet(self, box.value.kind, &box.value.owner.array_buffer.value, box.value.byte_offset, box.value.len, idx, value);
 }
 
@@ -404,7 +405,7 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
         // F.myProp = 1 -- the old "functions have no property bag"
         // gap is gone).
         if (std.mem.eql(u8, key, "prototype")) {
-            if (value != .object) return error.NotImplemented;
+            if (value != .object) return self.throwError(.type_error, "Setting a function's prototype to a non-object is not supported yet", .{});
             obj.function.value.prototype = value.retain();
             return;
         }
@@ -464,7 +465,7 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
             box.value.message = try box.value.allocator.dupe(u8, s);
             return;
         }
-        return error.NotImplemented;
+        return self.throwError(.type_error, "Cannot add property {s} to an Error object: not supported yet", .{key});
     }
     if (obj == .regex) {
         if (std.mem.eql(u8, key, "lastIndex")) {
@@ -528,9 +529,9 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
         // above (function/array/regex/object).
         if (box.value.target == .object) return self.setObjectProperty(box.value.target, key, value);
         if (box.value.target == .array) return self.setArrayProperty(box.value.target, key, value);
-        return error.NotImplemented;
+        return self.throwError(.type_error, "Cannot set property {s} through a Proxy whose target is a {s}: not supported yet", .{ key, @tagName(box.value.target) });
     }
-    if (obj != .object) return error.NotImplemented;
+    if (obj != .object) return self.throwError(.type_error, "Cannot add property {s} to a {s}: not supported yet", .{ key, @tagName(obj) });
     // Writing a property on `globalThis` creates/updates a global
     // binding (`globalThis.foo = 1` makes `foo` a global) -- UNLESS
     // `key` already names one (`undefined`/`NaN`/`Infinity`, marked

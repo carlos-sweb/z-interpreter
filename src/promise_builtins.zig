@@ -81,7 +81,8 @@ fn promiseConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     const resolve_fn = try interp(ctx).gcNewFunction(.{ .ctx = cap, .name = "resolve", .arity = 1, .call = capResolve });
     const reject_fn = try interp(ctx).gcNewFunction(.{ .ctx = cap, .name = "reject", .arity = 1, .call = capReject });
 
-    _ = executor.function.value.call(executor.function.value.ctx, allocator, JSValue.UNDEFINED, &.{ resolve_fn, reject_fn }) catch |err| {
+    _ = executor.function.value.call(executor.function.value.ctx, allocator, JSValue.UNDEFINED, &.{ resolve_fn, reject_fn }) catch |err0| {
+        const err = self.throwIfGap(err0);
         if (err != error.JsThrow) return err;
         const ex = self.pending_exception.?;
         self.pending_exception = null;

@@ -993,6 +993,16 @@ pub fn throwValue(self: *Interpreter, value: JSValue) anyerror {
 
 /// Build an engine error (ReferenceError/TypeError/...) and raise it.
 /// allocPrint's OOM propagates as OOM, never as JsThrow.
+/// A feature gap (`error.NotImplemented`, raised by this interpreter or a
+/// z-* library) that reaches a point where JS can observe exceptions
+/// (try/catch, a promise rejection, an async/generator body, the top
+/// level) becomes a catchable TypeError there instead of aborting the
+/// whole run. Every other error passes through unchanged.
+pub fn throwIfGap(self: *Interpreter, err: anyerror) anyerror {
+    if (err != error.NotImplemented) return err;
+    return self.throwError(.type_error, "This operation is not supported by this engine yet", .{});
+}
+
 pub fn throwError(self: *Interpreter, kind: zvalue.ErrorKind, comptime fmt: []const u8, args: anytype) anyerror {
     const msg = try std.fmt.allocPrint(self.gc_allocator, fmt, args);
     // ZError.init() (zerror.zig) dupes `message` into its own storage --
