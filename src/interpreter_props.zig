@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const regex_builtins = @import("regex_builtins.zig");
+const accessor_builtins = @import("accessor_builtins.zig");
 const zvalue = @import("zvalue");
 const zstring = @import("zstring");
 const JSValue = zvalue.JSValue;
@@ -63,10 +64,19 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
         .array => |box| blk: {
             if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.length()));
             const idx = std.fmt.parseInt(usize, key, 10) catch {
-                // Method (via Array.prototype) or a named own property
-                // (exec-result index/input/groups); else undefined.
+                // A named own property (array_props: exec-result
+                // index/input/groups, `a.constructor = ...`) shadows the
+                // inherited one; an own accessor runs with the array as
+                // `this`. Then Array.prototype's chain; else undefined.
+                if (self.array_props.get(@intFromPtr(box))) |bag| {
+                    if (bag.object.value.getOwnRecord(key)) |rec| {
+                        if (!rec.isAccessor()) break :blk rec.value.retain();
+                        const g = rec.getter orelse break :blk JSValue.UNDEFINED;
+                        break :blk try g.function.value.call(g.function.value.ctx, self.gc_allocator, obj, &.{});
+                    }
+                }
                 if (try self.getFromProto(obj, self.protos.array, key)) |m| break :blk m;
-                break :blk (self.arrayExtra(obj, key) orelse JSValue.UNDEFINED).retain();
+                break :blk JSValue.UNDEFINED;
             };
             if (idx >= box.value.length()) break :blk JSValue.UNDEFINED;
             break :blk box.value.get(idx).retain();
@@ -199,13 +209,13 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             if (try self.getFromProto(obj, self.protos.promise, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
-        .map => |box| blk: {
-            if (std.mem.eql(u8, key, "size")) break :blk JSValue.fromNumber(@floatFromInt(box.value.size()));
+        .map => blk: {
+            // `size` is an accessor on Map.prototype (accessor_builtins).
             if (try self.getFromProto(obj, self.protos.map, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
-        .set => |box| blk: {
-            if (std.mem.eql(u8, key, "size")) break :blk JSValue.fromNumber(@floatFromInt(box.value.size()));
+        .set => blk: {
+            // `size` is an accessor on Set.prototype (accessor_builtins).
             if (try self.getFromProto(obj, self.protos.set, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
@@ -213,7 +223,7 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
         // computed here rather than stored -- same category as
         // array/string's own special-cased `.length`.
         .array_buffer => |box| blk: {
-            if (std.mem.eql(u8, key, "byteLength")) break :blk JSValue.fromNumber(@floatFromInt(box.value.byteLength()));
+            // byteLength & co. are accessors on the prototype (accessor_builtins).
             if (try self.getFromProto(obj, self.arrayBufferProto(box.value.is_shared), key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
@@ -221,10 +231,8 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
         // accessor properties. `.buffer` returns the SAME `.array_buffer`
         // JSValue this view was constructed over (retained) -- real JS:
         // `dv.buffer === buf`.
-        .data_view => |box| blk: {
-            if (std.mem.eql(u8, key, "buffer")) break :blk box.value.owner.retain();
-            if (std.mem.eql(u8, key, "byteOffset")) break :blk JSValue.fromNumber(@floatFromInt(box.value.view.byte_offset));
-            if (std.mem.eql(u8, key, "byteLength")) break :blk JSValue.fromNumber(@floatFromInt(box.value.view.byte_length));
+        .data_view => blk: {
+            // buffer/byteOffset/byteLength are accessors on DataView.prototype.
             if (try self.getFromProto(obj, self.protos.data_view, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
@@ -233,10 +241,8 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
         // NEVER falls through to the prototype chain like a plain
         // object's missing numeric-string key would.
         .typed_array => |box| blk: {
-            if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.len));
-            if (std.mem.eql(u8, key, "buffer")) break :blk box.value.owner.retain();
-            if (std.mem.eql(u8, key, "byteOffset")) break :blk JSValue.fromNumber(@floatFromInt(box.value.byte_offset));
-            if (std.mem.eql(u8, key, "byteLength")) break :blk JSValue.fromNumber(@floatFromInt(box.value.len * box.value.kind.elemSize()));
+            // length/buffer/byteOffset/byteLength are accessors on
+            // %TypedArray%.prototype (accessor_builtins).
             if (std.fmt.parseInt(usize, key, 10)) |idx| {
                 if (idx >= box.value.len) break :blk JSValue.UNDEFINED;
                 break :blk try builtins.typedElemGet(self, box.value.kind, &box.value.owner.array_buffer.value, box.value.byte_offset, box.value.len, idx);
@@ -244,10 +250,8 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             if (try self.getFromProto(obj, self.typedArrayProto(box.value.kind), key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
-        .symbol => |box| blk: {
-            if (std.mem.eql(u8, key, "description")) {
-                break :blk if (box.value.description) |d| try self.gcNewString(d) else JSValue.UNDEFINED;
-            }
+        .symbol => blk: {
+            // `description` is an accessor on Symbol.prototype.
             if (try self.getFromProto(obj, self.protos.symbol, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
@@ -954,5 +958,8 @@ pub fn materializeProtos(self: *Interpreter) !void {
         try ctor_statics.object.value.defineProperty("BYTES_PER_ELEMENT", JSValue.fromNumber(@floatFromInt(e[2])), bpe_attrs);
         @field(self.protos, e[0]) = proto;
     }
+    // The builtin accessor properties (Map/Set size, buffer/view
+    // lengths, Symbol description, species, __proto__).
+    try accessor_builtins.install(self);
 }
 
