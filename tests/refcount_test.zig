@@ -18,7 +18,7 @@ fn expectObjectRefcount(source: []const u8, expected: usize) !void {
     try helpers.runAndCheck(source, expected, struct {
         fn check(want: usize, result: helpers.Result) !void {
             try testing.expect(result.value == .object);
-            try testing.expectEqual(want, result.value.object.count);
+            try testing.expectEqual(want, result.value.object.refCount());
         }
     }.check);
 }
