@@ -129,16 +129,21 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                                 // the function/class with the (already
                                 // static-or-computed-resolved) key.
                                 try self.maybeNameAnonymousValue(prop.value, value, key_str);
-                                try obj.object.value.set(key_str, value.retain());
+                                // `value` is owned (evalExpression's contract
+                                // since Etapa 1): it moves into the property.
+                                try obj.objectSet(key_str, value);
                             },
                             .method => {
                                 const f = try self.makeObjectMethodClosure(env, zfunctions.asFunctionNode(prop.value.data.function_like), obj);
-                                try obj.object.value.set(key_str, f);
+                                try obj.objectSet(key_str, f);
                             },
                             // get+set for the same key merge into one
                             // accessor property (defineAccessor's
                             // contract); data-only consumers see
-                            // UNDEFINED as its value.
+                            // UNDEFINED as its value. Known leak: over
+                            // an existing data key (`{a: v, get a(){}}`)
+                            // the old value is not released; z-value has
+                            // no Rc-aware accessor wrapper.
                             .get, .set => {
                                 const f = try self.makeObjectMethodClosure(env, zfunctions.asFunctionNode(prop.value.data.function_like), obj);
                                 try obj.object.value.defineAccessor(
@@ -164,14 +169,14 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                             defer builtins.freeOwnedKeys(arena, ks);
                             for (ks) |k| {
                                 if (isSymbolKey(k)) continue;
-                                try obj.object.value.set(k, try self.getProperty(spread_val, k));
+                                try obj.objectSet(k, try self.getProperty(spread_val, k));
                             }
                         } else {
                             if (spread_val != .object) return self.throwError(.type_error, "Spreading a {s} into an object literal is not supported yet", .{@tagName(spread_val)});
                             const keys = try spread_val.object.value.keys(arena);
                             defer arena.free(keys);
                             for (keys) |k| {
-                                try obj.object.value.set(k, spread_val.object.value.get(k).?.retain());
+                                try obj.objectSet(k, spread_val.object.value.get(k).?.retain());
                             }
                         }
                     },

@@ -221,7 +221,7 @@ fn objectAssign(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
         const ks = try source.object.value.keys(allocator);
         defer allocator.free(ks);
         for (ks) |k| {
-            try target.object.value.set(k, source.object.value.get(k).?.retain());
+            try target.objectSet(k, source.object.value.get(k).?.retain());
         }
     }
     return target.retain();
@@ -504,6 +504,9 @@ fn definePropertyFromJs(self: *Interpreter, obj: JSValue, key: []const u8, desc:
 
     if (existing) |rec| {
         // Partial merge onto an existing (configurable) property.
+        // Known leak: the old value (or getter/setter) is overwritten
+        // without being released. Not migrated to objectDefine, which
+        // replaces the whole descriptor instead of merging fields.
         if (has_value) {
             rec.value = d.get("value").?.retain();
             rec.getter = null;
@@ -1013,7 +1016,7 @@ fn objectFromEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
         // pair-key stays a real symbol-keyed property), not plain ToString.
         const ks = try self.encodeKey(k);
         defer self.gc_allocator.free(ks);
-        try result.object.value.set(ks, v.retain());
+        try result.objectSet(ks, v.retain());
     }
     return result;
 }

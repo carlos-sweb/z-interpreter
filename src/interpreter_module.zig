@@ -178,8 +178,10 @@ pub fn evalModuleBody(self: *Interpreter, env: *Environment, stmts: []const *zst
                     try self.collectDeclaredNames(inner, &decl_names);
                 },
                 .default => |expr| {
+                    // `v` is owned (evalExpression's contract since
+                    // Etapa 1): it moves into the export.
                     const v = try self.evalExpression(env, expr);
-                    try rec.exports.object.value.set("default", v.retain());
+                    try rec.exports.objectSet("default", v);
                 },
                 .named => |n| {
                     if (n.source) |src| {
@@ -187,7 +189,7 @@ pub fn evalModuleBody(self: *Interpreter, env: *Environment, stmts: []const *zst
                         for (n.specifiers) |spec| {
                             const v = dep.exports.object.value.get(spec.local) orelse
                                 return self.throwError(.syntax_error, "The requested module '{s}' does not provide an export named '{s}'", .{ src, spec.local });
-                            try rec.exports.object.value.set(spec.exported, v.retain());
+                            try rec.exports.objectSet(spec.exported, v.retain());
                         }
                     } else {
                         for (n.specifiers) |spec| try local_specs.append(arena, spec);
@@ -201,7 +203,7 @@ pub fn evalModuleBody(self: *Interpreter, env: *Environment, stmts: []const *zst
                     defer arena.free(keys);
                     for (keys) |k| {
                         if (std.mem.eql(u8, k, "default")) continue;
-                        try rec.exports.object.value.set(k, dep.exports.object.value.get(k).?.retain());
+                        try rec.exports.objectSet(k, dep.exports.object.value.get(k).?.retain());
                     }
                 },
             },
@@ -211,12 +213,12 @@ pub fn evalModuleBody(self: *Interpreter, env: *Environment, stmts: []const *zst
 
     for (decl_names.items) |name| {
         const v = env.get(name) orelse continue;
-        try rec.exports.object.value.set(name, v.retain());
+        try rec.exports.objectSet(name, v.retain());
     }
     for (local_specs.items) |spec| {
         const v = env.get(spec.local) orelse
             return self.throwError(.syntax_error, "Export '{s}' is not defined in module", .{spec.local});
-        try rec.exports.object.value.set(spec.exported, v.retain());
+        try rec.exports.objectSet(spec.exported, v.retain());
     }
 }
 

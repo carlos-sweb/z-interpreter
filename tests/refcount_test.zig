@@ -308,3 +308,176 @@ test "an object that dies releases its prototype" {
         \\probe;
     , 2);
 }
+
+// ---- z-value mutation wrappers / evalExpression ownership ----------------
+
+/// Function boxes alive after `source` ran (no GC pass: the collector
+/// would also reclaim a leaked, unreachable one). A box that reaches
+/// refcount 0 leaves the GC registry at once.
+fn liveFunctionBoxes(source: []const u8) !usize {
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try @import("zinterpreter").Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+    const value = try interp.run(source);
+    value.deinit();
+    var n: usize = 0;
+    var it = interp.gc_registry.iterator();
+    while (it.next()) |entry| {
+        if (entry.value_ptr.* == .function) n += 1;
+    }
+    return n;
+}
+
+test "an object literal property holds exactly one reference to its value" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let o = { a: probe }; // +1 (property), now 3
+        \\probe;
+    , 3);
+}
+
+test "a duplicate key in an object literal releases the value it replaces" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let o = { a: probe, a: 1 };
+        \\probe;
+    , 2);
+}
+
+test "a duplicate method in an object literal releases the method it replaces" {
+    try testing.expectEqual(try liveFunctionBoxes("let o = { m() {} }; 0;"), try liveFunctionBoxes("let o = { m() {}, m() {} }; 0;"));
+}
+
+test "a method in an object literal releases the value it replaces" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let o = { a: probe, a() {} };
+        \\probe;
+    , 2);
+}
+
+test "Object.assign over an existing key releases the value it replaces" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let t = {};
+        \\t.a = probe;            // now 3
+        \\Object.assign(t, { a: 1 });
+        \\probe;
+    , 2);
+}
+
+test "Object.assign copies hold exactly one reference each" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let t = Object.assign({}, { a: probe }); // +1 (t.a), now 3
+        \\probe;
+    , 3);
+}
+
+test "spread with overlapping keys releases the value it replaces" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let o = { a: probe, ...{ a: 1 } };
+        \\probe;
+    , 2);
+}
+
+test "spread from a proxy with overlapping keys releases the value it replaces" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let o = { a: probe, ...new Proxy({ a: 1 }, {}) };
+        \\probe;
+    , 2);
+}
+
+test "Object.fromEntries with a repeated key releases the value it replaces" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let o = Object.fromEntries([['a', probe], ['a', 1]]);
+        \\probe;
+    , 2);
+}
+
+test "new Map holds exactly one reference per key and value" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let m = new Map([[probe, probe]]); // +1 key, +1 value, now 4
+        \\probe;
+    , 4);
+}
+
+test "new Map with a repeated key releases the value it replaces" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let m = new Map([['k', probe], ['k', 1]]);
+        \\probe;
+    , 2);
+}
+
+test "new Map with a repeated key releases the redundant key" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let m = new Map([[probe, 1], [probe, 2]]); // one stored key, now 3
+        \\probe;
+    , 3);
+}
+
+test "new Set with a repeated value holds one reference" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let s = new Set([probe, probe]); // +1, now 3
+        \\probe;
+    , 3);
+}
+
+test "Map.delete releases the stored key" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let m = new Map();
+        \\m.set(probe, 1); // now 3
+        \\m.delete(probe);
+        \\probe;
+    , 2);
+}
+
+test "Set.add of a value already present does not retain it again" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let s = new Set();
+        \\s.add(probe); // now 3
+        \\s.add(probe);
+        \\probe;
+    , 3);
+}
+
+test "Map.clear releases every key and value" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let m = new Map();
+        \\m.set(probe, probe); // now 4
+        \\m.clear();
+        \\probe;
+    , 2);
+}
+
+test "a static field holds exactly one reference to its value" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\class C { static x = probe; } // +1 (C.x), now 3
+        \\probe;
+    , 3);
+}
+
+test "a duplicate static field releases the value it replaces" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\class C { static x = probe; static x = 1; }
+        \\probe;
+    , 2);
+}
+
+test "a duplicate class method releases the method it replaces" {
+    try testing.expectEqual(try liveFunctionBoxes("class C { m() {} } 0;"), try liveFunctionBoxes("class C { m() {} m() {} } 0;"));
+    try testing.expectEqual(try liveFunctionBoxes("class C { static m() {} } 0;"), try liveFunctionBoxes("class C { static m() {} static m() {} } 0;"));
+}

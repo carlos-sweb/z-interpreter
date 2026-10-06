@@ -497,7 +497,9 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
                 // fieldDisplayName -- see runInstanceFields).
                 if (el.value) |vexpr| try self.maybeNameAnonymousValue(vexpr, v, fieldDisplayName(key));
                 const bag = try self.functionStatics(class_fn);
-                try bag.object.value.set(key, v.retain());
+                // `v` is owned (evalExpression's contract since Etapa 1):
+                // it moves into the property.
+                try bag.objectSet(key, v);
             } else {
                 // Instance fields are CAPTURED here (key already
                 // resolved) and initialized per-instance at
@@ -524,7 +526,7 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
         // definePropertyFromJs already does for JS-level accessors.
         const method_attrs = zvalue.PropertyDescriptor{ .writable = true, .enumerable = false, .configurable = true };
         switch (el.kind) {
-            .method => try target.object.value.defineProperty(key, m, method_attrs),
+            .method => try target.objectDefine(key, m, method_attrs),
             .get => {
                 try target.object.value.defineAccessor(key, m, null, JSValue.UNDEFINED);
                 const rec = target.object.value.getOwnRecordMut(key).?;

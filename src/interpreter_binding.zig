@@ -33,6 +33,12 @@ const FiberState = interpreter_mod.FiberState;
 /// `box.value.toSlice()`'s borrowed slice directly -- a single
 /// uniform contract across every branch, same reasoning as
 /// `ownEnumerableKeys`/`freeOwnedKeys`'s always-owned contract.
+///
+/// Ownership is mixed (pre-existing, not fixed): array and set sources
+/// hand back BORROWED elements, string, map and iterator sources OWNED
+/// ones (fresh strings, fresh pairs, drained values). Callers that
+/// retain every item are right for the borrowed case and leak for the
+/// owned one.
 pub fn iterableItems(self: *Interpreter, value: JSValue) anyerror![]const JSValue {
     const arena = self.gc_allocator;
     return switch (value) {

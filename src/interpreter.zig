@@ -1182,6 +1182,39 @@ test "a gcNew* whose gcTrack fails releases what it built" {
     try testing.expectEqual(@as(usize, 1), owner.array_buffer.refCount());
 }
 
+test "Map.prototype.set and Set.prototype.add release their arguments on OOM" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    const map_set = try interp.run("Map.prototype.set");
+    defer map_set.deinit();
+    const set_add = try interp.run("Set.prototype.add");
+    defer set_add.deinit();
+    const key = try interp.gcNewObject();
+    defer key.deinit();
+    const value = try interp.gcNewObject();
+    defer value.deinit();
+
+    // The map and set keep the allocator they were made with: their
+    // first insert must allocate, and that allocation fails.
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{});
+    const m = try JSValue.newMap(failing.allocator());
+    defer m.deinit();
+    const s = try JSValue.newSet(failing.allocator());
+    defer s.deinit();
+    failing.fail_index = failing.alloc_index;
+    const f = map_set.function.value;
+    try testing.expectError(error.OutOfMemory, f.call(f.ctx, interp.gc_allocator, m, &.{ key, value }));
+    const g = set_add.function.value;
+    try testing.expectError(error.OutOfMemory, g.call(g.ctx, interp.gc_allocator, s, &.{key}));
+    try testing.expect(!m.map.value.has(key));
+    try testing.expect(!s.set.value.has(key));
+    try testing.expectEqual(@as(usize, 1), key.object.refCount());
+    try testing.expectEqual(@as(usize, 1), value.object.refCount());
+}
+
 test "the shutdown snapshot of the GC registry never grows while it fills" {
     const testing = std.testing;
     var allocating = std.Io.Writer.Allocating.init(testing.allocator);
