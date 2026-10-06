@@ -789,6 +789,15 @@ pub const Interpreter = struct {
     /// Internal slots of WeakMap/WeakSet/WeakRef/FinalizationRegistry
     /// instances (see ObjectSlots).
     object_slots: std.AutoHashMapUnmanaged(usize, ObjectSlots) = .empty,
+    /// ZObject.prototype es un puntero crudo sin refcount. Esta tabla
+    /// mantiene vivos los prototipos que z-object no retiene. Si z-object
+    /// refactoriza el prototipo con refcount, esta tabla se elimina.
+    /// Keyed by the object's box address; the value is an owned reference
+    /// to its prototype, set by `setOwnedPrototype` (prototypes coming from
+    /// JS: Object.create, Object.setPrototypeOf, the __proto__ setter) and
+    /// released when the object dies. Intrinsic prototypes need no entry:
+    /// the interpreter's own fields keep them alive.
+    proto_refs: std.AutoHashMapUnmanaged(usize, JSValue) = .empty,
     /// Named own properties on array values (arrays have no general
     /// property bag) -- used by exec/match result arrays for
     /// `index`/`input`/`groups`. Keyed by the array Rc box pointer; the
@@ -938,6 +947,7 @@ pub const Interpreter = struct {
     pub const throwError = interpreter_gc.throwError;
     pub const throwIfGap = interpreter_gc.throwIfGap;
     pub const heapBoxAddress = interpreter_gc.heapBoxAddress;
+    pub const setOwnedPrototype = interpreter_gc.setOwnedPrototype;
 
     // z-interpreter-refactor.md, Step 5 Phase C batch 8: statement/
     // hoisting/loop cluster, split into interpreter_stmt.zig.
@@ -1079,6 +1089,26 @@ pub const invokeFunctionNode = interpreter_class.invokeFunctionNode;
 
 fn gcTestInterp(allocating: *std.Io.Writer.Allocating) !Interpreter {
     return Interpreter.init(std.testing.allocator, &allocating.writer);
+}
+
+test "the shutdown snapshot of the GC registry never grows while it fills" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    _ = try interp.run("var keep = []; for (var i = 0; i < 5000; i++) keep.push({ i: i });");
+    const n = interp.gc_registry.count();
+    try testing.expect(n >= 5000);
+    var expected: std.AutoHashMapUnmanaged(usize, void) = .empty;
+    defer expected.deinit(testing.allocator);
+    try expected.ensureTotalCapacity(testing.allocator, n);
+    var snap = try interpreter_gc.registrySnapshot(&interp);
+    defer snap.deinit(interp.gc_allocator);
+    // Same capacity as a reservation for exactly n entries: the copy never
+    // rehashed (putAssumeCapacity would also assert this in safe builds).
+    try testing.expectEqual(expected.capacity(), snap.capacity());
+    try testing.expectEqual(n, snap.count());
 }
 
 test "collectGarbage reclaims a plain object-object cycle" {

@@ -296,6 +296,7 @@ pub fn deinit(self: *Interpreter) void {
     var osd = self.object_slots.valueIterator();
     while (osd.next()) |slots| slots.freeStorage(self.gc_allocator);
     self.object_slots.deinit(self.gc_allocator);
+    self.proto_refs.deinit(self.gc_allocator);
     self.array_props.deinit(self.gc_allocator);
     self.primitive_wrapper_data.deinit(self.gc_allocator);
     self.deleted_fn_props.deinit(self.gc_allocator);
@@ -336,6 +337,10 @@ pub fn gcOnBoxDestroyed(ctx: *anyopaque, box: *anyopaque) void {
             kv.value.last_index.deinit();
             if (kv.value.props) |bag| bag.deinit();
         }
+    }
+    // The reference an object held to a JS-supplied prototype.
+    if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| {
+        if (!self.tearing_down) kv.value.deinit();
     }
     // A builtin instance's internal slots (WeakMap & co., Iterator helpers).
     if (self.object_slots.fetchRemove(@intFromPtr(box))) |kv| {
@@ -616,10 +621,13 @@ pub fn traceValueChildren(self: *Interpreter, v: JSValue, visitor: anytype) void
         // assumed.
         .undefined, .null, .boolean, .number, .string, .regex, .symbol, .date, .bigint, .array_buffer, .temporal => {},
         .array => |box| for (box.value.toSliceMut()) |*child| visitor.value(child.*),
-        .object => |box| for (box.value.properties.values()) |prop| {
-            visitor.value(prop.value);
-            if (prop.getter) |g| visitor.value(g);
-            if (prop.setter) |s| visitor.value(s);
+        .object => |box| {
+            for (box.value.properties.values()) |prop| {
+                visitor.value(prop.value);
+                if (prop.getter) |g| visitor.value(g);
+                if (prop.setter) |s| visitor.value(s);
+            }
+            if (self.proto_refs.get(@intFromPtr(box))) |p| visitor.value(p);
         },
         .map => |box| {
             for (box.value.keys()) |*key| visitor.value(key.*);
@@ -765,6 +773,10 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
                 if (prop.getter) |g| sweeper.value(g);
                 if (prop.setter) |s| sweeper.value(s);
             }
+            // Through the sweeper (a prototype collected in this same
+            // sweep is skipped), and out of the table before destroy() so
+            // the hook doesn't release it a second time.
+            if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             box.value.deinit();
             box.destroy();
         },
@@ -967,13 +979,39 @@ pub fn collectGarbage(self: *Interpreter) void {
 /// `freeGarbageNode` (with `garbage` = "every currently registered
 /// address") so two nodes that reference each other don't race to
 /// free one another mid-teardown.
-pub fn freeAllGcNodes(self: *Interpreter) void {
-    var garbage: std.AutoHashMapUnmanaged(usize, void) = .empty;
-    defer garbage.deinit(self.gc_allocator);
-    var it = self.gc_registry.iterator();
-    while (it.next()) |entry| {
-        garbage.put(self.gc_allocator, entry.key_ptr.*, {}) catch return;
+/// The set of every registered node's address, sized up front. Filling a
+/// map that grows as it goes, in the registry's own slot (hash) order, is
+/// quadratic: each growth leaves the next keys landing in long runs of
+/// taken slots. Reserving first means no growth while it fills.
+pub fn registrySnapshot(self: *Interpreter) !std.AutoHashMapUnmanaged(usize, void) {
+    var set: std.AutoHashMapUnmanaged(usize, void) = .empty;
+    try set.ensureTotalCapacity(self.gc_allocator, self.gc_registry.count());
+    var it = self.gc_registry.keyIterator();
+    while (it.next()) |addr| set.putAssumeCapacity(addr.*, {});
+    return set;
+}
+
+/// [[SetPrototypeOf]] for a prototype supplied by JS (`proto` is an
+/// `.object` or `.null`): sets ZObject's raw pointer and keeps an owned
+/// reference to the new prototype in `proto_refs`, releasing the previous
+/// one. On a refused change (a cycle) nothing is retained or released.
+pub fn setOwnedPrototype(self: *Interpreter, obj: JSValue, proto: JSValue) !void {
+    const p: ?*@TypeOf(obj.object.value) = if (proto == .object) @constCast(&proto.object.value) else null;
+    try obj.object.value.setPrototype(p);
+    const key = @intFromPtr(obj.object);
+    if (proto == .object) {
+        const gop = try self.proto_refs.getOrPut(self.gc_allocator, key);
+        const old: ?JSValue = if (gop.found_existing) gop.value_ptr.* else null;
+        gop.value_ptr.* = proto.retain();
+        if (old) |o| o.deinit();
+    } else if (self.proto_refs.fetchRemove(key)) |kv| {
+        kv.value.deinit();
     }
+}
+
+pub fn freeAllGcNodes(self: *Interpreter) void {
+    var garbage = registrySnapshot(self) catch return;
+    defer garbage.deinit(self.gc_allocator);
     var sweeper = Sweeper{ .garbage = &garbage };
     var git = garbage.keyIterator();
     while (git.next()) |addr| {

@@ -256,3 +256,55 @@ test "a promise job keeps its value after the settling promise is gone" {
         \\p.then(o => console.log(o.k));
     , "true\n3\nkept\n");
 }
+
+// ---- Lifetimes the argument fix exposed -------------------------------
+
+test "code run by eval outlives the eval argument string" {
+    // The source string is built at runtime and dropped right after the
+    // call; functions defined in it must still find their identifiers.
+    try helpers.expectStdout(
+        \\var s1 = 'first'; var o;
+        \\var code = 'o = { get foo() { return s' + '1; } };';
+        \\eval(code);
+        \\code = null;
+        \\var junk = []; for (var i = 0; i < 500; i++) junk.push(('o = { get foo() { return QQ; } };' + i).slice(0, 34));
+        \\console.log(o.foo);
+    , "first\n");
+}
+
+test "a temporary prototype stays alive with its object" {
+    try helpers.expectStdout(
+        \\var a = Object.create({ p: 42 });
+        \\var b = {}; Object.setPrototypeOf(b, { q: 'set' });
+        \\var c = {}; c.__proto__ = { r: 'proto' };
+        \\var junk = []; for (var i = 0; i < 500; i++) junk.push({ x: i, y: 'z' + i });
+        \\console.log(a.p, b.q, c.r);
+    , "42 set proto\n");
+}
+
+test "an object holds exactly one reference to a prototype set from JS" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let o = Object.create(probe); // +1 (o's prototype)
+        \\probe;
+    , 3);
+}
+
+test "replacing or clearing a prototype releases the old one" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let o = Object.create(probe);
+        \\Object.setPrototypeOf(o, {}); // releases probe
+        \\let p = {}; p.__proto__ = probe; p.__proto__ = null; // +1, then released
+        \\probe;
+    , 2);
+}
+
+test "an object that dies releases its prototype" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let o = Object.create(probe);
+        \\o = null;
+        \\probe;
+    , 2);
+}

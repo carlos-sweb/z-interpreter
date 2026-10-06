@@ -168,8 +168,7 @@ fn protoSetter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
         return self.throwError(.type_error, "Setting the prototype of a {s} is not supported yet", .{@tagName(this_value)});
     if (proto != .null and proto != .object)
         return self.throwError(.type_error, "A {s} as a prototype is not supported yet", .{@tagName(proto)});
-    const p: ?*@TypeOf(this_value.object.value) = if (proto == .null) null else @constCast(&proto.object.value);
-    this_value.object.value.setPrototype(p) catch |err| switch (err) {
+    self.setOwnedPrototype(this_value, proto) catch |err| switch (err) {
         error.PrototypeCycle => return self.throwError(.type_error, "Cyclic __proto__ value", .{}),
         else => return self.throwError(.type_error, "Object.prototype.__proto__ setter failed: {s}", .{@errorName(err)}),
     };

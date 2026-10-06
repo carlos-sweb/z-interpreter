@@ -854,8 +854,8 @@ fn objectCreate(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     if (proto != .object and proto != .null) {
         return self.throwError(.type_error, "Object prototype may only be an Object or null", .{});
     }
-    var obj = try interp(ctx).gcNewObject();
-    if (proto == .object) try obj.object.value.setPrototype(@constCast(&proto.object.value));
+    const obj = try interp(ctx).gcNewObject();
+    if (proto == .object) try self.setOwnedPrototype(obj, proto);
     const props = arg(args, 1);
     if (props == .object) {
         const keys = try props.object.value.keys(allocator);
@@ -960,10 +960,8 @@ fn objectSetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     const obj = arg(args, 0);
     const proto = arg(args, 1);
     if (obj != .object) return self.throwError(.type_error, "Object.setPrototypeOf called on non-object", .{});
-    if (proto == .object) {
-        try obj.object.value.setPrototype(@constCast(&proto.object.value));
-    } else if (proto == .null) {
-        try obj.object.value.setPrototype(null);
+    if (proto == .object or proto == .null) {
+        try self.setOwnedPrototype(obj, proto);
     } else {
         return self.throwError(.type_error, "Object prototype may only be an Object or null", .{});
     }

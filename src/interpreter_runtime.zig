@@ -217,7 +217,12 @@ pub fn run(self: *Interpreter, source: []const u8) anyerror!JSValue {
 /// exception from the code propagates. Returns eval's completion value.
 pub fn evalSource(self: *Interpreter, scope: *Environment, src: []const u8) anyerror!JSValue {
     const ast_arena = self.arena_state.allocator();
-    const parser = zfunctions.Parser.init(ast_arena, src) catch
+    // The AST points into its source text (identifiers, string bodies),
+    // and `src` belongs to the caller's string, which can die as soon as
+    // eval() returns -- while functions defined in the code live on. The
+    // arena copy lives as long as the AST.
+    const owned_src = try ast_arena.dupe(u8, src);
+    const parser = zfunctions.Parser.init(ast_arena, owned_src) catch
         return self.throwError(.syntax_error, "Invalid or unexpected token in eval", .{});
     // Reuse whatever budget is already active for the current
     // execution context (main-thread `run()`, or the fiber-scoped
