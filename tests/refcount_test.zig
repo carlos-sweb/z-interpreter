@@ -481,3 +481,124 @@ test "a duplicate class method releases the method it replaces" {
     try testing.expectEqual(try liveFunctionBoxes("class C { m() {} } 0;"), try liveFunctionBoxes("class C { m() {} m() {} } 0;"));
     try testing.expectEqual(try liveFunctionBoxes("class C { static m() {} } 0;"), try liveFunctionBoxes("class C { static m() {} static m() {} } 0;"));
 }
+
+// ---- owned evalExpression values in class/default/sequence paths --------
+
+/// Refcount of the `.function` a script completes with.
+fn functionRefcountOf(source: []const u8) !usize {
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try @import("zinterpreter").Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+    const value = try interp.run(source);
+    defer value.deinit();
+    try testing.expect(value == .function);
+    return value.function.refCount();
+}
+
+test "an instance field holds exactly one reference to its value" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\class C { x = probe; }
+        \\let c = new C(); // +1 (c.x), now 3
+        \\probe;
+    , 3);
+}
+
+test "a parameter default is released after binding; a passed argument is not" {
+    // The call's environment keeps `x` (+1) until the collector runs.
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let f = (x = probe) => 0;
+        \\f();
+        \\probe;
+    , 3);
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let f = (x = {}) => 0;
+        \\f(probe);
+        \\probe;
+    , 3);
+}
+
+test "an array pattern default is released after binding; an item is not" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let [a = probe] = []; // +1 (a), now 3
+        \\probe;
+    , 3);
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let [a = {}] = [probe];
+        \\probe;
+    , 3);
+}
+
+test "an object pattern default is released after binding" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let { a = probe } = {}; // +1 (a), now 3
+        \\probe;
+    , 3);
+    // Not from the default: the getProperty result still leaks one
+    // reference (block D); this pins that it is not released twice.
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let { a = {} } = { a: probe };
+        \\probe;
+    , 4);
+}
+
+test "an array assignment default is released after assigning; an item is not" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let a;
+        \\[a = probe] = []; // +1 (a), now 3
+        \\probe;
+    , 3);
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let a;
+        \\[a = {}] = [probe];
+        \\probe;
+    , 3);
+}
+
+test "an object assignment default is released after assigning" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let a;
+        \\({ a: a = probe } = {}); // +1 (a), now 3
+        \\probe;
+    , 3);
+    // Not from the default: the getProperty result still leaks one
+    // reference (block D); this pins that it is not released twice.
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let a;
+        \\({ a: a = {} } = { a: probe });
+        \\probe;
+    , 4);
+}
+
+test "extends holds exactly one reference to the parent class" {
+    // The class's context keeps one; the evaluated `extends` value is
+    // released.
+    const alone = try functionRefcountOf("let probe = class {}; probe.prototype; probe;");
+    const extended = try functionRefcountOf("let probe = class {}; probe.prototype; class C extends probe {} probe;");
+    try testing.expectEqual(alone + 1, extended);
+}
+
+test "a sequence expression releases the values it discards" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\(probe, 0);
+        \\probe;
+    , 2);
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let f = () => probe;
+        \\(f(), 0);
+        \\probe;
+    , 2);
+}

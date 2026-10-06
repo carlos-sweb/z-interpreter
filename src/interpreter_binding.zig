@@ -252,9 +252,15 @@ pub fn bindPattern(self: *Interpreter, env: *Environment, pattern: *const zstate
             for (arr_pat.elements, 0..) |maybe_el, i| {
                 const el = maybe_el orelse continue; // elision hole
                 var v = if (i < items.len) items[i] else JSValue.UNDEFINED;
+                // A default is owned (evalExpression's) and bindPattern
+                // retains what it binds: release only that case, never
+                // an item (see iterableItems' ownership note).
+                var from_default = false;
+                defer if (from_default) v.deinit();
                 if (v == .@"undefined") {
                     if (el.default) |def| {
                         v = try self.evalExpression(env, def);
+                        from_default = true;
                         // NamedEvaluation: `[a = AnonFn]` names it "a".
                         if (el.pattern.* == .identifier) {
                             try self.maybeNameAnonymousValue(def, v, el.pattern.identifier.name);
@@ -286,9 +292,15 @@ pub fn bindPattern(self: *Interpreter, env: *Environment, pattern: *const zstate
             // objects -- all already live there.
             for (obj_pat.properties) |prop| {
                 var v = try self.getProperty(value, prop.key);
+                // A default is owned (evalExpression's) and bindPattern
+                // retains what it binds: release it. (The getProperty
+                // result is owned too and still leaks -- block D.)
+                var from_default = false;
+                defer if (from_default) v.deinit();
                 if (v == .@"undefined") {
                     if (prop.default) |def| {
                         v = try self.evalExpression(env, def);
+                        from_default = true;
                         // NamedEvaluation: `{a = AnonFn}` names it "a".
                         if (prop.value.* == .identifier) {
                             try self.maybeNameAnonymousValue(def, v, prop.value.identifier.name);
@@ -360,8 +372,15 @@ pub fn destructuringAssign(self: *Interpreter, env: *Environment, target: *zpars
                 }
                 var v = if (i < items.len) items[i] else JSValue.UNDEFINED;
                 var el_target = el;
+                // A default is owned (evalExpression's) and assignTo
+                // retains what it stores: release only that case.
+                var from_default = false;
+                defer if (from_default) v.deinit();
                 if (el.data == .assignment and el.data.assignment.op == .assign) {
-                    if (v == .@"undefined") v = try self.evalExpression(env, el.data.assignment.value);
+                    if (v == .@"undefined") {
+                        v = try self.evalExpression(env, el.data.assignment.value);
+                        from_default = true;
+                    }
                     el_target = el.data.assignment.target;
                 }
                 try self.destructuringAssignTarget(env, el_target, v);
@@ -394,8 +413,16 @@ pub fn destructuringAssign(self: *Interpreter, env: *Environment, target: *zpars
                         try consumed.append(arena, pk);
                         var v = try self.getProperty(value, key);
                         var el_target = prop.value;
+                        // A default is owned (evalExpression's) and
+                        // assignTo retains what it stores: release it.
+                        // (The getProperty result still leaks -- block D.)
+                        var from_default = false;
+                        defer if (from_default) v.deinit();
                         if (el_target.data == .assignment and el_target.data.assignment.op == .assign) {
-                            if (v == .@"undefined") v = try self.evalExpression(env, el_target.data.assignment.value);
+                            if (v == .@"undefined") {
+                                v = try self.evalExpression(env, el_target.data.assignment.value);
+                                from_default = true;
+                            }
                             el_target = el_target.data.assignment.target;
                         }
                         try self.destructuringAssignTarget(env, el_target, v);

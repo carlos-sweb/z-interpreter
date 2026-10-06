@@ -302,13 +302,16 @@ pub fn runInstanceFields(self: *Interpreter, cctx: *ClassCtx, instance: JSValue)
     field_env.private_ctx = cctx;
     for (cctx.instance_fields) |fd| {
         const v = if (fd.value) |vexpr| try self.evalExpression(field_env, vexpr) else JSValue.UNDEFINED;
+        // `v` is owned (evalExpression's contract since Etapa 1) and
+        // moves into the field; released if it never gets there.
+        errdefer v.deinit();
         // NamedEvaluation: `class C { x = AnonFn }` names it "x" --
         // `fieldDisplayName` recovers "#x" from a private key's
         // internal `\x00P<hex>|#x` encoding, per real spec.
         if (fd.value) |vexpr| try self.maybeNameAnonymousValue(vexpr, v, fieldDisplayName(fd.key));
         const is_private = fd.key.len > 0 and fd.key[0] == 0;
         const target = &instance.object.value;
-        target.set(fd.key, v.retain()) catch |err| switch (err) {
+        target.set(fd.key, v) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             // A constructor can freeze/preventExtensions `this` BEFORE
             // fields initialize. Per spec, a PUBLIC field then fails
@@ -328,7 +331,7 @@ pub fn runInstanceFields(self: *Interpreter, cctx: *ClassCtx, instance: JSValue)
                     target.is_frozen = saved_frozen;
                     target.is_extensible = saved_ext;
                 }
-                target.set(fd.key, v.retain()) catch |e2| return switch (e2) {
+                target.set(fd.key, v) catch |e2| return switch (e2) {
                     error.OutOfMemory => error.OutOfMemory,
                     else => unreachable, // flags lifted; nothing else can gate a fresh key
                 };
@@ -349,6 +352,8 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
     const arena = self.gc_allocator;
 
     var super_ctor: ?JSValue = null;
+    // Owned (evalExpression's): ClassCtx retains its own copy below.
+    defer if (super_ctor) |sc| sc.deinit();
     var super_proto: ?JSValue = null;
     if (cnode.superclass) |sc_expr| {
         const sc = try self.evalExpression(env, sc_expr);
@@ -593,9 +598,15 @@ pub fn invokeFunctionNode(
 
     for (fnode.params.items, 0..) |param, i| {
         var value = if (i < args.len) args[i] else JSValue.UNDEFINED;
+        // `args[i]` is borrowed; a default is owned (evalExpression's)
+        // and bindPattern retains what it binds, so only a default is
+        // released here.
+        var from_default = false;
+        defer if (from_default) value.deinit();
         if (value == .@"undefined") {
             if (param.default) |def| {
                 value = try self.evalExpression(call_env, def);
+                from_default = true;
                 // NamedEvaluation: `function f(x = AnonFn)` names it "x".
                 if (param.pattern.* == .identifier) {
                     try self.maybeNameAnonymousValue(def, value, param.pattern.identifier.name);

@@ -71,8 +71,12 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
         .this_expr => return env.resolveThis(),
         .paren => |inner| return self.evalExpression(env, inner),
         .sequence => |items| {
+            // Every value but the last is discarded: release it.
             var result: JSValue = JSValue.UNDEFINED;
-            for (items) |item| result = try self.evalExpression(env, item);
+            for (items) |item| {
+                result.deinit();
+                result = try self.evalExpression(env, item);
+            }
             return result;
         },
         .template_literal => |t| {
