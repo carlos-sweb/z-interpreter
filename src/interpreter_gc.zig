@@ -482,66 +482,79 @@ pub fn gcChildEnv(self: *Interpreter, parent: *Environment) !*Environment {
 
 pub fn gcNewObject(self: *Interpreter) !JSValue {
     const v = try JSValue.newObject(self.gc_allocator);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
 pub fn gcNewArray(self: *Interpreter) !JSValue {
     const v = try JSValue.newArray(self.gc_allocator);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
 pub fn gcNewMap(self: *Interpreter) !JSValue {
     const v = try JSValue.newMap(self.gc_allocator);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
 pub fn gcNewSet(self: *Interpreter) !JSValue {
     const v = try JSValue.newSet(self.gc_allocator);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
 pub fn gcNewFunction(self: *Interpreter, callable: zvalue.Callable) !JSValue {
     const v = try JSValue.newFunction(self.gc_allocator, callable);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
 pub fn gcNewPromise(self: *Interpreter) !JSValue {
     const v = try JSValue.newPromise(self.gc_allocator);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
 pub fn gcNewError(self: *Interpreter, kind: zvalue.ErrorKind, message: []const u8) !JSValue {
     const v = try JSValue.newError(self.gc_allocator, kind, message);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
 pub fn gcNewAggregateError(self: *Interpreter, message: []const u8, errs: []const JSValue) !JSValue {
     const v = try JSValue.newAggregateError(self.gc_allocator, message, errs);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
 pub fn gcNewSymbol(self: *Interpreter, description: ?[]const u8) !JSValue {
     const v = try JSValue.newSymbol(self.gc_allocator, description);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
 pub fn gcNewString(self: *Interpreter, content: []const u8) !JSValue {
     const v = try JSValue.newString(self.gc_allocator, content);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
 pub fn gcNewDate(self: *Interpreter, ms: i64) !JSValue {
     const v = try JSValue.newDate(self.gc_allocator, ms);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
 pub fn gcNewTemporal(self: *Interpreter, value: zvalue.TemporalValue) !JSValue {
     const v = try JSValue.newTemporal(self.gc_allocator, value);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
 pub fn gcNewBigInt(self: *Interpreter, raw_digit_text: []const u8) !JSValue {
     const v = try JSValue.newBigInt(self.gc_allocator, raw_digit_text);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
@@ -549,21 +562,25 @@ pub fn gcNewBigInt(self: *Interpreter, raw_digit_text: []const u8) !JSValue {
 /// `.mul`/etc.), not parsed from literal digit text.
 pub fn gcNewBigIntValue(self: *Interpreter, v: zbigint.ZBigInt) !JSValue {
     const jv = try JSValue.newBigIntFromValue(self.gc_allocator, v);
+    errdefer jv.deinit();
     try self.gcTrack(jv);
     return jv;
 }
 pub fn gcNewProxy(self: *Interpreter, target: JSValue, handler: JSValue) !JSValue {
     const v = try JSValue.newProxy(self.gc_allocator, target, handler);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
 pub fn gcNewArrayBuffer(self: *Interpreter, byte_length: usize) !JSValue {
     const v = try JSValue.newArrayBuffer(self.gc_allocator, byte_length);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
 pub fn gcNewSharedArrayBuffer(self: *Interpreter, byte_length: usize) !JSValue {
     const v = try JSValue.newSharedArrayBuffer(self.gc_allocator, byte_length);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
@@ -571,8 +588,15 @@ pub fn gcNewSharedArrayBuffer(self: *Interpreter, byte_length: usize) !JSValue {
 /// `ArrayBuffer.prototype.slice`'s copy), not freshly zero-allocated
 /// -- same shape as `gcNewBigIntValue` for an already-computed
 /// `ZBigInt`.
+/// Takes ownership of `v`, also on failure (like z-value's constructors).
 pub fn gcNewArrayBufferFromValue(self: *Interpreter, v: zbuffer.ArrayBuffer) !JSValue {
-    const jv: JSValue = .{ .array_buffer = try zvalue.Rc(zvalue.ArrayBuffer).create(self.gc_allocator, v) };
+    var payload = v;
+    const box = zvalue.Rc(zvalue.ArrayBuffer).create(self.gc_allocator, payload) catch |err| {
+        payload.deinit();
+        return err;
+    };
+    const jv: JSValue = .{ .array_buffer = box };
+    errdefer jv.deinit();
     try self.gcTrack(jv);
     return jv;
 }
@@ -582,6 +606,7 @@ pub fn gcNewArrayBufferFromValue(self: *Interpreter, v: zbuffer.ArrayBuffer) !JS
 /// `owner`.
 pub fn gcNewDataView(self: *Interpreter, owner: JSValue, byte_offset: usize, byte_length: ?usize) zbuffer.BufferError!JSValue {
     const v = try JSValue.newDataView(self.gc_allocator, owner, byte_offset, byte_length);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
@@ -589,6 +614,7 @@ pub fn gcNewDataView(self: *Interpreter, owner: JSValue, byte_offset: usize, byt
 /// `gcNewDataView`'s doc comment -- same convention).
 pub fn gcNewTypedArray(self: *Interpreter, owner: JSValue, byte_offset: usize, len: ?usize, kind: zvalue.TypedKind) zbuffer.BufferError!JSValue {
     const v = try JSValue.newTypedArray(self.gc_allocator, owner, byte_offset, len, kind);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }

@@ -384,10 +384,8 @@ fn typedArrayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
     if (first == .undefined or first == .number) {
         const n: usize = if (first == .undefined) 0 else try toByteIndexArg(self, first, "length");
         const buf = try self.gcNewArrayBuffer(n * elem_size);
-        return self.gcNewTypedArray(buf, 0, n, kind) catch |e| {
-            buf.deinit();
-            return self.bufferErr(e);
-        };
+        // gcNewTypedArray takes `buf` (its owner) even when it fails.
+        return self.gcNewTypedArray(buf, 0, n, kind) catch |e| self.bufferErr(e);
     }
 
     // Non-iterable array-like (`{length:3, 0:1, ...}`, no @@iterator):
@@ -409,10 +407,8 @@ fn typedArrayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
         // `len * elem_size` can legitimately be an impossible request),
         // not an unrecoverable engine error.
         const buf = self.gcNewArrayBuffer(len * elem_size) catch return self.throwError(.range_error, "Invalid typed array length: {d}", .{len});
-        const ta = self.gcNewTypedArray(buf, 0, len, kind) catch |e| {
-            buf.deinit();
-            return self.bufferErr(e);
-        };
+        // gcNewTypedArray takes `buf` (its owner) even when it fails.
+        const ta = self.gcNewTypedArray(buf, 0, len, kind) catch |e| return self.bufferErr(e);
         var i: usize = 0;
         while (i < len) : (i += 1) {
             const key = try std.fmt.allocPrint(allocator, "{d}", .{i});
@@ -434,10 +430,7 @@ fn typedArrayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
     const items = try self.iterableItems(first);
     defer self.gc_allocator.free(items);
     const buf = try self.gcNewArrayBuffer(items.len * elem_size);
-    const ta = self.gcNewTypedArray(buf, 0, items.len, kind) catch |e| {
-        buf.deinit();
-        return self.bufferErr(e);
-    };
+    const ta = self.gcNewTypedArray(buf, 0, items.len, kind) catch |e| return self.bufferErr(e);
     for (items, 0..) |item, i| {
         typedElemSet(self, kind, &buf.array_buffer.value, 0, items.len, i, item) catch |e| {
             ta.deinit();
@@ -483,10 +476,8 @@ fn taWrite(self: *Interpreter, this_value: JSValue, i: usize, v: JSValue) anyerr
 /// factored out for reuse by map/filter/slice.
 fn newSameKindTypedArray(self: *Interpreter, kind: zvalue.TypedKind, len: usize) anyerror!JSValue {
     const buf = try self.gcNewArrayBuffer(len * kind.elemSize());
-    return self.gcNewTypedArray(buf, 0, len, kind) catch |e| {
-        buf.deinit();
-        return self.bufferErr(e);
-    };
+    // gcNewTypedArray takes `buf` (its owner) even when it fails.
+    return self.gcNewTypedArray(buf, 0, len, kind) catch |e| self.bufferErr(e);
 }
 
 fn taForEach(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {

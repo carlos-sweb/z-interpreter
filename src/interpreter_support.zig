@@ -72,9 +72,14 @@ const CompiledRegex = struct { state: RegexState, re: zregex.Regex };
 /// flag, `u` with `v`, or a bad pattern is a catchable SyntaxError.
 fn compileRegex(self: *Interpreter, pattern: []const u8, flags: []const u8) anyerror!CompiledRegex {
     const arena = self.gc_allocator;
+    // Two separate dupes, so a failed second one releases the first.
+    const source = try arena.dupe(u8, pattern);
+    errdefer arena.free(source);
+    const flags_copy = try arena.dupe(u8, flags);
+    errdefer arena.free(flags_copy);
     var state: RegexState = .{
-        .source = try arena.dupe(u8, pattern),
-        .flags = try arena.dupe(u8, flags),
+        .source = source,
+        .flags = flags_copy,
         .global = false,
         .ignore_case = false,
         .multiline = false,
@@ -84,10 +89,8 @@ fn compileRegex(self: *Interpreter, pattern: []const u8, flags: []const u8) anye
         .has_indices = false,
         .unicode_sets = false,
     };
-    // Only fires on an error return below (invalid flags/pattern) --
-    // on success the caller takes over these two dupes.
-    errdefer arena.free(state.source);
-    errdefer arena.free(state.flags);
+    // The errdefers above fire on an error return below (invalid
+    // flags/pattern) -- on success the caller takes over both dupes.
     for (flags) |f| {
         const slot: *bool = switch (f) {
             'g' => &state.global,
@@ -128,7 +131,13 @@ fn compileRegex(self: *Interpreter, pattern: []const u8, flags: []const u8) anye
 pub fn makeRegex(self: *Interpreter, pattern: []const u8, flags: []const u8) anyerror!JSValue {
     const arena = self.gc_allocator;
     const c = try compileRegex(self, pattern, flags);
+    // Until regex_state owns them, the state's two dupes are ours.
+    errdefer {
+        arena.free(c.state.source);
+        arena.free(c.state.flags);
+    }
     const value = try JSValue.fromRegex(arena, c.re);
+    errdefer value.deinit();
     try self.gcTrack(value);
     try self.regex_state.put(arena, @intFromPtr(value.regex), c.state);
     return value;

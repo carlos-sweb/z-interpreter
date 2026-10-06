@@ -1091,6 +1091,97 @@ fn gcTestInterp(allocating: *std.Io.Writer.Allocating) !Interpreter {
     return Interpreter.init(std.testing.allocator, &allocating.writer);
 }
 
+/// Runs `make` with the interpreter's allocator failing at every
+/// allocation index in turn (and an empty GC registry, so gcTrack's put
+/// must allocate), until it succeeds. Every failure must leave nothing
+/// behind: what the failing allocator handed out, it got back.
+fn expectNoLeakOnAllocFailure(interp: *Interpreter, comptime make: fn (*Interpreter) anyerror!JSValue) !void {
+    const testing = std.testing;
+    const real_alloc = interp.gc_allocator;
+    const real_registry = interp.gc_registry;
+    defer {
+        interp.gc_allocator = real_alloc;
+        interp.gc_registry = real_registry;
+    }
+    var index: usize = 0;
+    while (true) : (index += 1) {
+        var failing = std.testing.FailingAllocator.init(real_alloc, .{ .fail_index = index });
+        interp.gc_allocator = failing.allocator();
+        interp.gc_registry = .empty;
+        const result = make(interp);
+        if (result) |v| {
+            v.deinit();
+            interp.gc_registry.deinit(failing.allocator());
+            try testing.expect(index > 0); // at least one failure was exercised
+            return;
+        } else |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            interp.gc_registry.deinit(failing.allocator());
+            try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        }
+    }
+}
+
+test "a gcNew* whose gcTrack fails releases what it built" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    _ = try interp.run("0");
+
+    try expectNoLeakOnAllocFailure(&interp, struct {
+        fn make(i: *Interpreter) anyerror!JSValue {
+            return i.gcNewObject();
+        }
+    }.make);
+    try expectNoLeakOnAllocFailure(&interp, struct {
+        fn make(i: *Interpreter) anyerror!JSValue {
+            return i.gcNewString("a string payload");
+        }
+    }.make);
+    try expectNoLeakOnAllocFailure(&interp, struct {
+        fn make(i: *Interpreter) anyerror!JSValue {
+            return i.gcNewArrayBufferFromValue(try zbuffer.ArrayBuffer.init(i.gc_allocator, 16));
+        }
+    }.make);
+    try expectNoLeakOnAllocFailure(&interp, struct {
+        fn make(i: *Interpreter) anyerror!JSValue {
+            return i.makeRegex("a+b", "g");
+        }
+    }.make);
+
+    // Constructors that take references: on failure they are released,
+    // so the inputs end where they started.
+    const target = try interp.gcNewObject();
+    defer target.deinit();
+    const handler = try interp.gcNewObject();
+    defer handler.deinit();
+    const owner = try interp.gcNewArrayBuffer(8);
+    defer owner.deinit();
+    const S = struct {
+        var t: JSValue = undefined;
+        var h: JSValue = undefined;
+        var o: JSValue = undefined;
+    };
+    S.t = target;
+    S.h = handler;
+    S.o = owner;
+    try expectNoLeakOnAllocFailure(&interp, struct {
+        fn make(i: *Interpreter) anyerror!JSValue {
+            return i.gcNewProxy(S.t.retain(), S.h.retain());
+        }
+    }.make);
+    try expectNoLeakOnAllocFailure(&interp, struct {
+        fn make(i: *Interpreter) anyerror!JSValue {
+            return i.gcNewTypedArray(S.o.retain(), 0, 2, .i32);
+        }
+    }.make);
+    try testing.expectEqual(@as(usize, 1), target.object.refCount());
+    try testing.expectEqual(@as(usize, 1), handler.object.refCount());
+    try testing.expectEqual(@as(usize, 1), owner.array_buffer.refCount());
+}
+
 test "the shutdown snapshot of the GC registry never grows while it fills" {
     const testing = std.testing;
     var allocating = std.Io.Writer.Allocating.init(testing.allocator);
