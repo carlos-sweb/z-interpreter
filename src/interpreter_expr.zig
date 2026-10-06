@@ -105,8 +105,12 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                     for (items) |item| _ = try arr.array.value.push(item.retain());
                     continue;
                 }
+                // The element's value is owned here and moves into the array.
                 const v = try self.evalExpression(env, el);
-                _ = try arr.array.value.push(v.retain());
+                _ = arr.array.value.push(v) catch |err| {
+                    v.deinit();
+                    return err;
+                };
             }
             return arr;
         },
@@ -743,7 +747,7 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
             return self.throwError(.syntax_error, "'super' keyword unexpected here", .{});
         defer sctor.deinit();
         const args = try self.evalArgs(env, c.args);
-        defer self.gc_allocator.free(args);
+        defer freeArgs(self, args);
         const prev_target = self.construct_target;
         self.construct_target = sctor.function.value.ctx;
         defer self.construct_target = prev_target;
@@ -795,7 +799,7 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
             return self.throwError(.type_error, "(intermediate value).{s} is not a function", .{pk.key});
         }
         const args = try self.evalArgs(env, c.args);
-        defer self.gc_allocator.free(args);
+        defer freeArgs(self, args);
         const this_v = env.resolveThis();
         defer this_v.deinit();
         return try method.function.value.call(method.function.value.ctx, arena, this_v, args);
@@ -839,7 +843,7 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
     }
 
     const args = try self.evalArgs(env, c.args);
-        defer self.gc_allocator.free(args);
+    defer freeArgs(self, args);
     // Direct eval: a call written literally as `eval(...)` where `eval`
     // still refers to the intrinsic runs its string argument in the
     // CURRENT scope (always-strict -> a child of it). Any other reference
@@ -885,17 +889,40 @@ pub fn callValue(self: *Interpreter, callee: JSValue, this_value: JSValue, args:
 pub fn evalArgs(self: *Interpreter, env: *Environment, arg_nodes: []const *zparser.Node) anyerror![]const JSValue {
     const arena = self.gc_allocator;
     var args: std.ArrayList(JSValue) = .empty;
+    errdefer {
+        for (args.items) |a| a.deinit();
+        args.deinit(arena);
+    }
     for (arg_nodes) |arg_node| {
         if (arg_node.data == .spread) {
             const spread_val = try self.evalExpression(env, arg_node.data.spread);
+            defer spread_val.deinit();
             const items = try self.iterableItems(spread_val);
             defer arena.free(items);
-            for (items) |item| try args.append(arena, item.retain());
+            for (items) |item| {
+                const r = item.retain();
+                args.append(arena, r) catch |err| {
+                    r.deinit();
+                    return err;
+                };
+            }
         } else {
-            try args.append(arena, try self.evalExpression(env, arg_node));
+            const v = try self.evalExpression(env, arg_node);
+            args.append(arena, v) catch |err| {
+                v.deinit();
+                return err;
+            };
         }
     }
     return args.toOwnedSlice(arena);
+}
+
+/// Releases what `evalArgs` returned: every value is owned by the
+/// caller (callees borrow their arguments and retain what they keep),
+/// so the call site drops them once the call has returned.
+fn freeArgs(self: *Interpreter, args: []const JSValue) void {
+    for (args) |a| a.deinit();
+    self.gc_allocator.free(args);
 }
 
 /// ECMA-262 10.2.2 [[Construct]], narrowed: fresh object wired to
@@ -913,7 +940,7 @@ pub fn evalNew(self: *Interpreter, env: *Environment, n: anytype) anyerror!JSVal
     };
     // `new Foo` with no parens at all (args == null) is `new Foo()`.
     const args = try self.evalArgs(env, n.args orelse &.{});
-    defer self.gc_allocator.free(args);
+    defer freeArgs(self, args);
     return self.constructValue(callee, args, callee_name);
 }
 

@@ -2,13 +2,12 @@
 //! object-property overwrite/delete, Map set/delete, and variable
 //! reassignment must release the value they displace, not leak it.
 //!
-//! Baseline quirk these tests build on: `let x = <fresh value>;` leaves the
-//! box at refcount 2, not 1 -- the literal's own creation (count=1) is
-//! never separately released once bindPattern's declare-time retain adds a
-//! second owner (out of scope for this phase; see the GC plan). Every test
-//! below starts from that known baseline and checks the DELTA an
-//! overwrite/delete/reassign should apply on top of it, rather than
-//! asserting an absolute count in isolation.
+//! Baseline these tests build on: after `let probe = <fresh value>; ...;
+//! probe;` the box is at refcount 2 -- probe's binding, plus the script's
+//! completion value (the final `probe;`), which the run hands back to the
+//! test as an owned reference. Every test below starts from that baseline
+//! and checks the DELTA an overwrite/delete/reassign should apply on top
+//! of it, rather than asserting an absolute count in isolation.
 const std = @import("std");
 const testing = std.testing;
 const zvalue = @import("zvalue");
@@ -18,7 +17,7 @@ fn expectObjectRefcount(source: []const u8, expected: usize) !void {
     try helpers.runAndCheck(source, expected, struct {
         fn check(want: usize, result: helpers.Result) !void {
             try testing.expect(result.value == .object);
-            try testing.expectEqual(want, result.value.object.count);
+            try testing.expectEqual(want, result.value.object.refCount());
         }
     }.check);
 }
@@ -140,13 +139,120 @@ test "concat retains each element once per occurrence in the merged result" {
         \\let probe = {};
         \\let arr = [probe];       // array-literal element -- +1, now 3
         \\const merged = arr.concat(probe, [probe]);
-        \\// Evaluating the `[probe]` argument is its OWN array-literal
-        \\// construction -- +1 (now 4) BEFORE concat() even runs. concat()
-        \\// then builds a brand new array with 3 elements (arr's own probe,
-        \\// the loose probe, and the [probe] arg's probe), each retained
-        \\// once as it's copied into that new result -- +3 (now 7). arr's
-        \\// own element is retained AGAIN here because concat() returns an
-        \\// independent shallow copy, not a view onto arr.
+        \\// The `[probe]` argument is its OWN array-literal construction
+        \\// (+1 while the call runs), released with the other arguments
+        \\// once concat() returns. concat() builds a brand new array with
+        \\// 3 elements (arr's own probe, the loose probe, and the [probe]
+        \\// arg's probe), each retained once as it's copied into that new
+        \\// result -- +3 (now 6). arr's own element is retained AGAIN here
+        \\// because concat() returns an independent shallow copy, not a
+        \\// view onto arr.
         \\probe;
-    , 7);
+    , 6);
+}
+
+// ---- Call arguments, array literals and declarations ------------------
+// Each of these used to keep one extra reference per evaluation: call
+// arguments were never released after the call, an array literal
+// retained an element it already owned, and a declaration retained its
+// initializer's result on top of the binding's own reference.
+
+test "call arguments are released after a JS function call" {
+    // What remains is the callee's own: each parameter binding and each
+    // `arguments` element holds one reference, and call environments are
+    // not freed yet (a separate, known gap) -- f(probe, probe) keeps 2 + 2,
+    // f(probe) keeps 1 + 1. The caller's own references (3 here) are gone.
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\function f(a, b) { return 0; }
+        \\f(probe, probe); f(probe);
+        \\probe;
+    , 8);
+}
+
+test "call arguments are released after a native call and a constructor" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\Object.keys(probe); Object.is(probe, probe);
+        \\new Array(probe); [].concat(probe);
+        \\probe;
+    , 2);
+}
+
+test "a returned argument is a new reference, the argument itself is released" {
+    // count(probe, probe) keeps 2 parameters + 2 `arguments` elements and
+    // keep(probe) 1 + 1 (call environments are not freed yet); `back`
+    // holds the returned reference: 2 + 4 + 2 + 1.
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\function count(a, b) { return 0; }
+        \\function keep(a) { return a; }
+        \\count(probe, probe);
+        \\const back = keep(probe);
+        \\probe;
+    , 9);
+}
+
+test "spread arguments are released after the call" {
+    // Only the callee's `arguments` keeps its 2 elements (its environment
+    // is not freed yet); the spread array and the caller's copies are gone.
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\function f() { return arguments.length; }
+        \\f(...[probe, probe]);
+        \\probe;
+    , 4);
+}
+
+test "a discarded array literal releases its elements" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\[probe, probe];
+        \\let tmp = [probe]; // +1 (element of a live array)
+        \\probe;
+    , 3);
+}
+
+test "let/const/var initializers hold exactly one reference each" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let a = probe; const b = probe; var c = probe; // +3
+        \\probe;
+    , 5);
+}
+
+test "a for-let initializer holds exactly the loop binding's reference" {
+    // The loop scope's binding keeps its one reference (environments are
+    // not freed yet -- a separate, known gap); the initializer adds none.
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\for (let i = probe; false;) {}
+        \\probe;
+    , 3);
+}
+
+test "assigning to a property costs exactly the property's reference" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let obj = {};
+        \\obj.a = probe; // +1 (property), nothing else
+        \\probe;
+    , 3);
+}
+
+test "a generator keeps its arguments until it runs, and they stay valid" {
+    try helpers.expectStdout(
+        \\function* g(a, b) { yield a.v + b.v; }
+        \\const it = g({ v: 1 }, { v: 2 }); // arguments are temporaries
+        \\console.log(it.next().value);
+    , "3\n");
+}
+
+test "a promise job keeps its value after the settling promise is gone" {
+    try helpers.expectStdout(
+        \\Promise.resolve('3').then(v => console.log(v));
+        \\const p = Promise.resolve({ k: 'kept' });
+        \\console.log(Promise.resolve(p) === p);
+        \\p.then(o => console.log(o.k));
+    , "true\n3\nkept\n");
 }

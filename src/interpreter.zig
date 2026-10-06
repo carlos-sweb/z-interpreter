@@ -1178,13 +1178,13 @@ test "collectGarbage reclaims an abandoned, never-driven generator (fiber stack 
         \\let g = gen();
         \\g = null;
     );
-    // The generator object + its "next" function + the FiberState (whose
-    // 8 MiB stack rides along, freed via Fiber.deinit() inside
-    // freeGarbageNode's .fiber_state case), at minimum -- exact count
-    // intentionally not asserted, see the closure<->object<->environment
-    // test's comment.
+    // The generator object and its "next" function die by refcount at
+    // `g = null`; the FiberState (whose 8 MiB stack rides along, freed
+    // via Fiber.deinit() inside freeGarbageNode's .fiber_state case) has
+    // no Rc and waits for the collector -- exact count intentionally not
+    // asserted, see the closure<->object<->environment test's comment.
     const before_collect = interp.gc_registry.count();
-    try testing.expect(before_collect >= baseline + 3);
+    try testing.expect(before_collect >= baseline + 1);
     interp.collectGarbage();
     const after_collect = interp.gc_registry.count();
     try testing.expect(after_collect < before_collect);

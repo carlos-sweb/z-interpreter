@@ -382,6 +382,9 @@ pub fn evalStatement(self: *Interpreter, env: *Environment, stmt: *zstatements.S
                 // the argument).
                 if (v.kind == .@"var" and decl.init == null) continue;
                 const value = if (decl.init) |init_expr| try self.evalExpression(env, init_expr) else JSValue.UNDEFINED;
+                // The initializer's result is owned here; bindPattern
+                // retains what it binds.
+                defer value.deinit();
                 // NamedEvaluation: `let/const/var x = AnonFn` names the
                 // function/class "x" -- simple-identifier targets only.
                 if (decl.init) |init_expr| {
@@ -655,6 +658,7 @@ pub fn evalForStatement(self: *Interpreter, env: *Environment, s: anytype, label
                             // hoisted binding.
                             if (d.kind == .@"var" and decl.init == null) continue;
                             const value = if (decl.init) |e| try self.evalExpression(loop_env, e) else JSValue.UNDEFINED;
+                            defer value.deinit();
                             try self.bindPattern(loop_env, decl.pattern, value, if (d.kind == .@"var") .assign else .define);
                             if (d.kind == .@"const") try self.markPatternConst(loop_env, decl.pattern);
                         }

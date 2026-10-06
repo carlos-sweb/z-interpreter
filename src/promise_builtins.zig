@@ -158,8 +158,9 @@ fn promiseResolveStatic(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     _ = allocator;
     _ = this_value;
     const v = arg(args, 0);
-    // Promise.resolve(promise) returns it unchanged (real behavior).
-    if (v == .promise) return v;
+    // Promise.resolve(promise) returns it unchanged (real behavior);
+    // the argument is borrowed, so the result is a new reference.
+    if (v == .promise) return v.retain();
     return interp(ctx).fulfilledPromise(v);
 }
 

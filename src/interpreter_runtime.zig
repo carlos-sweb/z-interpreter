@@ -268,6 +268,12 @@ pub fn runPendingJob(self: *Interpreter) anyerror!void {
     if (self.pending_jobs.items.len == 0) return;
     const job = self.pending_jobs.orderedRemove(0);
     const arena = self.gc_allocator;
+    // The job holds its own reference to its argument and handler (the
+    // promise that queued it may be gone by now); dropped once it ran.
+    defer {
+        job.argument.deinit();
+        if (job.handler) |h| h.deinit();
+    }
 
     const handler = job.handler orelse {
         // Pass-through: adoption and the missing side of .then/.catch.
@@ -322,7 +328,7 @@ pub fn settlePromise(self: *Interpreter, p: JSValue, state: zvalue.PromiseState,
     for (reactions) |r| {
         try self.pending_jobs.append(arena, .{
             .handler = if (state == .fulfilled) r.on_fulfilled else r.on_rejected,
-            .argument = value,
+            .argument = value.retain(),
             .rejected = state == .rejected,
             .derived = r.derived,
         });
@@ -341,8 +347,8 @@ pub fn subscribePromise(self: *Interpreter, p: JSValue, on_fulfilled: ?JSValue, 
         .derived = if (derived) |d| d.retain() else null,
     }) orelse return;
     try self.pending_jobs.append(arena, .{
-        .handler = if (settled.state == .fulfilled) on_fulfilled else on_rejected,
-        .argument = settled.result,
+        .handler = if (settled.state == .fulfilled) (if (on_fulfilled) |h| h.retain() else null) else (if (on_rejected) |h| h.retain() else null),
+        .argument = settled.result.retain(),
         .rejected = settled.state == .rejected,
         // Same double-ownership shape as the pending branch above
         // (which already retains): `derived` is also promiseThen's own
@@ -443,6 +449,16 @@ pub fn awaitValue(self: *Interpreter, fs: *FiberState, operand: JSValue) anyerro
     return fs.resume_value;
 }
 
+/// A fiber's own copy of its call arguments: the caller releases its
+/// references once the call returns, but the body may only bind them
+/// later (a generator runs nothing until the first next()), so the
+/// FiberState holds a reference to each -- released when it is swept.
+fn retainedCopy(allocator: std.mem.Allocator, args: []const JSValue) ![]JSValue {
+    const copy = try allocator.dupe(JSValue, args);
+    for (copy) |a| _ = a.retain();
+    return copy;
+}
+
 /// Calling `function*` builds the generator object -- a plain object
 /// whose `next` native drives the (not-yet-started) fiber. The body
 /// runs nothing until the first next() (real semantics).
@@ -458,7 +474,7 @@ pub fn makeGeneratorObject(self: *Interpreter, fnode: *zfunctions.FunctionNode, 
         .closure_env = closure_env,
         .this_value = if (this_value) |tv| tv.retain() else null,
         .private_ctx = private_ctx,
-        .args = try arena.dupe(JSValue, args),
+        .args = try retainedCopy(arena, args),
     };
     fs.fiber = try fiber_mod.Fiber.init(arena, fiberEntry, fs);
     try self.gcTrackFiberState(fs);
@@ -491,7 +507,7 @@ pub fn runAsyncFunction(self: *Interpreter, fnode: *zfunctions.FunctionNode, clo
         .closure_env = closure_env,
         .this_value = if (this_value) |tv| tv.retain() else null,
         .private_ctx = private_ctx,
-        .args = try arena.dupe(JSValue, args),
+        .args = try retainedCopy(arena, args),
         .promise = try self.gcNewPromise(),
     };
     fs.fiber = try fiber_mod.Fiber.init(arena, fiberEntry, fs);
@@ -526,7 +542,7 @@ pub fn makeAsyncGeneratorObject(self: *Interpreter, fnode: *zfunctions.FunctionN
         .closure_env = closure_env,
         .this_value = if (this_value) |tv| tv.retain() else null,
         .private_ctx = private_ctx,
-        .args = try arena.dupe(JSValue, args),
+        .args = try retainedCopy(arena, args),
     };
     fs.fiber = try fiber_mod.Fiber.init(arena, fiberEntry, fs);
     try self.gcTrackFiberState(fs);
