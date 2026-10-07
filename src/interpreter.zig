@@ -821,14 +821,18 @@ pub const Interpreter = struct {
     /// Named own properties on array values (arrays have no general
     /// property bag) -- used by exec/match result arrays for
     /// `index`/`input`/`groups`. Keyed by the array Rc box pointer; the
-    /// value is a plain object holding the extras.
+    /// value is a plain object holding the extras. For the collector the
+    /// bag is an edge of its array (not a root), and the entry goes when
+    /// the array dies.
     array_props: std.AutoHashMapUnmanaged(usize, JSValue) = .empty,
     /// The boxed primitive inside a `new String()`/`new Number()`/
     /// `new Boolean()` wrapper object -- these constructors return an
     /// ordinary object (no internal-slot concept exists on JSValue's
     /// `.object` variant), so the wrapped primitive lives here instead,
     /// keyed by the wrapper object's Rc box pointer. Same side-table
-    /// shape as `array_props`. See /home/sweb/.plans/primitive-wrapper-objects.md.
+    /// shape as `array_props`, and the same lifetime: an edge of its
+    /// wrapper object for the collector, dropped when the wrapper dies.
+    /// See /home/sweb/.plans/primitive-wrapper-objects.md.
     primitive_wrapper_data: std.AutoHashMapUnmanaged(usize, JSValue) = .empty,
     /// `delete f.name`/`delete f.length` tracking: those aren't real
     /// ZObject bag entries (getProperty/hasOwnProperty/
@@ -1437,9 +1441,7 @@ test "collectGarbage drops the per-address entries of the boxes it frees" {
     const wrappers = interp.primitive_wrapper_data.count();
     const deleted = interp.deleted_fn_props.count();
     // Each box is kept alive only by a cycle, so only the collector frees
-    // it. The array's cycle goes through its elements: a cycle through its
-    // array_props bag (`r.self = r`) is never collected, because the
-    // collector marks that table's bags as roots, not as the array's edges.
+    // it. (A cycle through the array's own bag is the next test.)
     _ = try interp.run(
         \\(function () {
         \\  var r = /a/.exec('a'); r.push(r);
@@ -1451,6 +1453,32 @@ test "collectGarbage drops the per-address entries of the boxes it frees" {
     try testing.expectEqual(arrays, interp.array_props.count());
     try testing.expectEqual(wrappers, interp.primitive_wrapper_data.count());
     try testing.expectEqual(deleted, interp.deleted_fn_props.count());
+}
+
+test "collectGarbage frees an array whose cycle goes through its own array_props bag" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    _ = try interp.run("let r = []; let w = null;");
+    interp.collectGarbage(); // a clean baseline: nothing collectable left
+    const arrays = interp.array_props.count();
+    const wrappers = interp.primitive_wrapper_data.count();
+    const boxes = interp.gc_registry.count();
+    // `r.self` lives in the array's array_props bag, `w.self` in the
+    // wrapper's own properties: each box is reachable only through itself.
+    _ = try interp.run(
+        \\r.self = r; r = null;
+        \\w = new String("x"); w.self = w; w = null;
+    );
+    try testing.expect(interp.array_props.count() == arrays + 1);
+    interp.collectGarbage();
+    try testing.expectEqual(arrays, interp.array_props.count());
+    try testing.expectEqual(wrappers, interp.primitive_wrapper_data.count());
+    // The bag, the wrapper and its string are gone, and so is the array,
+    // which the baseline already counted (`let r = []`).
+    try testing.expectEqual(boxes - 1, interp.gc_registry.count());
 }
 
 /// The FiberState behind a generator object (its own `next` native's ctx).

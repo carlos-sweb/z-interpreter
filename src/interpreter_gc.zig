@@ -655,7 +655,13 @@ pub fn traceValueChildren(self: *Interpreter, v: JSValue, visitor: anytype) void
         // in principle -- verified via each one's build.zig.zon, not
         // assumed.
         .undefined, .null, .boolean, .number, .string, .regex, .symbol, .date, .bigint, .array_buffer, .temporal => {},
-        .array => |box| for (box.value.toSliceMut()) |*child| visitor.value(child.*),
+        .array => |box| {
+            for (box.value.toSliceMut()) |*child| visitor.value(child.*);
+            // The array's named-property bag hangs off the array, like
+            // proto_refs below: a cycle through it (`r.self = r`) is still
+            // collectable.
+            if (self.array_props.get(@intFromPtr(box))) |bag| visitor.value(bag);
+        },
         .object => |box| {
             for (box.value.properties.values()) |prop| {
                 visitor.value(prop.value);
@@ -663,6 +669,8 @@ pub fn traceValueChildren(self: *Interpreter, v: JSValue, visitor: anytype) void
                 if (prop.setter) |s| visitor.value(s);
             }
             if (self.proto_refs.get(@intFromPtr(box))) |p| visitor.value(p);
+            // A wrapper object's boxed primitive (`new String("x")`).
+            if (self.primitive_wrapper_data.get(@intFromPtr(box))) |prim| visitor.value(prim);
         },
         .map => |box| {
             for (box.value.keys()) |*key| visitor.value(key.*);
@@ -751,8 +759,9 @@ pub fn markRoots(self: *Interpreter, marker: *Marker) void {
     while (skit.next()) |v| marker.value(v.*);
     var srit = self.symbol_registry.valueIterator();
     while (srit.next()) |v| marker.value(v.*);
-    var apit = self.array_props.valueIterator();
-    while (apit.next()) |v| marker.value(v.*);
+    // array_props and primitive_wrapper_data are NOT roots: their values
+    // are edges of the array/wrapper box they belong to (see
+    // traceValueChildren), so they live exactly as long as that box.
     // A live RegExp's lastIndex and own-property bag (released by the
     // RegExp's destroy hook, so marking them here is always safe).
     var rsit = self.regex_state.valueIterator();
@@ -760,8 +769,6 @@ pub fn markRoots(self: *Interpreter, marker: *Marker) void {
         marker.value(st.last_index);
         if (st.props) |bag| marker.value(bag);
     }
-    var pwit = self.primitive_wrapper_data.valueIterator();
-    while (pwit.next()) |v| marker.value(v.*);
     var mcit = self.method_cache.valueIterator();
     while (mcit.next()) |v| marker.value(v.*);
     if (self.global_object) |v| marker.value(v);
