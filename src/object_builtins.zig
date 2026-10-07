@@ -704,7 +704,9 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, thi
             if (std.mem.eql(u8, key, "name"))
                 return if (deleted.name) JSValue.UNDEFINED else dataDescObj(self, try interp(ctx).gcNewString(box.value.name), false, false, true);
             if (std.mem.eql(u8, key, "prototype") and !isProxyConstructor(self, obj) and (box.value.prototype != null or box.value.constructable))
-                return dataDescObj(self, try self.functionPrototype(obj), true, false, false);
+                // dataDescObj keeps the value it gets; functionPrototype()
+                // only lends the callable's own reference.
+                return dataDescObj(self, (try self.functionPrototype(obj)).retain(), true, false, false);
             if (box.value.statics) |bag| {
                 if (bag.object.value.getOwnRecord(key)) |rec| return descFromRecord(self, rec);
             }
