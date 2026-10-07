@@ -372,8 +372,10 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
     const closure_env = if (cnode.name != null) try self.gcChildEnv(env) else env;
 
     var proto = try self.gcNewObject();
+    // The parent's prototype/statics are held by this class's own
+    // references, not only by the ClassCtx (which only the collector frees).
     if (super_proto) |sp|
-        try proto.object.value.setPrototype(&sp.object.value)
+        try self.setOwnedPrototype(proto, sp)
     else if (self.protos.object == .object)
         try proto.object.value.setPrototype(&self.protos.object.object.value);
 
@@ -415,7 +417,7 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
     if (super_ctor) |parent| {
         const parent_bag = try self.functionStatics(parent);
         const bag = try self.functionStatics(class_fn);
-        try bag.object.value.setPrototype(&parent_bag.object.value);
+        try self.setOwnedPrototype(bag, parent_bag);
     }
 
     // The class's own name binds BEFORE static elements run (spec:

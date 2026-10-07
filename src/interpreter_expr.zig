@@ -943,6 +943,9 @@ fn freeArgs(self: *Interpreter, args: []const JSValue) void {
 /// [[Construct]]) recursively through nested proxies.
 pub fn evalNew(self: *Interpreter, env: *Environment, n: anytype) anyerror!JSValue {
     const callee = try self.evalExpression(env, n.callee);
+    // Owned (evalExpression's); constructValue only borrows it. Safe to
+    // drop: the instance retains its own prototype (setOwnedPrototype).
+    defer callee.deinit();
     const callee_name: []const u8 = switch (n.callee.data) {
         .identifier => |name| name,
         else => "expression",
@@ -979,8 +982,10 @@ pub fn constructValue(self: *Interpreter, callee: JSValue, args: []const JSValue
         return self.throwError(.type_error, "{s} is not a constructor", .{callee_name});
     }
     const proto = try self.functionPrototype(callee);
-    var instance = try self.gcNewObject();
-    try instance.object.value.setPrototype(&proto.object.value);
+    const instance = try self.gcNewObject();
+    // The instance holds its own reference: the constructor may die, or
+    // its `prototype` be reassigned, while the instance lives.
+    try self.setOwnedPrototype(instance, proto);
     // Arm the construct token for exactly this call -- see the field
     // doc on `construct_target`.
     const prev_target = self.construct_target;

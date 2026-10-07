@@ -602,3 +602,61 @@ test "a sequence expression releases the values it discards" {
         \\probe;
     , 2);
 }
+
+// ---- instances retain their prototype (proto_refs) ----------------------
+// `Reflect.set`/`Reflect.get` instead of `F.prototype = p` / `F.prototype`:
+// member assignment/read still leak a reference to `F` (block D).
+
+test "an instance keeps its prototype alive after the constructor dies" {
+    try helpers.expectNumber(
+        \\var g = function () {};
+        \\Reflect.set(g, "prototype", { x: 41 });
+        \\var o = new g();
+        \\g = null; // the constructor dies; o still holds its prototype
+        \\var junk = []; for (var i = 0; i < 2000; i++) junk.push({ x: i, y: 'z' + i });
+        \\o.x + 1;
+    , 42);
+}
+
+test "each live instance holds one reference to its prototype" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\function F() {}
+        \\Reflect.set(F, "prototype", probe); // +1 (F's prototype), now 3
+        \\let a = new F(); // +1
+        \\let b = new F(); // +1, now 5
+        \\probe;
+    , 5);
+    // Each constructor call's environment keeps `this` (the instance)
+    // until the collector runs; once it has, the dead instances have
+    // released their references: back to 3.
+    try testing.expectEqual(@as(usize, 3), try objectRefcountAfterGc(
+        \\let probe = {};
+        \\function F() {}
+        \\Reflect.set(F, "prototype", probe);
+        \\let a = new F();
+        \\let b = new F();
+        \\a = null;
+        \\b = null;
+        \\probe;
+    ));
+}
+
+/// Refcount of the `.object` a script completes with, after a GC pass.
+fn objectRefcountAfterGc(source: []const u8) !usize {
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try @import("zinterpreter").Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+    const value = try interp.run(source);
+    defer value.deinit();
+    try testing.expect(value == .object);
+    interp.collectGarbage();
+    return value.object.refCount();
+}
+
+test "new F() does not leak a reference to F" {
+    const none = try functionRefcountOf("function F() {} Reflect.get(F, 'prototype'); F;");
+    const two = try functionRefcountOf("function F() {} new F(); new F(); F;");
+    try testing.expectEqual(none, two);
+}

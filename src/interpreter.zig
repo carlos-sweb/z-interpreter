@@ -794,7 +794,8 @@ pub const Interpreter = struct {
     /// refactoriza el prototipo con refcount, esta tabla se elimina.
     /// Keyed by the object's box address; the value is an owned reference
     /// to its prototype, set by `setOwnedPrototype` (prototypes coming from
-    /// JS: Object.create, Object.setPrototypeOf, the __proto__ setter) and
+    /// JS: Object.create, Object.setPrototypeOf, the __proto__ setter;
+    /// instances made by `new`; class prototype and statics chains) and
     /// released when the object dies. Intrinsic prototypes need no entry:
     /// the interpreter's own fields keep them alive.
     proto_refs: std.AutoHashMapUnmanaged(usize, JSValue) = .empty,
@@ -1213,6 +1214,140 @@ test "Map.prototype.set and Set.prototype.add release their arguments on OOM" {
     try testing.expect(!s.set.value.has(key));
     try testing.expectEqual(@as(usize, 1), key.object.refCount());
     try testing.expectEqual(@as(usize, 1), value.object.refCount());
+}
+
+/// The invariant `setOwnedPrototype` keeps: an object whose raw
+/// prototype pointer is `proto` holds a reference to it in proto_refs,
+/// and `proto`'s count is its baseline plus that one reference.
+fn expectPrototypeRetained(interp: *Interpreter, obj: JSValue, proto: JSValue, base: usize) !void {
+    const testing = std.testing;
+    const linked = obj.object.value.getPrototype() == &proto.object.value;
+    const entry = interp.proto_refs.get(@intFromPtr(obj.object));
+    if (linked) {
+        try testing.expect(entry != null and entry.? == .object and entry.?.object == proto.object);
+        try testing.expectEqual(base + 1, proto.object.refCount());
+    } else {
+        try testing.expect(entry == null);
+        try testing.expectEqual(base, proto.object.refCount());
+    }
+}
+
+/// Calls `f(this, args)` with the interpreter's allocator failing at
+/// every allocation index in turn, until it succeeds; after each failure
+/// and after the success, `check` must hold. Returns the success value.
+/// Boxes made during a call keep the allocator they were made with, so
+/// `failings` (one per attempt) must outlive the interpreter.
+fn callFailingAtEveryIndex(interp: *Interpreter, failings: []std.testing.FailingAllocator, f: JSValue, this: JSValue, args: []const JSValue, ctx: anytype, comptime check: fn (@TypeOf(ctx), ?JSValue) anyerror!void) !JSValue {
+    const testing = std.testing;
+    const real = interp.gc_allocator;
+    defer interp.gc_allocator = real;
+    var index: usize = 0;
+    while (true) : (index += 1) {
+        if (index >= failings.len) return error.TooManyAllocations;
+        failings[index] = std.testing.FailingAllocator.init(real, .{ .fail_index = index });
+        interp.gc_allocator = failings[index].allocator();
+        const result = f.function.value.call(f.function.value.ctx, interp.gc_allocator, this, args);
+        interp.gc_allocator = real;
+        if (result) |v| {
+            try check(ctx, v);
+            try testing.expect(index > 0); // at least one failure was exercised
+            return v;
+        } else |err| {
+            // The __proto__ setter reports any failure as a TypeError.
+            if (err == error.JsThrow) {
+                if (interp.pending_exception) |e| e.deinit();
+                interp.pending_exception = null;
+            } else try testing.expectEqual(error.OutOfMemory, err);
+            try check(ctx, null);
+        }
+    }
+}
+
+test "Object.create, Object.setPrototypeOf and __proto__ never leave an unretained prototype on OOM" {
+    const testing = std.testing;
+    const Case = enum { create, set_prototype_of, proto_setter };
+    inline for (.{ Case.create, Case.set_prototype_of, Case.proto_setter }) |case| {
+        // Declared before the interpreter: it must outlive it.
+        var failings: [64]std.testing.FailingAllocator = undefined;
+        var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+        defer allocating.deinit();
+        var interp = try gcTestInterp(&allocating);
+        defer interp.deinit();
+        const f = try interp.run(switch (case) {
+            .create => "Object.create",
+            .set_prototype_of => "Object.setPrototypeOf",
+            .proto_setter => "Object.getOwnPropertyDescriptor(Object.prototype, '__proto__').set",
+        });
+        defer f.deinit();
+        const obj = try interp.run("({})");
+        defer obj.deinit();
+        const proto = try interp.run("({})");
+        defer proto.deinit();
+        // An empty table: its first insert must allocate.
+        try testing.expectEqual(@as(usize, 0), interp.proto_refs.capacity());
+        const base = proto.object.refCount();
+        const Ctx = struct { interp: *Interpreter, obj: JSValue, proto: JSValue, base: usize, case: Case };
+        const ctx = Ctx{ .interp = &interp, .obj = obj, .proto = proto, .base = base, .case = case };
+        const check = struct {
+            fn check(c: Ctx, result: ?JSValue) anyerror!void {
+                switch (c.case) {
+                    // A failed create returns nothing: the prototype must
+                    // be back at its baseline.
+                    .create => if (result) |r| try expectPrototypeRetained(c.interp, r, c.proto, c.base) else try std.testing.expectEqual(c.base, c.proto.object.refCount()),
+                    else => try expectPrototypeRetained(c.interp, c.obj, c.proto, c.base),
+                }
+            }
+        }.check;
+        const result = try callFailingAtEveryIndex(&interp, &failings, f, if (case == .proto_setter) obj else JSValue.UNDEFINED, switch (case) {
+            .create => &.{proto},
+            .set_prototype_of => &.{ obj, proto },
+            .proto_setter => &.{proto},
+        }, ctx, check);
+        result.deinit();
+    }
+}
+
+test "collectGarbage keeps an instance's prototype once its constructor is unreachable" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    _ = try interp.run(
+        \\var o = (function () {
+        \\  var g = function () {};
+        \\  Reflect.set(g, "prototype", { x: 41 });
+        \\  return new g();
+        \\})();
+    );
+    interp.collectGarbage();
+    const v = try interp.run("var junk = []; for (var i = 0; i < 2000; i++) junk.push({ x: i }); o.x + 1;");
+    try testing.expectEqual(@as(f64, 42), v.number);
+}
+
+test "collectGarbage keeps a class's prototype and statics chain to its parent" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    // Only an instance of C (prototype chain) and C itself (statics
+    // chain) stay reachable; B, C's class context and the IIFE's scope
+    // are left to the collector.
+    _ = try interp.run(
+        \\var c = (function () {
+        \\  class B { m() { return 40; } static s() { return 2; } }
+        \\  class C extends B {}
+        \\  return new C();
+        \\})();
+        \\var K = (function () {
+        \\  class B { static s() { return 2; } }
+        \\  return class C extends B {};
+        \\})();
+    );
+    interp.collectGarbage();
+    const v = try interp.run("var junk = []; for (var i = 0; i < 2000; i++) junk.push({ x: i }); c.m() + K.s();");
+    try testing.expectEqual(@as(f64, 42), v.number);
 }
 
 test "the shutdown snapshot of the GC registry never grows while it fills" {

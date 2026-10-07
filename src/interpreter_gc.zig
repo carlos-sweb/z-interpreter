@@ -1017,16 +1017,24 @@ pub fn registrySnapshot(self: *Interpreter) !std.AutoHashMapUnmanaged(usize, voi
     return set;
 }
 
-/// [[SetPrototypeOf]] for a prototype supplied by JS (`proto` is an
-/// `.object` or `.null`): sets ZObject's raw pointer and keeps an owned
-/// reference to the new prototype in `proto_refs`, releasing the previous
-/// one. On a refused change (a cycle) nothing is retained or released.
+/// [[SetPrototypeOf]] with an owned reference (`proto` is an `.object`
+/// or `.null`): sets ZObject's raw pointer and keeps a reference to the
+/// new prototype in `proto_refs`, releasing the previous one. Used for
+/// every prototype that is not an intrinsic: JS-supplied ones
+/// (Object.create, Object.setPrototypeOf, __proto__), instances made by
+/// `new`, and class prototype/statics chains.
+///
+/// The table slot is reserved BEFORE the raw pointer changes: on out of
+/// memory nothing changes (the object keeps its previous prototype),
+/// never a raw pointer to a prototype nothing retains. On a refused
+/// change (a cycle) nothing is retained or released either.
 pub fn setOwnedPrototype(self: *Interpreter, obj: JSValue, proto: JSValue) !void {
     const p: ?*@TypeOf(obj.object.value) = if (proto == .object) @constCast(&proto.object.value) else null;
+    if (proto == .object) try self.proto_refs.ensureUnusedCapacity(self.gc_allocator, 1);
     try obj.object.value.setPrototype(p);
     const key = @intFromPtr(obj.object);
     if (proto == .object) {
-        const gop = try self.proto_refs.getOrPut(self.gc_allocator, key);
+        const gop = self.proto_refs.getOrPutAssumeCapacity(key);
         const old: ?JSValue = if (gop.found_existing) gop.value_ptr.* else null;
         gop.value_ptr.* = proto.retain();
         if (old) |o| o.deinit();
