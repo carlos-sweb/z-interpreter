@@ -413,7 +413,12 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
         // gap is gone).
         if (std.mem.eql(u8, key, "prototype")) {
             if (value != .object) return self.throwError(.type_error, "Setting a function's prototype to a non-object is not supported yet", .{});
+            // Old one released only after the new one is stored, so
+            // `F.prototype = F.prototype` never drops it to zero midway.
+            // Instances made from the old one hold their own reference.
+            const old = obj.function.value.prototype;
             obj.function.value.prototype = value.retain();
+            if (old) |o| o.deinit();
             return;
         }
         // `.name`/`.length` start life as virtual (writable: false)

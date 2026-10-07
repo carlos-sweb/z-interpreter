@@ -93,7 +93,7 @@ fn generatorNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     const self = fs.interp;
     if (fs.fiber.finished) return iterResult(self, JSValue.UNDEFINED, true);
 
-    fs.resume_value = if (args.len > 0) args[0].retain() else JSValue.UNDEFINED;
+    fs.setResumeValue(if (args.len > 0) args[0].retain() else JSValue.UNDEFINED);
     fs.resume_is_throw = false;
     fs.yielded = null;
     try self.resumeFiber(fs);
@@ -131,7 +131,7 @@ fn asyncGeneratorNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     // result -- same double-ownership shape as runAsyncFunction's
     // `fs.promise`/promiseConstructor's `cap.promise`.
     fs.pending_result_promise = p.retain();
-    fs.resume_value = if (args.len > 0) args[0].retain() else JSValue.UNDEFINED;
+    fs.setResumeValue(if (args.len > 0) args[0].retain() else JSValue.UNDEFINED);
     fs.resume_is_throw = false;
     try self.resumeFiber(fs);
     return p;
@@ -153,7 +153,7 @@ fn awaitOnFulfilled(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     _ = allocator;
     _ = this_value;
     const fs: *FiberState = @ptrCast(@alignCast(ctx));
-    fs.resume_value = if (args.len > 0) args[0].retain() else JSValue.UNDEFINED;
+    fs.setResumeValue(if (args.len > 0) args[0].retain() else JSValue.UNDEFINED);
     fs.resume_is_throw = false;
     try fs.interp.resumeFiber(fs);
     return JSValue.UNDEFINED;
@@ -163,7 +163,7 @@ fn awaitOnRejected(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     _ = allocator;
     _ = this_value;
     const fs: *FiberState = @ptrCast(@alignCast(ctx));
-    fs.resume_value = if (args.len > 0) args[0].retain() else JSValue.UNDEFINED;
+    fs.setResumeValue(if (args.len > 0) args[0].retain() else JSValue.UNDEFINED);
     fs.resume_is_throw = true;
     try fs.interp.resumeFiber(fs);
     return JSValue.UNDEFINED;
@@ -449,9 +449,9 @@ pub fn awaitValue(self: *Interpreter, fs: *FiberState, operand: JSValue) anyerro
     fs.fiber.suspendSelf();
     if (fs.resume_is_throw) {
         fs.resume_is_throw = false;
-        return self.throwValue(fs.resume_value);
+        return self.throwValue(fs.takeResumeValue());
     }
-    return fs.resume_value;
+    return fs.takeResumeValue();
 }
 
 /// A fiber's own copy of its call arguments: the caller releases its

@@ -190,8 +190,10 @@ pub fn evalYieldDelegate(self: *Interpreter, env: *Environment, fs: *FiberState,
                 fs.fiber.suspendSelf();
                 if (fs.resume_is_throw) {
                     fs.resume_is_throw = false;
-                    return self.throwValue(fs.resume_value);
+                    return self.throwValue(fs.takeResumeValue());
                 }
+                // Borrowed: the slot keeps owning it until the next
+                // resume replaces it (setResumeValue), after it is used.
                 resume_value = fs.resume_value;
             }
         }
@@ -206,7 +208,7 @@ pub fn evalYieldDelegate(self: *Interpreter, env: *Environment, fs: *FiberState,
         fs.fiber.suspendSelf();
         if (fs.resume_is_throw) {
             fs.resume_is_throw = false;
-            return self.throwValue(fs.resume_value);
+            return self.throwValue(fs.takeResumeValue());
         }
     }
     return JSValue.UNDEFINED;
@@ -271,6 +273,8 @@ pub fn bindPattern(self: *Interpreter, env: *Environment, pattern: *const zstate
             }
             if (arr_pat.rest) |rest_pat| {
                 var rest_arr = try self.gcNewArray();
+                // bindPattern retains what it binds.
+                defer rest_arr.deinit();
                 if (arr_pat.elements.len < items.len) {
                     for (items[arr_pat.elements.len..]) |item| {
                         _ = try rest_arr.array.value.push(item.retain());
@@ -292,15 +296,12 @@ pub fn bindPattern(self: *Interpreter, env: *Environment, pattern: *const zstate
             // objects -- all already live there.
             for (obj_pat.properties) |prop| {
                 var v = try self.getProperty(value, prop.key);
-                // A default is owned (evalExpression's) and bindPattern
-                // retains what it binds: release it. (The getProperty
-                // result is owned too and still leaks -- block D.)
-                var from_default = false;
-                defer if (from_default) v.deinit();
+                // Owned either way (getProperty's, or the default's) and
+                // bindPattern retains what it binds: always released here.
+                defer v.deinit();
                 if (v == .@"undefined") {
                     if (prop.default) |def| {
                         v = try self.evalExpression(env, def);
-                        from_default = true;
                         // NamedEvaluation: `{a = AnonFn}` names it "a".
                         if (prop.value.* == .identifier) {
                             try self.maybeNameAnonymousValue(def, v, prop.value.identifier.name);
@@ -364,6 +365,8 @@ pub fn destructuringAssign(self: *Interpreter, env: *Environment, target: *zpars
                 if (el.data == .spread) {
                     // Parse-time validation guarantees this is last.
                     var rest_arr = try self.gcNewArray();
+                    // assignTo retains what it stores.
+                    defer rest_arr.deinit();
                     if (i < items.len) {
                         for (items[i..]) |item| _ = try rest_arr.array.value.push(item.retain());
                     }
@@ -413,15 +416,13 @@ pub fn destructuringAssign(self: *Interpreter, env: *Environment, target: *zpars
                         try consumed.append(arena, pk);
                         var v = try self.getProperty(value, key);
                         var el_target = prop.value;
-                        // A default is owned (evalExpression's) and
-                        // assignTo retains what it stores: release it.
-                        // (The getProperty result still leaks -- block D.)
-                        var from_default = false;
-                        defer if (from_default) v.deinit();
+                        // Owned either way (getProperty's, or the
+                        // default's) and assignTo retains what it stores:
+                        // always released here.
+                        defer v.deinit();
                         if (el_target.data == .assignment and el_target.data.assignment.op == .assign) {
                             if (v == .@"undefined") {
                                 v = try self.evalExpression(env, el_target.data.assignment.value);
-                                from_default = true;
                             }
                             el_target = el_target.data.assignment.target;
                         }
@@ -435,6 +436,8 @@ pub fn destructuringAssign(self: *Interpreter, env: *Environment, target: *zpars
                         // actual target.
                         const arg = sp.data.spread;
                         var rest_obj = try self.ordinaryObject();
+                        // assignTo retains what it stores.
+                        defer rest_obj.deinit();
                         if (value == .proxy) {
                             const ks = try builtins.ownEnumerableKeys(self, arena, value);
                             defer builtins.freeOwnedKeys(arena, ks);

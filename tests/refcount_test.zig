@@ -540,13 +540,12 @@ test "an object pattern default is released after binding" {
         \\let { a = probe } = {}; // +1 (a), now 3
         \\probe;
     , 3);
-    // Not from the default: the getProperty result still leaks one
-    // reference (block D); this pins that it is not released twice.
+    // Not from the default: the getProperty result is released too.
     try expectObjectRefcount(
         \\let probe = {};
-        \\let { a = {} } = { a: probe };
+        \\let { a = {} } = { a: probe }; // +1 (a), now 3
         \\probe;
-    , 4);
+    , 3);
 }
 
 test "an array assignment default is released after assigning; an item is not" {
@@ -571,14 +570,13 @@ test "an object assignment default is released after assigning" {
         \\({ a: a = probe } = {}); // +1 (a), now 3
         \\probe;
     , 3);
-    // Not from the default: the getProperty result still leaks one
-    // reference (block D); this pins that it is not released twice.
+    // Not from the default: the getProperty result is released too.
     try expectObjectRefcount(
         \\let probe = {};
         \\let a;
-        \\({ a: a = {} } = { a: probe });
+        \\({ a: a = {} } = { a: probe }); // +1 (a), now 3
         \\probe;
-    , 4);
+    , 3);
 }
 
 test "extends holds exactly one reference to the parent class" {
@@ -659,4 +657,85 @@ test "new F() does not leak a reference to F" {
     const none = try functionRefcountOf("function F() {} Reflect.get(F, 'prototype'); F;");
     const two = try functionRefcountOf("function F() {} new F(); new F(); F;");
     try testing.expectEqual(none, two);
+}
+
+// ---- member access releases its object; related leaks (block D) --------
+
+/// Refcount of the `.array` a script completes with.
+fn arrayRefcountOf(source: []const u8) !usize {
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try @import("zinterpreter").Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+    const value = try interp.run(source);
+    defer value.deinit();
+    try testing.expect(value == .array);
+    return value.array.refCount();
+}
+
+test "reading a member does not leak a reference to the object" {
+    try expectObjectRefcount(
+        \\let probe = { a: 1 };
+        \\probe.a; probe["a"]; probe?.a;
+        \\probe;
+    , 2);
+}
+
+test "writing a member does not leak a reference to the object" {
+    try expectObjectRefcount(
+        \\let probe = { x: 1 };
+        \\probe.x = 2; probe.x++; probe.x += 1; [probe.x] = [5];
+        \\probe;
+    , 2);
+}
+
+test "F.prototype = X releases the previous prototype" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\function F() {}
+        \\Reflect.set(F, "prototype", probe); // +1, now 3
+        \\F.prototype = {};                   // released, back to 2
+        \\probe;
+    , 2);
+    // The same box again: never dropped to zero midway.
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\function F() {}
+        \\Reflect.set(F, "prototype", probe);
+        \\F.prototype = F.prototype;
+        \\probe;
+    , 3);
+}
+
+/// Refcount of the `.object` a script completes with (no GC pass).
+fn objectRefcountOf(source: []const u8) !usize {
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try @import("zinterpreter").Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+    const value = try interp.run(source);
+    defer value.deinit();
+    try testing.expect(value == .object);
+    return value.object.refCount();
+}
+
+test "a constructor that throws does not leak the instance" {
+    // Every leaked Map instance would keep a proto_refs reference to
+    // Map.prototype. No GC pass: the collector would reclaim a leaked,
+    // unreachable instance anyway.
+    const none = try objectRefcountOf("Reflect.get(Map, 'prototype');");
+    const thrown = try objectRefcountOf(
+        \\try { new Map(5); } catch (e) {}
+        \\try { new Map(5); } catch (e) {}
+        \\Reflect.get(Map, 'prototype');
+    );
+    try testing.expectEqual(none, thrown);
+}
+
+test "rest elements and parameters hold exactly one reference" {
+    try testing.expectEqual(@as(usize, 2), try arrayRefcountOf("let [...r] = [1]; r;"));
+    try testing.expectEqual(@as(usize, 2), try arrayRefcountOf("let r; [...r] = [1]; r;"));
+    try expectObjectRefcount("let r; ({ ...r } = { a: 1 }); r;", 2);
+    // The call's environment keeps `r` (+1) until the collector runs.
+    try testing.expectEqual(@as(usize, 3), try arrayRefcountOf("let f = (...r) => r; let r = f(1); r;"));
 }

@@ -619,6 +619,8 @@ pub fn invokeFunctionNode(
     }
     if (fnode.params.rest) |rest| {
         var rest_arr = try self.gcNewArray();
+        // bindPattern retains what it binds.
+        defer rest_arr.deinit();
         const start = fnode.params.items.len;
         if (start < args.len) {
             for (args[start..]) |a| _ = try rest_arr.array.value.push(a.retain());

@@ -262,6 +262,9 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                 return try self.getProperty(sproto, pk.key);
             }
             const obj = try self.evalExpression(env, m.object);
+            // Owned (evalExpression's); getProperty/privateGet only borrow
+            // it and hand back an owned result.
+            defer obj.deinit();
             if (m.optional and (obj == .@"undefined" or obj == .@"null")) return JSValue.UNDEFINED;
             if (privateMemberName(m)) |pn| return self.privateGet(env, obj, pn);
             const pk = try self.memberKeyString(env, m);
@@ -285,11 +288,13 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
             if (fs.is_async) value = try self.awaitValue(fs, value);
             fs.yielded = value;
             fs.fiber.suspendSelf();
+            // The resume value is the fiber's until taken: taking it
+            // hands this expression the only reference.
             if (fs.resume_is_throw) {
                 fs.resume_is_throw = false;
-                return self.throwValue(fs.resume_value);
+                return self.throwValue(fs.takeResumeValue());
             }
-            return fs.resume_value;
+            return fs.takeResumeValue();
         },
         .await_expr => |operand_node| {
             const fs = self.current_fiber orelse return error.NotImplemented;
@@ -737,6 +742,8 @@ pub fn assignTo(self: *Interpreter, env: *Environment, target: *zparser.Node, va
         .paren => |inner| try self.assignTo(env, inner, value),
         .member => |m| {
             const obj = try self.evalExpression(env, m.object);
+            // Owned (evalExpression's); the setters only borrow it.
+            defer obj.deinit();
             if (privateMemberName(m)) |pn| return self.privateSet(env, obj, pn, value);
             const pk = try self.memberKeyString(env, m);
             defer pk.free(self.gc_allocator);
@@ -983,6 +990,9 @@ pub fn constructValue(self: *Interpreter, callee: JSValue, args: []const JSValue
     }
     const proto = try self.functionPrototype(callee);
     const instance = try self.gcNewObject();
+    // Released if the construction fails (the prototype link or the
+    // constructor call itself throws).
+    errdefer instance.deinit();
     // The instance holds its own reference: the constructor may die, or
     // its `prototype` be reassigned, while the instance lives.
     try self.setOwnedPrototype(instance, proto);

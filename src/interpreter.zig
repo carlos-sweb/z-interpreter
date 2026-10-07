@@ -358,6 +358,8 @@ pub const FiberState = struct {
     args: []const JSValue,
     /// Scheduler -> fiber: what the suspension point produces on resume
     /// (next(v) / the awaited promise's settlement).
+    /// Owned by this slot from the producer's store (setResumeValue) until
+    /// the suspension point takes it (takeResumeValue).
     resume_value: JSValue = JSValue.UNDEFINED,
     resume_is_throw: bool = false,
     /// Fiber -> scheduler: the value a `yield` produced, if any.
@@ -382,6 +384,23 @@ pub const FiberState = struct {
     /// request is in flight -- v1 doesn't support overlapping next() calls
     /// (the only real consumer, `for await`, never overlaps them).
     pending_result_promise: ?JSValue = null,
+
+    /// Stores `value` (an owned reference) as the resume value, releasing
+    /// one left behind that no suspension point took (the first next(v),
+    /// whose argument the body never sees; the steps of a `yield*`).
+    pub fn setResumeValue(self: *FiberState, value: JSValue) void {
+        self.resume_value.deinit();
+        self.resume_value = value;
+    }
+
+    /// Hands the resume value to the suspension point that resumed (as an
+    /// owned reference), leaving the slot empty: the slot owns it until
+    /// then, never both at once.
+    pub fn takeResumeValue(self: *FiberState) JSValue {
+        const v = self.resume_value;
+        self.resume_value = JSValue.UNDEFINED;
+        return v;
+    }
 
     /// GC prep (roadmap item 15, phase 2): see Environment.traceChildren
     /// for the visitor contract. `interp`/`fiber`/`fnode` aren't
@@ -1432,6 +1451,101 @@ test "collectGarbage drops the per-address entries of the boxes it frees" {
     try testing.expectEqual(arrays, interp.array_props.count());
     try testing.expectEqual(wrappers, interp.primitive_wrapper_data.count());
     try testing.expectEqual(deleted, interp.deleted_fn_props.count());
+}
+
+/// The FiberState behind a generator object (its own `next` native's ctx).
+fn fiberOf(gen: JSValue) *FiberState {
+    const next = gen.object.value.get("next").?;
+    return @ptrCast(@alignCast(next.function.value.ctx));
+}
+
+test "yield takes the resume value: the slot ends empty and the value has one owner" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    _ = try interp.run("var probe = {}; function* g() { var x = yield; } var it = g(); it.next();");
+    const it = try interp.run("it;");
+    defer it.deinit();
+    const fs = fiberOf(it);
+    _ = try interp.run("it.next(probe);");
+    try testing.expect(fs.resume_value == .undefined);
+    const probe = try interp.run("probe;");
+    defer probe.deinit();
+    // probe's binding, this reference, and the generator's `x` (its
+    // environment lives until the collector runs) -- not the slot.
+    try testing.expectEqual(@as(usize, 3), probe.object.refCount());
+}
+
+test "await takes the resume value: the slot ends empty" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    // An async generator, so the fiber is reachable through `it.next`.
+    _ = try interp.run(
+        \\var probe = {}; var seen = false;
+        \\async function* ag() { var x = await probe; seen = x === probe; yield 1; }
+        \\var it = ag(); it.next();
+    );
+    const it = try interp.run("it;");
+    defer it.deinit();
+    const seen = try interp.run("seen;");
+    try testing.expect(seen == .boolean and seen.boolean); // the await did resume
+    try testing.expect(fiberOf(it).resume_value == .undefined);
+}
+
+test "a throw delivered at yield or yield* takes the resume value" {
+    const testing = std.testing;
+    // No gen.throw() yet: deliver the throw by hand, as the scheduler
+    // would, to a fiber suspended at each kind of yield.
+    const sources = [_][]const u8{
+        "function* g() { yield 1; } var it = g(); it.next();",
+        "function* g() { yield* [1, 2]; } var it = g(); it.next();",
+        "function* inner() { yield 1; } function* g() { yield* inner(); } var it = g(); it.next();",
+    };
+    for (sources) |src| {
+        var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+        defer allocating.deinit();
+        var interp = try gcTestInterp(&allocating);
+        defer interp.deinit();
+        _ = try interp.run("var probe = {};");
+        _ = try interp.run(src);
+        const it = try interp.run("it;");
+        defer it.deinit();
+        const probe = try interp.run("probe;");
+        defer probe.deinit();
+        const before = probe.object.refCount();
+        const fs = fiberOf(it);
+        fs.setResumeValue(probe.retain());
+        fs.resume_is_throw = true;
+        try interp.resumeFiber(fs);
+        try testing.expect(fs.resume_value == .undefined);
+        // The thrown value moved to the generator's completed_throw: still
+        // exactly the one reference the slot had.
+        try testing.expect(fs.completed_throw != null and fs.completed_throw.? == .object and fs.completed_throw.?.object == probe.object);
+        try testing.expectEqual(before + 1, probe.object.refCount());
+    }
+}
+
+test "the first next(v), which the body never sees, does not leak its value" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    _ = try interp.run(
+        \\var probe = {};
+        \\function* g() { yield 1; yield 2; }
+        \\var it = g();
+        \\it.next(probe); // stored in the slot; the body starts, never takes it
+        \\it.next();      // the next resume releases it
+    );
+    const probe = try interp.run("probe;");
+    defer probe.deinit();
+    try testing.expectEqual(@as(usize, 2), probe.object.refCount()); // binding + this
 }
 
 test "the shutdown snapshot of the GC registry never grows while it fills" {
