@@ -342,6 +342,15 @@ pub fn gcOnBoxDestroyed(ctx: *anyopaque, box: *anyopaque) void {
     if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| {
         if (!self.tearing_down) kv.value.deinit();
     }
+    // Per-address side tables: an entry left behind would leak its value
+    // and be inherited by the next box allocated at the same address.
+    if (self.array_props.fetchRemove(@intFromPtr(box))) |kv| {
+        if (!self.tearing_down) kv.value.deinit();
+    }
+    if (self.primitive_wrapper_data.fetchRemove(@intFromPtr(box))) |kv| {
+        if (!self.tearing_down) kv.value.deinit();
+    }
+    _ = self.deleted_fn_props.remove(@intFromPtr(box));
     // A builtin instance's internal slots (WeakMap & co., Iterator helpers).
     if (self.object_slots.fetchRemove(@intFromPtr(box))) |kv| {
         var slots = kv.value;
@@ -790,6 +799,8 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
     switch (node) {
         .array => |box| {
             for (box.value.toSliceMut()) |*child| sweeper.value(child.*);
+            // Out of the table before destroy(), as with proto_refs below.
+            if (self.array_props.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             box.value.deinit();
             box.destroy();
         },
@@ -803,6 +814,7 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
             // sweep is skipped), and out of the table before destroy() so
             // the hook doesn't release it a second time.
             if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
+            if (self.primitive_wrapper_data.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             box.value.deinit();
             box.destroy();
         },
@@ -832,6 +844,7 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
             // equivalent release by hand instead, garbage-aware.
             if (box.value.prototype) |p| sweeper.value(p);
             if (box.value.statics) |s| sweeper.value(s);
+            _ = self.deleted_fn_props.remove(@intFromPtr(box));
             // A ClosureCtx/FiberState/ClassCtx `ctx` is its OWN
             // registry entry, torn down on its own turn in this same
             // sweep pass -- nothing further to do with it here.

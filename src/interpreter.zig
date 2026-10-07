@@ -818,8 +818,9 @@ pub const Interpreter = struct {
     /// configurable-but-otherwise-fixed own properties), so `delete`
     /// needs its own side table to record "gone" -- same shape as
     /// `array_props`/`primitive_wrapper_data`, keyed by the function box
-    /// pointer. No JSValue payload, so no GC-tracking/cleanup needed
-    /// (unlike those two).
+    /// pointer. No JSValue payload; the entry is still dropped when the
+    /// function dies (gcOnBoxDestroyed), like those two tables' entries,
+    /// so a function later allocated at the same address doesn't inherit it.
     deleted_fn_props: std.AutoHashMapUnmanaged(usize, DeletedFnProps) = .empty,
     /// The stack-depth guard: recursing below this native stack address
     /// raises the real `RangeError: Maximum call stack size exceeded`
@@ -1348,6 +1349,89 @@ test "collectGarbage keeps a class's prototype and statics chain to its parent" 
     interp.collectGarbage();
     const v = try interp.run("var junk = []; for (var i = 0; i < 2000; i++) junk.push({ x: i }); c.m() + K.s();");
     try testing.expectEqual(@as(f64, 42), v.number);
+}
+
+test "a dying array drops its array_props entry and releases the bag" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    const arr = try interp.run("var r = /a/.exec('a'); r;");
+    const key = @intFromPtr(arr.array);
+    const bag = interp.array_props.get(key).?.retain(); // index/input/groups
+    defer bag.deinit();
+    const before = interp.array_props.count();
+    _ = try interp.run("r = null;");
+    arr.deinit(); // the array's last reference
+    try testing.expect(!interp.array_props.contains(key));
+    try testing.expectEqual(before - 1, interp.array_props.count());
+    try testing.expectEqual(@as(usize, 1), bag.object.refCount()); // only ours is left
+}
+
+test "a dying wrapper object drops its primitive_wrapper_data entry and releases the primitive" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    const w = try interp.run("var w = new String('xyz'); w;");
+    const key = @intFromPtr(w.object);
+    const prim = interp.primitive_wrapper_data.get(key).?.retain();
+    defer prim.deinit();
+    try testing.expect(prim == .string);
+    const before = interp.primitive_wrapper_data.count();
+    _ = try interp.run("w = null;");
+    w.deinit();
+    try testing.expect(!interp.primitive_wrapper_data.contains(key));
+    try testing.expectEqual(before - 1, interp.primitive_wrapper_data.count());
+    try testing.expectEqual(@as(usize, 1), prim.string.refCount()); // only ours is left
+}
+
+test "a dying function drops its deleted_fn_props entry" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    const f = try interp.run("var f = function () {}; delete f.name; delete f.length; f;");
+    const key = @intFromPtr(f.function);
+    const gone = interp.deleted_fn_props.get(key).?;
+    try testing.expect(gone.name and gone.length);
+    _ = try interp.run("f = null;");
+    f.deinit();
+    try testing.expect(!interp.deleted_fn_props.contains(key));
+    // A function made afterwards has its own name/length.
+    const v = try interp.run("var g = function (a, b) {}; g.name + g.length;");
+    defer v.deinit();
+    try testing.expectEqualStrings("g2", v.string.value.data);
+}
+
+test "collectGarbage drops the per-address entries of the boxes it frees" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    _ = try interp.run("1;");
+    const arrays = interp.array_props.count();
+    const wrappers = interp.primitive_wrapper_data.count();
+    const deleted = interp.deleted_fn_props.count();
+    // Each box is kept alive only by a cycle, so only the collector frees
+    // it. The array's cycle goes through its elements: a cycle through its
+    // array_props bag (`r.self = r`) is never collected, because the
+    // collector marks that table's bags as roots, not as the array's edges.
+    _ = try interp.run(
+        \\(function () {
+        \\  var r = /a/.exec('a'); r.push(r);
+        \\  var w = new Number(5); w.self = w;
+        \\  var f = function () {}; delete f.name; f.self = f;
+        \\})();
+    );
+    interp.collectGarbage();
+    try testing.expectEqual(arrays, interp.array_props.count());
+    try testing.expectEqual(wrappers, interp.primitive_wrapper_data.count());
+    try testing.expectEqual(deleted, interp.deleted_fn_props.count());
 }
 
 test "the shutdown snapshot of the GC registry never grows while it fills" {
