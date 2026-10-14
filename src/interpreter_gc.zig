@@ -117,6 +117,8 @@ const GcNode = union(enum) {
     all_ctx: *builtins.AllCtx,
     all_elem_ctx: *builtins.AllElemCtx,
     race_ctx: *builtins.RaceCtx,
+    /// A Proxy.revocable revoke function's proxy (null once revoked).
+    revoke_ctx: *builtins.RevokeCtx,
     array_iter_ctx: *builtins.ArrayIterCtx,
 
     /// The registry key: the node's own address, regardless of kind.
@@ -145,7 +147,7 @@ pub const GcRegistry = std.AutoHashMapUnmanaged(usize, GcNode);
 /// separate switch (Step 1c uses this one as a gate on that one, rather
 /// than merging them, since gcTrack needs a typed `GcNode`, not just an
 /// address).
-fn heapBoxAddress(v: JSValue) ?usize {
+pub fn heapBoxAddress(v: JSValue) ?usize {
     return switch (v) {
         .undefined, .null, .boolean, .number => null,
         .array => |box| @intFromPtr(box),
@@ -257,6 +259,7 @@ pub fn init(backing_allocator: Allocator, console_writer: *std.Io.Writer) !Inter
 /// key strings, then each map/list's internal array) -- touching any
 /// JSValue still stored in them again would be a double-free.
 pub fn deinit(self: *Interpreter) void {
+    self.tearing_down = true;
     self.freeAllGcNodes();
     self.gc_registry.deinit(self.gc_allocator);
 
@@ -287,6 +290,13 @@ pub fn deinit(self: *Interpreter) void {
     while (mod_it.next()) |rec| self.gc_allocator.destroy(rec.*);
     self.modules.deinit(self.gc_allocator);
     self.regex_state.deinit(self.gc_allocator);
+    self.regexp_string_iters.deinit(self.gc_allocator);
+    // Entries left at teardown: their JSValues went with freeAllGcNodes,
+    // only their storage remains.
+    var osd = self.object_slots.valueIterator();
+    while (osd.next()) |slots| slots.freeStorage(self.gc_allocator);
+    self.object_slots.deinit(self.gc_allocator);
+    self.proto_refs.deinit(self.gc_allocator);
     self.array_props.deinit(self.gc_allocator);
     self.primitive_wrapper_data.deinit(self.gc_allocator);
     self.deleted_fn_props.deinit(self.gc_allocator);
@@ -302,6 +312,14 @@ pub fn deinit(self: *Interpreter) void {
 /// whenever a tracked box's refcount naturally reaches zero mid-run --
 /// the common case for acyclic garbage. Keeps the registry from ever
 /// holding a dangling entry.
+fn releaseValue(_: void, v: JSValue) void {
+    v.deinit();
+}
+
+fn markValue(marker: *Marker, v: JSValue) void {
+    marker.value(v);
+}
+
 pub fn gcOnBoxDestroyed(ctx: *anyopaque, box: *anyopaque) void {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     _ = self.gc_registry.remove(@intFromPtr(box));
@@ -313,7 +331,38 @@ pub fn gcOnBoxDestroyed(ctx: *anyopaque, box: *anyopaque) void {
     if (self.regex_state.fetchRemove(@intFromPtr(box))) |kv| {
         self.gc_allocator.free(kv.value.source);
         self.gc_allocator.free(kv.value.flags);
-        kv.value.last_index.deinit();
+        // During deinit's freeAllGcNodes every registered box (these
+        // included) is freed by the sweep itself.
+        if (!self.tearing_down) {
+            kv.value.last_index.deinit();
+            if (kv.value.props) |bag| bag.deinit();
+        }
+    }
+    // The reference an object held to a JS-supplied prototype.
+    if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| {
+        if (!self.tearing_down) kv.value.deinit();
+    }
+    // Per-address side tables: an entry left behind would leak its value
+    // and be inherited by the next box allocated at the same address.
+    if (self.array_props.fetchRemove(@intFromPtr(box))) |kv| {
+        if (!self.tearing_down) kv.value.deinit();
+    }
+    if (self.primitive_wrapper_data.fetchRemove(@intFromPtr(box))) |kv| {
+        if (!self.tearing_down) kv.value.deinit();
+    }
+    _ = self.deleted_fn_props.remove(@intFromPtr(box));
+    // A builtin instance's internal slots (WeakMap & co., Iterator helpers).
+    if (self.object_slots.fetchRemove(@intFromPtr(box))) |kv| {
+        var slots = kv.value;
+        if (!self.tearing_down) slots.eachValue({}, releaseValue);
+        slots.freeStorage(self.gc_allocator);
+    }
+    // Same for a %RegExpStringIterator%'s slots.
+    if (self.regexp_string_iters.fetchRemove(@intFromPtr(box))) |kv| {
+        if (!self.tearing_down) {
+            kv.value.r.deinit();
+            kv.value.s.deinit();
+        }
     }
 }
 
@@ -424,6 +473,9 @@ pub fn gcTrackAllElemCtx(self: *Interpreter, c: *builtins.AllElemCtx) !void {
 pub fn gcTrackRaceCtx(self: *Interpreter, c: *builtins.RaceCtx) !void {
     try self.gcTrackNode(.{ .race_ctx = c });
 }
+pub fn gcTrackRevokeCtx(self: *Interpreter, c: *builtins.RevokeCtx) !void {
+    try self.gcTrackNode(.{ .revoke_ctx = c });
+}
 pub fn gcTrackArrayIterCtx(self: *Interpreter, c: *builtins.ArrayIterCtx) !void {
     try self.gcTrackNode(.{ .array_iter_ctx = c });
 }
@@ -439,66 +491,79 @@ pub fn gcChildEnv(self: *Interpreter, parent: *Environment) !*Environment {
 
 pub fn gcNewObject(self: *Interpreter) !JSValue {
     const v = try JSValue.newObject(self.gc_allocator);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
 pub fn gcNewArray(self: *Interpreter) !JSValue {
     const v = try JSValue.newArray(self.gc_allocator);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
 pub fn gcNewMap(self: *Interpreter) !JSValue {
     const v = try JSValue.newMap(self.gc_allocator);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
 pub fn gcNewSet(self: *Interpreter) !JSValue {
     const v = try JSValue.newSet(self.gc_allocator);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
 pub fn gcNewFunction(self: *Interpreter, callable: zvalue.Callable) !JSValue {
     const v = try JSValue.newFunction(self.gc_allocator, callable);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
 pub fn gcNewPromise(self: *Interpreter) !JSValue {
     const v = try JSValue.newPromise(self.gc_allocator);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
 pub fn gcNewError(self: *Interpreter, kind: zvalue.ErrorKind, message: []const u8) !JSValue {
     const v = try JSValue.newError(self.gc_allocator, kind, message);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
 pub fn gcNewAggregateError(self: *Interpreter, message: []const u8, errs: []const JSValue) !JSValue {
     const v = try JSValue.newAggregateError(self.gc_allocator, message, errs);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
 pub fn gcNewSymbol(self: *Interpreter, description: ?[]const u8) !JSValue {
     const v = try JSValue.newSymbol(self.gc_allocator, description);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
 pub fn gcNewString(self: *Interpreter, content: []const u8) !JSValue {
     const v = try JSValue.newString(self.gc_allocator, content);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
 pub fn gcNewDate(self: *Interpreter, ms: i64) !JSValue {
     const v = try JSValue.newDate(self.gc_allocator, ms);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
 pub fn gcNewTemporal(self: *Interpreter, value: zvalue.TemporalValue) !JSValue {
     const v = try JSValue.newTemporal(self.gc_allocator, value);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
 pub fn gcNewBigInt(self: *Interpreter, raw_digit_text: []const u8) !JSValue {
     const v = try JSValue.newBigInt(self.gc_allocator, raw_digit_text);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
@@ -506,21 +571,25 @@ pub fn gcNewBigInt(self: *Interpreter, raw_digit_text: []const u8) !JSValue {
 /// `.mul`/etc.), not parsed from literal digit text.
 pub fn gcNewBigIntValue(self: *Interpreter, v: zbigint.ZBigInt) !JSValue {
     const jv = try JSValue.newBigIntFromValue(self.gc_allocator, v);
+    errdefer jv.deinit();
     try self.gcTrack(jv);
     return jv;
 }
 pub fn gcNewProxy(self: *Interpreter, target: JSValue, handler: JSValue) !JSValue {
     const v = try JSValue.newProxy(self.gc_allocator, target, handler);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
 pub fn gcNewArrayBuffer(self: *Interpreter, byte_length: usize) !JSValue {
     const v = try JSValue.newArrayBuffer(self.gc_allocator, byte_length);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
 pub fn gcNewSharedArrayBuffer(self: *Interpreter, byte_length: usize) !JSValue {
     const v = try JSValue.newSharedArrayBuffer(self.gc_allocator, byte_length);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
@@ -528,8 +597,15 @@ pub fn gcNewSharedArrayBuffer(self: *Interpreter, byte_length: usize) !JSValue {
 /// `ArrayBuffer.prototype.slice`'s copy), not freshly zero-allocated
 /// -- same shape as `gcNewBigIntValue` for an already-computed
 /// `ZBigInt`.
+/// Takes ownership of `v`, also on failure (like z-value's constructors).
 pub fn gcNewArrayBufferFromValue(self: *Interpreter, v: zbuffer.ArrayBuffer) !JSValue {
-    const jv: JSValue = .{ .array_buffer = try zvalue.Rc(zvalue.ArrayBuffer).create(self.gc_allocator, v) };
+    var payload = v;
+    const box = zvalue.Rc(zvalue.ArrayBuffer).create(self.gc_allocator, payload) catch |err| {
+        payload.deinit();
+        return err;
+    };
+    const jv: JSValue = .{ .array_buffer = box };
+    errdefer jv.deinit();
     try self.gcTrack(jv);
     return jv;
 }
@@ -539,6 +615,7 @@ pub fn gcNewArrayBufferFromValue(self: *Interpreter, v: zbuffer.ArrayBuffer) !JS
 /// `owner`.
 pub fn gcNewDataView(self: *Interpreter, owner: JSValue, byte_offset: usize, byte_length: ?usize) zbuffer.BufferError!JSValue {
     const v = try JSValue.newDataView(self.gc_allocator, owner, byte_offset, byte_length);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
@@ -546,6 +623,7 @@ pub fn gcNewDataView(self: *Interpreter, owner: JSValue, byte_offset: usize, byt
 /// `gcNewDataView`'s doc comment -- same convention).
 pub fn gcNewTypedArray(self: *Interpreter, owner: JSValue, byte_offset: usize, len: ?usize, kind: zvalue.TypedKind) zbuffer.BufferError!JSValue {
     const v = try JSValue.newTypedArray(self.gc_allocator, owner, byte_offset, len, kind);
+    errdefer v.deinit();
     try self.gcTrack(v);
     return v;
 }
@@ -577,11 +655,22 @@ pub fn traceValueChildren(self: *Interpreter, v: JSValue, visitor: anytype) void
         // in principle -- verified via each one's build.zig.zon, not
         // assumed.
         .undefined, .null, .boolean, .number, .string, .regex, .symbol, .date, .bigint, .array_buffer, .temporal => {},
-        .array => |box| for (box.value.toSliceMut()) |*child| visitor.value(child.*),
-        .object => |box| for (box.value.properties.values()) |prop| {
-            visitor.value(prop.value);
-            if (prop.getter) |g| visitor.value(g);
-            if (prop.setter) |s| visitor.value(s);
+        .array => |box| {
+            for (box.value.toSliceMut()) |*child| visitor.value(child.*);
+            // The array's named-property bag hangs off the array, like
+            // proto_refs below: a cycle through it (`r.self = r`) is still
+            // collectable.
+            if (self.array_props.get(@intFromPtr(box))) |bag| visitor.value(bag);
+        },
+        .object => |box| {
+            for (box.value.properties.values()) |prop| {
+                visitor.value(prop.value);
+                if (prop.getter) |g| visitor.value(g);
+                if (prop.setter) |s| visitor.value(s);
+            }
+            if (self.proto_refs.get(@intFromPtr(box))) |p| visitor.value(p);
+            // A wrapper object's boxed primitive (`new String("x")`).
+            if (self.primitive_wrapper_data.get(@intFromPtr(box))) |prim| visitor.value(prim);
         },
         .map => |box| {
             for (box.value.keys()) |*key| visitor.value(key.*);
@@ -612,6 +701,7 @@ pub fn traceValueChildren(self: *Interpreter, v: JSValue, visitor: anytype) void
                 // via the shared on_r's ctx) -- nothing owned to trace.
                 .all_elem_ctx => {},
                 .race_ctx => |c| visitor.value(c.derived),
+                .revoke_ctx => |c| visitor.value(c.proxy),
                 .array_iter_ctx => |c| for (c.items) |item| visitor.value(item),
                 else => {},
             };
@@ -669,15 +759,34 @@ pub fn markRoots(self: *Interpreter, marker: *Marker) void {
     while (skit.next()) |v| marker.value(v.*);
     var srit = self.symbol_registry.valueIterator();
     while (srit.next()) |v| marker.value(v.*);
-    var apit = self.array_props.valueIterator();
-    while (apit.next()) |v| marker.value(v.*);
-    var pwit = self.primitive_wrapper_data.valueIterator();
-    while (pwit.next()) |v| marker.value(v.*);
+    // array_props and primitive_wrapper_data are NOT roots: their values
+    // are edges of the array/wrapper box they belong to (see
+    // traceValueChildren), so they live exactly as long as that box.
+    // A live RegExp's lastIndex and own-property bag (released by the
+    // RegExp's destroy hook, so marking them here is always safe).
+    var rsit = self.regex_state.valueIterator();
+    while (rsit.next()) |st| {
+        marker.value(st.last_index);
+        if (st.props) |bag| marker.value(bag);
+    }
     var mcit = self.method_cache.valueIterator();
     while (mcit.next()) |v| marker.value(v.*);
     if (self.global_object) |v| marker.value(v);
     if (self.eval_fn) |v| marker.value(v);
     if (self.symbol_iterator) |v| marker.value(v);
+    if (self.regexp_ctor) |v| marker.value(v);
+    if (self.regexp_string_iterator_proto) |v| marker.value(v);
+    if (self.iterator_prototype) |v| marker.value(v);
+    if (self.iterator_ctor) |v| marker.value(v);
+    if (self.iterator_helper_proto) |v| marker.value(v);
+    if (self.wrap_for_valid_iterator_proto) |v| marker.value(v);
+    var osi = self.object_slots.valueIterator();
+    while (osi.next()) |slots| slots.eachValue(marker, markValue);
+    var rsi = self.regexp_string_iters.valueIterator();
+    while (rsi.next()) |st| {
+        marker.value(st.r);
+        marker.value(st.s);
+    }
     if (self.symbol_async_iterator) |v| marker.value(v);
     if (self.symbol_to_primitive) |v| marker.value(v);
     inline for (std.meta.fields(Protos)) |f| marker.value(@field(self.protos, f.name));
@@ -697,6 +806,8 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
     switch (node) {
         .array => |box| {
             for (box.value.toSliceMut()) |*child| sweeper.value(child.*);
+            // Out of the table before destroy(), as with proto_refs below.
+            if (self.array_props.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             box.value.deinit();
             box.destroy();
         },
@@ -706,6 +817,11 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
                 if (prop.getter) |g| sweeper.value(g);
                 if (prop.setter) |s| sweeper.value(s);
             }
+            // Through the sweeper (a prototype collected in this same
+            // sweep is skipped), and out of the table before destroy() so
+            // the hook doesn't release it a second time.
+            if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
+            if (self.primitive_wrapper_data.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             box.value.deinit();
             box.destroy();
         },
@@ -735,6 +851,7 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
             // equivalent release by hand instead, garbage-aware.
             if (box.value.prototype) |p| sweeper.value(p);
             if (box.value.statics) |s| sweeper.value(s);
+            _ = self.deleted_fn_props.remove(@intFromPtr(box));
             // A ClosureCtx/FiberState/ClassCtx `ctx` is its OWN
             // registry entry, torn down on its own turn in this same
             // sweep pass -- nothing further to do with it here.
@@ -860,6 +977,10 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
             sweeper.value(c.derived);
             self.gc_allocator.destroy(c);
         },
+        .revoke_ctx => |c| {
+            sweeper.value(c.proxy);
+            self.gc_allocator.destroy(c);
+        },
         .array_iter_ctx => |c| {
             for (c.items) |v| sweeper.value(v);
             self.gc_allocator.free(c.items);
@@ -904,13 +1025,47 @@ pub fn collectGarbage(self: *Interpreter) void {
 /// `freeGarbageNode` (with `garbage` = "every currently registered
 /// address") so two nodes that reference each other don't race to
 /// free one another mid-teardown.
-pub fn freeAllGcNodes(self: *Interpreter) void {
-    var garbage: std.AutoHashMapUnmanaged(usize, void) = .empty;
-    defer garbage.deinit(self.gc_allocator);
-    var it = self.gc_registry.iterator();
-    while (it.next()) |entry| {
-        garbage.put(self.gc_allocator, entry.key_ptr.*, {}) catch return;
+/// The set of every registered node's address, sized up front. Filling a
+/// map that grows as it goes, in the registry's own slot (hash) order, is
+/// quadratic: each growth leaves the next keys landing in long runs of
+/// taken slots. Reserving first means no growth while it fills.
+pub fn registrySnapshot(self: *Interpreter) !std.AutoHashMapUnmanaged(usize, void) {
+    var set: std.AutoHashMapUnmanaged(usize, void) = .empty;
+    try set.ensureTotalCapacity(self.gc_allocator, self.gc_registry.count());
+    var it = self.gc_registry.keyIterator();
+    while (it.next()) |addr| set.putAssumeCapacity(addr.*, {});
+    return set;
+}
+
+/// [[SetPrototypeOf]] with an owned reference (`proto` is an `.object`
+/// or `.null`): sets ZObject's raw pointer and keeps a reference to the
+/// new prototype in `proto_refs`, releasing the previous one. Used for
+/// every prototype that is not an intrinsic: JS-supplied ones
+/// (Object.create, Object.setPrototypeOf, __proto__), instances made by
+/// `new`, and class prototype/statics chains.
+///
+/// The table slot is reserved BEFORE the raw pointer changes: on out of
+/// memory nothing changes (the object keeps its previous prototype),
+/// never a raw pointer to a prototype nothing retains. On a refused
+/// change (a cycle) nothing is retained or released either.
+pub fn setOwnedPrototype(self: *Interpreter, obj: JSValue, proto: JSValue) !void {
+    const p: ?*@TypeOf(obj.object.value) = if (proto == .object) @constCast(&proto.object.value) else null;
+    if (proto == .object) try self.proto_refs.ensureUnusedCapacity(self.gc_allocator, 1);
+    try obj.object.value.setPrototype(p);
+    const key = @intFromPtr(obj.object);
+    if (proto == .object) {
+        const gop = self.proto_refs.getOrPutAssumeCapacity(key);
+        const old: ?JSValue = if (gop.found_existing) gop.value_ptr.* else null;
+        gop.value_ptr.* = proto.retain();
+        if (old) |o| o.deinit();
+    } else if (self.proto_refs.fetchRemove(key)) |kv| {
+        kv.value.deinit();
     }
+}
+
+pub fn freeAllGcNodes(self: *Interpreter) void {
+    var garbage = registrySnapshot(self) catch return;
+    defer garbage.deinit(self.gc_allocator);
     var sweeper = Sweeper{ .garbage = &garbage };
     var git = garbage.keyIterator();
     while (git.next()) |addr| {
@@ -944,6 +1099,12 @@ pub fn freeAllGcNodes(self: *Interpreter) void {
     if (self.global_object) |v| sweeper.value(v);
     if (self.eval_fn) |v| sweeper.value(v);
     if (self.symbol_iterator) |v| sweeper.value(v);
+    if (self.regexp_ctor) |v| sweeper.value(v);
+    if (self.regexp_string_iterator_proto) |v| sweeper.value(v);
+    if (self.iterator_prototype) |v| sweeper.value(v);
+    if (self.iterator_ctor) |v| sweeper.value(v);
+    if (self.iterator_helper_proto) |v| sweeper.value(v);
+    if (self.wrap_for_valid_iterator_proto) |v| sweeper.value(v);
     if (self.symbol_async_iterator) |v| sweeper.value(v);
     if (self.symbol_to_primitive) |v| sweeper.value(v);
     inline for (std.meta.fields(Protos)) |f| sweeper.value(@field(self.protos, f.name));
@@ -961,6 +1122,16 @@ pub fn throwValue(self: *Interpreter, value: JSValue) anyerror {
 
 /// Build an engine error (ReferenceError/TypeError/...) and raise it.
 /// allocPrint's OOM propagates as OOM, never as JsThrow.
+/// A feature gap (`error.NotImplemented`, raised by this interpreter or a
+/// z-* library) that reaches a point where JS can observe exceptions
+/// (try/catch, a promise rejection, an async/generator body, the top
+/// level) becomes a catchable TypeError there instead of aborting the
+/// whole run. Every other error passes through unchanged.
+pub fn throwIfGap(self: *Interpreter, err: anyerror) anyerror {
+    if (err != error.NotImplemented) return err;
+    return self.throwError(.type_error, "This operation is not supported by this engine yet", .{});
+}
+
 pub fn throwError(self: *Interpreter, kind: zvalue.ErrorKind, comptime fmt: []const u8, args: anytype) anyerror {
     const msg = try std.fmt.allocPrint(self.gc_allocator, fmt, args);
     // ZError.init() (zerror.zig) dupes `message` into its own storage --

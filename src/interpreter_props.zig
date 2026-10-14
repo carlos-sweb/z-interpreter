@@ -4,6 +4,11 @@
 //! z-interpreter-refactor.md.
 
 const std = @import("std");
+const regex_builtins = @import("regex_builtins.zig");
+const accessor_builtins = @import("accessor_builtins.zig");
+const weak_builtins = @import("weak_builtins.zig");
+const error_builtins = @import("error_builtins.zig");
+const iterator_builtins = @import("iterator_builtins.zig");
 const zvalue = @import("zvalue");
 const zstring = @import("zstring");
 const JSValue = zvalue.JSValue;
@@ -62,10 +67,19 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
         .array => |box| blk: {
             if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.length()));
             const idx = std.fmt.parseInt(usize, key, 10) catch {
-                // Method (via Array.prototype) or a named own property
-                // (exec-result index/input/groups); else undefined.
+                // A named own property (array_props: exec-result
+                // index/input/groups, `a.constructor = ...`) shadows the
+                // inherited one; an own accessor runs with the array as
+                // `this`. Then Array.prototype's chain; else undefined.
+                if (self.array_props.get(@intFromPtr(box))) |bag| {
+                    if (bag.object.value.getOwnRecord(key)) |rec| {
+                        if (!rec.isAccessor()) break :blk rec.value.retain();
+                        const g = rec.getter orelse break :blk JSValue.UNDEFINED;
+                        break :blk try g.function.value.call(g.function.value.ctx, self.gc_allocator, obj, &.{});
+                    }
+                }
                 if (try self.getFromProto(obj, self.protos.array, key)) |m| break :blk m;
-                break :blk (self.arrayExtra(obj, key) orelse JSValue.UNDEFINED).retain();
+                break :blk JSValue.UNDEFINED;
             };
             if (idx >= box.value.length()) break :blk JSValue.UNDEFINED;
             break :blk box.value.get(idx).retain();
@@ -145,7 +159,13 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             // same bag by setPropertyOnValue) must win over the
             // Callable-struct-backed default.
             if (box.value.statics) |bag| {
-                if (bag.object.value.has(key)) break :blk try self.getProperty(bag, key);
+                if (bag.object.value.has(key)) {
+                    // getFromProto walks the same chain as a getProperty
+                    // on the bag, but calls a getter with the function
+                    // itself as `this` (`static get x() { return this }`
+                    // is the class; RegExp[Symbol.species] is RegExp).
+                    if (try self.getFromProto(obj, bag, key)) |v| break :blk v;
+                }
             }
             if (std.mem.eql(u8, key, "name")) break :blk try self.gcNewString(box.value.name);
             if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.arity));
@@ -192,13 +212,13 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             if (try self.getFromProto(obj, self.protos.promise, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
-        .map => |box| blk: {
-            if (std.mem.eql(u8, key, "size")) break :blk JSValue.fromNumber(@floatFromInt(box.value.size()));
+        .map => blk: {
+            // `size` is an accessor on Map.prototype (accessor_builtins).
             if (try self.getFromProto(obj, self.protos.map, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
-        .set => |box| blk: {
-            if (std.mem.eql(u8, key, "size")) break :blk JSValue.fromNumber(@floatFromInt(box.value.size()));
+        .set => blk: {
+            // `size` is an accessor on Set.prototype (accessor_builtins).
             if (try self.getFromProto(obj, self.protos.set, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
@@ -206,7 +226,7 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
         // computed here rather than stored -- same category as
         // array/string's own special-cased `.length`.
         .array_buffer => |box| blk: {
-            if (std.mem.eql(u8, key, "byteLength")) break :blk JSValue.fromNumber(@floatFromInt(box.value.byteLength()));
+            // byteLength & co. are accessors on the prototype (accessor_builtins).
             if (try self.getFromProto(obj, self.arrayBufferProto(box.value.is_shared), key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
@@ -214,10 +234,8 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
         // accessor properties. `.buffer` returns the SAME `.array_buffer`
         // JSValue this view was constructed over (retained) -- real JS:
         // `dv.buffer === buf`.
-        .data_view => |box| blk: {
-            if (std.mem.eql(u8, key, "buffer")) break :blk box.value.owner.retain();
-            if (std.mem.eql(u8, key, "byteOffset")) break :blk JSValue.fromNumber(@floatFromInt(box.value.view.byte_offset));
-            if (std.mem.eql(u8, key, "byteLength")) break :blk JSValue.fromNumber(@floatFromInt(box.value.view.byte_length));
+        .data_view => blk: {
+            // buffer/byteOffset/byteLength are accessors on DataView.prototype.
             if (try self.getFromProto(obj, self.protos.data_view, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
@@ -226,10 +244,8 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
         // NEVER falls through to the prototype chain like a plain
         // object's missing numeric-string key would.
         .typed_array => |box| blk: {
-            if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.len));
-            if (std.mem.eql(u8, key, "buffer")) break :blk box.value.owner.retain();
-            if (std.mem.eql(u8, key, "byteOffset")) break :blk JSValue.fromNumber(@floatFromInt(box.value.byte_offset));
-            if (std.mem.eql(u8, key, "byteLength")) break :blk JSValue.fromNumber(@floatFromInt(box.value.len * box.value.kind.elemSize()));
+            // length/buffer/byteOffset/byteLength are accessors on
+            // %TypedArray%.prototype (accessor_builtins).
             if (std.fmt.parseInt(usize, key, 10)) |idx| {
                 if (idx >= box.value.len) break :blk JSValue.UNDEFINED;
                 break :blk try builtins.typedElemGet(self, box.value.kind, &box.value.owner.array_buffer.value, box.value.byte_offset, box.value.len, idx);
@@ -237,33 +253,18 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             if (try self.getFromProto(obj, self.typedArrayProto(box.value.kind), key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
-        .symbol => |box| blk: {
-            if (std.mem.eql(u8, key, "description")) {
-                break :blk if (box.value.description) |d| try self.gcNewString(d) else JSValue.UNDEFINED;
-            }
+        .symbol => blk: {
+            // `description` is an accessor on Symbol.prototype.
             if (try self.getFromProto(obj, self.protos.symbol, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
         .regex => blk: {
-            const st = self.regexState(obj);
-            if (std.mem.eql(u8, key, "source")) break :blk try self.gcNewString(st.source);
-            // Real spec: `.flags` is a COMPUTED property, canonical
-            // fixed order (d,g,i,m,s,u,v,y) -- NOT a passthrough of the
-            // source text's own flag order (confirmed against real
-            // Node: `/x/yusmigd`.flags === "dgimsuy", not "yusmigd").
-            if (std.mem.eql(u8, key, "flags")) {
-                var buf: [8]u8 = undefined;
-                break :blk try self.gcNewString(Interpreter.canonicalFlags(st, &buf));
+            // `lastIndex` is a RegExp's only own property; source, flags,
+            // global, ... are accessors on RegExp.prototype (found below).
+            if (std.mem.eql(u8, key, "lastIndex")) break :blk self.regexState(obj).last_index.retain();
+            if (self.regexProps(obj)) |bag| {
+                if (try self.getFromProto(obj, bag, key)) |m| break :blk m;
             }
-            if (std.mem.eql(u8, key, "global")) break :blk JSValue.fromBool(st.global);
-            if (std.mem.eql(u8, key, "ignoreCase")) break :blk JSValue.fromBool(st.ignore_case);
-            if (std.mem.eql(u8, key, "multiline")) break :blk JSValue.fromBool(st.multiline);
-            if (std.mem.eql(u8, key, "dotAll")) break :blk JSValue.fromBool(st.dot_all);
-            if (std.mem.eql(u8, key, "sticky")) break :blk JSValue.fromBool(st.sticky);
-            if (std.mem.eql(u8, key, "unicode")) break :blk JSValue.fromBool(st.unicode);
-            if (std.mem.eql(u8, key, "hasIndices")) break :blk JSValue.fromBool(st.has_indices);
-            if (std.mem.eql(u8, key, "unicodeSets")) break :blk JSValue.fromBool(st.unicode_sets);
-            if (std.mem.eql(u8, key, "lastIndex")) break :blk st.last_index.retain();
             if (try self.getFromProto(obj, self.protos.regex, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
@@ -323,7 +324,8 @@ pub fn setArrayProperty(self: *Interpreter, obj: JSValue, key: []const u8, value
 /// has for arrays (no general property bag).
 pub fn setTypedArrayProperty(self: *Interpreter, obj: JSValue, key: []const u8, value: JSValue) anyerror!void {
     const box = obj.typed_array;
-    const idx = std.fmt.parseInt(usize, key, 10) catch return error.NotImplemented;
+    const idx = std.fmt.parseInt(usize, key, 10) catch
+        return self.throwError(.type_error, "Cannot set property {s} of a typed array: named properties are not supported yet", .{key});
     try builtins.typedElemSet(self, box.value.kind, &box.value.owner.array_buffer.value, box.value.byte_offset, box.value.len, idx, value);
 }
 
@@ -410,8 +412,13 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
         // F.myProp = 1 -- the old "functions have no property bag"
         // gap is gone).
         if (std.mem.eql(u8, key, "prototype")) {
-            if (value != .object) return error.NotImplemented;
+            if (value != .object) return self.throwError(.type_error, "Setting a function's prototype to a non-object is not supported yet", .{});
+            // Old one released only after the new one is stored, so
+            // `F.prototype = F.prototype` never drops it to zero midway.
+            // Instances made from the old one hold their own reference.
+            const old = obj.function.value.prototype;
             obj.function.value.prototype = value.retain();
+            if (old) |o| o.deinit();
             return;
         }
         // `.name`/`.length` start life as virtual (writable: false)
@@ -470,7 +477,7 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
             box.value.message = try box.value.allocator.dupe(u8, s);
             return;
         }
-        return error.NotImplemented;
+        return self.throwError(.type_error, "Cannot add property {s} to an Error object: not supported yet", .{key});
     }
     if (obj == .regex) {
         if (std.mem.eql(u8, key, "lastIndex")) {
@@ -484,12 +491,35 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
             // become `0` -- found via test262 literals/regexp/
             // lastIndex.js's verifyProperty, which does a real write-
             // probe, not just a descriptor read.
-            const st = self.regexState(obj);
-            st.last_index.deinit();
-            st.last_index = value.retain();
+            return regex_builtins.setLastIndex(self, obj, value.retain());
+        }
+        // An own property (the bag): an own accessor runs with the RegExp
+        // as `this`; an own data property is written with its writable /
+        // frozen checks.
+        if (self.regexProps(obj)) |bag| {
+            if (bag.object.value.getOwnRecord(key)) |rec| {
+                if (rec.isAccessor()) {
+                    const setter = rec.setter orelse return self.throwError(.type_error, "Cannot set property {s} of [object RegExp] which has only a getter", .{key});
+                    _ = try setter.function.value.call(setter.function.value.ctx, self.gc_allocator, obj, &.{value});
+                    return;
+                }
+                return self.setObjectProperty(bag, key, value);
+            }
+        }
+        // An inherited accessor (source, flags, global, ... or a user
+        // one on RegExp.prototype): its setter runs; a getter-only one is
+        // a TypeError (always-strict [[Set]] failure).
+        var current: ?*const @TypeOf(self.protos.regex.object.value) = &self.protos.regex.object.value;
+        while (current) |o| : (current = o.getPrototype()) {
+            const rec = o.getOwnRecord(key) orelse continue;
+            if (!rec.isAccessor()) break;
+            const setter = rec.setter orelse return self.throwError(.type_error, "Cannot set property {s} of [object RegExp] which has only a getter", .{key});
+            _ = try setter.function.value.call(setter.function.value.ctx, self.gc_allocator, obj, &.{value});
             return;
         }
-        return error.NotImplemented;
+        // Otherwise a new own data property (`re.exec = f` shadows the
+        // inherited method).
+        return self.setObjectProperty(try self.regexPropsObject(obj), key, value);
     }
     if (obj == .proxy) {
         const box = obj.proxy;
@@ -511,9 +541,9 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
         // above (function/array/regex/object).
         if (box.value.target == .object) return self.setObjectProperty(box.value.target, key, value);
         if (box.value.target == .array) return self.setArrayProperty(box.value.target, key, value);
-        return error.NotImplemented;
+        return self.throwError(.type_error, "Cannot set property {s} through a Proxy whose target is a {s}: not supported yet", .{ key, @tagName(box.value.target) });
     }
-    if (obj != .object) return error.NotImplemented;
+    if (obj != .object) return self.throwError(.type_error, "Cannot add property {s} to a {s}: not supported yet", .{ key, @tagName(obj) });
     // Writing a property on `globalThis` creates/updates a global
     // binding (`globalThis.foo = 1` makes `foo` a global) -- UNLESS
     // `key` already names one (`undefined`/`NaN`/`Infinity`, marked
@@ -634,6 +664,13 @@ pub fn deletePropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8) 
     // succeed. No bag yet means nothing was ever defined there.
     if (obj == .array) {
         if (self.array_props.get(@intFromPtr(obj.array))) |bag| return self.deleteObjectProperty(bag, key);
+        return true;
+    }
+    // A RegExp: `lastIndex` is non-configurable; anything else lives in
+    // its own-property bag.
+    if (obj == .regex) {
+        if (std.mem.eql(u8, key, "lastIndex")) return false;
+        if (self.regexProps(obj)) |bag| return self.deleteObjectProperty(bag, key);
         return true;
     }
     if (obj != .object) return true;
@@ -821,6 +858,7 @@ pub fn materializeProtos(self: *Interpreter) !void {
         const tp_fn = try native_helpers.native(self, "[Symbol.toPrimitive]", 1, date_builtins.dateToPrimitive);
         try self.protos.date.object.value.defineProperty(tp_key, tp_fn, .{ .writable = false, .enumerable = false, .configurable = true });
     }
+    try regex_builtins.installProtoExtras(self);
     if (self.symbol_to_string_tag) |tag_sym| {
         const tag_key = try self.encodeKey(tag_sym);
         defer self.gc_allocator.free(tag_key);
@@ -928,5 +966,13 @@ pub fn materializeProtos(self: *Interpreter) !void {
         try ctor_statics.object.value.defineProperty("BYTES_PER_ELEMENT", JSValue.fromNumber(@floatFromInt(e[2])), bpe_attrs);
         @field(self.protos, e[0]) = proto;
     }
+    // The builtin accessor properties (Map/Set size, buffer/view
+    // lengths, Symbol description, species, __proto__).
+    try accessor_builtins.install(self);
+    // Globals that need the prototypes above: AggregateError (chained to
+    // Error.prototype) and WeakMap/WeakSet/WeakRef/FinalizationRegistry.
+    try error_builtins.installAggregate(self);
+    try weak_builtins.install(self);
+    try iterator_builtins.install(self);
 }
 

@@ -71,3 +71,33 @@ test "enumerable:false hides from for-in, keys, and JSON" {
         \\console.log(seen.join(','), JSON.stringify(o), Object.getOwnPropertyNames(o).join(','));
     , "visible {\"visible\":1} visible,oculta\n");
 }
+
+test "a function's prototype descriptor holds its own reference to the prototype" {
+    // F's prototype: F's own reference, `p` and the completion value = 3.
+    // The descriptor adds one and gives it back when it dies; without its
+    // own reference, its death would drop the prototype to 2 (and to 0,
+    // freeing it under F, for a prototype nothing else holds).
+    try helpers.runAndCheck(
+        \\function F() {}
+        \\let p = Reflect.get(F, "prototype");
+        \\let d = Object.getOwnPropertyDescriptor(F, "prototype");
+        \\d = null;
+        \\p;
+    , @as(usize, 3), struct {
+        fn check(want: usize, result: helpers.Result) !void {
+            try std.testing.expect(result.value == .object);
+            try std.testing.expectEqual(want, result.value.object.refCount());
+        }
+    }.check);
+}
+
+test "dropping a builtin prototype's descriptor keeps the prototype alive" {
+    try helpers.expectStdout(
+        \\var d = Object.getOwnPropertyDescriptor(Function, "prototype");
+        \\d = null;
+        \\d = Object.getOwnPropertyDescriptor(Object, "prototype");
+        \\d = null;
+        \\var junk = []; for (var i = 0; i < 2000; i++) junk.push({ x: i });
+        \\console.log(Reflect.get(Function, "prototype") === Object.getPrototypeOf(function () {}), Object.hasOwnProperty("prototype"), Reflect.get(Object, "prototype") === Object.getPrototypeOf({}));
+    , "true true true\n");
+}

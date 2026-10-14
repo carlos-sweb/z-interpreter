@@ -153,3 +153,42 @@ test "import in a classic run() without a loader is a catchable SyntaxError" {
     try testing.expectError(error.UncaughtException, interp.run("import { x } from 'm';"));
     try testing.expectEqualStrings("Cannot use import statement outside a module", interp.pending_exception.?.@"error".value.message);
 }
+
+/// Refcount of the object module `module` exports as `name`, after
+/// `entry` ran.
+fn exportRefcountAfter(fs: *const MockFs, entry: []const u8, module: []const u8, name: []const u8) !usize {
+    var r = try Run.init(fs);
+    defer r.deinit();
+    _ = try r.interp.runModule(entry);
+    const rec = r.interp.modules.get(module).?;
+    const v = rec.exports.object.value.get(name).?;
+    try testing.expect(v == .object);
+    return v.object.refCount();
+}
+
+test "a local export over an `export *` name releases the re-exported value" {
+    const fs = MockFs.initComptime(.{
+        .{ "dep", "export const x = {};" },
+        .{ "plain", "import 'dep'; export const x = 1;" },
+        .{ "clash", "export * from 'dep'; export const x = 1;" },
+    });
+    try testing.expectEqual(try exportRefcountAfter(&fs, "plain", "dep", "x"), try exportRefcountAfter(&fs, "clash", "dep", "x"));
+}
+
+test "a named re-export over an `export *` name releases the re-exported value" {
+    const fs = MockFs.initComptime(.{
+        .{ "dep", "export const x = {};" },
+        .{ "dep2", "export const y = 1;" },
+        .{ "plain", "import 'dep'; export { y as x } from 'dep2';" },
+        .{ "clash", "export * from 'dep'; export { y as x } from 'dep2';" },
+    });
+    try testing.expectEqual(try exportRefcountAfter(&fs, "plain", "dep", "x"), try exportRefcountAfter(&fs, "clash", "dep", "x"));
+}
+
+test "export default holds exactly one reference to its value" {
+    // `default` and `y` hold the same object, with no binding of their
+    // own (unlike `export const y = o`): each export is one reference.
+    const with_default = MockFs.initComptime(.{.{ "dep", "const o = {}; export const x = o; export default o;" }});
+    const with_named = MockFs.initComptime(.{.{ "dep", "const o = {}; export const x = o; export { o as y };" }});
+    try testing.expectEqual(try exportRefcountAfter(&with_named, "dep", "dep", "x"), try exportRefcountAfter(&with_default, "dep", "dep", "x"));
+}

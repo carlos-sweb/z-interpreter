@@ -71,8 +71,12 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
         .this_expr => return env.resolveThis(),
         .paren => |inner| return self.evalExpression(env, inner),
         .sequence => |items| {
+            // Every value but the last is discarded: release it.
             var result: JSValue = JSValue.UNDEFINED;
-            for (items) |item| result = try self.evalExpression(env, item);
+            for (items) |item| {
+                result.deinit();
+                result = try self.evalExpression(env, item);
+            }
             return result;
         },
         .template_literal => |t| {
@@ -105,8 +109,12 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                     for (items) |item| _ = try arr.array.value.push(item.retain());
                     continue;
                 }
+                // The element's value is owned here and moves into the array.
                 const v = try self.evalExpression(env, el);
-                _ = try arr.array.value.push(v.retain());
+                _ = arr.array.value.push(v) catch |err| {
+                    v.deinit();
+                    return err;
+                };
             }
             return arr;
         },
@@ -125,16 +133,21 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                                 // the function/class with the (already
                                 // static-or-computed-resolved) key.
                                 try self.maybeNameAnonymousValue(prop.value, value, key_str);
-                                try obj.object.value.set(key_str, value.retain());
+                                // `value` is owned (evalExpression's contract
+                                // since Etapa 1): it moves into the property.
+                                try obj.objectSet(key_str, value);
                             },
                             .method => {
                                 const f = try self.makeObjectMethodClosure(env, zfunctions.asFunctionNode(prop.value.data.function_like), obj);
-                                try obj.object.value.set(key_str, f);
+                                try obj.objectSet(key_str, f);
                             },
                             // get+set for the same key merge into one
                             // accessor property (defineAccessor's
                             // contract); data-only consumers see
-                            // UNDEFINED as its value.
+                            // UNDEFINED as its value. Known leak: over
+                            // an existing data key (`{a: v, get a(){}}`)
+                            // the old value is not released; z-value has
+                            // no Rc-aware accessor wrapper.
                             .get, .set => {
                                 const f = try self.makeObjectMethodClosure(env, zfunctions.asFunctionNode(prop.value.data.function_like), obj);
                                 try obj.object.value.defineAccessor(
@@ -160,14 +173,14 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                             defer builtins.freeOwnedKeys(arena, ks);
                             for (ks) |k| {
                                 if (isSymbolKey(k)) continue;
-                                try obj.object.value.set(k, try self.getProperty(spread_val, k));
+                                try obj.objectSet(k, try self.getProperty(spread_val, k));
                             }
                         } else {
-                            if (spread_val != .object) return error.NotImplemented;
+                            if (spread_val != .object) return self.throwError(.type_error, "Spreading a {s} into an object literal is not supported yet", .{@tagName(spread_val)});
                             const keys = try spread_val.object.value.keys(arena);
                             defer arena.free(keys);
                             for (keys) |k| {
-                                try obj.object.value.set(k, spread_val.object.value.get(k).?.retain());
+                                try obj.objectSet(k, spread_val.object.value.get(k).?.retain());
                             }
                         }
                     },
@@ -249,6 +262,9 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                 return try self.getProperty(sproto, pk.key);
             }
             const obj = try self.evalExpression(env, m.object);
+            // Owned (evalExpression's); getProperty/privateGet only borrow
+            // it and hand back an owned result.
+            defer obj.deinit();
             if (m.optional and (obj == .@"undefined" or obj == .@"null")) return JSValue.UNDEFINED;
             if (privateMemberName(m)) |pn| return self.privateGet(env, obj, pn);
             const pk = try self.memberKeyString(env, m);
@@ -272,11 +288,13 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
             if (fs.is_async) value = try self.awaitValue(fs, value);
             fs.yielded = value;
             fs.fiber.suspendSelf();
+            // The resume value is the fiber's until taken: taking it
+            // hands this expression the only reference.
             if (fs.resume_is_throw) {
                 fs.resume_is_throw = false;
-                return self.throwValue(fs.resume_value);
+                return self.throwValue(fs.takeResumeValue());
             }
-            return fs.resume_value;
+            return fs.takeResumeValue();
         },
         .await_expr => |operand_node| {
             const fs = self.current_fiber orelse return error.NotImplemented;
@@ -480,7 +498,14 @@ pub fn evalIn(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
             }
             break :blk try self.evalIn(l, box.value.target);
         },
-        .function, .regex, .symbol, .map, .set, .@"error", .date, .promise, .bigint, .array_buffer, .data_view, .typed_array, .temporal => error.NotImplemented,
+        // A RegExp's own `lastIndex`, or anything on RegExp.prototype's
+        // chain (source, flags, global, ... are accessors there).
+        .regex => JSValue.fromBool(std.mem.eql(u8, key, "lastIndex") or
+            (if (self.regexProps(r)) |bag| bag.object.value.hasOwnProperty(key) else false) or
+            self.protos.regex.object.value.has(key)),
+        // A BigInt is a primitive: the real TypeError.
+        .bigint => self.throwError(.type_error, "Cannot use 'in' operator to search for '{s}' in a BigInt", .{key}),
+        .function, .symbol, .map, .set, .@"error", .date, .promise, .array_buffer, .data_view, .typed_array, .temporal => self.throwError(.type_error, "The 'in' operator on a {s} is not supported yet", .{@tagName(r)}),
     };
 }
 
@@ -717,6 +742,8 @@ pub fn assignTo(self: *Interpreter, env: *Environment, target: *zparser.Node, va
         .paren => |inner| try self.assignTo(env, inner, value),
         .member => |m| {
             const obj = try self.evalExpression(env, m.object);
+            // Owned (evalExpression's); the setters only borrow it.
+            defer obj.deinit();
             if (privateMemberName(m)) |pn| return self.privateSet(env, obj, pn, value);
             const pk = try self.memberKeyString(env, m);
             defer pk.free(self.gc_allocator);
@@ -736,7 +763,7 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
             return self.throwError(.syntax_error, "'super' keyword unexpected here", .{});
         defer sctor.deinit();
         const args = try self.evalArgs(env, c.args);
-        defer self.gc_allocator.free(args);
+        defer freeArgs(self, args);
         const prev_target = self.construct_target;
         self.construct_target = sctor.function.value.ctx;
         defer self.construct_target = prev_target;
@@ -788,7 +815,7 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
             return self.throwError(.type_error, "(intermediate value).{s} is not a function", .{pk.key});
         }
         const args = try self.evalArgs(env, c.args);
-        defer self.gc_allocator.free(args);
+        defer freeArgs(self, args);
         const this_v = env.resolveThis();
         defer this_v.deinit();
         return try method.function.value.call(method.function.value.ctx, arena, this_v, args);
@@ -832,7 +859,7 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
     }
 
     const args = try self.evalArgs(env, c.args);
-        defer self.gc_allocator.free(args);
+    defer freeArgs(self, args);
     // Direct eval: a call written literally as `eval(...)` where `eval`
     // still refers to the intrinsic runs its string argument in the
     // CURRENT scope (always-strict -> a child of it). Any other reference
@@ -878,17 +905,40 @@ pub fn callValue(self: *Interpreter, callee: JSValue, this_value: JSValue, args:
 pub fn evalArgs(self: *Interpreter, env: *Environment, arg_nodes: []const *zparser.Node) anyerror![]const JSValue {
     const arena = self.gc_allocator;
     var args: std.ArrayList(JSValue) = .empty;
+    errdefer {
+        for (args.items) |a| a.deinit();
+        args.deinit(arena);
+    }
     for (arg_nodes) |arg_node| {
         if (arg_node.data == .spread) {
             const spread_val = try self.evalExpression(env, arg_node.data.spread);
+            defer spread_val.deinit();
             const items = try self.iterableItems(spread_val);
             defer arena.free(items);
-            for (items) |item| try args.append(arena, item.retain());
+            for (items) |item| {
+                const r = item.retain();
+                args.append(arena, r) catch |err| {
+                    r.deinit();
+                    return err;
+                };
+            }
         } else {
-            try args.append(arena, try self.evalExpression(env, arg_node));
+            const v = try self.evalExpression(env, arg_node);
+            args.append(arena, v) catch |err| {
+                v.deinit();
+                return err;
+            };
         }
     }
     return args.toOwnedSlice(arena);
+}
+
+/// Releases what `evalArgs` returned: every value is owned by the
+/// caller (callees borrow their arguments and retain what they keep),
+/// so the call site drops them once the call has returned.
+fn freeArgs(self: *Interpreter, args: []const JSValue) void {
+    for (args) |a| a.deinit();
+    self.gc_allocator.free(args);
 }
 
 /// ECMA-262 10.2.2 [[Construct]], narrowed: fresh object wired to
@@ -900,13 +950,16 @@ pub fn evalArgs(self: *Interpreter, env: *Environment, arg_nodes: []const *zpars
 /// [[Construct]]) recursively through nested proxies.
 pub fn evalNew(self: *Interpreter, env: *Environment, n: anytype) anyerror!JSValue {
     const callee = try self.evalExpression(env, n.callee);
+    // Owned (evalExpression's); constructValue only borrows it. Safe to
+    // drop: the instance retains its own prototype (setOwnedPrototype).
+    defer callee.deinit();
     const callee_name: []const u8 = switch (n.callee.data) {
         .identifier => |name| name,
         else => "expression",
     };
     // `new Foo` with no parens at all (args == null) is `new Foo()`.
     const args = try self.evalArgs(env, n.args orelse &.{});
-    defer self.gc_allocator.free(args);
+    defer freeArgs(self, args);
     return self.constructValue(callee, args, callee_name);
 }
 
@@ -936,8 +989,13 @@ pub fn constructValue(self: *Interpreter, callee: JSValue, args: []const JSValue
         return self.throwError(.type_error, "{s} is not a constructor", .{callee_name});
     }
     const proto = try self.functionPrototype(callee);
-    var instance = try self.gcNewObject();
-    try instance.object.value.setPrototype(&proto.object.value);
+    const instance = try self.gcNewObject();
+    // Released if the construction fails (the prototype link or the
+    // constructor call itself throws).
+    errdefer instance.deinit();
+    // The instance holds its own reference: the constructor may die, or
+    // its `prototype` be reassigned, while the instance lives.
+    try self.setOwnedPrototype(instance, proto);
     // Arm the construct token for exactly this call -- see the field
     // doc on `construct_target`.
     const prev_target = self.construct_target;

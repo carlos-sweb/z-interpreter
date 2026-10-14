@@ -29,6 +29,7 @@ const JSValue = zvalue.JSValue;
 const interpreter_mod = @import("interpreter.zig");
 const Interpreter = interpreter_mod.Interpreter;
 const coercion = @import("coercion.zig");
+const regex_builtins = @import("regex_builtins.zig");
 const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
 
@@ -220,7 +221,7 @@ fn objectAssign(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
         const ks = try source.object.value.keys(allocator);
         defer allocator.free(ks);
         for (ks) |k| {
-            try target.object.value.set(k, source.object.value.get(k).?.retain());
+            try target.objectSet(k, source.object.value.get(k).?.retain());
         }
     }
     return target.retain();
@@ -291,7 +292,8 @@ fn objHasOwnProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
         // `lastIndex` is the only own property this model gives a regex
         // literal (mirrors getProperty/objectGetOwnPropertyDescriptor's
         // own `.regex` cases).
-        .regex => JSValue.fromBool(std.mem.eql(u8, key, "lastIndex")),
+        .regex => JSValue.fromBool(std.mem.eql(u8, key, "lastIndex") or
+            (if (interp(ctx).regexProps(this_value)) |bag| bag.object.value.hasOwnProperty(key) else false)),
         else => JSValue.fromBool(false),
     };
 }
@@ -502,6 +504,9 @@ fn definePropertyFromJs(self: *Interpreter, obj: JSValue, key: []const u8, desc:
 
     if (existing) |rec| {
         // Partial merge onto an existing (configurable) property.
+        // Known leak: the old value (or getter/setter) is overwritten
+        // without being released. Not migrated to objectDefine, which
+        // replaces the whole descriptor instead of merging fields.
         if (has_value) {
             rec.value = d.get("value").?.retain();
             rec.getter = null;
@@ -538,6 +543,10 @@ pub fn definePropertyOn(self: *Interpreter, what: []const u8, obj: JSValue, key:
         .object => try definePropertyFromJs(self, obj, key, desc),
         .function => try definePropertyFromJs(self, try self.functionStatics(obj), key, desc),
         .array => try arrayDefineProperty(self, obj, key, desc),
+        .regex => if (std.mem.eql(u8, key, "lastIndex"))
+            try regex_builtins.regexDefineProperty(self, obj, key, desc)
+        else
+            try definePropertyFromJs(self, try self.regexPropsObject(obj), key, desc),
         .proxy => |box| {
             if (try self.proxyTrap(box, "defineProperty")) |trap_fn| {
                 defer trap_fn.deinit();
@@ -588,7 +597,7 @@ fn objectDefineProperties(ctx: *anyopaque, allocator: Allocator, this_value: JSV
     _ = this_value;
     const self = interp(ctx);
     const obj = arg(args, 0);
-    if (obj != .object and obj != .function and obj != .array)
+    if (obj != .object and obj != .function and obj != .array and obj != .regex)
         return self.throwError(.type_error, "Object.defineProperties called on non-object", .{});
     const props = arg(args, 1);
     if (props != .object) return self.throwError(.type_error, "Property description must be an object", .{});
@@ -695,7 +704,9 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, thi
             if (std.mem.eql(u8, key, "name"))
                 return if (deleted.name) JSValue.UNDEFINED else dataDescObj(self, try interp(ctx).gcNewString(box.value.name), false, false, true);
             if (std.mem.eql(u8, key, "prototype") and !isProxyConstructor(self, obj) and (box.value.prototype != null or box.value.constructable))
-                return dataDescObj(self, try self.functionPrototype(obj), true, false, false);
+                // dataDescObj keeps the value it gets; functionPrototype()
+                // only lends the callable's own reference.
+                return dataDescObj(self, (try self.functionPrototype(obj)).retain(), true, false, false);
             if (box.value.statics) |bag| {
                 if (bag.object.value.getOwnRecord(key)) |rec| return descFromRecord(self, rec);
             }
@@ -736,7 +747,10 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, thi
         // getProperty/setPropertyOnValue).
         .regex => {
             if (std.mem.eql(u8, key, "lastIndex"))
-                return dataDescObj(self, self.regexState(obj).last_index.retain(), true, false, false);
+                return dataDescObj(self, self.regexState(obj).last_index.retain(), self.regexState(obj).last_index_writable, false, false);
+            if (self.regexProps(obj)) |bag| {
+                if (bag.object.value.getOwnRecord(key)) |rec| return descFromRecord(self, rec);
+            }
             return JSValue.UNDEFINED;
         },
         // Other object-likes (date/map/...) have no string-keyed own
@@ -845,8 +859,8 @@ fn objectCreate(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     if (proto != .object and proto != .null) {
         return self.throwError(.type_error, "Object prototype may only be an Object or null", .{});
     }
-    var obj = try interp(ctx).gcNewObject();
-    if (proto == .object) try obj.object.value.setPrototype(@constCast(&proto.object.value));
+    const obj = try interp(ctx).gcNewObject();
+    if (proto == .object) try self.setOwnedPrototype(obj, proto);
     const props = arg(args, 1);
     if (props == .object) {
         const keys = try props.object.value.keys(allocator);
@@ -870,6 +884,7 @@ fn extensibilityBag(self: *Interpreter, v: JSValue) ?JSValue {
         .object => v,
         .function => |box| box.value.statics,
         .array => |box| self.array_props.get(@intFromPtr(box)),
+        .regex => self.regexProps(v),
         else => null,
     };
 }
@@ -882,6 +897,7 @@ fn extensibilityBagForWrite(self: *Interpreter, v: JSValue) anyerror!?JSValue {
         .object => v,
         .function => try self.functionStatics(v),
         .array => try self.arrayPropsObject(v),
+        .regex => try self.regexPropsObject(v),
         else => null,
     };
 }
@@ -892,6 +908,8 @@ fn objectFreeze(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     const self = interp(ctx);
     const v = arg(args, 0);
     if (try extensibilityBagForWrite(self, v)) |bag| bag.object.value.freeze();
+    // A RegExp's lastIndex lives outside its bag; freezing makes it read-only too.
+    if (v == .regex) self.regexState(v).last_index_writable = false;
     return v.retain();
 }
 
@@ -947,10 +965,8 @@ fn objectSetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     const obj = arg(args, 0);
     const proto = arg(args, 1);
     if (obj != .object) return self.throwError(.type_error, "Object.setPrototypeOf called on non-object", .{});
-    if (proto == .object) {
-        try obj.object.value.setPrototype(@constCast(&proto.object.value));
-    } else if (proto == .null) {
-        try obj.object.value.setPrototype(null);
+    if (proto == .object or proto == .null) {
+        try self.setOwnedPrototype(obj, proto);
     } else {
         return self.throwError(.type_error, "Object prototype may only be an Object or null", .{});
     }
@@ -1002,7 +1018,7 @@ fn objectFromEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
         // pair-key stays a real symbol-keyed property), not plain ToString.
         const ks = try self.encodeKey(k);
         defer self.gc_allocator.free(ks);
-        try result.object.value.set(ks, v.retain());
+        try result.objectSet(ks, v.retain());
     }
     return result;
 }

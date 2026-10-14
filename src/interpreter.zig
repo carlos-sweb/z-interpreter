@@ -40,6 +40,9 @@ pub const Protos = struct {
     date: JSValue = JSValue.UNDEFINED,
     regex: JSValue = JSValue.UNDEFINED,
     @"error": JSValue = JSValue.UNDEFINED,
+    /// AggregateError.prototype (its instances are `.object`s chained
+    /// to it, and it to Error.prototype -- see error_builtins).
+    aggregate_error: JSValue = JSValue.UNDEFINED,
     map: JSValue = JSValue.UNDEFINED,
     set: JSValue = JSValue.UNDEFINED,
     symbol: JSValue = JSValue.UNDEFINED,
@@ -115,6 +118,113 @@ pub const RegexState = struct {
     // retained on every write, released in gcOnBoxDestroyed alongside
     // this regex's other regex_state cleanup.
     last_index: JSValue = JSValue.fromNumber(0),
+    // `lastIndex` is writable until `Object.defineProperty(re, "lastIndex",
+    // {writable: false})`; it is never enumerable nor configurable.
+    last_index_writable: bool = true,
+    // Own properties other than `lastIndex` (`re.exec = f`,
+    // Object.defineProperty(re, "flags", ...)): a prototype-less object
+    // created on first write, holding full descriptors. Lives and dies
+    // with the RegExp (released in gcOnBoxDestroyed).
+    props: ?JSValue = null,
+};
+
+/// A %RegExpStringIterator% object's internal slots ([[IteratingRegExp]],
+/// [[IteratedString]], [[Global]], [[Unicode]], [[Done]]), keyed by the
+/// iterator object's box. `pos`/`cursor_*` are the fast path's own
+/// position (see regex_protocol's regExpStringIteratorNext).
+pub const RegExpStringIterState = struct {
+    r: JSValue,
+    s: JSValue,
+    global: bool,
+    unicode: bool,
+    done: bool = false,
+    pos: ?usize = null,
+    cursor_pos: usize = 0,
+    cursor_index: usize = 0,
+};
+
+/// One WeakMap/WeakSet entry, keyed (in WeakTable) by the key's box
+/// address. The key is held strongly: this engine never observes it
+/// dying, which the spec permits (a WeakMap need not drop entries).
+pub const WeakEntry = struct { key: JSValue, value: JSValue };
+pub const WeakTable = std.AutoHashMapUnmanaged(usize, WeakEntry);
+/// A FinalizationRegistry registration ([[Cells]] element).
+pub const FinRegCell = struct { target: JSValue, held: JSValue, token: JSValue };
+
+/// An Iterator helper's state (iterator_builtins.zig): the underlying
+/// iterator record, the callback, and the generator-like run state.
+/// Heap-allocated so a pointer to it survives `object_slots` rehashing
+/// while the callback runs.
+pub const IteratorHelper = struct {
+    kind: enum { map, filter, take, drop, flat_map },
+    state: enum { suspended_start, suspended_yield, executing, completed } = .suspended_start,
+    iterator: JSValue,
+    next: JSValue,
+    func: JSValue = JSValue.UNDEFINED,
+    counter: f64 = 0,
+    /// take/drop's remaining count (+Infinity allowed).
+    remaining: f64 = 0,
+    /// flatMap's current inner iterator record.
+    inner_iterator: JSValue = JSValue.UNDEFINED,
+    inner_next: JSValue = JSValue.UNDEFINED,
+    inner_alive: bool = false,
+};
+
+/// The internal slots of an `.object` that is a builtin instance with no
+/// JSValue tag of its own (WeakMap, WeakSet, WeakRef,
+/// FinalizationRegistry, Iterator helpers, Iterator.from's wrappers);
+/// keyed by the box address in `object_slots`.
+pub const ObjectSlots = union(enum) {
+    weak_map: WeakTable,
+    weak_set: WeakTable,
+    weak_ref: JSValue,
+    finalization_registry: struct { cleanup: JSValue, cells: std.ArrayListUnmanaged(FinRegCell) },
+    iterator_helper: *IteratorHelper,
+    /// %WrapForValidIteratorPrototype%'s [[Iterated]] record.
+    wrapped_iterator: struct { iterator: JSValue, next: JSValue },
+
+    /// Every JSValue the slots hold (GC marking and release).
+    pub fn eachValue(self: *const ObjectSlots, ctx: anytype, comptime f: fn (@TypeOf(ctx), JSValue) void) void {
+        switch (self.*) {
+            .weak_map, .weak_set => |t| {
+                var it = t.valueIterator();
+                while (it.next()) |e| {
+                    f(ctx, e.key);
+                    f(ctx, e.value);
+                }
+            },
+            .weak_ref => |v| f(ctx, v),
+            .iterator_helper => |h| {
+                f(ctx, h.iterator);
+                f(ctx, h.next);
+                f(ctx, h.func);
+                f(ctx, h.inner_iterator);
+                f(ctx, h.inner_next);
+            },
+            .wrapped_iterator => |w| {
+                f(ctx, w.iterator);
+                f(ctx, w.next);
+            },
+            .finalization_registry => |r| {
+                f(ctx, r.cleanup);
+                for (r.cells.items) |c| {
+                    f(ctx, c.target);
+                    f(ctx, c.held);
+                    f(ctx, c.token);
+                }
+            },
+        }
+    }
+
+    /// Frees the slots' own storage (not the JSValues).
+    pub fn freeStorage(self: *ObjectSlots, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .weak_map, .weak_set => |*t| t.deinit(allocator),
+            .finalization_registry => |*r| r.cells.deinit(allocator),
+            .iterator_helper => |h| allocator.destroy(h),
+            .weak_ref, .wrapped_iterator => {},
+        }
+    }
 };
 
 /// `delete f.name`/`delete f.length` state -- see `deleted_fn_props`.
@@ -248,6 +358,8 @@ pub const FiberState = struct {
     args: []const JSValue,
     /// Scheduler -> fiber: what the suspension point produces on resume
     /// (next(v) / the awaited promise's settlement).
+    /// Owned by this slot from the producer's store (setResumeValue) until
+    /// the suspension point takes it (takeResumeValue).
     resume_value: JSValue = JSValue.UNDEFINED,
     resume_is_throw: bool = false,
     /// Fiber -> scheduler: the value a `yield` produced, if any.
@@ -272,6 +384,23 @@ pub const FiberState = struct {
     /// request is in flight -- v1 doesn't support overlapping next() calls
     /// (the only real consumer, `for await`, never overlaps them).
     pending_result_promise: ?JSValue = null,
+
+    /// Stores `value` (an owned reference) as the resume value, releasing
+    /// one left behind that no suspension point took (the first next(v),
+    /// whose argument the body never sees; the steps of a `yield*`).
+    pub fn setResumeValue(self: *FiberState, value: JSValue) void {
+        self.resume_value.deinit();
+        self.resume_value = value;
+    }
+
+    /// Hands the resume value to the suspension point that resumed (as an
+    /// owned reference), leaving the slot empty: the slot owns it until
+    /// then, never both at once.
+    pub fn takeResumeValue(self: *FiberState) JSValue {
+        const v = self.resume_value;
+        self.resume_value = JSValue.UNDEFINED;
+        return v;
+    }
 
     /// GC prep (roadmap item 15, phase 2): see Environment.traceChildren
     /// for the visitor contract. `interp`/`fiber`/`fnode` aren't
@@ -615,6 +744,20 @@ pub const Interpreter = struct {
     /// The well-known `Symbol.iterator` value (the only one wired into
     /// real behavior). Set in setupGlobals.
     symbol_iterator: ?JSValue = null,
+    /// %RegExp%, the original RegExp constructor (SpeciesConstructor's
+    /// default), whatever the global `RegExp` binding holds later.
+    regexp_ctor: ?JSValue = null,
+    /// %RegExpStringIteratorPrototype% (matchAll's iterators).
+    regexp_string_iterator_proto: ?JSValue = null,
+    /// %IteratorPrototype% (`Iterator.prototype`), the [[Prototype]] of
+    /// every builtin iterator and generator object (owned here: a
+    /// prototype link isn't a reference).
+    iterator_prototype: ?JSValue = null,
+    /// %Iterator%, %IteratorHelperPrototype% and
+    /// %WrapForValidIteratorPrototype% (iterator_builtins).
+    iterator_ctor: ?JSValue = null,
+    iterator_helper_proto: ?JSValue = null,
+    wrap_for_valid_iterator_proto: ?JSValue = null,
     /// The well-known `Symbol.asyncIterator` -- resolveAsyncIterator's
     /// first choice for `for await`. Set in setupGlobals.
     symbol_async_iterator: ?JSValue = null,
@@ -656,17 +799,40 @@ pub const Interpreter = struct {
     /// string, and the boolean flag set live here (the symbol_keys
     /// pattern).
     regex_state: std.AutoHashMapUnmanaged(usize, RegexState) = .empty,
+    /// Set while `deinit` frees every GC node: a destroy hook must not
+    /// release JSValues then (freeAllGcNodes frees each registered box
+    /// itself, so releasing one from a hook would free it twice).
+    tearing_down: bool = false,
+    /// %RegExpStringIterator% instances' internal slots (see the type).
+    regexp_string_iters: std.AutoHashMapUnmanaged(usize, RegExpStringIterState) = .empty,
+    /// Internal slots of WeakMap/WeakSet/WeakRef/FinalizationRegistry
+    /// instances (see ObjectSlots).
+    object_slots: std.AutoHashMapUnmanaged(usize, ObjectSlots) = .empty,
+    /// ZObject.prototype es un puntero crudo sin refcount. Esta tabla
+    /// mantiene vivos los prototipos que z-object no retiene. Si z-object
+    /// refactoriza el prototipo con refcount, esta tabla se elimina.
+    /// Keyed by the object's box address; the value is an owned reference
+    /// to its prototype, set by `setOwnedPrototype` (prototypes coming from
+    /// JS: Object.create, Object.setPrototypeOf, the __proto__ setter;
+    /// instances made by `new`; class prototype and statics chains) and
+    /// released when the object dies. Intrinsic prototypes need no entry:
+    /// the interpreter's own fields keep them alive.
+    proto_refs: std.AutoHashMapUnmanaged(usize, JSValue) = .empty,
     /// Named own properties on array values (arrays have no general
     /// property bag) -- used by exec/match result arrays for
     /// `index`/`input`/`groups`. Keyed by the array Rc box pointer; the
-    /// value is a plain object holding the extras.
+    /// value is a plain object holding the extras. For the collector the
+    /// bag is an edge of its array (not a root), and the entry goes when
+    /// the array dies.
     array_props: std.AutoHashMapUnmanaged(usize, JSValue) = .empty,
     /// The boxed primitive inside a `new String()`/`new Number()`/
     /// `new Boolean()` wrapper object -- these constructors return an
     /// ordinary object (no internal-slot concept exists on JSValue's
     /// `.object` variant), so the wrapped primitive lives here instead,
     /// keyed by the wrapper object's Rc box pointer. Same side-table
-    /// shape as `array_props`. See /home/sweb/.plans/primitive-wrapper-objects.md.
+    /// shape as `array_props`, and the same lifetime: an edge of its
+    /// wrapper object for the collector, dropped when the wrapper dies.
+    /// See /home/sweb/.plans/primitive-wrapper-objects.md.
     primitive_wrapper_data: std.AutoHashMapUnmanaged(usize, JSValue) = .empty,
     /// `delete f.name`/`delete f.length` tracking: those aren't real
     /// ZObject bag entries (getProperty/hasOwnProperty/
@@ -675,8 +841,9 @@ pub const Interpreter = struct {
     /// configurable-but-otherwise-fixed own properties), so `delete`
     /// needs its own side table to record "gone" -- same shape as
     /// `array_props`/`primitive_wrapper_data`, keyed by the function box
-    /// pointer. No JSValue payload, so no GC-tracking/cleanup needed
-    /// (unlike those two).
+    /// pointer. No JSValue payload; the entry is still dropped when the
+    /// function dies (gcOnBoxDestroyed), like those two tables' entries,
+    /// so a function later allocated at the same address doesn't inherit it.
     deleted_fn_props: std.AutoHashMapUnmanaged(usize, DeletedFnProps) = .empty,
     /// The stack-depth guard: recursing below this native stack address
     /// raises the real `RangeError: Maximum call stack size exceeded`
@@ -716,6 +883,7 @@ pub const Interpreter = struct {
     pub const gcTrackAllCtx = interpreter_gc.gcTrackAllCtx;
     pub const gcTrackAllElemCtx = interpreter_gc.gcTrackAllElemCtx;
     pub const gcTrackRaceCtx = interpreter_gc.gcTrackRaceCtx;
+    pub const gcTrackRevokeCtx = interpreter_gc.gcTrackRevokeCtx;
     pub const gcTrackArrayIterCtx = interpreter_gc.gcTrackArrayIterCtx;
     pub const gcChildEnv = interpreter_gc.gcChildEnv;
     pub const gcNewObject = interpreter_gc.gcNewObject;
@@ -766,6 +934,9 @@ pub const Interpreter = struct {
     pub const setArrayExtra = interpreter_support.setArrayExtra;
     pub const arrayExtra = interpreter_support.arrayExtra;
     pub const arrayPropsObject = interpreter_support.arrayPropsObject;
+    pub const regexPropsObject = interpreter_support.regexPropsObject;
+    pub const recompileRegex = interpreter_support.recompileRegex;
+    pub const regexProps = interpreter_support.regexProps;
     pub const boxPrimitiveIfConstructed = interpreter_support.boxPrimitiveIfConstructed;
     pub const unboxPrimitiveWrapper = interpreter_support.unboxPrimitiveWrapper;
 
@@ -799,6 +970,9 @@ pub const Interpreter = struct {
     // outbound dependency is gcNewError, also there).
     pub const throwValue = interpreter_gc.throwValue;
     pub const throwError = interpreter_gc.throwError;
+    pub const throwIfGap = interpreter_gc.throwIfGap;
+    pub const heapBoxAddress = interpreter_gc.heapBoxAddress;
+    pub const setOwnedPrototype = interpreter_gc.setOwnedPrototype;
 
     // z-interpreter-refactor.md, Step 5 Phase C batch 8: statement/
     // hoisting/loop cluster, split into interpreter_stmt.zig.
@@ -942,6 +1116,486 @@ fn gcTestInterp(allocating: *std.Io.Writer.Allocating) !Interpreter {
     return Interpreter.init(std.testing.allocator, &allocating.writer);
 }
 
+/// Runs `make` with the interpreter's allocator failing at every
+/// allocation index in turn (and an empty GC registry, so gcTrack's put
+/// must allocate), until it succeeds. Every failure must leave nothing
+/// behind: what the failing allocator handed out, it got back.
+fn expectNoLeakOnAllocFailure(interp: *Interpreter, comptime make: fn (*Interpreter) anyerror!JSValue) !void {
+    const testing = std.testing;
+    const real_alloc = interp.gc_allocator;
+    const real_registry = interp.gc_registry;
+    defer {
+        interp.gc_allocator = real_alloc;
+        interp.gc_registry = real_registry;
+    }
+    var index: usize = 0;
+    while (true) : (index += 1) {
+        var failing = std.testing.FailingAllocator.init(real_alloc, .{ .fail_index = index });
+        interp.gc_allocator = failing.allocator();
+        interp.gc_registry = .empty;
+        const result = make(interp);
+        if (result) |v| {
+            v.deinit();
+            interp.gc_registry.deinit(failing.allocator());
+            try testing.expect(index > 0); // at least one failure was exercised
+            return;
+        } else |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            interp.gc_registry.deinit(failing.allocator());
+            try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        }
+    }
+}
+
+test "a gcNew* whose gcTrack fails releases what it built" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    _ = try interp.run("0");
+
+    try expectNoLeakOnAllocFailure(&interp, struct {
+        fn make(i: *Interpreter) anyerror!JSValue {
+            return i.gcNewObject();
+        }
+    }.make);
+    try expectNoLeakOnAllocFailure(&interp, struct {
+        fn make(i: *Interpreter) anyerror!JSValue {
+            return i.gcNewString("a string payload");
+        }
+    }.make);
+    try expectNoLeakOnAllocFailure(&interp, struct {
+        fn make(i: *Interpreter) anyerror!JSValue {
+            return i.gcNewArrayBufferFromValue(try zbuffer.ArrayBuffer.init(i.gc_allocator, 16));
+        }
+    }.make);
+    try expectNoLeakOnAllocFailure(&interp, struct {
+        fn make(i: *Interpreter) anyerror!JSValue {
+            return i.makeRegex("a+b", "g");
+        }
+    }.make);
+
+    // Constructors that take references: on failure they are released,
+    // so the inputs end where they started.
+    const target = try interp.gcNewObject();
+    defer target.deinit();
+    const handler = try interp.gcNewObject();
+    defer handler.deinit();
+    const owner = try interp.gcNewArrayBuffer(8);
+    defer owner.deinit();
+    const S = struct {
+        var t: JSValue = undefined;
+        var h: JSValue = undefined;
+        var o: JSValue = undefined;
+    };
+    S.t = target;
+    S.h = handler;
+    S.o = owner;
+    try expectNoLeakOnAllocFailure(&interp, struct {
+        fn make(i: *Interpreter) anyerror!JSValue {
+            return i.gcNewProxy(S.t.retain(), S.h.retain());
+        }
+    }.make);
+    try expectNoLeakOnAllocFailure(&interp, struct {
+        fn make(i: *Interpreter) anyerror!JSValue {
+            return i.gcNewTypedArray(S.o.retain(), 0, 2, .i32);
+        }
+    }.make);
+    try testing.expectEqual(@as(usize, 1), target.object.refCount());
+    try testing.expectEqual(@as(usize, 1), handler.object.refCount());
+    try testing.expectEqual(@as(usize, 1), owner.array_buffer.refCount());
+}
+
+test "Map.prototype.set and Set.prototype.add release their arguments on OOM" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    const map_set = try interp.run("Map.prototype.set");
+    defer map_set.deinit();
+    const set_add = try interp.run("Set.prototype.add");
+    defer set_add.deinit();
+    const key = try interp.gcNewObject();
+    defer key.deinit();
+    const value = try interp.gcNewObject();
+    defer value.deinit();
+
+    // The map and set keep the allocator they were made with: their
+    // first insert must allocate, and that allocation fails.
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{});
+    const m = try JSValue.newMap(failing.allocator());
+    defer m.deinit();
+    const s = try JSValue.newSet(failing.allocator());
+    defer s.deinit();
+    failing.fail_index = failing.alloc_index;
+    const f = map_set.function.value;
+    try testing.expectError(error.OutOfMemory, f.call(f.ctx, interp.gc_allocator, m, &.{ key, value }));
+    const g = set_add.function.value;
+    try testing.expectError(error.OutOfMemory, g.call(g.ctx, interp.gc_allocator, s, &.{key}));
+    try testing.expect(!m.map.value.has(key));
+    try testing.expect(!s.set.value.has(key));
+    try testing.expectEqual(@as(usize, 1), key.object.refCount());
+    try testing.expectEqual(@as(usize, 1), value.object.refCount());
+}
+
+/// The invariant `setOwnedPrototype` keeps: an object whose raw
+/// prototype pointer is `proto` holds a reference to it in proto_refs,
+/// and `proto`'s count is its baseline plus that one reference.
+fn expectPrototypeRetained(interp: *Interpreter, obj: JSValue, proto: JSValue, base: usize) !void {
+    const testing = std.testing;
+    const linked = obj.object.value.getPrototype() == &proto.object.value;
+    const entry = interp.proto_refs.get(@intFromPtr(obj.object));
+    if (linked) {
+        try testing.expect(entry != null and entry.? == .object and entry.?.object == proto.object);
+        try testing.expectEqual(base + 1, proto.object.refCount());
+    } else {
+        try testing.expect(entry == null);
+        try testing.expectEqual(base, proto.object.refCount());
+    }
+}
+
+/// Calls `f(this, args)` with the interpreter's allocator failing at
+/// every allocation index in turn, until it succeeds; after each failure
+/// and after the success, `check` must hold. Returns the success value.
+/// Boxes made during a call keep the allocator they were made with, so
+/// `failings` (one per attempt) must outlive the interpreter.
+fn callFailingAtEveryIndex(interp: *Interpreter, failings: []std.testing.FailingAllocator, f: JSValue, this: JSValue, args: []const JSValue, ctx: anytype, comptime check: fn (@TypeOf(ctx), ?JSValue) anyerror!void) !JSValue {
+    const testing = std.testing;
+    const real = interp.gc_allocator;
+    defer interp.gc_allocator = real;
+    var index: usize = 0;
+    while (true) : (index += 1) {
+        if (index >= failings.len) return error.TooManyAllocations;
+        failings[index] = std.testing.FailingAllocator.init(real, .{ .fail_index = index });
+        interp.gc_allocator = failings[index].allocator();
+        const result = f.function.value.call(f.function.value.ctx, interp.gc_allocator, this, args);
+        interp.gc_allocator = real;
+        if (result) |v| {
+            try check(ctx, v);
+            try testing.expect(index > 0); // at least one failure was exercised
+            return v;
+        } else |err| {
+            // The __proto__ setter reports any failure as a TypeError.
+            if (err == error.JsThrow) {
+                if (interp.pending_exception) |e| e.deinit();
+                interp.pending_exception = null;
+            } else try testing.expectEqual(error.OutOfMemory, err);
+            try check(ctx, null);
+        }
+    }
+}
+
+test "Object.create, Object.setPrototypeOf and __proto__ never leave an unretained prototype on OOM" {
+    const testing = std.testing;
+    const Case = enum { create, set_prototype_of, proto_setter };
+    inline for (.{ Case.create, Case.set_prototype_of, Case.proto_setter }) |case| {
+        // Declared before the interpreter: it must outlive it.
+        var failings: [64]std.testing.FailingAllocator = undefined;
+        var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+        defer allocating.deinit();
+        var interp = try gcTestInterp(&allocating);
+        defer interp.deinit();
+        const f = try interp.run(switch (case) {
+            .create => "Object.create",
+            .set_prototype_of => "Object.setPrototypeOf",
+            .proto_setter => "Object.getOwnPropertyDescriptor(Object.prototype, '__proto__').set",
+        });
+        defer f.deinit();
+        const obj = try interp.run("({})");
+        defer obj.deinit();
+        const proto = try interp.run("({})");
+        defer proto.deinit();
+        // An empty table: its first insert must allocate.
+        try testing.expectEqual(@as(usize, 0), interp.proto_refs.capacity());
+        const base = proto.object.refCount();
+        const Ctx = struct { interp: *Interpreter, obj: JSValue, proto: JSValue, base: usize, case: Case };
+        const ctx = Ctx{ .interp = &interp, .obj = obj, .proto = proto, .base = base, .case = case };
+        const check = struct {
+            fn check(c: Ctx, result: ?JSValue) anyerror!void {
+                switch (c.case) {
+                    // A failed create returns nothing: the prototype must
+                    // be back at its baseline.
+                    .create => if (result) |r| try expectPrototypeRetained(c.interp, r, c.proto, c.base) else try std.testing.expectEqual(c.base, c.proto.object.refCount()),
+                    else => try expectPrototypeRetained(c.interp, c.obj, c.proto, c.base),
+                }
+            }
+        }.check;
+        const result = try callFailingAtEveryIndex(&interp, &failings, f, if (case == .proto_setter) obj else JSValue.UNDEFINED, switch (case) {
+            .create => &.{proto},
+            .set_prototype_of => &.{ obj, proto },
+            .proto_setter => &.{proto},
+        }, ctx, check);
+        result.deinit();
+    }
+}
+
+test "collectGarbage keeps an instance's prototype once its constructor is unreachable" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    _ = try interp.run(
+        \\var o = (function () {
+        \\  var g = function () {};
+        \\  Reflect.set(g, "prototype", { x: 41 });
+        \\  return new g();
+        \\})();
+    );
+    interp.collectGarbage();
+    const v = try interp.run("var junk = []; for (var i = 0; i < 2000; i++) junk.push({ x: i }); o.x + 1;");
+    try testing.expectEqual(@as(f64, 42), v.number);
+}
+
+test "collectGarbage keeps a class's prototype and statics chain to its parent" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    // Only an instance of C (prototype chain) and C itself (statics
+    // chain) stay reachable; B, C's class context and the IIFE's scope
+    // are left to the collector.
+    _ = try interp.run(
+        \\var c = (function () {
+        \\  class B { m() { return 40; } static s() { return 2; } }
+        \\  class C extends B {}
+        \\  return new C();
+        \\})();
+        \\var K = (function () {
+        \\  class B { static s() { return 2; } }
+        \\  return class C extends B {};
+        \\})();
+    );
+    interp.collectGarbage();
+    const v = try interp.run("var junk = []; for (var i = 0; i < 2000; i++) junk.push({ x: i }); c.m() + K.s();");
+    try testing.expectEqual(@as(f64, 42), v.number);
+}
+
+test "a dying array drops its array_props entry and releases the bag" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    const arr = try interp.run("var r = /a/.exec('a'); r;");
+    const key = @intFromPtr(arr.array);
+    const bag = interp.array_props.get(key).?.retain(); // index/input/groups
+    defer bag.deinit();
+    const before = interp.array_props.count();
+    _ = try interp.run("r = null;");
+    arr.deinit(); // the array's last reference
+    try testing.expect(!interp.array_props.contains(key));
+    try testing.expectEqual(before - 1, interp.array_props.count());
+    try testing.expectEqual(@as(usize, 1), bag.object.refCount()); // only ours is left
+}
+
+test "a dying wrapper object drops its primitive_wrapper_data entry and releases the primitive" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    const w = try interp.run("var w = new String('xyz'); w;");
+    const key = @intFromPtr(w.object);
+    const prim = interp.primitive_wrapper_data.get(key).?.retain();
+    defer prim.deinit();
+    try testing.expect(prim == .string);
+    const before = interp.primitive_wrapper_data.count();
+    _ = try interp.run("w = null;");
+    w.deinit();
+    try testing.expect(!interp.primitive_wrapper_data.contains(key));
+    try testing.expectEqual(before - 1, interp.primitive_wrapper_data.count());
+    try testing.expectEqual(@as(usize, 1), prim.string.refCount()); // only ours is left
+}
+
+test "a dying function drops its deleted_fn_props entry" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    const f = try interp.run("var f = function () {}; delete f.name; delete f.length; f;");
+    const key = @intFromPtr(f.function);
+    const gone = interp.deleted_fn_props.get(key).?;
+    try testing.expect(gone.name and gone.length);
+    _ = try interp.run("f = null;");
+    f.deinit();
+    try testing.expect(!interp.deleted_fn_props.contains(key));
+    // A function made afterwards has its own name/length.
+    const v = try interp.run("var g = function (a, b) {}; g.name + g.length;");
+    defer v.deinit();
+    try testing.expectEqualStrings("g2", v.string.value.data);
+}
+
+test "collectGarbage drops the per-address entries of the boxes it frees" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    _ = try interp.run("1;");
+    const arrays = interp.array_props.count();
+    const wrappers = interp.primitive_wrapper_data.count();
+    const deleted = interp.deleted_fn_props.count();
+    // Each box is kept alive only by a cycle, so only the collector frees
+    // it. (A cycle through the array's own bag is the next test.)
+    _ = try interp.run(
+        \\(function () {
+        \\  var r = /a/.exec('a'); r.push(r);
+        \\  var w = new Number(5); w.self = w;
+        \\  var f = function () {}; delete f.name; f.self = f;
+        \\})();
+    );
+    interp.collectGarbage();
+    try testing.expectEqual(arrays, interp.array_props.count());
+    try testing.expectEqual(wrappers, interp.primitive_wrapper_data.count());
+    try testing.expectEqual(deleted, interp.deleted_fn_props.count());
+}
+
+test "collectGarbage frees an array whose cycle goes through its own array_props bag" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    _ = try interp.run("let r = []; let w = null;");
+    interp.collectGarbage(); // a clean baseline: nothing collectable left
+    const arrays = interp.array_props.count();
+    const wrappers = interp.primitive_wrapper_data.count();
+    const boxes = interp.gc_registry.count();
+    // `r.self` lives in the array's array_props bag, `w.self` in the
+    // wrapper's own properties: each box is reachable only through itself.
+    _ = try interp.run(
+        \\r.self = r; r = null;
+        \\w = new String("x"); w.self = w; w = null;
+    );
+    try testing.expect(interp.array_props.count() == arrays + 1);
+    interp.collectGarbage();
+    try testing.expectEqual(arrays, interp.array_props.count());
+    try testing.expectEqual(wrappers, interp.primitive_wrapper_data.count());
+    // The bag, the wrapper and its string are gone, and so is the array,
+    // which the baseline already counted (`let r = []`).
+    try testing.expectEqual(boxes - 1, interp.gc_registry.count());
+}
+
+/// The FiberState behind a generator object (its own `next` native's ctx).
+fn fiberOf(gen: JSValue) *FiberState {
+    const next = gen.object.value.get("next").?;
+    return @ptrCast(@alignCast(next.function.value.ctx));
+}
+
+test "yield takes the resume value: the slot ends empty and the value has one owner" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    _ = try interp.run("var probe = {}; function* g() { var x = yield; } var it = g(); it.next();");
+    const it = try interp.run("it;");
+    defer it.deinit();
+    const fs = fiberOf(it);
+    _ = try interp.run("it.next(probe);");
+    try testing.expect(fs.resume_value == .undefined);
+    const probe = try interp.run("probe;");
+    defer probe.deinit();
+    // probe's binding, this reference, and the generator's `x` (its
+    // environment lives until the collector runs) -- not the slot.
+    try testing.expectEqual(@as(usize, 3), probe.object.refCount());
+}
+
+test "await takes the resume value: the slot ends empty" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    // An async generator, so the fiber is reachable through `it.next`.
+    _ = try interp.run(
+        \\var probe = {}; var seen = false;
+        \\async function* ag() { var x = await probe; seen = x === probe; yield 1; }
+        \\var it = ag(); it.next();
+    );
+    const it = try interp.run("it;");
+    defer it.deinit();
+    const seen = try interp.run("seen;");
+    try testing.expect(seen == .boolean and seen.boolean); // the await did resume
+    try testing.expect(fiberOf(it).resume_value == .undefined);
+}
+
+test "a throw delivered at yield or yield* takes the resume value" {
+    const testing = std.testing;
+    // No gen.throw() yet: deliver the throw by hand, as the scheduler
+    // would, to a fiber suspended at each kind of yield.
+    const sources = [_][]const u8{
+        "function* g() { yield 1; } var it = g(); it.next();",
+        "function* g() { yield* [1, 2]; } var it = g(); it.next();",
+        "function* inner() { yield 1; } function* g() { yield* inner(); } var it = g(); it.next();",
+    };
+    for (sources) |src| {
+        var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+        defer allocating.deinit();
+        var interp = try gcTestInterp(&allocating);
+        defer interp.deinit();
+        _ = try interp.run("var probe = {};");
+        _ = try interp.run(src);
+        const it = try interp.run("it;");
+        defer it.deinit();
+        const probe = try interp.run("probe;");
+        defer probe.deinit();
+        const before = probe.object.refCount();
+        const fs = fiberOf(it);
+        fs.setResumeValue(probe.retain());
+        fs.resume_is_throw = true;
+        try interp.resumeFiber(fs);
+        try testing.expect(fs.resume_value == .undefined);
+        // The thrown value moved to the generator's completed_throw: still
+        // exactly the one reference the slot had.
+        try testing.expect(fs.completed_throw != null and fs.completed_throw.? == .object and fs.completed_throw.?.object == probe.object);
+        try testing.expectEqual(before + 1, probe.object.refCount());
+    }
+}
+
+test "the first next(v), which the body never sees, does not leak its value" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    _ = try interp.run(
+        \\var probe = {};
+        \\function* g() { yield 1; yield 2; }
+        \\var it = g();
+        \\it.next(probe); // stored in the slot; the body starts, never takes it
+        \\it.next();      // the next resume releases it
+    );
+    const probe = try interp.run("probe;");
+    defer probe.deinit();
+    try testing.expectEqual(@as(usize, 2), probe.object.refCount()); // binding + this
+}
+
+test "the shutdown snapshot of the GC registry never grows while it fills" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    _ = try interp.run("var keep = []; for (var i = 0; i < 5000; i++) keep.push({ i: i });");
+    const n = interp.gc_registry.count();
+    try testing.expect(n >= 5000);
+    var expected: std.AutoHashMapUnmanaged(usize, void) = .empty;
+    defer expected.deinit(testing.allocator);
+    try expected.ensureTotalCapacity(testing.allocator, n);
+    var snap = try interpreter_gc.registrySnapshot(&interp);
+    defer snap.deinit(interp.gc_allocator);
+    // Same capacity as a reservation for exactly n entries: the copy never
+    // rehashed (putAssumeCapacity would also assert this in safe builds).
+    try testing.expectEqual(expected.capacity(), snap.capacity());
+    try testing.expectEqual(n, snap.count());
+}
+
 test "collectGarbage reclaims a plain object-object cycle" {
     const testing = std.testing;
     var allocating = std.Io.Writer.Allocating.init(testing.allocator);
@@ -1039,13 +1693,13 @@ test "collectGarbage reclaims an abandoned, never-driven generator (fiber stack 
         \\let g = gen();
         \\g = null;
     );
-    // The generator object + its "next" function + the FiberState (whose
-    // 8 MiB stack rides along, freed via Fiber.deinit() inside
-    // freeGarbageNode's .fiber_state case), at minimum -- exact count
-    // intentionally not asserted, see the closure<->object<->environment
-    // test's comment.
+    // The generator object and its "next" function die by refcount at
+    // `g = null`; the FiberState (whose 8 MiB stack rides along, freed
+    // via Fiber.deinit() inside freeGarbageNode's .fiber_state case) has
+    // no Rc and waits for the collector -- exact count intentionally not
+    // asserted, see the closure<->object<->environment test's comment.
     const before_collect = interp.gc_registry.count();
-    try testing.expect(before_collect >= baseline + 3);
+    try testing.expect(before_collect >= baseline + 1);
     interp.collectGarbage();
     const after_collect = interp.gc_registry.count();
     try testing.expect(after_collect < before_collect);

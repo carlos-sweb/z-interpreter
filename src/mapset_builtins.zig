@@ -65,9 +65,14 @@ fn mapConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
         defer self.gc_allocator.free(items);
         for (items) |entry| {
             if (entry != .array and entry != .object) return self.throwError(.type_error, "Iterator value {s} is not an entry object", .{entry.typeOf()});
+            // getProperty hands back owned references: they move into
+            // the map (mapSet consumes both, also on error).
             const k = try self.getProperty(entry, "0");
-            const v = try self.getProperty(entry, "1");
-            try m.map.value.set(k.retain(), v.retain());
+            const v = self.getProperty(entry, "1") catch |err| {
+                k.deinit();
+                return err;
+            };
+            try m.mapSet(k, v);
         }
     }
     return m;
@@ -83,7 +88,10 @@ fn setConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     if (init != .undefined and init != .null) {
         const items = try self.iterableItems(init);
         defer self.gc_allocator.free(items);
-        for (items) |v| try s.set.value.add(v.retain());
+        // iterableItems' ownership is mixed (borrowed for array/set
+        // sources, owned for string/iterator ones); this retain is right
+        // for the borrowed case only. Pre-existing, left as is.
+        for (items) |v| try s.setAdd(v.retain());
     }
     return s;
 }
@@ -97,17 +105,9 @@ fn mapGet(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
 fn mapSet(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const m = try requireMap(ctx, this_value, "set");
-    const key = arg(args, 0);
-    const value = arg(args, 1);
-    // std.array_hash_map's put() only replaces the VALUE on an existing
-    // key (getOrPutContext leaves key_ptr alone) -- so retaining the key
-    // argument when the key already exists would retain something that
-    // never gets stored, a pure leak. Capture+release the displaced value
-    // the same way (set() silently overwrites it otherwise).
-    const existed = m.map.value.has(key);
-    const old_value = if (existed) m.map.value.get(key) else null;
-    try m.map.value.set(if (existed) key else key.retain(), value.retain());
-    if (old_value) |v| v.deinit();
+    // mapSet keeps the stored key on an existing entry and releases the
+    // redundant one and the displaced value; on error it releases both.
+    try m.mapSet(arg(args, 0).retain(), arg(args, 1).retain());
     return m.retain(); // chainable
 }
 
@@ -120,24 +120,16 @@ fn mapHas(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
 fn mapDelete(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const m = try requireMap(ctx, this_value, "delete");
-    const key = arg(args, 0);
-    // delete() only returns a bool (no removed key/value) -- capture the
-    // value first so we can release it. The stored KEY isn't released here
-    // (deliberately out of scope): for object/symbol/function keys
-    // SameValueZero is reference identity so `key` IS the stored box, but
-    // for strings it's value equality over possibly-different boxes, and
-    // ZMap doesn't expose "the actual stored key" to disambiguate safely.
-    const old_value = m.map.value.get(key);
-    const removed = m.map.value.delete(key);
-    if (removed) if (old_value) |v| v.deinit();
-    return JSValue.fromBool(removed);
+    // Releases the STORED key (maybe a different, equal box than the
+    // argument) and its value.
+    return JSValue.fromBool(m.mapDelete(arg(args, 0)));
 }
 
 fn mapClear(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     _ = args;
     const m = try requireMap(ctx, this_value, "clear");
-    m.map.value.clear();
+    m.mapClear();
     return JSValue.UNDEFINED;
 }
 
@@ -209,7 +201,8 @@ fn mapEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 fn setAdd(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const s = try requireSet(ctx, this_value, "add");
-    if (!s.set.value.has(arg(args, 0))) try s.set.value.add(arg(args, 0).retain());
+    // setAdd releases the reference if the value is already present.
+    try s.setAdd(arg(args, 0).retain());
     return s.retain(); // chainable
 }
 
@@ -222,6 +215,11 @@ fn setHas(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
 fn setDelete(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const s = try requireSet(ctx, this_value, "delete");
+    // Set.delete/clear no liberan porque iterableItems devuelve elementos
+    // prestados. Migrar (a setDelete/setClear) cuando iterableItems
+    // devuelva referencias propias: hoy liberar aquí deja colgando la
+    // lista de un llamador que ejecuta JS mientras la recorre
+    // (Array.from(set, fn), yield* set).
     return JSValue.fromBool(s.set.value.delete(arg(args, 0)));
 }
 
@@ -229,6 +227,11 @@ fn setClear(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
     _ = allocator;
     _ = args;
     const s = try requireSet(ctx, this_value, "clear");
+    // Set.delete/clear no liberan porque iterableItems devuelve elementos
+    // prestados. Migrar (a setDelete/setClear) cuando iterableItems
+    // devuelva referencias propias: hoy liberar aquí deja colgando la
+    // lista de un llamador que ejecuta JS mientras la recorre
+    // (Array.from(set, fn), yield* set).
     s.set.value.clear();
     return JSValue.UNDEFINED;
 }

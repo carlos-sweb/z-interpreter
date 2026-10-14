@@ -2,13 +2,12 @@
 //! object-property overwrite/delete, Map set/delete, and variable
 //! reassignment must release the value they displace, not leak it.
 //!
-//! Baseline quirk these tests build on: `let x = <fresh value>;` leaves the
-//! box at refcount 2, not 1 -- the literal's own creation (count=1) is
-//! never separately released once bindPattern's declare-time retain adds a
-//! second owner (out of scope for this phase; see the GC plan). Every test
-//! below starts from that known baseline and checks the DELTA an
-//! overwrite/delete/reassign should apply on top of it, rather than
-//! asserting an absolute count in isolation.
+//! Baseline these tests build on: after `let probe = <fresh value>; ...;
+//! probe;` the box is at refcount 2 -- probe's binding, plus the script's
+//! completion value (the final `probe;`), which the run hands back to the
+//! test as an owned reference. Every test below starts from that baseline
+//! and checks the DELTA an overwrite/delete/reassign should apply on top
+//! of it, rather than asserting an absolute count in isolation.
 const std = @import("std");
 const testing = std.testing;
 const zvalue = @import("zvalue");
@@ -140,13 +139,603 @@ test "concat retains each element once per occurrence in the merged result" {
         \\let probe = {};
         \\let arr = [probe];       // array-literal element -- +1, now 3
         \\const merged = arr.concat(probe, [probe]);
-        \\// Evaluating the `[probe]` argument is its OWN array-literal
-        \\// construction -- +1 (now 4) BEFORE concat() even runs. concat()
-        \\// then builds a brand new array with 3 elements (arr's own probe,
-        \\// the loose probe, and the [probe] arg's probe), each retained
-        \\// once as it's copied into that new result -- +3 (now 7). arr's
-        \\// own element is retained AGAIN here because concat() returns an
-        \\// independent shallow copy, not a view onto arr.
+        \\// The `[probe]` argument is its OWN array-literal construction
+        \\// (+1 while the call runs), released with the other arguments
+        \\// once concat() returns. concat() builds a brand new array with
+        \\// 3 elements (arr's own probe, the loose probe, and the [probe]
+        \\// arg's probe), each retained once as it's copied into that new
+        \\// result -- +3 (now 6). arr's own element is retained AGAIN here
+        \\// because concat() returns an independent shallow copy, not a
+        \\// view onto arr.
         \\probe;
-    , 7);
+    , 6);
+}
+
+// ---- Call arguments, array literals and declarations ------------------
+// Each of these used to keep one extra reference per evaluation: call
+// arguments were never released after the call, an array literal
+// retained an element it already owned, and a declaration retained its
+// initializer's result on top of the binding's own reference.
+
+test "call arguments are released after a JS function call" {
+    // What remains is the callee's own: each parameter binding and each
+    // `arguments` element holds one reference, and call environments are
+    // not freed yet (a separate, known gap) -- f(probe, probe) keeps 2 + 2,
+    // f(probe) keeps 1 + 1. The caller's own references (3 here) are gone.
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\function f(a, b) { return 0; }
+        \\f(probe, probe); f(probe);
+        \\probe;
+    , 8);
+}
+
+test "call arguments are released after a native call and a constructor" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\Object.keys(probe); Object.is(probe, probe);
+        \\new Array(probe); [].concat(probe);
+        \\probe;
+    , 2);
+}
+
+test "a returned argument is a new reference, the argument itself is released" {
+    // count(probe, probe) keeps 2 parameters + 2 `arguments` elements and
+    // keep(probe) 1 + 1 (call environments are not freed yet); `back`
+    // holds the returned reference: 2 + 4 + 2 + 1.
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\function count(a, b) { return 0; }
+        \\function keep(a) { return a; }
+        \\count(probe, probe);
+        \\const back = keep(probe);
+        \\probe;
+    , 9);
+}
+
+test "spread arguments are released after the call" {
+    // Only the callee's `arguments` keeps its 2 elements (its environment
+    // is not freed yet); the spread array and the caller's copies are gone.
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\function f() { return arguments.length; }
+        \\f(...[probe, probe]);
+        \\probe;
+    , 4);
+}
+
+test "a discarded array literal releases its elements" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\[probe, probe];
+        \\let tmp = [probe]; // +1 (element of a live array)
+        \\probe;
+    , 3);
+}
+
+test "let/const/var initializers hold exactly one reference each" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let a = probe; const b = probe; var c = probe; // +3
+        \\probe;
+    , 5);
+}
+
+test "a for-let initializer holds exactly the loop binding's reference" {
+    // The loop scope's binding keeps its one reference (environments are
+    // not freed yet -- a separate, known gap); the initializer adds none.
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\for (let i = probe; false;) {}
+        \\probe;
+    , 3);
+}
+
+test "assigning to a property costs exactly the property's reference" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let obj = {};
+        \\obj.a = probe; // +1 (property), nothing else
+        \\probe;
+    , 3);
+}
+
+test "a generator keeps its arguments until it runs, and they stay valid" {
+    try helpers.expectStdout(
+        \\function* g(a, b) { yield a.v + b.v; }
+        \\const it = g({ v: 1 }, { v: 2 }); // arguments are temporaries
+        \\console.log(it.next().value);
+    , "3\n");
+}
+
+test "a promise job keeps its value after the settling promise is gone" {
+    try helpers.expectStdout(
+        \\Promise.resolve('3').then(v => console.log(v));
+        \\const p = Promise.resolve({ k: 'kept' });
+        \\console.log(Promise.resolve(p) === p);
+        \\p.then(o => console.log(o.k));
+    , "true\n3\nkept\n");
+}
+
+// ---- Lifetimes the argument fix exposed -------------------------------
+
+test "code run by eval outlives the eval argument string" {
+    // The source string is built at runtime and dropped right after the
+    // call; functions defined in it must still find their identifiers.
+    try helpers.expectStdout(
+        \\var s1 = 'first'; var o;
+        \\var code = 'o = { get foo() { return s' + '1; } };';
+        \\eval(code);
+        \\code = null;
+        \\var junk = []; for (var i = 0; i < 500; i++) junk.push(('o = { get foo() { return QQ; } };' + i).slice(0, 34));
+        \\console.log(o.foo);
+    , "first\n");
+}
+
+test "a temporary prototype stays alive with its object" {
+    try helpers.expectStdout(
+        \\var a = Object.create({ p: 42 });
+        \\var b = {}; Object.setPrototypeOf(b, { q: 'set' });
+        \\var c = {}; c.__proto__ = { r: 'proto' };
+        \\var junk = []; for (var i = 0; i < 500; i++) junk.push({ x: i, y: 'z' + i });
+        \\console.log(a.p, b.q, c.r);
+    , "42 set proto\n");
+}
+
+test "an object holds exactly one reference to a prototype set from JS" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let o = Object.create(probe); // +1 (o's prototype)
+        \\probe;
+    , 3);
+}
+
+test "replacing or clearing a prototype releases the old one" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let o = Object.create(probe);
+        \\Object.setPrototypeOf(o, {}); // releases probe
+        \\let p = {}; p.__proto__ = probe; p.__proto__ = null; // +1, then released
+        \\probe;
+    , 2);
+}
+
+test "an object that dies releases its prototype" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let o = Object.create(probe);
+        \\o = null;
+        \\probe;
+    , 2);
+}
+
+// ---- z-value mutation wrappers / evalExpression ownership ----------------
+
+/// Function boxes alive after `source` ran (no GC pass: the collector
+/// would also reclaim a leaked, unreachable one). A box that reaches
+/// refcount 0 leaves the GC registry at once.
+fn liveFunctionBoxes(source: []const u8) !usize {
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try @import("zinterpreter").Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+    const value = try interp.run(source);
+    value.deinit();
+    var n: usize = 0;
+    var it = interp.gc_registry.iterator();
+    while (it.next()) |entry| {
+        if (entry.value_ptr.* == .function) n += 1;
+    }
+    return n;
+}
+
+test "an object literal property holds exactly one reference to its value" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let o = { a: probe }; // +1 (property), now 3
+        \\probe;
+    , 3);
+}
+
+test "a duplicate key in an object literal releases the value it replaces" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let o = { a: probe, a: 1 };
+        \\probe;
+    , 2);
+}
+
+test "a duplicate method in an object literal releases the method it replaces" {
+    try testing.expectEqual(try liveFunctionBoxes("let o = { m() {} }; 0;"), try liveFunctionBoxes("let o = { m() {}, m() {} }; 0;"));
+}
+
+test "a method in an object literal releases the value it replaces" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let o = { a: probe, a() {} };
+        \\probe;
+    , 2);
+}
+
+test "Object.assign over an existing key releases the value it replaces" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let t = {};
+        \\t.a = probe;            // now 3
+        \\Object.assign(t, { a: 1 });
+        \\probe;
+    , 2);
+}
+
+test "Object.assign copies hold exactly one reference each" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let t = Object.assign({}, { a: probe }); // +1 (t.a), now 3
+        \\probe;
+    , 3);
+}
+
+test "spread with overlapping keys releases the value it replaces" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let o = { a: probe, ...{ a: 1 } };
+        \\probe;
+    , 2);
+}
+
+test "spread from a proxy with overlapping keys releases the value it replaces" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let o = { a: probe, ...new Proxy({ a: 1 }, {}) };
+        \\probe;
+    , 2);
+}
+
+test "Object.fromEntries with a repeated key releases the value it replaces" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let o = Object.fromEntries([['a', probe], ['a', 1]]);
+        \\probe;
+    , 2);
+}
+
+test "new Map holds exactly one reference per key and value" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let m = new Map([[probe, probe]]); // +1 key, +1 value, now 4
+        \\probe;
+    , 4);
+}
+
+test "new Map with a repeated key releases the value it replaces" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let m = new Map([['k', probe], ['k', 1]]);
+        \\probe;
+    , 2);
+}
+
+test "new Map with a repeated key releases the redundant key" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let m = new Map([[probe, 1], [probe, 2]]); // one stored key, now 3
+        \\probe;
+    , 3);
+}
+
+test "new Set with a repeated value holds one reference" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let s = new Set([probe, probe]); // +1, now 3
+        \\probe;
+    , 3);
+}
+
+test "Map.delete releases the stored key" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let m = new Map();
+        \\m.set(probe, 1); // now 3
+        \\m.delete(probe);
+        \\probe;
+    , 2);
+}
+
+test "Set.add of a value already present does not retain it again" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let s = new Set();
+        \\s.add(probe); // now 3
+        \\s.add(probe);
+        \\probe;
+    , 3);
+}
+
+test "Map.clear releases every key and value" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let m = new Map();
+        \\m.set(probe, probe); // now 4
+        \\m.clear();
+        \\probe;
+    , 2);
+}
+
+test "a static field holds exactly one reference to its value" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\class C { static x = probe; } // +1 (C.x), now 3
+        \\probe;
+    , 3);
+}
+
+test "a duplicate static field releases the value it replaces" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\class C { static x = probe; static x = 1; }
+        \\probe;
+    , 2);
+}
+
+test "a duplicate class method releases the method it replaces" {
+    try testing.expectEqual(try liveFunctionBoxes("class C { m() {} } 0;"), try liveFunctionBoxes("class C { m() {} m() {} } 0;"));
+    try testing.expectEqual(try liveFunctionBoxes("class C { static m() {} } 0;"), try liveFunctionBoxes("class C { static m() {} static m() {} } 0;"));
+}
+
+// ---- owned evalExpression values in class/default/sequence paths --------
+
+/// Refcount of the `.function` a script completes with.
+fn functionRefcountOf(source: []const u8) !usize {
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try @import("zinterpreter").Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+    const value = try interp.run(source);
+    defer value.deinit();
+    try testing.expect(value == .function);
+    return value.function.refCount();
+}
+
+test "an instance field holds exactly one reference to its value" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\class C { x = probe; }
+        \\let c = new C(); // +1 (c.x), now 3
+        \\probe;
+    , 3);
+}
+
+test "a parameter default is released after binding; a passed argument is not" {
+    // The call's environment keeps `x` (+1) until the collector runs.
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let f = (x = probe) => 0;
+        \\f();
+        \\probe;
+    , 3);
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let f = (x = {}) => 0;
+        \\f(probe);
+        \\probe;
+    , 3);
+}
+
+test "an array pattern default is released after binding; an item is not" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let [a = probe] = []; // +1 (a), now 3
+        \\probe;
+    , 3);
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let [a = {}] = [probe];
+        \\probe;
+    , 3);
+}
+
+test "an object pattern default is released after binding" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let { a = probe } = {}; // +1 (a), now 3
+        \\probe;
+    , 3);
+    // Not from the default: the getProperty result is released too.
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let { a = {} } = { a: probe }; // +1 (a), now 3
+        \\probe;
+    , 3);
+}
+
+test "an array assignment default is released after assigning; an item is not" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let a;
+        \\[a = probe] = []; // +1 (a), now 3
+        \\probe;
+    , 3);
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let a;
+        \\[a = {}] = [probe];
+        \\probe;
+    , 3);
+}
+
+test "an object assignment default is released after assigning" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let a;
+        \\({ a: a = probe } = {}); // +1 (a), now 3
+        \\probe;
+    , 3);
+    // Not from the default: the getProperty result is released too.
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let a;
+        \\({ a: a = {} } = { a: probe }); // +1 (a), now 3
+        \\probe;
+    , 3);
+}
+
+test "extends holds exactly one reference to the parent class" {
+    // The class's context keeps one; the evaluated `extends` value is
+    // released.
+    const alone = try functionRefcountOf("let probe = class {}; probe.prototype; probe;");
+    const extended = try functionRefcountOf("let probe = class {}; probe.prototype; class C extends probe {} probe;");
+    try testing.expectEqual(alone + 1, extended);
+}
+
+test "a sequence expression releases the values it discards" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\(probe, 0);
+        \\probe;
+    , 2);
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\let f = () => probe;
+        \\(f(), 0);
+        \\probe;
+    , 2);
+}
+
+// ---- instances retain their prototype (proto_refs) ----------------------
+// `Reflect.set`/`Reflect.get` instead of `F.prototype = p` / `F.prototype`:
+// member assignment/read still leak a reference to `F` (block D).
+
+test "an instance keeps its prototype alive after the constructor dies" {
+    try helpers.expectNumber(
+        \\var g = function () {};
+        \\Reflect.set(g, "prototype", { x: 41 });
+        \\var o = new g();
+        \\g = null; // the constructor dies; o still holds its prototype
+        \\var junk = []; for (var i = 0; i < 2000; i++) junk.push({ x: i, y: 'z' + i });
+        \\o.x + 1;
+    , 42);
+}
+
+test "each live instance holds one reference to its prototype" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\function F() {}
+        \\Reflect.set(F, "prototype", probe); // +1 (F's prototype), now 3
+        \\let a = new F(); // +1
+        \\let b = new F(); // +1, now 5
+        \\probe;
+    , 5);
+    // Each constructor call's environment keeps `this` (the instance)
+    // until the collector runs; once it has, the dead instances have
+    // released their references: back to 3.
+    try testing.expectEqual(@as(usize, 3), try objectRefcountAfterGc(
+        \\let probe = {};
+        \\function F() {}
+        \\Reflect.set(F, "prototype", probe);
+        \\let a = new F();
+        \\let b = new F();
+        \\a = null;
+        \\b = null;
+        \\probe;
+    ));
+}
+
+/// Refcount of the `.object` a script completes with, after a GC pass.
+fn objectRefcountAfterGc(source: []const u8) !usize {
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try @import("zinterpreter").Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+    const value = try interp.run(source);
+    defer value.deinit();
+    try testing.expect(value == .object);
+    interp.collectGarbage();
+    return value.object.refCount();
+}
+
+test "new F() does not leak a reference to F" {
+    const none = try functionRefcountOf("function F() {} Reflect.get(F, 'prototype'); F;");
+    const two = try functionRefcountOf("function F() {} new F(); new F(); F;");
+    try testing.expectEqual(none, two);
+}
+
+// ---- member access releases its object; related leaks (block D) --------
+
+/// Refcount of the `.array` a script completes with.
+fn arrayRefcountOf(source: []const u8) !usize {
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try @import("zinterpreter").Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+    const value = try interp.run(source);
+    defer value.deinit();
+    try testing.expect(value == .array);
+    return value.array.refCount();
+}
+
+test "reading a member does not leak a reference to the object" {
+    try expectObjectRefcount(
+        \\let probe = { a: 1 };
+        \\probe.a; probe["a"]; probe?.a;
+        \\probe;
+    , 2);
+}
+
+test "writing a member does not leak a reference to the object" {
+    try expectObjectRefcount(
+        \\let probe = { x: 1 };
+        \\probe.x = 2; probe.x++; probe.x += 1; [probe.x] = [5];
+        \\probe;
+    , 2);
+}
+
+test "F.prototype = X releases the previous prototype" {
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\function F() {}
+        \\Reflect.set(F, "prototype", probe); // +1, now 3
+        \\F.prototype = {};                   // released, back to 2
+        \\probe;
+    , 2);
+    // The same box again: never dropped to zero midway.
+    try expectObjectRefcount(
+        \\let probe = {};
+        \\function F() {}
+        \\Reflect.set(F, "prototype", probe);
+        \\F.prototype = F.prototype;
+        \\probe;
+    , 3);
+}
+
+/// Refcount of the `.object` a script completes with (no GC pass).
+fn objectRefcountOf(source: []const u8) !usize {
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try @import("zinterpreter").Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+    const value = try interp.run(source);
+    defer value.deinit();
+    try testing.expect(value == .object);
+    return value.object.refCount();
+}
+
+test "a constructor that throws does not leak the instance" {
+    // Every leaked Map instance would keep a proto_refs reference to
+    // Map.prototype. No GC pass: the collector would reclaim a leaked,
+    // unreachable instance anyway.
+    const none = try objectRefcountOf("Reflect.get(Map, 'prototype');");
+    const thrown = try objectRefcountOf(
+        \\try { new Map(5); } catch (e) {}
+        \\try { new Map(5); } catch (e) {}
+        \\Reflect.get(Map, 'prototype');
+    );
+    try testing.expectEqual(none, thrown);
+}
+
+test "rest elements and parameters hold exactly one reference" {
+    try testing.expectEqual(@as(usize, 2), try arrayRefcountOf("let [...r] = [1]; r;"));
+    try testing.expectEqual(@as(usize, 2), try arrayRefcountOf("let r; [...r] = [1]; r;"));
+    try expectObjectRefcount("let r; ({ ...r } = { a: 1 }); r;", 2);
+    // The call's environment keeps `r` (+1) until the collector runs.
+    try testing.expectEqual(@as(usize, 3), try arrayRefcountOf("let f = (...r) => r; let r = f(1); r;"));
 }

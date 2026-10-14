@@ -302,13 +302,16 @@ pub fn runInstanceFields(self: *Interpreter, cctx: *ClassCtx, instance: JSValue)
     field_env.private_ctx = cctx;
     for (cctx.instance_fields) |fd| {
         const v = if (fd.value) |vexpr| try self.evalExpression(field_env, vexpr) else JSValue.UNDEFINED;
+        // `v` is owned (evalExpression's contract since Etapa 1) and
+        // moves into the field; released if it never gets there.
+        errdefer v.deinit();
         // NamedEvaluation: `class C { x = AnonFn }` names it "x" --
         // `fieldDisplayName` recovers "#x" from a private key's
         // internal `\x00P<hex>|#x` encoding, per real spec.
         if (fd.value) |vexpr| try self.maybeNameAnonymousValue(vexpr, v, fieldDisplayName(fd.key));
         const is_private = fd.key.len > 0 and fd.key[0] == 0;
         const target = &instance.object.value;
-        target.set(fd.key, v.retain()) catch |err| switch (err) {
+        target.set(fd.key, v) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             // A constructor can freeze/preventExtensions `this` BEFORE
             // fields initialize. Per spec, a PUBLIC field then fails
@@ -328,7 +331,7 @@ pub fn runInstanceFields(self: *Interpreter, cctx: *ClassCtx, instance: JSValue)
                     target.is_frozen = saved_frozen;
                     target.is_extensible = saved_ext;
                 }
-                target.set(fd.key, v.retain()) catch |e2| return switch (e2) {
+                target.set(fd.key, v) catch |e2| return switch (e2) {
                     error.OutOfMemory => error.OutOfMemory,
                     else => unreachable, // flags lifted; nothing else can gate a fresh key
                 };
@@ -349,6 +352,8 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
     const arena = self.gc_allocator;
 
     var super_ctor: ?JSValue = null;
+    // Owned (evalExpression's): ClassCtx retains its own copy below.
+    defer if (super_ctor) |sc| sc.deinit();
     var super_proto: ?JSValue = null;
     if (cnode.superclass) |sc_expr| {
         const sc = try self.evalExpression(env, sc_expr);
@@ -367,8 +372,10 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
     const closure_env = if (cnode.name != null) try self.gcChildEnv(env) else env;
 
     var proto = try self.gcNewObject();
+    // The parent's prototype/statics are held by this class's own
+    // references, not only by the ClassCtx (which only the collector frees).
     if (super_proto) |sp|
-        try proto.object.value.setPrototype(&sp.object.value)
+        try self.setOwnedPrototype(proto, sp)
     else if (self.protos.object == .object)
         try proto.object.value.setPrototype(&self.protos.object.object.value);
 
@@ -410,7 +417,7 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
     if (super_ctor) |parent| {
         const parent_bag = try self.functionStatics(parent);
         const bag = try self.functionStatics(class_fn);
-        try bag.object.value.setPrototype(&parent_bag.object.value);
+        try self.setOwnedPrototype(bag, parent_bag);
     }
 
     // The class's own name binds BEFORE static elements run (spec:
@@ -497,7 +504,9 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
                 // fieldDisplayName -- see runInstanceFields).
                 if (el.value) |vexpr| try self.maybeNameAnonymousValue(vexpr, v, fieldDisplayName(key));
                 const bag = try self.functionStatics(class_fn);
-                try bag.object.value.set(key, v.retain());
+                // `v` is owned (evalExpression's contract since Etapa 1):
+                // it moves into the property.
+                try bag.objectSet(key, v);
             } else {
                 // Instance fields are CAPTURED here (key already
                 // resolved) and initialized per-instance at
@@ -524,7 +533,7 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
         // definePropertyFromJs already does for JS-level accessors.
         const method_attrs = zvalue.PropertyDescriptor{ .writable = true, .enumerable = false, .configurable = true };
         switch (el.kind) {
-            .method => try target.object.value.defineProperty(key, m, method_attrs),
+            .method => try target.objectDefine(key, m, method_attrs),
             .get => {
                 try target.object.value.defineAccessor(key, m, null, JSValue.UNDEFINED);
                 const rec = target.object.value.getOwnRecordMut(key).?;
@@ -591,9 +600,15 @@ pub fn invokeFunctionNode(
 
     for (fnode.params.items, 0..) |param, i| {
         var value = if (i < args.len) args[i] else JSValue.UNDEFINED;
+        // `args[i]` is borrowed; a default is owned (evalExpression's)
+        // and bindPattern retains what it binds, so only a default is
+        // released here.
+        var from_default = false;
+        defer if (from_default) value.deinit();
         if (value == .@"undefined") {
             if (param.default) |def| {
                 value = try self.evalExpression(call_env, def);
+                from_default = true;
                 // NamedEvaluation: `function f(x = AnonFn)` names it "x".
                 if (param.pattern.* == .identifier) {
                     try self.maybeNameAnonymousValue(def, value, param.pattern.identifier.name);
@@ -604,6 +619,8 @@ pub fn invokeFunctionNode(
     }
     if (fnode.params.rest) |rest| {
         var rest_arr = try self.gcNewArray();
+        // bindPattern retains what it binds.
+        defer rest_arr.deinit();
         const start = fnode.params.items.len;
         if (start < args.len) {
             for (args[start..]) |a| _ = try rest_arr.array.value.push(a.retain());

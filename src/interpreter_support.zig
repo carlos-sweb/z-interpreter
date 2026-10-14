@@ -64,13 +64,22 @@ pub fn canonicalFlags(st: *const RegexState, buf: []u8) []const u8 {
     return buf[0..n];
 }
 
-/// Compiles `pattern` with `flags` into a `.regex` value and records
-/// its JS-level state. A bad pattern is a catchable SyntaxError.
-pub fn makeRegex(self: *Interpreter, pattern: []const u8, flags: []const u8) anyerror!JSValue {
+/// A pattern and flags parsed and compiled: the RegexState to record
+/// (owning its `source`/`flags` copies) and the z-regex program.
+const CompiledRegex = struct { state: RegexState, re: zregex.Regex };
+
+/// RegExpInitialize's validation and compilation: a bad flag, a repeated
+/// flag, `u` with `v`, or a bad pattern is a catchable SyntaxError.
+fn compileRegex(self: *Interpreter, pattern: []const u8, flags: []const u8) anyerror!CompiledRegex {
     const arena = self.gc_allocator;
+    // Two separate dupes, so a failed second one releases the first.
+    const source = try arena.dupe(u8, pattern);
+    errdefer arena.free(source);
+    const flags_copy = try arena.dupe(u8, flags);
+    errdefer arena.free(flags_copy);
     var state: RegexState = .{
-        .source = try arena.dupe(u8, pattern),
-        .flags = try arena.dupe(u8, flags),
+        .source = source,
+        .flags = flags_copy,
         .global = false,
         .ignore_case = false,
         .multiline = false,
@@ -80,34 +89,76 @@ pub fn makeRegex(self: *Interpreter, pattern: []const u8, flags: []const u8) any
         .has_indices = false,
         .unicode_sets = false,
     };
-    // Only fires on an error return below (invalid flags/pattern) --
-    // on success `state` is copied into `self.regex_state` and these
-    // two dupes become that copy's own, no-longer-freeable-here data.
-    errdefer arena.free(state.source);
-    errdefer arena.free(state.flags);
-    for (flags) |f| switch (f) {
-        'g' => state.global = true,
-        'i' => state.ignore_case = true,
-        'm' => state.multiline = true,
-        's' => state.dot_all = true,
-        'y' => state.sticky = true,
-        'u' => state.unicode = true,
-        'd' => state.has_indices = true,
-        'v' => state.unicode_sets = true,
-        else => return self.throwError(.syntax_error, "Invalid flags supplied to RegExp constructor '{s}'", .{flags}),
-    };
-    const re = zregex.Regex.compileWithOptions(arena, pattern, .{
+    // The errdefers above fire on an error return below (invalid
+    // flags/pattern) -- on success the caller takes over both dupes.
+    for (flags) |f| {
+        const slot: *bool = switch (f) {
+            'g' => &state.global,
+            'i' => &state.ignore_case,
+            'm' => &state.multiline,
+            's' => &state.dot_all,
+            'y' => &state.sticky,
+            'u' => &state.unicode,
+            'd' => &state.has_indices,
+            'v' => &state.unicode_sets,
+            else => return self.throwError(.syntax_error, "Invalid flags supplied to RegExp constructor '{s}'", .{flags}),
+        };
+        // A repeated flag is a SyntaxError (RegExpInitialize step 7).
+        if (slot.*) return self.throwError(.syntax_error, "Invalid flags supplied to RegExp constructor '{s}'", .{flags});
+        slot.* = true;
+    }
+    // `u` and `v` together is a SyntaxError too.
+    if (state.unicode and state.unicode_sets)
+        return self.throwError(.syntax_error, "Invalid flags supplied to RegExp constructor '{s}'", .{flags});
+    // The program keeps a reference to its pattern text: hand it the
+    // state's own copy (it lives as long as the program), not the
+    // caller's buffer.
+    const re = zregex.Regex.compileWithOptions(arena, state.source, .{
         .case_insensitive = state.ignore_case,
         .multiline = state.multiline,
         .dot_all = state.dot_all,
         .sticky = state.sticky,
+        .unicode = state.unicode,
+        .v = state.unicode_sets,
     }) catch {
         return self.throwError(.syntax_error, "Invalid regular expression: /{s}/", .{pattern});
     };
-    const value = try JSValue.fromRegex(arena, re);
+    return .{ .state = state, .re = re };
+}
+
+/// Compiles `pattern` with `flags` into a `.regex` value and records
+/// its JS-level state. A bad pattern is a catchable SyntaxError.
+pub fn makeRegex(self: *Interpreter, pattern: []const u8, flags: []const u8) anyerror!JSValue {
+    const arena = self.gc_allocator;
+    const c = try compileRegex(self, pattern, flags);
+    // Until regex_state owns them, the state's two dupes are ours.
+    errdefer {
+        arena.free(c.state.source);
+        arena.free(c.state.flags);
+    }
+    const value = try JSValue.fromRegex(arena, c.re);
+    errdefer value.deinit();
     try self.gcTrack(value);
-    try self.regex_state.put(arena, @intFromPtr(value.regex), state);
+    try self.regex_state.put(arena, @intFromPtr(value.regex), c.state);
     return value;
+}
+
+/// RegExp.prototype.compile's RegExpInitialize on an existing RegExp: a
+/// new program, source and flags in place; lastIndex (and its
+/// writability) and own properties stay. On a SyntaxError nothing changes.
+pub fn recompileRegex(self: *Interpreter, value: JSValue, pattern: []const u8, flags: []const u8) anyerror!void {
+    const arena = self.gc_allocator;
+    const c = try compileRegex(self, pattern, flags);
+    const st = self.regexState(value);
+    arena.free(st.source);
+    arena.free(st.flags);
+    value.regex.value.deinit();
+    value.regex.value = c.re;
+    var next = c.state;
+    next.last_index = st.last_index;
+    next.last_index_writable = st.last_index_writable;
+    next.props = st.props;
+    st.* = next;
 }
 
 /// The RegexState for a `.regex` value (always present -- every
@@ -140,6 +191,22 @@ pub fn arrayPropsObject(self: *Interpreter, array: JSValue) !JSValue {
     const gop = try self.array_props.getOrPut(arena, @intFromPtr(array.array));
     if (!gop.found_existing) gop.value_ptr.* = try self.ordinaryObject();
     return gop.value_ptr.*;
+}
+
+/// A RegExp's own-property bag (other than `lastIndex`), if it has one.
+pub fn regexProps(self: *Interpreter, re: JSValue) ?JSValue {
+    return self.regexState(re).props;
+}
+
+/// The RegExp's own-property bag, created on first use: a real
+/// `.object` with no prototype (lookups on it see own properties only;
+/// the RegExp's inherited ones come from RegExp.prototype).
+pub fn regexPropsObject(self: *Interpreter, re: JSValue) !JSValue {
+    const st = self.regexState(re);
+    if (st.props) |bag| return bag;
+    const bag = try self.gcNewObject();
+    st.props = bag;
+    return bag;
 }
 
 /// `new String(...)`/`new Number(...)`/`new Boolean(...)`: JSValue's
@@ -218,6 +285,9 @@ pub fn nativeMethod(self: *Interpreter, comptime type_prefix: []const u8, name: 
 /// the returned function and must `.deinit()` it when done (a
 /// `null` result has already released it).
 pub fn proxyTrap(self: *Interpreter, proxy: *zvalue.Rc(zvalue.Proxy), trap_name: []const u8) anyerror!?JSValue {
+    // A revoked proxy (Proxy.revocable) has a null [[ProxyHandler]].
+    if (proxy.value.handler == .null)
+        return self.throwError(.type_error, "Cannot perform '{s}' on a proxy that has been revoked", .{trap_name});
     if (proxy.value.handler != .object) return null;
     const fn_val = try self.getProperty(proxy.value.handler, trap_name);
     if (fn_val != .function) {

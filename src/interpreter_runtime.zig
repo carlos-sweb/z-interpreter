@@ -50,7 +50,8 @@ fn fiberEntry(arg: *anyopaque) void {
     const fs: *FiberState = @ptrCast(@alignCast(arg));
     const self = fs.interp;
     const arena = self.gc_allocator;
-    const result = invokeFunctionNode(self, fs.fnode, fs.closure_env, arena, fs.this_value, null, null, fs.private_ctx, fs.args, null) catch |err| {
+    const result = invokeFunctionNode(self, fs.fnode, fs.closure_env, arena, fs.this_value, null, null, fs.private_ctx, fs.args, null) catch |err0| {
+        const err = self.throwIfGap(err0);
         if (err == error.JsThrow) {
             const ex = self.pending_exception.?;
             self.pending_exception = null;
@@ -92,7 +93,7 @@ fn generatorNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     const self = fs.interp;
     if (fs.fiber.finished) return iterResult(self, JSValue.UNDEFINED, true);
 
-    fs.resume_value = if (args.len > 0) args[0].retain() else JSValue.UNDEFINED;
+    fs.setResumeValue(if (args.len > 0) args[0].retain() else JSValue.UNDEFINED);
     fs.resume_is_throw = false;
     fs.yielded = null;
     try self.resumeFiber(fs);
@@ -130,7 +131,7 @@ fn asyncGeneratorNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     // result -- same double-ownership shape as runAsyncFunction's
     // `fs.promise`/promiseConstructor's `cap.promise`.
     fs.pending_result_promise = p.retain();
-    fs.resume_value = if (args.len > 0) args[0].retain() else JSValue.UNDEFINED;
+    fs.setResumeValue(if (args.len > 0) args[0].retain() else JSValue.UNDEFINED);
     fs.resume_is_throw = false;
     try self.resumeFiber(fs);
     return p;
@@ -152,7 +153,7 @@ fn awaitOnFulfilled(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     _ = allocator;
     _ = this_value;
     const fs: *FiberState = @ptrCast(@alignCast(ctx));
-    fs.resume_value = if (args.len > 0) args[0].retain() else JSValue.UNDEFINED;
+    fs.setResumeValue(if (args.len > 0) args[0].retain() else JSValue.UNDEFINED);
     fs.resume_is_throw = false;
     try fs.interp.resumeFiber(fs);
     return JSValue.UNDEFINED;
@@ -162,7 +163,7 @@ fn awaitOnRejected(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     _ = allocator;
     _ = this_value;
     const fs: *FiberState = @ptrCast(@alignCast(ctx));
-    fs.resume_value = if (args.len > 0) args[0].retain() else JSValue.UNDEFINED;
+    fs.setResumeValue(if (args.len > 0) args[0].retain() else JSValue.UNDEFINED);
     fs.resume_is_throw = true;
     try fs.interp.resumeFiber(fs);
     return JSValue.UNDEFINED;
@@ -198,7 +199,8 @@ pub fn run(self: *Interpreter, source: []const u8) anyerror!JSValue {
     const parser = try zfunctions.Parser.init(ast_arena, source);
     parser.setStackLimit(self.stack_limit);
     const program = try parser.parseProgram();
-    const c = self.evalBody(self.script_env.?, program) catch |err| {
+    const c = self.evalBody(self.script_env.?, program) catch |err0| {
+        const err = self.throwIfGap(err0);
         if (err != error.JsThrow) return err;
         return error.UncaughtException;
     };
@@ -215,7 +217,12 @@ pub fn run(self: *Interpreter, source: []const u8) anyerror!JSValue {
 /// exception from the code propagates. Returns eval's completion value.
 pub fn evalSource(self: *Interpreter, scope: *Environment, src: []const u8) anyerror!JSValue {
     const ast_arena = self.arena_state.allocator();
-    const parser = zfunctions.Parser.init(ast_arena, src) catch
+    // The AST points into its source text (identifiers, string bodies),
+    // and `src` belongs to the caller's string, which can die as soon as
+    // eval() returns -- while functions defined in the code live on. The
+    // arena copy lives as long as the AST.
+    const owned_src = try ast_arena.dupe(u8, src);
+    const parser = zfunctions.Parser.init(ast_arena, owned_src) catch
         return self.throwError(.syntax_error, "Invalid or unexpected token in eval", .{});
     // Reuse whatever budget is already active for the current
     // execution context (main-thread `run()`, or the fiber-scoped
@@ -266,6 +273,12 @@ pub fn runPendingJob(self: *Interpreter) anyerror!void {
     if (self.pending_jobs.items.len == 0) return;
     const job = self.pending_jobs.orderedRemove(0);
     const arena = self.gc_allocator;
+    // The job holds its own reference to its argument and handler (the
+    // promise that queued it may be gone by now); dropped once it ran.
+    defer {
+        job.argument.deinit();
+        if (job.handler) |h| h.deinit();
+    }
 
     const handler = job.handler orelse {
         // Pass-through: adoption and the missing side of .then/.catch.
@@ -278,7 +291,8 @@ pub fn runPendingJob(self: *Interpreter) anyerror!void {
         }
         return;
     };
-    const result = handler.function.value.call(handler.function.value.ctx, arena, JSValue.UNDEFINED, &.{job.argument}) catch |err| {
+    const result = handler.function.value.call(handler.function.value.ctx, arena, JSValue.UNDEFINED, &.{job.argument}) catch |err0| {
+        const err = self.throwIfGap(err0);
         if (err != error.JsThrow) return err;
         const ex = self.pending_exception.?;
         self.pending_exception = null;
@@ -319,7 +333,7 @@ pub fn settlePromise(self: *Interpreter, p: JSValue, state: zvalue.PromiseState,
     for (reactions) |r| {
         try self.pending_jobs.append(arena, .{
             .handler = if (state == .fulfilled) r.on_fulfilled else r.on_rejected,
-            .argument = value,
+            .argument = value.retain(),
             .rejected = state == .rejected,
             .derived = r.derived,
         });
@@ -338,8 +352,8 @@ pub fn subscribePromise(self: *Interpreter, p: JSValue, on_fulfilled: ?JSValue, 
         .derived = if (derived) |d| d.retain() else null,
     }) orelse return;
     try self.pending_jobs.append(arena, .{
-        .handler = if (settled.state == .fulfilled) on_fulfilled else on_rejected,
-        .argument = settled.result,
+        .handler = if (settled.state == .fulfilled) (if (on_fulfilled) |h| h.retain() else null) else (if (on_rejected) |h| h.retain() else null),
+        .argument = settled.result.retain(),
         .rejected = settled.state == .rejected,
         // Same double-ownership shape as the pending branch above
         // (which already retains): `derived` is also promiseThen's own
@@ -435,9 +449,19 @@ pub fn awaitValue(self: *Interpreter, fs: *FiberState, operand: JSValue) anyerro
     fs.fiber.suspendSelf();
     if (fs.resume_is_throw) {
         fs.resume_is_throw = false;
-        return self.throwValue(fs.resume_value);
+        return self.throwValue(fs.takeResumeValue());
     }
-    return fs.resume_value;
+    return fs.takeResumeValue();
+}
+
+/// A fiber's own copy of its call arguments: the caller releases its
+/// references once the call returns, but the body may only bind them
+/// later (a generator runs nothing until the first next()), so the
+/// FiberState holds a reference to each -- released when it is swept.
+fn retainedCopy(allocator: std.mem.Allocator, args: []const JSValue) ![]JSValue {
+    const copy = try allocator.dupe(JSValue, args);
+    for (copy) |a| _ = a.retain();
+    return copy;
 }
 
 /// Calling `function*` builds the generator object -- a plain object
@@ -455,11 +479,12 @@ pub fn makeGeneratorObject(self: *Interpreter, fnode: *zfunctions.FunctionNode, 
         .closure_env = closure_env,
         .this_value = if (this_value) |tv| tv.retain() else null,
         .private_ctx = private_ctx,
-        .args = try arena.dupe(JSValue, args),
+        .args = try retainedCopy(arena, args),
     };
     fs.fiber = try fiber_mod.Fiber.init(arena, fiberEntry, fs);
     try self.gcTrackFiberState(fs);
     var obj = try self.gcNewObject();
+    if (self.iterator_prototype) |p| try obj.object.value.setPrototype(&p.object.value);
     try obj.object.value.set("next", try self.gcNewFunction(.{ .ctx = fs, .name = "next", .call = generatorNext }));
     // A generator IS its own iterable: `gen()[Symbol.iterator]()`
     // returns the generator itself (so `[...gen()]` works via the
@@ -487,7 +512,7 @@ pub fn runAsyncFunction(self: *Interpreter, fnode: *zfunctions.FunctionNode, clo
         .closure_env = closure_env,
         .this_value = if (this_value) |tv| tv.retain() else null,
         .private_ctx = private_ctx,
-        .args = try arena.dupe(JSValue, args),
+        .args = try retainedCopy(arena, args),
         .promise = try self.gcNewPromise(),
     };
     fs.fiber = try fiber_mod.Fiber.init(arena, fiberEntry, fs);
@@ -522,7 +547,7 @@ pub fn makeAsyncGeneratorObject(self: *Interpreter, fnode: *zfunctions.FunctionN
         .closure_env = closure_env,
         .this_value = if (this_value) |tv| tv.retain() else null,
         .private_ctx = private_ctx,
-        .args = try arena.dupe(JSValue, args),
+        .args = try retainedCopy(arena, args),
     };
     fs.fiber = try fiber_mod.Fiber.init(arena, fiberEntry, fs);
     try self.gcTrackFiberState(fs);
@@ -587,7 +612,8 @@ pub fn runEventLoop(self: *Interpreter) anyerror!void {
             };
             _ = std.os.linux.nanosleep(&req, null);
         }
-        _ = timer.callback.function.value.call(timer.callback.function.value.ctx, arena, JSValue.UNDEFINED, &.{}) catch |err| {
+        _ = timer.callback.function.value.call(timer.callback.function.value.ctx, arena, JSValue.UNDEFINED, &.{}) catch |err0| {
+            const err = self.throwIfGap(err0);
             if (err != error.JsThrow) return err;
             return error.UncaughtException;
         };
