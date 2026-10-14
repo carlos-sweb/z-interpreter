@@ -1,3 +1,10 @@
+//! Z-Interpreter public API for Zig 0.17.0.
+//!
+//! Create an `Interpreter` with a host allocator and output writer, then execute
+//! JavaScript with `run()` or install a `ModuleLoader` and call `runModule()`.
+//! Values returned by execution are owned by the caller: call `deinit()` on them
+//! before destroying the interpreter. `Interpreter.deinit()` releases its state.
+
 const interpreter_mod = @import("interpreter.zig");
 const environment_mod = @import("environment.zig");
 const completion_mod = @import("completion.zig");

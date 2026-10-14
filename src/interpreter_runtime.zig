@@ -92,6 +92,7 @@ fn generatorNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     const self = fs.interp;
     if (fs.fiber.finished) return iterResult(self, JSValue.UNDEFINED, true);
 
+    fs.resume_value.deinit();
     fs.resume_value = if (args.len > 0) args[0].retain() else JSValue.UNDEFINED;
     fs.resume_is_throw = false;
     fs.yielded = null;
@@ -130,6 +131,7 @@ fn asyncGeneratorNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     // result -- same double-ownership shape as runAsyncFunction's
     // `fs.promise`/promiseConstructor's `cap.promise`.
     fs.pending_result_promise = p.retain();
+    fs.resume_value.deinit();
     fs.resume_value = if (args.len > 0) args[0].retain() else JSValue.UNDEFINED;
     fs.resume_is_throw = false;
     try self.resumeFiber(fs);
@@ -152,6 +154,7 @@ fn awaitOnFulfilled(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     _ = allocator;
     _ = this_value;
     const fs: *FiberState = @ptrCast(@alignCast(ctx));
+    fs.resume_value.deinit();
     fs.resume_value = if (args.len > 0) args[0].retain() else JSValue.UNDEFINED;
     fs.resume_is_throw = false;
     try fs.interp.resumeFiber(fs);
@@ -162,6 +165,7 @@ fn awaitOnRejected(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     _ = allocator;
     _ = this_value;
     const fs: *FiberState = @ptrCast(@alignCast(ctx));
+    fs.resume_value.deinit();
     fs.resume_value = if (args.len > 0) args[0].retain() else JSValue.UNDEFINED;
     fs.resume_is_throw = true;
     try fs.interp.resumeFiber(fs);
@@ -265,6 +269,11 @@ pub fn hasPendingJobs(self: *Interpreter) bool {
 pub fn runPendingJob(self: *Interpreter) anyerror!void {
     if (self.pending_jobs.items.len == 0) return;
     const job = self.pending_jobs.orderedRemove(0);
+    defer {
+        if (job.handler) |h| h.deinit();
+        job.argument.deinit();
+        if (job.derived) |d| d.deinit();
+    }
     const arena = self.gc_allocator;
 
     const handler = job.handler orelse {
@@ -285,6 +294,7 @@ pub fn runPendingJob(self: *Interpreter) anyerror!void {
         if (job.derived) |d| try self.settlePromise(d, .rejected, ex);
         return;
     };
+    defer result.deinit();
     if (job.derived) |d| try self.resolvePromise(d, result);
 }
 
@@ -313,17 +323,37 @@ pub fn rejectPromiseValue(self: *Interpreter, p: JSValue, reason: JSValue) anyer
 /// Settles (idempotently -- a second settle is the spec's no-op) and
 /// enqueues every stored reaction with the settlement.
 pub fn settlePromise(self: *Interpreter, p: JSValue, state: zvalue.PromiseState, value: JSValue) anyerror!void {
+    if (p.promise.value.state != .pending) return;
     const arena = self.gc_allocator;
     const reactions = try p.promise.value.settle(arena, state, value.retain());
-    defer arena.free(reactions);
-    for (reactions) |r| {
-        try self.pending_jobs.append(arena, .{
-            .handler = if (state == .fulfilled) r.on_fulfilled else r.on_rejected,
-            .argument = value,
-            .rejected = state == .rejected,
-            .derived = r.derived,
-        });
+    defer {
+        for (reactions) |r| {
+            if (r.on_fulfilled) |h| h.deinit();
+            if (r.on_rejected) |h| h.deinit();
+            if (r.derived) |d| d.deinit();
+        }
+        arena.free(reactions);
     }
+    for (reactions) |r| {
+        try enqueuePromiseJob(self, if (state == .fulfilled) r.on_fulfilled else r.on_rejected, value, state == .rejected, r.derived);
+    }
+}
+
+/// Jobs outlive the receiver and argument temporaries of the call that
+/// scheduled them, so the queue owns every value until the job completes.
+fn enqueuePromiseJob(self: *Interpreter, handler: ?JSValue, argument: JSValue, rejected: bool, derived: ?JSValue) !void {
+    const owned_handler = if (handler) |h| h.retain() else null;
+    errdefer if (owned_handler) |h| h.deinit();
+    const owned_argument = argument.retain();
+    errdefer owned_argument.deinit();
+    const owned_derived = if (derived) |d| d.retain() else null;
+    errdefer if (owned_derived) |d| d.deinit();
+    try self.pending_jobs.append(self.gc_allocator, .{
+        .handler = owned_handler,
+        .argument = owned_argument,
+        .rejected = rejected,
+        .derived = owned_derived,
+    });
 }
 
 /// Registers interest in `p`'s settlement: stores the reaction while
@@ -332,20 +362,21 @@ pub fn settlePromise(self: *Interpreter, p: JSValue, state: zvalue.PromiseState,
 /// the queue, never inline).
 pub fn subscribePromise(self: *Interpreter, p: JSValue, on_fulfilled: ?JSValue, on_rejected: ?JSValue, derived: ?JSValue) anyerror!void {
     const arena = self.gc_allocator;
-    const settled = try p.promise.value.subscribe(arena, .{
+    if (p.promise.value.state != .pending) {
+        try enqueuePromiseJob(self, if (p.promise.value.state == .fulfilled) on_fulfilled else on_rejected, p.promise.value.result.?, p.promise.value.state == .rejected, derived);
+        return;
+    }
+    const reaction: zvalue.ZPromise(JSValue).Reaction = .{
         .on_fulfilled = if (on_fulfilled) |h| h.retain() else null,
         .on_rejected = if (on_rejected) |h| h.retain() else null,
         .derived = if (derived) |d| d.retain() else null,
-    }) orelse return;
-    try self.pending_jobs.append(arena, .{
-        .handler = if (settled.state == .fulfilled) on_fulfilled else on_rejected,
-        .argument = settled.result,
-        .rejected = settled.state == .rejected,
-        // Same double-ownership shape as the pending branch above
-        // (which already retains): `derived` is also promiseThen's own
-        // return value, so this job needs its own copy too.
-        .derived = if (derived) |d| d.retain() else null,
-    });
+    };
+    errdefer {
+        if (reaction.on_fulfilled) |h| h.deinit();
+        if (reaction.on_rejected) |h| h.deinit();
+        if (reaction.derived) |d| d.deinit();
+    }
+    _ = try p.promise.value.subscribe(arena, reaction);
 }
 
 /// `p.then(onF, onR)` -- creates and returns the derived promise.
@@ -435,9 +466,16 @@ pub fn awaitValue(self: *Interpreter, fs: *FiberState, operand: JSValue) anyerro
     fs.fiber.suspendSelf();
     if (fs.resume_is_throw) {
         fs.resume_is_throw = false;
-        return self.throwValue(fs.resume_value);
+        return self.throwValue(fs.resume_value.retain());
     }
-    return fs.resume_value;
+    return fs.resume_value.retain();
+}
+
+/// Fibers can suspend or start after their caller releases argument temporaries.
+fn retainFiberArgs(self: *Interpreter, args: []const JSValue) ![]const JSValue {
+    const owned = try self.gc_allocator.dupe(JSValue, args);
+    for (owned) |*value| value.* = value.retain();
+    return owned;
 }
 
 /// Calling `function*` builds the generator object -- a plain object
@@ -455,7 +493,7 @@ pub fn makeGeneratorObject(self: *Interpreter, fnode: *zfunctions.FunctionNode, 
         .closure_env = closure_env,
         .this_value = if (this_value) |tv| tv.retain() else null,
         .private_ctx = private_ctx,
-        .args = try arena.dupe(JSValue, args),
+        .args = try retainFiberArgs(self, args),
     };
     fs.fiber = try fiber_mod.Fiber.init(arena, fiberEntry, fs);
     try self.gcTrackFiberState(fs);
@@ -487,7 +525,7 @@ pub fn runAsyncFunction(self: *Interpreter, fnode: *zfunctions.FunctionNode, clo
         .closure_env = closure_env,
         .this_value = if (this_value) |tv| tv.retain() else null,
         .private_ctx = private_ctx,
-        .args = try arena.dupe(JSValue, args),
+        .args = try retainFiberArgs(self, args),
         .promise = try self.gcNewPromise(),
     };
     fs.fiber = try fiber_mod.Fiber.init(arena, fiberEntry, fs);
@@ -522,7 +560,7 @@ pub fn makeAsyncGeneratorObject(self: *Interpreter, fnode: *zfunctions.FunctionN
         .closure_env = closure_env,
         .this_value = if (this_value) |tv| tv.retain() else null,
         .private_ctx = private_ctx,
-        .args = try arena.dupe(JSValue, args),
+        .args = try retainFiberArgs(self, args),
     };
     fs.fiber = try fiber_mod.Fiber.init(arena, fiberEntry, fs);
     try self.gcTrackFiberState(fs);

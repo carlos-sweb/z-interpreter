@@ -4,6 +4,13 @@
 const std = @import("std");
 const helpers = @import("helpers.zig");
 
+test "async arguments survive suspension and the caller's temporary cleanup" {
+    try helpers.expectStdout(
+        \\async function echo(value) { await Promise.resolve(); return value; }
+        \\echo('retained').then(value => console.log(value));
+    , "retained\n");
+}
+
 test "an async function returns a promise; sync until the first await" {
     try helpers.expectStdout(
         \\async function trabajo() {

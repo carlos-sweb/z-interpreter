@@ -270,10 +270,9 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
         // Spec says TypeError here (not ReferenceError). The optional
         // chaining guards short-circuit BEFORE getProperty, so `a?.b`
         // on null still yields undefined without ever reaching this.
-        .@"undefined", .@"null" => self.throwError(.type_error, "Cannot read properties of {s} (reading '{s}')", .{ if (obj == .@"null") "null" else "undefined", key }),
+        .undefined, .null => self.throwError(.type_error, "Cannot read properties of {s} (reading '{s}')", .{ if (obj == .null) "null" else "undefined", key }),
     };
 }
-
 
 /// Writing to an array: numeric indices (grow with undefined holes
 /// past the end -- narrowing vs true sparse arrays) and `length`
@@ -401,8 +400,8 @@ pub fn deleteObjectProperty(self: *Interpreter, obj: JSValue, key: []const u8) a
 /// gap -- NotImplemented is the honest answer, and a JS `catch` must
 /// never swallow it.
 pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, value: JSValue) anyerror!void {
-    if (obj == .@"undefined" or obj == .@"null") {
-        return self.throwError(.type_error, "Cannot set properties of {s} (setting '{s}')", .{ if (obj == .@"null") "null" else "undefined", key });
+    if (obj == .undefined or obj == .null) {
+        return self.throwError(.type_error, "Cannot set properties of {s} (setting '{s}')", .{ if (obj == .null) "null" else "undefined", key });
     }
     if (obj == .function) {
         // `F.prototype = {...}` overwrites the callable's slot;
@@ -540,7 +539,7 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
             // slice (`globalThis[computed] = x`, or any Reflect.set
             // caller's own buffer) -- dupe defensively so the new
             // global binding's name always outlives it.
-            try self.global_env.define(self.gc_allocator, try self.gc_allocator.dupe(u8, key), value.retain());
+            try self.global_env.define(self.gc_allocator, try self.arena_state.allocator().dupe(u8, key), value.retain());
             return;
         }
     }
@@ -929,4 +928,3 @@ pub fn materializeProtos(self: *Interpreter) !void {
         @field(self.protos, e[0]) = proto;
     }
 }
-

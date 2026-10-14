@@ -106,6 +106,7 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                     continue;
                 }
                 const v = try self.evalExpression(env, el);
+                defer v.deinit();
                 _ = try arr.array.value.push(v.retain());
             }
             return arr;
@@ -121,6 +122,7 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                         switch (prop.kind) {
                             .init => {
                                 const value = try self.evalExpression(env, prop.value);
+                                defer value.deinit();
                                 // NamedEvaluation: `{ x: AnonFn }` names
                                 // the function/class with the (already
                                 // static-or-computed-resolved) key.
@@ -203,7 +205,7 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
             const take_right = switch (l.op) {
                 .and_op => coercion.isTruthy(left),
                 .or_op => !coercion.isTruthy(left),
-                .nullish => left == .@"undefined" or left == .@"null",
+                .nullish => left == .undefined or left == .null,
             };
             if (!take_right) return left;
             left.deinit();
@@ -249,7 +251,7 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                 return try self.getProperty(sproto, pk.key);
             }
             const obj = try self.evalExpression(env, m.object);
-            if (m.optional and (obj == .@"undefined" or obj == .@"null")) return JSValue.UNDEFINED;
+            if (m.optional and (obj == .undefined or obj == .null)) return JSValue.UNDEFINED;
             if (privateMemberName(m)) |pn| return self.privateGet(env, obj, pn);
             const pk = try self.memberKeyString(env, m);
             defer pk.free(self.gc_allocator);
@@ -274,9 +276,9 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
             fs.fiber.suspendSelf();
             if (fs.resume_is_throw) {
                 fs.resume_is_throw = false;
-                return self.throwValue(fs.resume_value);
+                return self.throwValue(fs.resume_value.retain());
             }
-            return fs.resume_value;
+            return fs.resume_value.retain();
         },
         .await_expr => |operand_node| {
             const fs = self.current_fiber orelse return error.NotImplemented;
@@ -380,7 +382,6 @@ pub fn propertyKeyString(self: *Interpreter, env: *Environment, computed: bool, 
     };
 }
 
-
 /// ECMA-262 13.10.2 InstanceofOperator, narrowed (no
 /// Symbol.hasInstance): walk the LHS object's prototype chain looking
 /// for the RHS function's prototype object, by pointer identity.
@@ -464,7 +465,7 @@ pub fn evalIn(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
         // `key` is the raw `\x00S<ptr>` encoding when `l` is a symbol --
         // display the real "Symbol(desc)" form in the message instead
         // of leaking that internal encoding to user-visible text.
-        .@"undefined", .@"null", .boolean, .number, .string => if (l == .symbol)
+        .undefined, .null, .boolean, .number, .string => if (l == .symbol)
             self.throwError(.type_error, "Cannot use 'in' operator to search for 'Symbol({s})'", .{l.symbol.value.description orelse ""})
         else
             self.throwError(.type_error, "Cannot use 'in' operator to search for '{s}'", .{key}),
@@ -483,7 +484,6 @@ pub fn evalIn(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
         .function, .regex, .symbol, .map, .set, .@"error", .date, .promise, .bigint, .array_buffer, .data_view, .typed_array, .temporal => error.NotImplemented,
     };
 }
-
 
 pub fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSValue {
     switch (u.op) {
@@ -633,7 +633,7 @@ pub fn evalAssignment(self: *Interpreter, env: *Environment, a: anytype) anyerro
             const should_assign = switch (a.op) {
                 .logical_and => coercion.isTruthy(current),
                 .logical_or => !coercion.isTruthy(current),
-                .nullish => current == .@"undefined" or current == .@"null",
+                .nullish => current == .undefined or current == .null,
                 else => unreachable,
             };
             if (!should_assign) return current;
@@ -799,7 +799,7 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
     if (c.callee.data == .member) {
         const m = c.callee.data.member;
         const obj = try self.evalExpression(env, m.object);
-        if (m.optional and (obj == .@"undefined" or obj == .@"null")) {
+        if (m.optional and (obj == .undefined or obj == .null)) {
             obj.deinit();
             return JSValue.UNDEFINED;
         }
@@ -817,7 +817,7 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
         callee_val = try self.evalExpression(env, c.callee);
     }
     defer callee_val.deinit();
-    if (c.optional and (callee_val == .@"undefined" or callee_val == .@"null")) return JSValue.UNDEFINED;
+    if (c.optional and (callee_val == .undefined or callee_val == .null)) return JSValue.UNDEFINED;
     // Best-effort callee name for the "is not a function" message --
     // no expression printer, just the two cheap cases. Needed both
     // for the immediate check below AND (a no-trap proxy chain whose
@@ -832,7 +832,10 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
     }
 
     const args = try self.evalArgs(env, c.args);
-        defer self.gc_allocator.free(args);
+    defer {
+        for (args) |value| value.deinit();
+        self.gc_allocator.free(args);
+    }
     // Direct eval: a call written literally as `eval(...)` where `eval`
     // still refers to the intrinsic runs its string argument in the
     // CURRENT scope (always-strict -> a child of it). Any other reference
@@ -878,14 +881,25 @@ pub fn callValue(self: *Interpreter, callee: JSValue, this_value: JSValue, args:
 pub fn evalArgs(self: *Interpreter, env: *Environment, arg_nodes: []const *zparser.Node) anyerror![]const JSValue {
     const arena = self.gc_allocator;
     var args: std.ArrayList(JSValue) = .empty;
+    errdefer {
+        for (args.items) |value| value.deinit();
+        args.deinit(arena);
+    }
     for (arg_nodes) |arg_node| {
         if (arg_node.data == .spread) {
             const spread_val = try self.evalExpression(env, arg_node.data.spread);
+            defer spread_val.deinit();
             const items = try self.iterableItems(spread_val);
             defer arena.free(items);
-            for (items) |item| try args.append(arena, item.retain());
+            for (items) |item| {
+                const owned = item.retain();
+                errdefer owned.deinit();
+                try args.append(arena, owned);
+            }
         } else {
-            try args.append(arena, try self.evalExpression(env, arg_node));
+            const value = try self.evalExpression(env, arg_node);
+            errdefer value.deinit();
+            try args.append(arena, value);
         }
     }
     return args.toOwnedSlice(arena);
@@ -906,7 +920,10 @@ pub fn evalNew(self: *Interpreter, env: *Environment, n: anytype) anyerror!JSVal
     };
     // `new Foo` with no parens at all (args == null) is `new Foo()`.
     const args = try self.evalArgs(env, n.args orelse &.{});
-    defer self.gc_allocator.free(args);
+    defer {
+        for (args) |value| value.deinit();
+        self.gc_allocator.free(args);
+    }
     return self.constructValue(callee, args, callee_name);
 }
 
@@ -950,7 +967,6 @@ pub fn constructValue(self: *Interpreter, callee: JSValue, args: []const JSValue
     };
 }
 
-
 /// A non-computed member access whose property name starts with '#' can
 /// only have come from `.#name` syntax (ordinary identifiers can't contain
 /// '#') -- it denotes PRIVATE member access. Computed `obj["#x"]` remains a
@@ -980,4 +996,3 @@ fn compoundToBinary(op: zparser.AssignOp) zparser.BinaryOp {
         .assign, .logical_and, .logical_or, .nullish => unreachable, // handled separately by evalAssignment
     };
 }
-

@@ -6,6 +6,14 @@
 const std = @import("std");
 const helpers = @import("helpers.zig");
 
+test "an async generator retains temporary arguments until next runs" {
+    try helpers.expectStdout(
+        \\async function* gen(value) { yield value; }
+        \\const iterator = gen('retained');
+        \\iterator.next().then(result => console.log(result.value));
+    , "retained\n");
+}
+
 test "next() on an async generator returns a promise of {value, done}" {
     try helpers.expectStdout(
         \\async function* g() { yield 1; yield 2; return 'FIN'; }

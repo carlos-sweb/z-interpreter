@@ -186,7 +186,6 @@ pub fn markFnPropDeleted(self: *Interpreter, fn_val: JSValue, comptime field: []
     @field(gop.value_ptr.*, field) = true;
 }
 
-
 /// A shared native-method JSValue for a (type, name) pair, cached so
 /// `a.push === b.push` holds like real JS prototype methods.
 pub fn nativeMethod(self: *Interpreter, comptime type_prefix: []const u8, name: []const u8, arity: usize, call_fn: native_helpers.NativeFn) anyerror!JSValue {
@@ -236,7 +235,6 @@ pub fn argsToArray(self: *Interpreter, args: []const JSValue) anyerror!JSValue {
     for (args) |a| _ = try arr.array.value.push(a.retain());
     return arr;
 }
-
 
 /// `+`'s string-concat path (ECMA-262: if either operand's
 /// ToPrimitive is a String, `+` concatenates rather than adding
@@ -510,8 +508,17 @@ pub fn bigintErr(self: *Interpreter, e: zbigint.BigIntError) anyerror!JSValue {
     return switch (e) {
         error.DivisionByZero => self.throwError(.range_error, "Division by zero", .{}),
         error.NegativeExponent => self.throwError(.range_error, "Exponent must be positive", .{}),
+        error.ExponentTooLarge, error.ResultTooLarge => self.throwError(.range_error, "Maximum BigInt size exceeded", .{}),
         error.OutOfMemory => error.OutOfMemory,
-        error.InvalidDigits => unreachable, // arithmetic ops never parse text
+        // One-shot arithmetic owns its buffers and never parses text/numbers
+        // or accepts a caller-provided radix, buffer, or aliased destination.
+        error.InvalidDigits,
+        error.InvalidRadix,
+        error.InvalidFloat,
+        error.NonIntegralFloat,
+        error.BufferTooSmall,
+        error.InvalidAlias,
+        => unreachable,
     };
 }
 
@@ -543,4 +550,3 @@ pub fn incDecOne(self: *Interpreter, current: JSValue, increment: bool) anyerror
     const n = try coercion.toNumber(current);
     return JSValue.fromNumber(if (increment) n + 1 else n - 1);
 }
-

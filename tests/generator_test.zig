@@ -6,6 +6,24 @@ const testing = std.testing;
 const zinterpreter = @import("zinterpreter");
 const helpers = @import("helpers.zig");
 
+test "a generator retains temporary arguments until its body starts" {
+    try helpers.expectStdout(
+        \\function* gen(value) { yield value; }
+        \\const iterator = gen('retained');
+        \\console.log(iterator.next().value);
+    , "retained\n");
+}
+
+test "yield receives an owned string that survives the following resume" {
+    try helpers.expectStdout(
+        \\function* gen() { const value = yield 'ready'; yield value; return value; }
+        \\const iterator = gen();
+        \\console.log(iterator.next().value);
+        \\console.log(iterator.next('retained').value);
+        \\console.log(iterator.next().value);
+    , "ready\nretained\nretained\n");
+}
+
 test "next() sequence with {value, done}; return value lands on done: true" {
     try helpers.expectStdout(
         \\function* tres() { yield 'a'; yield 'b'; return 'FIN'; }

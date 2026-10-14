@@ -455,18 +455,15 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
                 // that migration fixed at the root; see
                 // memberKeyString's comment for the Test262 crash this
                 // once caused). The ENCODED key string still must
-                // outlive this loop iteration (stored in
-                // `instance_fields` for per-construction use;
-                // freeGarbageNode's `.class_ctx` case only frees the
-                // array, not each key's content -- documented residual
-                // gap, narrow/one-time-per-class, not chased further
-                // here) -- that part is unrelated to `kv`'s own
-                // lifetime and stays as-is.
+                // outlive this loop iteration when used by instance
+                // fields. That path takes an arena-owned copy below;
+                // all other property storage copies the key itself.
                 const kv = try self.evalExpression(closure_env, expr);
                 defer kv.deinit();
                 break :blk try self.encodeKey(kv);
             },
         };
+        defer if (el.key != .ident) self.gc_allocator.free(key);
 
         // Real spec: a static class element (field, method, accessor,
         // or generator) named "prototype" is a TypeError -- confirmed
@@ -502,7 +499,8 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
                 // Instance fields are CAPTURED here (key already
                 // resolved) and initialized per-instance at
                 // construction time.
-                try instance_fields.append(arena, .{ .key = key, .value = el.value });
+                const field_key = if (el.key == .ident) key else try self.arena_state.allocator().dupe(u8, key);
+                try instance_fields.append(arena, .{ .key = field_key, .value = el.value });
             }
             continue;
         }
@@ -591,7 +589,7 @@ pub fn invokeFunctionNode(
 
     for (fnode.params.items, 0..) |param, i| {
         var value = if (i < args.len) args[i] else JSValue.UNDEFINED;
-        if (value == .@"undefined") {
+        if (value == .undefined) {
             if (param.default) |def| {
                 value = try self.evalExpression(call_env, def);
                 // NamedEvaluation: `function f(x = AnonFn)` names it "x".

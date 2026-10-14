@@ -26,7 +26,6 @@ const arg = native_helpers.arg;
 const native = native_helpers.native;
 const installBuiltin = builtin_helpers.installBuiltin;
 const requirePrimitive = builtin_helpers.requirePrimitive;
-const toIntSat = builtin_helpers.toIntSat;
 
 pub const number_methods = std.StaticStringMap(MethodSpec).initComptime(.{
     .{ "toString", MethodSpec{ .call = numberToString, .arity = 1 } },
@@ -41,16 +40,26 @@ fn requireNumber(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyer
     return (try requirePrimitive(ctx, this_value, .number, "Number.prototype.{s} called on a non-number", method)).number;
 }
 
+/// Preserve omission separately from an explicit Number; z-number performs
+/// ToIntegerOrInfinity and validates bounds in the operation's specified order.
+fn numberOption(ctx: *anyopaque, args: []const JSValue) anyerror!?f64 {
+    const value = arg(args, 0);
+    return if (value == .undefined) null else try interp(ctx).toNumberJS(value);
+}
+
+fn formattingError(ctx: *anyopaque, e: anyerror, message: []const u8) anyerror {
+    return switch (e) {
+        error.RangeError => interp(ctx).throwError(.range_error, "{s}", .{message}),
+        else => e,
+    };
+}
+
 /// `n.toString(radix?)` / `toLocaleString` -- radix 2..36 (default 10).
 fn numberToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const n = try requireNumber(ctx, this_value, "toString");
-    var radix: ?u8 = null;
-    if (arg(args, 0) != .undefined) {
-        const r = toIntSat(try interp(ctx).toNumberJS(arg(args, 0)));
-        if (r < 2 or r > 36) return interp(ctx).throwError(.range_error, "toString() radix must be between 2 and 36", .{});
-        radix = @intCast(r);
-    }
-    const s = try znumber.FormattingMethods.toString(n, allocator, radix);
+    const radix = try numberOption(ctx, args);
+    const s = znumber.FormattingMethods.toString(n, allocator, radix) catch |e|
+        return formattingError(ctx, e, "toString() radix must be between 2 and 36");
     defer allocator.free(s);
     return interp(ctx).gcNewString(s);
 }
@@ -61,42 +70,29 @@ fn numberValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     return JSValue.fromNumber(try requireNumber(ctx, this_value, "valueOf"));
 }
 
-/// Shared 0..100 digit argument for toFixed/toExponential/toPrecision, with
-/// the spec's RangeError. `null` when omitted (allowed by exponential/
-/// precision). `lo` is the minimum (0 for fixed/exponential, 1 for precision).
-fn digitArg(ctx: *anyopaque, args: []const JSValue, lo: i64) anyerror!?usize {
-    if (arg(args, 0) == .undefined) return null;
-    const d = toIntSat(try interp(ctx).toNumberJS(arg(args, 0)));
-    if (d < lo or d > 100) return interp(ctx).throwError(.range_error, "toFixed() digits argument must be between 0 and 100", .{});
-    return @intCast(d);
-}
-
 fn numberToFixed(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const n = try requireNumber(ctx, this_value, "toFixed");
-    const digits = (try digitArg(ctx, args, 0)) orelse 0;
-    const s = try znumber.FormattingMethods.toFixed(n, allocator, digits);
+    const digits = try numberOption(ctx, args);
+    const s = znumber.FormattingMethods.toFixed(n, allocator, digits) catch |e|
+        return formattingError(ctx, e, "toFixed() digits argument must be between 0 and 100");
     defer allocator.free(s);
     return interp(ctx).gcNewString(s);
 }
 
 fn numberToExponential(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const n = try requireNumber(ctx, this_value, "toExponential");
-    const digits = try digitArg(ctx, args, 0);
-    const s = try znumber.FormattingMethods.toExponential(n, allocator, digits);
+    const digits = try numberOption(ctx, args);
+    const s = znumber.FormattingMethods.toExponential(n, allocator, digits) catch |e|
+        return formattingError(ctx, e, "toExponential() digits argument must be between 0 and 100");
     defer allocator.free(s);
     return interp(ctx).gcNewString(s);
 }
 
 fn numberToPrecision(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const n = try requireNumber(ctx, this_value, "toPrecision");
-    // Omitted precision behaves like toString.
-    if (arg(args, 0) == .undefined) {
-        const s = try znumber.FormattingMethods.toString(n, allocator, null);
-        defer allocator.free(s);
-        return interp(ctx).gcNewString(s);
-    }
-    const p = (try digitArg(ctx, args, 1)).?;
-    const s = try znumber.FormattingMethods.toPrecision(n, allocator, p);
+    const precision = try numberOption(ctx, args);
+    const s = znumber.FormattingMethods.toPrecision(n, allocator, precision) catch |e|
+        return formattingError(ctx, e, "toPrecision() precision must be between 1 and 100");
     defer allocator.free(s);
     return interp(ctx).gcNewString(s);
 }

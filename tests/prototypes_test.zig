@@ -97,6 +97,15 @@ test "Number.prototype methods" {
     try helpers.expectUncaught("(5).toString(37);", .range_error, "toString() radix must be between 2 and 36");
 }
 
+test "Number formatting preserves omission, coercion and validation order" {
+    try helpers.expectStdout(
+        \\console.log((1.25).toFixed(1.9), (1.25).toPrecision('3'), (12.5).toExponential());
+        \\console.log(Infinity.toExponential(101), NaN.toPrecision(0));
+    , "1.3 1.25 1.25e+1\nInfinity NaN\n");
+    try helpers.expectUncaught("Infinity.toFixed(101);", .range_error, "toFixed() digits argument must be between 0 and 100");
+    try helpers.expectUncaught("(5).toPrecision(0);", .range_error, "toPrecision() precision must be between 1 and 100");
+}
+
 test "reflection over arrays and functions" {
     // defineProperty on an array (index / length) and a function (statics).
     try helpers.expectStdout("const a=[0,1]; Object.defineProperty(a,'2',{value:9}); console.log(a[2], a.length);", "9 3\n");

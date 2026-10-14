@@ -129,7 +129,7 @@ fn finallyOnFulfilled(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     _ = this_value;
     const c = finallyCtx(ctx);
     _ = try c.handler.function.value.call(c.handler.function.value.ctx, allocator, JSValue.UNDEFINED, &.{});
-    return arg(args, 0);
+    return arg(args, 0).retain();
 }
 
 fn finallyOnRejected(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -157,7 +157,7 @@ fn promiseResolveStatic(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     _ = this_value;
     const v = arg(args, 0);
     // Promise.resolve(promise) returns it unchanged (real behavior).
-    if (v == .promise) return v;
+    if (v == .promise) return v.retain();
     return interp(ctx).fulfilledPromise(v);
 }
 

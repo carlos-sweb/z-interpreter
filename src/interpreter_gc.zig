@@ -680,7 +680,7 @@ pub fn markRoots(self: *Interpreter, marker: *Marker) void {
     if (self.symbol_iterator) |v| marker.value(v);
     if (self.symbol_async_iterator) |v| marker.value(v);
     if (self.symbol_to_primitive) |v| marker.value(v);
-    inline for (std.meta.fields(Protos)) |f| marker.value(@field(self.protos, f.name));
+    inline for (@typeInfo(Protos).@"struct".field_names) |name| marker.value(@field(self.protos, name));
 }
 
 /// GC prep (phase 4): tears down one node already determined to be
@@ -946,7 +946,7 @@ pub fn freeAllGcNodes(self: *Interpreter) void {
     if (self.symbol_iterator) |v| sweeper.value(v);
     if (self.symbol_async_iterator) |v| sweeper.value(v);
     if (self.symbol_to_primitive) |v| sweeper.value(v);
-    inline for (std.meta.fields(Protos)) |f| sweeper.value(@field(self.protos, f.name));
+    inline for (@typeInfo(Protos).@"struct".field_names) |name| sweeper.value(@field(self.protos, name));
 }
 
 // ===== Exception machinery =====

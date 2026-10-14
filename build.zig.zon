@@ -1,35 +1,97 @@
 .{
     .name = .zinterpreter,
     .version = "0.1.0",
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .fingerprint = 0x6e1d38a16b4567c5,
     .description = "A minimal tree-walking interpreter for the z-* ECMAScript engine",
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src/",
+        "tests/",
+        "mise.toml",
         "README.md",
     },
     .dependencies = .{
-        .zparser = .{ .path = "../z-parser" },
-        .zstatements = .{ .path = "../z-statements" },
-        .zfunctions = .{ .path = "../z-functions" },
-        .zvalue = .{ .path = "../z-value" },
-        .zregex = .{ .path = "../z-regex" },
-        .znumber = .{ .path = "../z-number" },
-        .zmath = .{ .path = "../z-math" },
-        .zjson = .{ .path = "../z-json" },
-        .zstring = .{ .path = "../z-string" },
-        .zdate = .{ .path = "../z-date" },
-        .zarray = .{ .path = "../z-array" },
-        .zobject = .{ .path = "../z-object" },
-        .zmap = .{ .path = "../z-map" },
-        .zset = .{ .path = "../z-set" },
-        .zerror = .{ .path = "../z-error" },
-        .zsymbol = .{ .path = "../z-symbol" },
-        .zbigint = .{ .path = "../z-bigint" },
-        .zbuffer = .{ .path = "../z-buffer" },
-        .ztemporal = .{ .path = "../z-temporal" },
-        .zurlcode = .{ .path = "../z-urlcode" },
+        .zparser = .{
+            .url = "https://github.com/carlos-sweb/z-parser/archive/refs/tags/v0.1.0.tar.gz",
+            .hash = "zparser-0.1.0-uX9pprwPAQAfQ_bStOX4pNonRgRCJX9sdUG9l3HvLmea",
+        },
+        .zstatements = .{
+            .url = "https://github.com/carlos-sweb/z-statements/archive/refs/tags/v0.1.0.tar.gz",
+            .hash = "zstatements-0.1.0-E_kRvyWNBACWqaK6p636srLf7aTHq30crdfXx5MmZNgz",
+        },
+        .zfunctions = .{
+            .url = "https://github.com/carlos-sweb/z-functions/archive/refs/tags/v0.1.0.tar.gz",
+            .hash = "zfunctions-0.1.0-vB_Ir8YsAQD2_ZCEgUexv4OnsKzAh-X06gU5jx1V32AO",
+        },
+        .zvalue = .{
+            .url = "https://github.com/carlos-sweb/z-value/archive/refs/tags/v0.1.0.tar.gz",
+            .hash = "zvalue-0.1.0-DI9AtcjRAQD7dtSrV5Y8hmAAMI7_C3iLOiT24htJbU9T",
+        },
+        .zregex = .{
+            .url = "https://github.com/carlos-sweb/z-regex/archive/refs/tags/v0.9.1.tar.gz",
+            .hash = "zregex-0.9.1-c2ExG-nXtQC7-ZMaj_xLvyK4lGk4qSYJIQVlp-umRsBh",
+        },
+        .znumber = .{
+            .url = "https://github.com/carlos-sweb/z-number/archive/refs/tags/v0.1.0.tar.gz",
+            .hash = "znumber-0.1.0-ZBd29k1PdAD3V_SXlyBTBM0R0duQq2PMC4bOHMNch2Yd",
+        },
+        .zmath = .{
+            .url = "https://github.com/carlos-sweb/z-math/archive/refs/tags/v0.1.0.tar.gz",
+            .hash = "zmath-0.1.0-Jp7-TqptAABCbOk5rAylx9riLtEhDwrRJOaIIAL5kqrN",
+        },
+        .zjson = .{
+            .url = "https://github.com/carlos-sweb/z-json/archive/refs/tags/v0.1.0.tar.gz",
+            .hash = "zjson-0.1.0-HTnR7wq_AAD5olv6FsTFrQk7i6BptAPGncn79UiTQtl3",
+        },
+        .zstring = .{
+            .url = "https://github.com/carlos-sweb/z-string/archive/refs/tags/v0.4.1.tar.gz",
+            .hash = "z_string-0.4.1-_tPTB3qvcgCABVSF3Nw8kUjZglYyXpnEZVJWWKlZETJL",
+        },
+        .zdate = .{
+            .url = "https://github.com/carlos-sweb/z-date/archive/refs/tags/v0.1.0.tar.gz",
+            .hash = "zdate-0.1.0-f1RpEfhuGwBUqJ87i0el4VP-9O2z8x7XIJP9fwWH8BvA",
+        },
+        .zarray = .{
+            .url = "https://github.com/carlos-sweb/z-array/archive/refs/tags/v0.1.0.tar.gz",
+            .hash = "zarray-0.1.0--NF-nREsAgCIst1d1GpxPxSW9kD23R9YsHfLFutfI3BI",
+        },
+        .zobject = .{
+            .url = "https://github.com/carlos-sweb/z-object/archive/refs/tags/v0.1.0.tar.gz",
+            .hash = "zobject-0.1.0-dBSRhEALAgBp6grSV2T8Xv5jJ5fuP6jEKxssv0WzYHfI",
+        },
+        .zmap = .{
+            .url = "https://github.com/carlos-sweb/z-map/archive/refs/tags/0.1.0.tar.gz",
+            .hash = "zmap-0.1.0-rJUj4vovAABdj36zmPiFpDaj-FNuOg171FhdYOPPO_qg",
+        },
+        .zset = .{
+            .url = "https://github.com/carlos-sweb/z-set/archive/refs/tags/0.1.0.tar.gz",
+            .hash = "zset-0.1.0-wFuBtLQuAACmEGDqSGAPvhEHNqkVbwVEWf6gDmrRKomb",
+        },
+        .zerror = .{
+            .url = "https://github.com/carlos-sweb/z-error/archive/refs/tags/v0.1.0.tar.gz",
+            .hash = "zerror-0.1.0-bDg2UR8zAABuBVoyyvyYhoJsjYDE2oNWsillDSp_9gzo",
+        },
+        .zsymbol = .{
+            .url = "https://github.com/carlos-sweb/z-symbol/archive/refs/tags/v0.1.0.tar.gz",
+            .hash = "zsymbol-0.1.0--_-46A5FAADblMb_Etysuux6m0d6eekqqGcosK9eoVoC",
+        },
+        .zbigint = .{
+            .url = "https://github.com/carlos-sweb/z-bigint/archive/refs/tags/v0.1.0.tar.gz",
+            .hash = "zbigint-0.1.0-PA8m8TgNAQDF0cJPy3JN67NMRsXgqJUCJlEatiV66rMQ",
+        },
+        .zbuffer = .{
+            .url = "https://github.com/carlos-sweb/z-buffer/archive/refs/tags/v0.1.0.tar.gz",
+            .hash = "zbuffer-0.1.0-bUHCsDXIAAB1Yt5RcFhEApi6XO8NeV32ia8WvM3QttNv",
+        },
+        .ztemporal = .{
+            .url = "https://github.com/carlos-sweb/z-temporal/archive/refs/tags/v0.1.0.tar.gz",
+            .hash = "ztemporal-0.1.0-9l_8_jt7BgDitcgR0ACQLBddaQqIK4nfJAEEDvNKDs5Z",
+        },
+        .zurlcode = .{
+            .url = "https://github.com/carlos-sweb/z-urlcode/archive/refs/tags/v0.1.0.tar.gz",
+            .hash = "zurlcode-0.1.0-LPErohdAAABn6aKHZX0xcDjIL2k4pJHK2jXcgpvn21hz",
+        },
     },
 }

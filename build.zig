@@ -13,6 +13,11 @@ pub fn build(b: *std.Build) void {
     const zfunctions_dep = b.dependency("zfunctions", .{ .target = target, .optimize = optimize });
     const zfunctions_module = zfunctions_dep.module("zfunctions");
 
+    // z-statements bundles another parser and z-functions reuses it by default.
+    // Use our pinned parser throughout so AST nodes and parser hooks share types.
+    zstatements_module.addImport("zparser", zparser_module);
+    zfunctions_module.addImport("zparser", zparser_module);
+
     const zvalue_dep = b.dependency("zvalue", .{ .target = target, .optimize = optimize });
     const zvalue_module = zvalue_dep.module("zvalue");
 
@@ -66,6 +71,8 @@ pub fn build(b: *std.Build) void {
 
     const zinterpreter_module = b.addModule("zinterpreter", .{
         .root_source_file = b.path("src/zinterpreter.zig"),
+        .target = target,
+        .optimize = optimize,
     });
     zinterpreter_module.addImport("zparser", zparser_module);
     zinterpreter_module.addImport("zstatements", zstatements_module);
@@ -87,6 +94,15 @@ pub fn build(b: *std.Build) void {
     zinterpreter_module.addImport("zbuffer", zbuffer_module);
     zinterpreter_module.addImport("ztemporal", ztemporal_module);
     zinterpreter_module.addImport("zurlcode", zurlcode_module);
+
+    const docs_object = b.addObject(.{ .name = "zinterpreter", .root_module = zinterpreter_module });
+    const install_docs = b.addInstallDirectory(.{
+        .source_dir = docs_object.getEmittedDocs(),
+        .install_dir = .prefix,
+        .install_subdir = "docs",
+    });
+    const docs_step = b.step("docs", "Generate Zig API documentation");
+    docs_step.dependOn(&install_docs.step);
 
     const test_step = b.step("test", "Run all tests");
 

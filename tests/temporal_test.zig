@@ -3,11 +3,8 @@
 //! largest FAIL bucket, 0% pass, because the already-built z-temporal
 //! library was never connected). Same discipline as date_test.zig: real
 //! JS scripts through the whole engine, not just the Zig glue in
-//! isolation. `ZonedDateTime` arithmetic (`add`/`subtract`/`until`/
-//! `since`/`round`/`with*`) isn't wired -- z-temporal's own library
-//! doesn't implement it yet (see temporal_builtins.zig's top doc
-//! comment and temporal-zoneddatetime-now-wiring.md) -- no tests for
-//! it here.
+//! isolation. ZonedDateTime arithmetic and locale formatting are not
+//! exposed by the interpreter bindings yet.
 const std = @import("std");
 const testing = std.testing;
 const helpers = @import("helpers.zig");
@@ -140,4 +137,57 @@ test "console.log renders a Temporal instance with its kind name and ISO string"
     try helpers.expectStdout(
         \\console.log(new Temporal.PlainDate(2024, 6, 15));
     , "Temporal.PlainDate 2024-06-15\n");
+}
+
+test "Temporal string input and partial field updates use the v0.1.0 API" {
+    try helpers.expectStdout(
+        \\console.log(Temporal.PlainTime.from('12:34:56').with({ minute: 1 }).toString());
+        \\console.log(Temporal.PlainDateTime.from('2024-02-29T12:34:56').with({ hour: 6 }).toString());
+        \\console.log(Temporal.PlainYearMonth.from('2024-02').with({ month: 3 }).toString());
+        \\console.log(Temporal.PlainMonthDay.from('02-29').with({ day: 28 }).toString());
+        \\console.log(Temporal.Duration.from('PT1H').with({ minutes: 30 }).toString());
+        \\console.log(Temporal.Instant.from('2024-01-01T00:00:00Z').toString());
+    , "12:01:56\n2024-02-29T06:34:56\n2024-03\n02-28\nPT1H30M\n2024-01-01T00:00:00Z\n");
+}
+
+test "Temporal rounding modes and calendar-relative Duration options" {
+    try helpers.expectStdout(
+        \\const time = new Temporal.PlainTime(12, 30);
+        \\console.log(time.round({ smallestUnit: 'hour' }).toString());
+        \\console.log(time.round({ smallestUnit: 'hour', roundingMode: 'halfFloor' }).toString());
+        \\const duration = Temporal.Duration.from({ hours: 1, minutes: 30 });
+        \\console.log(duration.round({ smallestUnit: 'hour' }).toString());
+        \\console.log(duration.total('minutes'));
+        \\console.log(Temporal.Duration.from({ months: 1 }).total({ unit: 'days', relativeTo: '2024-02-01' }));
+        \\console.log(Temporal.Duration.compare({ months: 1 }, { days: 29 }, { relativeTo: '2024-02-01' }));
+    , "13:00:00\n12:00:00\nPT2H\n90\n29\n0\n");
+}
+
+test "Duration Number components preserve integral values outside i64" {
+    try helpers.expectNumber("Temporal.Duration.from({ nanoseconds: 100000000000000000000 }).nanoseconds;", 1e20);
+    try helpers.expectNumber("new Temporal.Duration(0, 0, 0, 0, 0, 0, 0, 0, 0, 100000000000000000000).with({ nanoseconds: 100000000000000000000 }).nanoseconds;", 1e20);
+    try helpers.expectStdout(
+        \\try { Temporal.Duration.from({ seconds: 0.5 }); } catch (e) { console.log(e.name); }
+        \\try { Temporal.Duration.from({ hours: 1, minutes: -1 }); } catch (e) { console.log(e.name); }
+        \\try { Temporal.Duration.from({}); } catch (e) { console.log(e.name); }
+        \\try { Temporal.PlainTime.from({}); } catch (e) { console.log(e.name); }
+    , "RangeError\nRangeError\nTypeError\nTypeError\n");
+}
+
+test "Temporal week number and constructor versus from overflow" {
+    try helpers.expectStdout(
+        \\console.log(Temporal.PlainDate.from('2024-02-29').weekOfYear);
+        \\console.log(Temporal.PlainDate.from({ year: 2024, month: 2, day: 30 }).toString());
+        \\try { Temporal.PlainDate.from({ year: 2024, month: 2, day: 30 }, { overflow: 'reject' }); } catch (e) { console.log(e.name); }
+        \\try { new Temporal.PlainDate(2024, 2, 30); } catch (e) { console.log(e.name); }
+    , "9\n2024-02-29\nRangeError\nRangeError\n");
+}
+
+test "ZonedDateTime construction and string parsing retain the zone" {
+    try helpers.expectStdout(
+        \\const zoned = Temporal.ZonedDateTime.from('2024-01-01T00:00:00+00:00[UTC]');
+        \\console.log(zoned.toString(), zoned.monthCode, zoned.weekOfYear);
+        \\console.log(new Temporal.ZonedDateTime(0n, 'UTC').toString());
+        \\console.log(Temporal.ZonedDateTime.from({ year: 2024, month: 1, day: 1, timeZone: 'UTC' }).toString());
+    , "2024-01-01T00:00:00+00:00[UTC] M01 1\n1970-01-01T00:00:00+00:00[UTC]\n2024-01-01T00:00:00+00:00[UTC]\n");
 }

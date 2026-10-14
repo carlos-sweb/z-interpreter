@@ -926,17 +926,13 @@ pub const Interpreter = struct {
 
 pub const invokeFunctionNode = interpreter_class.invokeFunctionNode;
 
-
 // ---- GC tests (roadmap item 15, phase 5) -----------------------------
 // White-box: collectGarbage()/gc_registry are private, so these live here
 // rather than in tests/. Each proves a specific unreachable-but-nonzero-
 // refcount shape gets reclaimed by checking gc_registry.count() returns
 // to its pre-cycle baseline after collectGarbage() -- mark-and-sweep
 // doesn't care what a node's Rc count says, only whether it's reachable,
-// so this is robust regardless of exactly how inflated that count is
-// (see the "let x = {} leaves refcount 2, not 1" quirk in
-// refcount_test.zig -- these cycles rely on exactly that quirk to even
-// be nonzero-but-unreachable in the first place).
+// so these checks depend on reachability rather than temporary reference counts.
 
 fn gcTestInterp(allocating: *std.Io.Writer.Allocating) !Interpreter {
     return Interpreter.init(std.testing.allocator, &allocating.writer);
@@ -1039,15 +1035,19 @@ test "collectGarbage reclaims an abandoned, never-driven generator (fiber stack 
         \\let g = gen();
         \\g = null;
     );
-    // The generator object + its "next" function + the FiberState (whose
-    // 8 MiB stack rides along, freed via Fiber.deinit() inside
-    // freeGarbageNode's .fiber_state case), at minimum -- exact count
-    // intentionally not asserted, see the closure<->object<->environment
-    // test's comment.
+    // The object and its methods can now be released immediately. The
+    // registered FiberState still owns its 8 MiB stack until collection.
+    var abandoned_fiber: ?usize = null;
+    var nodes = interp.gc_registry.iterator();
+    while (nodes.next()) |entry| {
+        if (entry.value_ptr.* == .fiber_state) abandoned_fiber = entry.key_ptr.*;
+    }
+    try testing.expect(abandoned_fiber != null);
     const before_collect = interp.gc_registry.count();
-    try testing.expect(before_collect >= baseline + 3);
     interp.collectGarbage();
     const after_collect = interp.gc_registry.count();
+    try testing.expect(!interp.gc_registry.contains(abandoned_fiber.?));
+    try testing.expect(after_collect <= baseline);
     try testing.expect(after_collect < before_collect);
     interp.collectGarbage(); // idempotent: nothing left to reclaim
     try testing.expectEqual(after_collect, interp.gc_registry.count());

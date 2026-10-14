@@ -207,6 +207,13 @@ test "parseInt/parseFloat" {
     try helpers.expectNumber("parseFloat('3.5abc');", 3.5);
 }
 
+test "parseInt normalizes Number radices with ToInt32" {
+    try helpers.expectNumber("parseInt('10', 4294967298);", 2);
+    try helpers.expectNumber("Number.parseInt('10', -4294967294);", 2);
+    try helpers.expectNumber("parseInt('ff', 16.9);", 255);
+    try helpers.expectStdout("console.log(parseInt('42', NaN), parseInt('42', Infinity), Number.isNaN(parseInt('42', 1)));", "42 42 true\n");
+}
+
 test "isNaN/isFinite" {
     try expectBool("isNaN(NaN);", true);
     try expectBool("isNaN(5);", false);

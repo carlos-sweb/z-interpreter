@@ -69,13 +69,9 @@ pub fn globalParseInt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     const self = interp(ctx);
     const s = try argString(self, allocator, args, 0);
     defer allocator.free(s);
-    const radix: ?u8 = if (arg(args, 1) == .undefined) null else blk: {
-        // Clamp into u8; out-of-[2,36] values are left for parseInt to reject
-        // (as NaN). Avoids @intFromFloat panicking on NaN/Infinity/huge radix.
-        const r = toIntSat(try self.toNumberJS(arg(args, 1)));
-        break :blk if (r >= 0 and r <= 36) @intCast(r) else 255;
-    };
-    return JSValue.fromNumber(znumber.ParsingMethods.parseInt(allocator, s, radix));
+    // z-number applies ToInt32 to the original Number, including wrapped radices.
+    const radix: ?f64 = if (arg(args, 1) == .undefined) null else try self.toNumberJS(arg(args, 1));
+    return JSValue.fromNumber(try znumber.ParsingMethods.parseInt(allocator, s, radix));
 }
 
 pub fn globalParseFloat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
