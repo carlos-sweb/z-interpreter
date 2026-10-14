@@ -6,7 +6,7 @@ const ztemporal = @import("ztemporal");
 const zstring = @import("zstring");
 const JSValue = zvalue.JSValue;
 
-/// Appends a Temporal `toIsoString` result, freeing the allocation and
+/// Appends a Temporal `toString` result, freeing the allocation and
 /// falling back to a placeholder on error (out-of-range values etc.) --
 /// console.log must never crash on a value it's merely displaying.
 fn appendIso(allocator: Allocator, buf: *std.ArrayList(u8), result: anyerror![]u8) !void {
@@ -26,8 +26,8 @@ fn appendIso(allocator: Allocator, buf: *std.ArrayList(u8), result: anyerror![]u
 /// its own) -- just legible and non-crashing for every JSValue shape.
 pub fn inspect(allocator: Allocator, buf: *std.ArrayList(u8), v: JSValue) !void {
     switch (v) {
-        .@"undefined" => try buf.appendSlice(allocator, "undefined"),
-        .@"null" => try buf.appendSlice(allocator, "null"),
+        .undefined => try buf.appendSlice(allocator, "undefined"),
+        .null => try buf.appendSlice(allocator, "null"),
         .boolean => |b| try buf.appendSlice(allocator, if (b) "true" else "false"),
         .number => |n| {
             // Real Node's inspect (unlike ToString, which is genuinely
@@ -131,13 +131,13 @@ pub fn inspect(allocator: Allocator, buf: *std.ArrayList(u8), v: JSValue) !void 
             try buf.appendSlice(allocator, box.value.kindName());
             try buf.append(allocator, ' ');
             switch (box.value) {
-                .plain_date => |tv| try appendIso(allocator, buf, tv.toIsoString(allocator, false)),
-                .plain_time => |tv| try appendIso(allocator, buf, tv.toIsoString(allocator)),
-                .plain_date_time => |tv| try appendIso(allocator, buf, tv.toIsoString(allocator, false)),
-                .plain_year_month => |tv| try appendIso(allocator, buf, tv.toIsoString(allocator, false)),
-                .plain_month_day => |tv| try appendIso(allocator, buf, tv.toIsoString(allocator, false)),
-                .instant => |tv| try appendIso(allocator, buf, tv.toIsoString(allocator)),
-                .duration => |tv| try appendIso(allocator, buf, tv.toIsoString(allocator)),
+                .plain_date => |tv| try appendIso(allocator, buf, tv.toString(allocator, .{})),
+                .plain_time => |tv| try appendIso(allocator, buf, tv.toString(allocator, .{})),
+                .plain_date_time => |tv| try appendIso(allocator, buf, tv.toString(allocator, .{})),
+                .plain_year_month => |tv| try appendIso(allocator, buf, tv.toString(allocator, .{})),
+                .plain_month_day => |tv| try appendIso(allocator, buf, tv.toString(allocator, .{})),
+                .instant => |tv| try appendIso(allocator, buf, tv.toString(allocator, .{})),
+                .duration => |tv| try appendIso(allocator, buf, tv.toString(allocator, .{})),
                 .zoned_date_time => try buf.appendSlice(allocator, "<unsupported>"), // not wired yet
             }
         },

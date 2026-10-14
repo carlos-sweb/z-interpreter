@@ -7,7 +7,7 @@
 //!
 //! `makeOneOf` below switches on every `JSValue` tag with NO `else` branch,
 //! so it alone already forces a compile error the day a new variant is
-//! added. The `inline for (std.meta.fields(JSValue))` loop in the test
+//! added. The `inline for (@typeInfo(JSValue).@"union".field_names)` loop in the test
 //! walks the union's field list at comptime, so covering a new variant here
 //! requires touching this file (compile error until you do), not trusting
 //! someone to remember. Each constructed value is tracked via the normal
@@ -36,8 +36,8 @@ fn dummyNativeCall(ctx: *anyopaque, allocator: std.mem.Allocator, this_value: JS
 fn makeOneOf(interp: *zinterpreter.Interpreter, comptime tag: std.meta.Tag(JSValue)) !JSValue {
     var dummy_ctx: u8 = 0;
     return switch (tag) {
-        .@"undefined" => JSValue.UNDEFINED,
-        .@"null" => JSValue.NULL,
+        .undefined => JSValue.UNDEFINED,
+        .null => JSValue.NULL,
         .boolean => JSValue{ .boolean = true },
         .number => JSValue{ .number = 1 },
         .string => try interp.gcNewString("x"),
@@ -66,7 +66,7 @@ fn makeOneOf(interp: *zinterpreter.Interpreter, comptime tag: std.meta.Tag(JSVal
             buf.deinit();
             break :blk ta;
         },
-        .temporal => try interp.gcNewTemporal(.{ .instant = .{ .epoch_nanoseconds = 0 } }),
+        .temporal => try interp.gcNewTemporal(.{ .instant = .{ .epochNs = 0 } }),
     };
 }
 
@@ -76,8 +76,8 @@ test "gcTrack covers every JSValue variant without leaking" {
     var interp = try zinterpreter.Interpreter.init(testing.allocator, &allocating.writer);
     defer interp.deinit();
 
-    inline for (std.meta.fields(JSValue)) |field| {
-        const tag: std.meta.Tag(JSValue) = @field(std.meta.Tag(JSValue), field.name);
+    inline for (@typeInfo(JSValue).@"union".field_names) |name| {
+        const tag: std.meta.Tag(JSValue) = @field(std.meta.Tag(JSValue), name);
         const v = try makeOneOf(&interp, tag);
         v.deinit();
     }

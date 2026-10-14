@@ -1100,7 +1100,6 @@ pub const Interpreter = struct {
 
 pub const invokeFunctionNode = interpreter_class.invokeFunctionNode;
 
-
 // ---- GC tests (roadmap item 15, phase 5) -----------------------------
 // White-box: collectGarbage()/gc_registry are private, so these live here
 // rather than in tests/. Each proves a specific unreachable-but-nonzero-
@@ -1729,4 +1728,32 @@ test "collectGarbage reclaims a promise captured by its own .then() callback" {
     );
     interp.collectGarbage();
     try testing.expectEqual(baseline, interp.gc_registry.count());
+}
+
+test "collectGarbage keeps a reachable bound function context" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    const setup = try interp.run("var f = (function() { var x = 40; return function(v) { return x + v; }.bind(null, 2); })();");
+    setup.deinit();
+    interp.collectGarbage();
+    const result = try interp.run("f();");
+    defer result.deinit();
+    try testing.expectEqual(@as(f64, 42), result.number);
+}
+
+test "collectGarbage keeps a reachable suspended generator context" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    const setup = try interp.run("var g = (function*() { yield 40; return 42; })(); g.next();");
+    setup.deinit();
+    interp.collectGarbage();
+    const result = try interp.run("g.next().value;");
+    defer result.deinit();
+    try testing.expectEqual(@as(f64, 42), result.number);
 }

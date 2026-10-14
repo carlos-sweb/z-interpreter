@@ -1,6 +1,6 @@
 # Z-Interpreter
 
-[![Zig Version](https://img.shields.io/badge/zig-0.16-orange.svg)](https://ziglang.org/)
+[![Zig Version](https://img.shields.io/badge/zig-0.17.0-orange.svg)](https://ziglang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 A minimal **tree-walking interpreter** for the z-* ECMAScript engine — the fifth repo, and the first that actually *executes* code instead of only tokenizing/parsing it. Ties together [z-parser](https://github.com/carlos-sweb/z-parser) (§13 expressions), [z-statements](https://github.com/carlos-sweb/z-statements) (§14 statements), [z-functions](https://github.com/carlos-sweb/z-functions) (§15 functions/arrows), and [z-value](https://github.com/carlos-sweb/z-value) (`JSValue`) into something that produces observable behavior — including a real `console.log("Hello World")`. Part of the [z-*](https://github.com/carlos-sweb) micro-library family.
@@ -12,7 +12,7 @@ Not spec completeness — validating the whole pipeline end-to-end for the first
 ## Design
 
 - **`JSValue` gained a `.function` variant** (in `z-value`, not here) — see that repo's own changelog. The payload, `Callable` (`ctx: *anyopaque` + `call: *const fn(...) anyerror!JSValue`), is z-value's own type, deliberately independent of this repo — this repo supplies two kinds of `ctx`/`call` pairs: native functions (`console.log`) and user closures (`ClosureCtx { function_node, closure_env, interp }`).
-- **One arena for an entire interpreter run** (`Interpreter.arena_state`), used for *both* environments and every `JSValue` this interpreter creates. Closures need their defining environment to outlive the call that created them (a classic aliasing problem); the correct general solution is GC or a refcounted environment graph (with the same cycle risk `z-value` already documents as an accepted gap). For a first interpreter, one arena freed in a single shot at `Interpreter.deinit()` is the pragmatic, explicitly-chosen simplification — correct for a single script run, which is the only case that matters here. `Rc(T)`'s `retain()`/`deinit()` discipline is still followed everywhere (the underflow assert in `Rc(T).decref()` remains a real bug detector even though the underlying free is a no-op under an arena).
+- **Memory ownership**: the interpreter arena keeps parsed source, ASTs and durable names alive until `Interpreter.deinit()`. Runtime values use reference counting and cycle collection; environments and fiber states are tracked by the collector. Callers own values returned by `run()` and must release them with `deinit()` before destroying the interpreter.
 - **Real ECMA-262 Completion Records** (`{ type, value, target }` in `completion.zig`), not naive Zig `break`/`continue`/`return` — those can't express "unwind through arbitrarily nested blocks/`if`s to the nearest loop/function boundary," which is exactly what JS's control-flow statements need. Every statement-evaluation function returns a `Completion`; blocks/loops/function-call boundaries each catch the completion types relevant to them and propagate the rest unchanged.
 - **A narrow coercion layer** (`coercion.zig`) supplies ToBoolean/ToNumber/ToString/a subset of Abstract Equality — none of which exist anywhere upstream (`JSValue` deliberately has none of this). Scoped to exactly what this phase's operators need; anything requiring real ToPrimitive (object/array/function on the left of `+`'s numeric branch, `==` against a mismatched non-primitive tag, etc.) is `error.NotImplemented`.
 - **`console.log`'s formatter (`inspect.zig`) is standalone, not `z-json`** — `JSON.stringify`'s rules (omits `undefined`/functions, quotes every string) are wrong for `console.log` (top-level strings shouldn't be quoted; `undefined` should still print something). Legible, not spec-exact.
@@ -140,7 +140,7 @@ Narrowings (documented gaps, not oversights): **non-iterable array-like construc
 
 - **`with`**.
 - **`constructor` shows up in `for-in`**: our narrowed model stores it as an ordinary (enumerable) property; real JS marks it non-enumerable.
-- **Fiber narrowings**: no `gen.return()`/`gen.throw()`, no async generators (they parse but are a runtime TypeError), no top-level await; `yield*` and for-of's iterator protocol duck-type on a callable `next` (no arbitrary `Symbol.iterator`); each generator/async activation arena-allocates an 8 MiB virtual stack, never individually freed (arena-per-run — the GC phase revisits).
+- **Fiber narrowings**: no `gen.return()`/`gen.throw()` or top-level await. Generator and async activations use an 8 MiB virtual stack owned by their fiber state; unreachable fibers and their stacks are reclaimed by cycle collection.
 - **`arguments` is a real array snapshot**, not the exotic Arguments object: every non-arrow call gets one (arrows inherit lexically); it has length, indexing, iteration, spread, and `Array.from` support for free, and is unmapped (always-strict — mutating a parameter doesn't change `arguments[i]`). Divergences: `Array.isArray(arguments)` is `true` (real JS: `false`), it carries array methods, and there's no `[object Arguments]` tag or `callee`.
 - **Class narrowings**: instance/static fields (`x = 1` / `static x = 1`), `#private` fields/methods/statics (with real brand-check `TypeError`s on cross-class access), and computed method/field keys are all implemented — what's still missing is `new.target` (a SyntaxError today) and decorators; a static accessor's `this` is the statics bag (so `this.otherStatic` works but `this === C` doesn't); `super` misuse is a runtime error here, not a parse-time SyntaxError; `prototype`/`name`/`length` still shadow anything with those names in a function's property bag.
 - **`({a = 1} = {})`** (CoverInitializedName — shorthand-with-default in an object *assignment* pattern): doesn't parse as an object literal; `({a: a = 1} = {})` works. And `{a} = obj` at statement level opens a block exactly like real JS — `({a} = obj)` is the correct form.
@@ -153,6 +153,7 @@ Narrowings (documented gaps, not oversights): **non-iterable array-like construc
 ## Usage
 
 ```zig
+const std = @import("std");
 const zinterpreter = @import("zinterpreter");
 
 var allocating = std.Io.Writer.Allocating.init(allocator);
@@ -162,10 +163,15 @@ var interp = try zinterpreter.Interpreter.init(allocator, &allocating.writer);
 defer interp.deinit();
 
 const result = try interp.run("console.log(\"Hello World\");");
+defer result.deinit();
 // allocating.written() == "Hello World\n"
 ```
 
 ## Testing
+
+Requires Zig 0.17.0. Dependencies are fetched from GitHub releases with pinned
+package hashes. z-statements and z-functions use v0.2.0 and share the canonical
+z-parser v0.1.0 module; no sibling checkouts are required.
 
 ```bash
 zig build test

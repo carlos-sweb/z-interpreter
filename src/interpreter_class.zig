@@ -447,32 +447,19 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
             continue;
         }
 
-        // Resolve the property key: computed keys evaluate ONCE, here,
-        // in order; private keys encode against this class's identity.
+        // Computed/private keys are temporary; property storage copies them.
         const key: []const u8 = switch (el.key) {
             .ident => |n| n,
             .private => |n| try self.encodePrivateKey(cctx, n),
             .computed => |expr| blk: {
-                // encodeKey handles BOTH symbols (`[Symbol.iterator]`,
-                // encoded like any symbol-keyed property) and ordinary
-                // values (ToPropertyKey string form). `kv` itself is
-                // disposed once encoded (uniform ownership since
-                // uniform-ownership-contract.md's Etapa 1 -- previously
-                // left un-freed as a workaround for the non-uniformity
-                // that migration fixed at the root; see
-                // memberKeyString's comment for the Test262 crash this
-                // once caused). The ENCODED key string still must
-                // outlive this loop iteration (stored in
-                // `instance_fields` for per-construction use;
-                // freeGarbageNode's `.class_ctx` case only frees the
-                // array, not each key's content -- documented residual
-                // gap, narrow/one-time-per-class, not chased further
-                // here) -- that part is unrelated to `kv`'s own
-                // lifetime and stays as-is.
                 const kv = try self.evalExpression(closure_env, expr);
                 defer kv.deinit();
                 break :blk try self.encodeKey(kv);
             },
+        };
+        defer switch (el.key) {
+            .ident => {},
+            .private, .computed => self.gc_allocator.free(key),
         };
 
         // Real spec: a static class element (field, method, accessor,
@@ -511,7 +498,7 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
                 // Instance fields are CAPTURED here (key already
                 // resolved) and initialized per-instance at
                 // construction time.
-                try instance_fields.append(arena, .{ .key = key, .value = el.value });
+                try instance_fields.append(arena, .{ .key = try self.arena_state.allocator().dupe(u8, key), .value = el.value });
             }
             continue;
         }
@@ -605,7 +592,7 @@ pub fn invokeFunctionNode(
         // released here.
         var from_default = false;
         defer if (from_default) value.deinit();
-        if (value == .@"undefined") {
+        if (value == .undefined) {
             if (param.default) |def| {
                 value = try self.evalExpression(call_env, def);
                 from_default = true;

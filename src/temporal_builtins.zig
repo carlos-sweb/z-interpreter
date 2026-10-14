@@ -16,14 +16,8 @@
 //! threading `Io` through `Interpreter` itself (a bigger, separate
 //! architectural change this plan deliberately avoided).
 //!
-//! Still NOT wired (z-temporal's own library gap, not a wiring gap --
-//! see the plan's "Alcance NO"): `ZonedDateTime.prototype.add/subtract/
-//! until/since/round/with/withCalendar/withPlainTime/withTimeZone` --
-//! z-temporal's Phase 7a doesn't implement `ZonedDateTime` arithmetic
-//! yet (confirmed reading `zoned_date_time.zig` in full: zero `pub fn`
-//! for any of these). `toLocaleString` (no other Temporal type here has
-//! it either -- would need real locale-aware formatting this engine
-//! doesn't have).
+//! ZonedDateTime arithmetic and locale formatting are available in
+//! z-temporal v0.1.0 but are not exposed by these bindings yet.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const zvalue = @import("zvalue");
@@ -62,14 +56,10 @@ fn dneMethod(obj: JSValue, name: []const u8, value: JSValue) !void {
 /// too returns bare `anyerror`, never a real value).
 fn temporalErr(self: *Interpreter, e: ztemporal.TemporalError) anyerror {
     return switch (e) {
-        error.InvalidRange => self.throwError(.range_error, "Value out of range for Temporal", .{}),
-        error.InvalidFormat => self.throwError(.range_error, "Invalid Temporal string", .{}),
-        error.InvalidField => self.throwError(.type_error, "Invalid or missing Temporal field", .{}),
-        error.MixedCalendarUnits => self.throwError(.range_error, "Duration operand cannot mix calendar units with a relativeTo-less operation", .{}),
-        error.NeedsRelativeTo => self.throwError(.range_error, "relativeTo is required for this operation", .{}),
-        error.InvalidTimeZone => self.throwError(.range_error, "Invalid time zone", .{}),
-        error.AmbiguousTime => self.throwError(.range_error, "Ambiguous or invalid wall-clock time", .{}),
+        error.RangeError => self.throwError(.range_error, "Invalid or out-of-range Temporal value", .{}),
+        error.TypeError => self.throwError(.type_error, "Invalid or missing Temporal field", .{}),
         error.OutOfMemory => error.OutOfMemory,
+        error.IoError => error.IoError,
     };
 }
 
@@ -115,15 +105,19 @@ fn optionalI32(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!?i32 
     return try requireI32(self, v, key);
 }
 
-fn optionalI64(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!?i64 {
+/// Duration stores integral JavaScript Numbers, including values outside i64.
+/// Let z-temporal validate component magnitudes and mixed signs.
+fn requireDurationNumber(self: *Interpreter, v: JSValue, what: []const u8) anyerror!f64 {
+    if (v != .number) return self.throwError(.type_error, "{s} must be a number", .{what});
+    if (!std.math.isFinite(v.number) or v.number != @trunc(v.number)) return self.throwError(.range_error, "{s} must be an integer", .{what});
+    return v.number;
+}
+
+fn optionalDurationNumber(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!?f64 {
     if (obj != .object) return null;
     const v = obj.object.value.get(key) orelse return null;
     if (v == .undefined) return null;
-    return try requireI64(self, v, key);
-}
-
-fn fieldI64(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!i64 {
-    return (try optionalI64(self, obj, key)) orelse 0;
+    return try requireDurationNumber(self, v, key);
 }
 
 /// Reads `options.overflow` ("constrain"/"reject"), defaulting to
@@ -218,9 +212,9 @@ fn unitFromString(self: *Interpreter, s: []const u8, what: []const u8) anyerror!
 
 fn roundingModeFromString(self: *Interpreter, s: []const u8) anyerror!RoundingMode {
     const names = [_]struct { []const u8, RoundingMode }{
-        .{ "ceil", .ceil },          .{ "floor", .floor },          .{ "trunc", .trunc },          .{ "expand", .expand },
-        .{ "halfCeil", .half_ceil }, .{ "halfFloor", .half_floor }, .{ "halfTrunc", .half_trunc }, .{ "halfExpand", .half_expand },
-        .{ "halfEven", .half_even },
+        .{ "ceil", .ceil },         .{ "floor", .floor },         .{ "trunc", .trunc },         .{ "expand", .expand },
+        .{ "halfCeil", .halfCeil }, .{ "halfFloor", .halfFloor }, .{ "halfTrunc", .halfTrunc }, .{ "halfExpand", .halfExpand },
+        .{ "halfEven", .halfEven },
     };
     for (names) |pair| {
         if (std.mem.eql(u8, s, pair[0])) return pair[1];
@@ -229,28 +223,28 @@ fn roundingModeFromString(self: *Interpreter, s: []const u8) anyerror!RoundingMo
 }
 
 fn readRoundingOptionsGeneric(self: *Interpreter, comptime T: type, options: JSValue, default_mode: RoundingMode) anyerror!T {
-    var out: T = .{ .rounding_mode = default_mode };
+    var out: T = .{ .roundingMode = default_mode };
     if (options == .string) {
         // A bare unit string is shorthand for { smallestUnit: options }.
-        out.smallest_unit = try unitFromString(self, options.string.value.data, "smallestUnit");
+        out.smallestUnit = try unitFromString(self, options.string.value.data, "smallestUnit");
         return out;
     }
     if (options != .object) return out;
     const o = options.object.value;
     if (o.get("smallestUnit")) |v| if (v != .undefined) {
         if (v != .string) return self.throwError(.type_error, "smallestUnit must be a string", .{});
-        out.smallest_unit = try unitFromString(self, v.string.value.data, "smallestUnit");
+        out.smallestUnit = try unitFromString(self, v.string.value.data, "smallestUnit");
     };
     if (o.get("largestUnit")) |v| if (v != .undefined) {
         if (v != .string) return self.throwError(.type_error, "largestUnit must be a string", .{});
-        out.largest_unit = try unitFromString(self, v.string.value.data, "largestUnit");
+        out.largestUnit = try unitFromString(self, v.string.value.data, "largestUnit");
     };
     if (o.get("roundingIncrement")) |v| if (v != .undefined) {
-        out.rounding_increment = try requireU32(self, v, "roundingIncrement");
+        out.roundingIncrement = try requireU32(self, v, "roundingIncrement");
     };
     if (o.get("roundingMode")) |v| if (v != .undefined) {
         if (v != .string) return self.throwError(.type_error, "roundingMode must be a string", .{});
-        out.rounding_mode = try roundingModeFromString(self, v.string.value.data);
+        out.roundingMode = try roundingModeFromString(self, v.string.value.data);
     };
     return out;
 }
@@ -260,7 +254,7 @@ fn readRoundingOptions(self: *Interpreter, options: JSValue) anyerror!RoundingOp
 }
 
 fn readRoundOptions(self: *Interpreter, options: JSValue) anyerror!RoundOptions {
-    return readRoundingOptionsGeneric(self, RoundOptions, options, .half_expand);
+    return readRoundingOptionsGeneric(self, RoundOptions, options, .halfExpand);
 }
 
 /// Extracts a `T` payload from a `.temporal` JSValue whose inner tag must
@@ -278,20 +272,20 @@ fn requireTemporal(self: *Interpreter, v: JSValue, comptime tag: std.meta.Tag(Te
 /// object with any of the 10 duration fields (missing ones default to 0).
 fn coerceDuration(self: *Interpreter, v: JSValue) anyerror!ztemporal.Duration {
     if (v == .temporal and v.temporal.value == .duration) return v.temporal.value.duration;
-    if (v == .string) return ztemporal.Duration.parseIso(v.string.value.data) catch |e| temporalErr(self, e);
+    if (v == .string) return ztemporal.Duration.from(.{ .string = v.string.value.data }) catch |e| temporalErr(self, e);
     if (v != .object) return self.throwError(.type_error, "Duration-like value required", .{});
-    return ztemporal.Duration.create(
-        try fieldI64(self, v, "years"),
-        try fieldI64(self, v, "months"),
-        try fieldI64(self, v, "weeks"),
-        try fieldI64(self, v, "days"),
-        try fieldI64(self, v, "hours"),
-        try fieldI64(self, v, "minutes"),
-        try fieldI64(self, v, "seconds"),
-        try fieldI64(self, v, "milliseconds"),
-        try fieldI64(self, v, "microseconds"),
-        try fieldI64(self, v, "nanoseconds"),
-    ) catch |e| temporalErr(self, e);
+    return ztemporal.Duration.from(.{ .fields = .{
+        .years = try optionalDurationNumber(self, v, "years"),
+        .months = try optionalDurationNumber(self, v, "months"),
+        .weeks = try optionalDurationNumber(self, v, "weeks"),
+        .days = try optionalDurationNumber(self, v, "days"),
+        .hours = try optionalDurationNumber(self, v, "hours"),
+        .minutes = try optionalDurationNumber(self, v, "minutes"),
+        .seconds = try optionalDurationNumber(self, v, "seconds"),
+        .milliseconds = try optionalDurationNumber(self, v, "milliseconds"),
+        .microseconds = try optionalDurationNumber(self, v, "microseconds"),
+        .nanoseconds = try optionalDurationNumber(self, v, "nanoseconds"),
+    } }) catch |e| temporalErr(self, e);
 }
 
 /// temporal-argument-coercion.md: the same "instance/string/property-
@@ -305,48 +299,54 @@ fn coerceDuration(self: *Interpreter, v: JSValue) anyerror!ztemporal.Duration {
 /// throw -- month 13 constrains to 12).
 fn coercePlainDate(self: *Interpreter, v: JSValue, overflow: Overflow) anyerror!ztemporal.PlainDate {
     if (v == .temporal and v.temporal.value == .plain_date) return v.temporal.value.plain_date;
-    if (v == .string) return ztemporal.PlainDate.parseIso(v.string.value.data) catch |e| temporalErr(self, e);
+    if (v == .string) return ztemporal.PlainDate.from(.{ .string = v.string.value.data }, .{}) catch |e| temporalErr(self, e);
     if (v != .object) return self.throwError(.type_error, "Temporal.PlainDate.from requires a string or an object", .{});
     const year = (try optionalI32(self, v, "year")) orelse return self.throwError(.type_error, "year is required", .{});
     const month = (try optionalI32(self, v, "month")) orelse return self.throwError(.type_error, "month is required", .{});
     const day = (try optionalI32(self, v, "day")) orelse return self.throwError(.type_error, "day is required", .{});
-    return ztemporal.PlainDate.create(year, month, day, overflow) catch |e| temporalErr(self, e);
+    return ztemporal.PlainDate.from(.{ .fields = .{ .year = year, .month = month, .day = day } }, .{ .overflow = overflow }) catch |e| temporalErr(self, e);
 }
 
 fn coercePlainTime(self: *Interpreter, v: JSValue, overflow: Overflow) anyerror!ztemporal.PlainTime {
     if (v == .temporal and v.temporal.value == .plain_time) return v.temporal.value.plain_time;
-    if (v == .string) return ztemporal.PlainTime.parseIso(v.string.value.data) catch |e| temporalErr(self, e);
+    if (v == .string) return ztemporal.PlainTime.from(.{ .string = v.string.value.data }, .{}) catch |e| temporalErr(self, e);
     if (v != .object) return self.throwError(.type_error, "Temporal.PlainTime.from requires a string or an object", .{});
-    return ztemporal.PlainTime.create(
-        (try optionalI32(self, v, "hour")) orelse 0,
-        (try optionalI32(self, v, "minute")) orelse 0,
-        (try optionalI32(self, v, "second")) orelse 0,
-        (try optionalI32(self, v, "millisecond")) orelse 0,
-        (try optionalI32(self, v, "microsecond")) orelse 0,
-        (try optionalI32(self, v, "nanosecond")) orelse 0,
-        overflow,
-    ) catch |e| temporalErr(self, e);
+    return ztemporal.PlainTime.from(.{
+        .fields = .{
+            .hour = try optionalI32(self, v, "hour"),
+            .minute = try optionalI32(self, v, "minute"),
+            .second = try optionalI32(self, v, "second"),
+            .millisecond = try optionalI32(self, v, "millisecond"),
+            .microsecond = try optionalI32(self, v, "microsecond"),
+            .nanosecond = try optionalI32(self, v, "nanosecond"),
+        },
+    }, .{
+        .overflow = overflow,
+    }) catch |e| temporalErr(self, e);
 }
 
 fn coercePlainDateTime(self: *Interpreter, v: JSValue, overflow: Overflow) anyerror!ztemporal.PlainDateTime {
     if (v == .temporal and v.temporal.value == .plain_date_time) return v.temporal.value.plain_date_time;
-    if (v == .string) return ztemporal.PlainDateTime.parseIso(v.string.value.data) catch |e| temporalErr(self, e);
+    if (v == .string) return ztemporal.PlainDateTime.from(.{ .string = v.string.value.data }, .{}) catch |e| temporalErr(self, e);
     if (v != .object) return self.throwError(.type_error, "Temporal.PlainDateTime.from requires a string or an object", .{});
     const year = (try optionalI32(self, v, "year")) orelse return self.throwError(.type_error, "year is required", .{});
     const month = (try optionalI32(self, v, "month")) orelse return self.throwError(.type_error, "month is required", .{});
     const day = (try optionalI32(self, v, "day")) orelse return self.throwError(.type_error, "day is required", .{});
-    return ztemporal.PlainDateTime.create(
-        year,
-        month,
-        day,
-        (try optionalI32(self, v, "hour")) orelse 0,
-        (try optionalI32(self, v, "minute")) orelse 0,
-        (try optionalI32(self, v, "second")) orelse 0,
-        (try optionalI32(self, v, "millisecond")) orelse 0,
-        (try optionalI32(self, v, "microsecond")) orelse 0,
-        (try optionalI32(self, v, "nanosecond")) orelse 0,
-        overflow,
-    ) catch |e| temporalErr(self, e);
+    return ztemporal.PlainDateTime.from(.{
+        .fields = .{
+            .year = year,
+            .month = month,
+            .day = day,
+            .hour = (try optionalI32(self, v, "hour")) orelse 0,
+            .minute = (try optionalI32(self, v, "minute")) orelse 0,
+            .second = (try optionalI32(self, v, "second")) orelse 0,
+            .millisecond = (try optionalI32(self, v, "millisecond")) orelse 0,
+            .microsecond = (try optionalI32(self, v, "microsecond")) orelse 0,
+            .nanosecond = (try optionalI32(self, v, "nanosecond")) orelse 0,
+        },
+    }, .{
+        .overflow = overflow,
+    }) catch |e| temporalErr(self, e);
 }
 
 /// `Instant` has no property-bag form at all (real spec: no date/time
@@ -363,28 +363,28 @@ fn coerceInstant(self: *Interpreter, allocator: Allocator, v: JSValue) anyerror!
     if (v == .object) {
         const s = try self.toDisplayStringJS(allocator, v);
         defer allocator.free(s);
-        return ztemporal.Instant.parseIso(s) catch |e| temporalErr(self, e);
+        return ztemporal.Instant.from(.{ .string = s }) catch |e| temporalErr(self, e);
     }
     if (v != .string) return self.throwError(.type_error, "Temporal.Instant.from requires a string", .{});
-    return ztemporal.Instant.parseIso(v.string.value.data) catch |e| temporalErr(self, e);
+    return ztemporal.Instant.from(.{ .string = v.string.value.data }) catch |e| temporalErr(self, e);
 }
 
 fn coercePlainYearMonth(self: *Interpreter, v: JSValue, overflow: Overflow) anyerror!ztemporal.PlainYearMonth {
     if (v == .temporal and v.temporal.value == .plain_year_month) return v.temporal.value.plain_year_month;
-    if (v == .string) return ztemporal.PlainYearMonth.parseIso(v.string.value.data) catch |e| temporalErr(self, e);
+    if (v == .string) return ztemporal.PlainYearMonth.from(.{ .string = v.string.value.data }, .{}) catch |e| temporalErr(self, e);
     if (v != .object) return self.throwError(.type_error, "Temporal.PlainYearMonth.from requires a string or an object", .{});
     const year = (try optionalI32(self, v, "year")) orelse return self.throwError(.type_error, "year is required", .{});
     const month = (try optionalI32(self, v, "month")) orelse return self.throwError(.type_error, "month is required", .{});
-    return ztemporal.PlainYearMonth.create(year, month, overflow) catch |e| temporalErr(self, e);
+    return ztemporal.PlainYearMonth.from(.{ .fields = .{ .year = year, .month = month } }, .{ .overflow = overflow }) catch |e| temporalErr(self, e);
 }
 
 fn coercePlainMonthDay(self: *Interpreter, v: JSValue, overflow: Overflow) anyerror!ztemporal.PlainMonthDay {
     if (v == .temporal and v.temporal.value == .plain_month_day) return v.temporal.value.plain_month_day;
-    if (v == .string) return ztemporal.PlainMonthDay.parseIso(v.string.value.data) catch |e| temporalErr(self, e);
+    if (v == .string) return ztemporal.PlainMonthDay.from(.{ .string = v.string.value.data }, .{}) catch |e| temporalErr(self, e);
     if (v != .object) return self.throwError(.type_error, "Temporal.PlainMonthDay.from requires a string or an object", .{});
     const month = (try optionalI32(self, v, "month")) orelse return self.throwError(.type_error, "month is required", .{});
     const day = (try optionalI32(self, v, "day")) orelse return self.throwError(.type_error, "day is required", .{});
-    return ztemporal.PlainMonthDay.create(month, day, overflow) catch |e| temporalErr(self, e);
+    return ztemporal.PlainMonthDay.from(.{ .fields = .{ .month = month, .day = day } }, .{ .overflow = overflow }) catch |e| temporalErr(self, e);
 }
 
 /// Installs a JS-string-valued getter accessor onto `proto`, backed by a
@@ -425,7 +425,7 @@ fn plainDateConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     const year = try requireI32(self, arg(args, 0), "year");
     const month = try requireI32(self, arg(args, 1), "month");
     const day = try requireI32(self, arg(args, 2), "day");
-    const pd = ztemporal.PlainDate.create(year, month, day, .reject) catch |e| return temporalErr(self, e);
+    const pd = ztemporal.PlainDate.init(year, month, day, null) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_date = pd });
 }
 
@@ -466,7 +466,7 @@ fn pdGetMonthCode(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     _ = allocator;
     _ = args;
     const self = interp(ctx);
-    var buf: [3]u8 = undefined;
+    var buf: [4]u8 = undefined;
     return self.gcNewString((try pdSelf(self, this_value)).monthCode(&buf));
 }
 fn pdGetCalendarId(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -509,7 +509,7 @@ fn pdGetWeekOfYear(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     _ = allocator;
     _ = args;
     const w = (try pdSelf(interp(ctx), this_value)).weekOfYear();
-    return JSValue.fromNumber(@floatFromInt(w.week));
+    return JSValue.fromNumber(@floatFromInt(w orelse return JSValue.UNDEFINED));
 }
 
 fn pdWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -519,12 +519,13 @@ fn pdWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     const fields = arg(args, 0);
     if (fields != .object) return self.throwError(.type_error, "with() requires an object", .{});
     const overflow = try readOverflow(self, arg(args, 1));
-    const result = pd.withFields(
-        try optionalI32(self, fields, "year"),
-        try optionalI32(self, fields, "month"),
-        try optionalI32(self, fields, "day"),
-        overflow,
-    ) catch |e| return temporalErr(self, e);
+    const result = pd.with(.{
+        .year = try optionalI32(self, fields, "year"),
+        .month = try optionalI32(self, fields, "month"),
+        .day = try optionalI32(self, fields, "day"),
+    }, .{
+        .overflow = overflow,
+    }) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_date = result });
 }
 
@@ -580,7 +581,7 @@ fn pdToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     _ = args;
     const self = interp(ctx);
     const pd = try pdSelf(self, this_value);
-    const s = pd.toIsoString(allocator, false) catch |e| return temporalErr(self, e);
+    const s = pd.toString(allocator, .{}) catch |e| return temporalErr(self, e);
     defer allocator.free(s);
     return self.gcNewString(s);
 }
@@ -632,7 +633,7 @@ fn plainTimeConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     const ms = if (args.len > 3) try requireI32(self, arg(args, 3), "millisecond") else 0;
     const us = if (args.len > 4) try requireI32(self, arg(args, 4), "microsecond") else 0;
     const ns = if (args.len > 5) try requireI32(self, arg(args, 5), "nanosecond") else 0;
-    const pt = ztemporal.PlainTime.create(hour, minute, second, ms, us, ns, .reject) catch |e| return temporalErr(self, e);
+    const pt = ztemporal.PlainTime.init(hour, minute, second, ms, us, ns) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_time = pt });
 }
 
@@ -692,15 +693,16 @@ fn ptWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     const fields = arg(args, 0);
     if (fields != .object) return self.throwError(.type_error, "with() requires an object", .{});
     const overflow = try readOverflow(self, arg(args, 1));
-    const result = pt.withFields(
-        try optionalI32(self, fields, "hour"),
-        try optionalI32(self, fields, "minute"),
-        try optionalI32(self, fields, "second"),
-        try optionalI32(self, fields, "millisecond"),
-        try optionalI32(self, fields, "microsecond"),
-        try optionalI32(self, fields, "nanosecond"),
-        overflow,
-    ) catch |e| return temporalErr(self, e);
+    const result = pt.with(.{
+        .hour = try optionalI32(self, fields, "hour"),
+        .minute = try optionalI32(self, fields, "minute"),
+        .second = try optionalI32(self, fields, "second"),
+        .millisecond = try optionalI32(self, fields, "millisecond"),
+        .microsecond = try optionalI32(self, fields, "microsecond"),
+        .nanosecond = try optionalI32(self, fields, "nanosecond"),
+    }, .{
+        .overflow = overflow,
+    }) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_time = result });
 }
 
@@ -761,7 +763,7 @@ fn ptToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     _ = args;
     const self = interp(ctx);
     const pt = try ptSelf(self, this_value);
-    const s = pt.toIsoString(allocator) catch |e| return temporalErr(self, e);
+    const s = pt.toString(allocator, .{}) catch |e| return temporalErr(self, e);
     defer allocator.free(s);
     return self.gcNewString(s);
 }
@@ -811,7 +813,7 @@ fn plainDateTimeConstructor(ctx: *anyopaque, allocator: Allocator, this_value: J
     const ms = if (args.len > 6) try requireI32(self, arg(args, 6), "millisecond") else 0;
     const us = if (args.len > 7) try requireI32(self, arg(args, 7), "microsecond") else 0;
     const ns = if (args.len > 8) try requireI32(self, arg(args, 8), "nanosecond") else 0;
-    const pdt = ztemporal.PlainDateTime.create(year, month, day, hour, minute, second, ms, us, ns, .reject) catch |e| return temporalErr(self, e);
+    const pdt = ztemporal.PlainDateTime.init(year, month, day, hour, minute, second, ms, us, ns, null) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_date_time = pdt });
 }
 
@@ -882,7 +884,7 @@ fn pdtGetMonthCode(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     _ = allocator;
     _ = args;
     const self = interp(ctx);
-    var buf: [3]u8 = undefined;
+    var buf: [4]u8 = undefined;
     return self.gcNewString((try pdtSelf(self, this_value)).date.monthCode(&buf));
 }
 fn pdtGetDayOfWeek(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -928,18 +930,19 @@ fn pdtWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const fields = arg(args, 0);
     if (fields != .object) return self.throwError(.type_error, "with() requires an object", .{});
     const overflow = try readOverflow(self, arg(args, 1));
-    const result = pdt.withFields(
-        try optionalI32(self, fields, "year"),
-        try optionalI32(self, fields, "month"),
-        try optionalI32(self, fields, "day"),
-        try optionalI32(self, fields, "hour"),
-        try optionalI32(self, fields, "minute"),
-        try optionalI32(self, fields, "second"),
-        try optionalI32(self, fields, "millisecond"),
-        try optionalI32(self, fields, "microsecond"),
-        try optionalI32(self, fields, "nanosecond"),
-        overflow,
-    ) catch |e| return temporalErr(self, e);
+    const result = pdt.with(.{
+        .year = try optionalI32(self, fields, "year"),
+        .month = try optionalI32(self, fields, "month"),
+        .day = try optionalI32(self, fields, "day"),
+        .hour = try optionalI32(self, fields, "hour"),
+        .minute = try optionalI32(self, fields, "minute"),
+        .second = try optionalI32(self, fields, "second"),
+        .millisecond = try optionalI32(self, fields, "millisecond"),
+        .microsecond = try optionalI32(self, fields, "microsecond"),
+        .nanosecond = try optionalI32(self, fields, "nanosecond"),
+    }, .{
+        .overflow = overflow,
+    }) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_date_time = result });
 }
 
@@ -1004,7 +1007,7 @@ fn pdtToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     _ = args;
     const self = interp(ctx);
     const pdt = try pdtSelf(self, this_value);
-    const s = pdt.toIsoString(allocator, false) catch |e| return temporalErr(self, e);
+    const s = pdt.toString(allocator, .{}) catch |e| return temporalErr(self, e);
     defer allocator.free(s);
     return self.gcNewString(s);
 }
@@ -1186,7 +1189,7 @@ fn instToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     _ = args;
     const self = interp(ctx);
     const inst = try instSelf(self, this_value);
-    const s = inst.toIsoString(allocator) catch |e| return temporalErr(self, e);
+    const s = inst.toString(allocator, .{}) catch |e| return temporalErr(self, e);
     defer allocator.free(s);
     return self.gcNewString(s);
 }
@@ -1238,9 +1241,9 @@ fn durationConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
-    var vals: [10]i64 = .{0} ** 10;
-    for (0..@min(args.len, 10)) |i| vals[i] = try requireI64(self, args[i], "duration field");
-    const d = ztemporal.Duration.create(vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7], vals[8], vals[9]) catch |e| return temporalErr(self, e);
+    var vals: [10]f64 = @splat(0);
+    for (0..@min(args.len, 10)) |i| vals[i] = try requireDurationNumber(self, args[i], "duration field");
+    const d = ztemporal.Duration.init(vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7], vals[8], vals[9]) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .duration = d });
 }
 
@@ -1253,12 +1256,15 @@ fn durationFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 }
 
 fn durationCompare(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
     _ = this_value;
     const self = interp(ctx);
     const a = try coerceDuration(self, arg(args, 0));
     const b = try coerceDuration(self, arg(args, 1));
-    const order = ztemporal.Duration.compare(a, b) catch |e| return temporalErr(self, e);
+    const order = ztemporal.Duration.compare(a, b, .{
+        .relativeTo = try readRelativeTo(self, arg(args, 2)),
+        .allocator = allocator,
+        .io = ioHandle(),
+    }) catch |e| return temporalErr(self, e);
     return JSValue.fromNumber(orderToJs(order));
 }
 
@@ -1268,7 +1274,7 @@ fn durField(comptime field: []const u8) NativeFn {
             _ = allocator;
             _ = args;
             const d = try durSelf(interp(ctx), this_value);
-            return JSValue.fromNumber(@floatFromInt(@field(d, field)));
+            return JSValue.fromNumber(@field(d, field));
         }
     }.call;
 }
@@ -1305,17 +1311,17 @@ fn durWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const d = try durSelf(self, this_value);
     const fields = arg(args, 0);
     if (fields != .object) return self.throwError(.type_error, "with() requires an object", .{});
-    const result = d.withFields(.{
-        .years = try optionalI64(self, fields, "years"),
-        .months = try optionalI64(self, fields, "months"),
-        .weeks = try optionalI64(self, fields, "weeks"),
-        .days = try optionalI64(self, fields, "days"),
-        .hours = try optionalI64(self, fields, "hours"),
-        .minutes = try optionalI64(self, fields, "minutes"),
-        .seconds = try optionalI64(self, fields, "seconds"),
-        .milliseconds = try optionalI64(self, fields, "milliseconds"),
-        .microseconds = try optionalI64(self, fields, "microseconds"),
-        .nanoseconds = try optionalI64(self, fields, "nanoseconds"),
+    const result = d.with(.{
+        .years = try optionalDurationNumber(self, fields, "years"),
+        .months = try optionalDurationNumber(self, fields, "months"),
+        .weeks = try optionalDurationNumber(self, fields, "weeks"),
+        .days = try optionalDurationNumber(self, fields, "days"),
+        .hours = try optionalDurationNumber(self, fields, "hours"),
+        .minutes = try optionalDurationNumber(self, fields, "minutes"),
+        .seconds = try optionalDurationNumber(self, fields, "seconds"),
+        .milliseconds = try optionalDurationNumber(self, fields, "milliseconds"),
+        .microseconds = try optionalDurationNumber(self, fields, "microseconds"),
+        .nanoseconds = try optionalDurationNumber(self, fields, "nanoseconds"),
     }) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .duration = result });
 }
@@ -1338,14 +1344,18 @@ fn durSubtract(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     return self.gcNewTemporal(.{ .duration = result });
 }
 
-/// `relativeTo` (a `Temporal.PlainDate`) is required for calendar-unit
-/// operations (see `TemporalError.NeedsRelativeTo`) -- optional here,
-/// `null` when absent/undefined, matching `round`/`.total()`'s own
-/// `?PlainDate` parameter.
-fn readRelativeTo(self: *Interpreter, options: JSValue) anyerror!?ztemporal.PlainDate {
+/// Calendar-unit operations carry `relativeTo` in their options. Preserve
+/// PlainDate string/property-bag coercion and accept all three Temporal
+/// reference types supported by z-temporal v0.1.0.
+fn readRelativeTo(self: *Interpreter, options: JSValue) anyerror!?ztemporal.Duration.RelativeTo {
     if (options != .object) return null;
     const v = options.object.value.get("relativeTo") orelse return null;
     if (v == .undefined) return null;
+    if (v == .temporal) switch (v.temporal.value) {
+        .plain_date_time => |dt| return .{ .plainDateTime = dt },
+        .zoned_date_time => |dt| return .{ .zonedDateTime = dt },
+        else => {},
+    };
     // temporal-argument-coercion.md: `relativeTo` accepts a string or
     // property-bag too (real spec's ToRelativeTemporalObject), not
     // just an already-constructed instance -- found during that
@@ -1354,22 +1364,28 @@ fn readRelativeTo(self: *Interpreter, options: JSValue) anyerror!?ztemporal.Plai
     // from an options object, not directly from `args`). Confirmed
     // against Node: `Duration.round({smallestUnit:"week", relativeTo:
     // "2024-01-01"})` and the property-bag form both work.
-    return try coercePlainDate(self, v, .constrain);
+    return .{ .plainDate = try coercePlainDate(self, v, .constrain) };
 }
 
 fn durRound(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
     const self = interp(ctx);
     const d = try durSelf(self, this_value);
     const options = arg(args, 0);
     const opts = try readRoundOptions(self, options);
     const relative_to = try readRelativeTo(self, options);
-    const result = d.round(relative_to, opts) catch |e| return temporalErr(self, e);
+    const result = d.round(.{
+        .relativeTo = relative_to,
+        .largestUnit = opts.largestUnit,
+        .smallestUnit = opts.smallestUnit,
+        .roundingIncrement = opts.roundingIncrement,
+        .roundingMode = opts.roundingMode,
+        .allocator = allocator,
+        .io = ioHandle(),
+    }) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .duration = result });
 }
 
 fn durTotal(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
     const self = interp(ctx);
     const d = try durSelf(self, this_value);
     const options = arg(args, 0);
@@ -1384,7 +1400,7 @@ fn durTotal(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
     if (unit_str.len == 0) return self.throwError(.type_error, "total() requires a unit", .{});
     const unit = try unitFromString(self, unit_str, "unit");
     const relative_to = try readRelativeTo(self, options);
-    const result = d.total(relative_to, unit) catch |e| return temporalErr(self, e);
+    const result = d.total(.{ .relativeTo = relative_to, .unit = unit, .allocator = allocator, .io = ioHandle() }) catch |e| return temporalErr(self, e);
     return JSValue.fromNumber(result);
 }
 
@@ -1392,7 +1408,7 @@ fn durToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     _ = args;
     const self = interp(ctx);
     const d = try durSelf(self, this_value);
-    const s = d.toIsoString(allocator) catch |e| return temporalErr(self, e);
+    const s = d.toString(allocator, .{}) catch |e| return temporalErr(self, e);
     defer allocator.free(s);
     return self.gcNewString(s);
 }
@@ -1441,7 +1457,7 @@ fn plainYearMonthConstructor(ctx: *anyopaque, allocator: Allocator, this_value: 
     const self = interp(ctx);
     const year = try requireI32(self, arg(args, 0), "year");
     const month = try requireI32(self, arg(args, 1), "month");
-    const pym = ztemporal.PlainYearMonth.create(year, month, .reject) catch |e| return temporalErr(self, e);
+    const pym = ztemporal.PlainYearMonth.init(year, month, null, null) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_year_month = pym });
 }
 
@@ -1477,7 +1493,7 @@ fn pymGetMonthCode(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     _ = allocator;
     _ = args;
     const self = interp(ctx);
-    var buf: [3]u8 = undefined;
+    var buf: [4]u8 = undefined;
     return self.gcNewString((try pymSelf(self, this_value)).monthCode(&buf));
 }
 fn pymGetCalendarId(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1524,7 +1540,12 @@ fn pymWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const fields = arg(args, 0);
     if (fields != .object) return self.throwError(.type_error, "with() requires an object", .{});
     const overflow = try readOverflow(self, arg(args, 1));
-    const result = pym.withFields(try optionalI32(self, fields, "year"), try optionalI32(self, fields, "month"), overflow) catch |e| return temporalErr(self, e);
+    const result = pym.with(.{
+        .year = try optionalI32(self, fields, "year"),
+        .month = try optionalI32(self, fields, "month"),
+    }, .{
+        .overflow = overflow,
+    }) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_year_month = result });
 }
 
@@ -1580,7 +1601,7 @@ fn pymToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     _ = args;
     const self = interp(ctx);
     const pym = try pymSelf(self, this_value);
-    const s = pym.toIsoString(allocator, false) catch |e| return temporalErr(self, e);
+    const s = pym.toString(allocator, .{}) catch |e| return temporalErr(self, e);
     defer allocator.free(s);
     return self.gcNewString(s);
 }
@@ -1629,7 +1650,7 @@ fn plainMonthDayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: J
     const self = interp(ctx);
     const month = try requireI32(self, arg(args, 0), "month");
     const day = try requireI32(self, arg(args, 1), "day");
-    const pmd = ztemporal.PlainMonthDay.create(month, day, .reject) catch |e| return temporalErr(self, e);
+    const pmd = ztemporal.PlainMonthDay.init(month, day, null, null) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_month_day = pmd });
 }
 
@@ -1651,7 +1672,7 @@ fn pmdGetMonthCode(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     _ = allocator;
     _ = args;
     const self = interp(ctx);
-    var buf: [3]u8 = undefined;
+    var buf: [4]u8 = undefined;
     return self.gcNewString((try pmdSelf(self, this_value)).monthCode(&buf));
 }
 fn pmdGetCalendarId(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1678,7 +1699,12 @@ fn pmdWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const fields = arg(args, 0);
     if (fields != .object) return self.throwError(.type_error, "with() requires an object", .{});
     const overflow = try readOverflow(self, arg(args, 1));
-    const result = pmd.withFields(try optionalI32(self, fields, "month"), try optionalI32(self, fields, "day"), overflow) catch |e| return temporalErr(self, e);
+    const result = pmd.with(.{
+        .month = try optionalI32(self, fields, "month"),
+        .day = try optionalI32(self, fields, "day"),
+    }, .{
+        .overflow = overflow,
+    }) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_month_day = result });
 }
 
@@ -1694,7 +1720,7 @@ fn pmdToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     _ = args;
     const self = interp(ctx);
     const pmd = try pmdSelf(self, this_value);
-    const s = pmd.toIsoString(allocator, false) catch |e| return temporalErr(self, e);
+    const s = pmd.toString(allocator, .{}) catch |e| return temporalErr(self, e);
     defer allocator.free(s);
     return self.gcNewString(s);
 }
@@ -1752,7 +1778,7 @@ fn zonedDateTimeConstructor(ctx: *anyopaque, allocator: Allocator, this_value: J
     const tz_arg = arg(args, 1);
     if (tz_arg != .string) return self.throwError(.type_error, "timeZone must be a string", .{});
     try requireIso8601Calendar(self, arg(args, 2));
-    const zdt = ztemporal.ZonedDateTime.create(allocator, ioHandle(), ns, tz_arg.string.value.data) catch |e| return temporalErr(self, e);
+    const zdt = ztemporal.ZonedDateTime.init(allocator, ioHandle(), ns, tz_arg.string.value.data, null) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .zoned_date_time = zdt });
 }
 
@@ -1765,29 +1791,37 @@ fn zonedDateTimeConstructor(ctx: *anyopaque, allocator: Allocator, this_value: J
 /// omitted).
 fn coerceZonedDateTime(self: *Interpreter, allocator: Allocator, v: JSValue, overflow: Overflow, disambiguation: ztemporal.Disambiguation, offset_option: ztemporal.OffsetOption) anyerror!ztemporal.ZonedDateTime {
     if (v == .temporal and v.temporal.value == .zoned_date_time) return v.temporal.value.zoned_date_time;
-    if (v == .string) return ztemporal.ZonedDateTime.parseIso(allocator, ioHandle(), v.string.value.data, offset_option, disambiguation) catch |e| temporalErr(self, e);
+    if (v == .string) return ztemporal.ZonedDateTime.from(allocator, ioHandle(), .{
+        .string = v.string.value.data,
+    }, .{
+        .overflow = overflow,
+        .offset = offset_option,
+        .disambiguation = disambiguation,
+    }) catch |e| temporalErr(self, e);
     if (v != .object) return self.throwError(.type_error, "Temporal.ZonedDateTime.from requires a string or an object", .{});
     const tz_v = v.object.value.get("timeZone") orelse return self.throwError(.type_error, "timeZone is required", .{});
     if (tz_v != .string) return self.throwError(.type_error, "timeZone must be a string", .{});
     const year = (try optionalI32(self, v, "year")) orelse return self.throwError(.type_error, "year is required", .{});
     const month = (try optionalI32(self, v, "month")) orelse return self.throwError(.type_error, "month is required", .{});
     const day = (try optionalI32(self, v, "day")) orelse return self.throwError(.type_error, "day is required", .{});
-    return ztemporal.ZonedDateTime.fromFields(
-        allocator,
-        ioHandle(),
-        year,
-        month,
-        day,
-        (try optionalI32(self, v, "hour")) orelse 0,
-        (try optionalI32(self, v, "minute")) orelse 0,
-        (try optionalI32(self, v, "second")) orelse 0,
-        (try optionalI32(self, v, "millisecond")) orelse 0,
-        (try optionalI32(self, v, "microsecond")) orelse 0,
-        (try optionalI32(self, v, "nanosecond")) orelse 0,
-        tz_v.string.value.data,
-        overflow,
-        disambiguation,
-    ) catch |e| temporalErr(self, e);
+    return ztemporal.ZonedDateTime.from(allocator, ioHandle(), .{
+        .fields = .{
+            .year = year,
+            .month = month,
+            .day = day,
+            .hour = (try optionalI32(self, v, "hour")) orelse 0,
+            .minute = (try optionalI32(self, v, "minute")) orelse 0,
+            .second = (try optionalI32(self, v, "second")) orelse 0,
+            .millisecond = (try optionalI32(self, v, "millisecond")) orelse 0,
+            .microsecond = (try optionalI32(self, v, "microsecond")) orelse 0,
+            .nanosecond = (try optionalI32(self, v, "nanosecond")) orelse 0,
+            .timeZone = tz_v.string.value.data,
+        },
+    }, .{
+        .overflow = overflow,
+        .disambiguation = disambiguation,
+        .offset = offset_option,
+    }) catch |e| temporalErr(self, e);
 }
 
 fn zonedDateTimeFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1885,7 +1919,7 @@ fn zdtGetHoursInDay(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
 }
 /// Real spec's ISO-8601-string offset (e.g. `"-05:00"`), distinct from
 /// the numeric `offsetNanoseconds` -- z-temporal has no dedicated
-/// getter for this (only its internal `toIsoString` formats one), so
+/// getter for this (only its internal `toString` formats one), so
 /// this duplicates that formatting inline rather than adding a new
 /// z-temporal function for one call site.
 fn zdtGetOffset(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1909,14 +1943,14 @@ fn zdtGetOffset(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 /// are NOT wired here -- confirmed `PlainDate`'s own wiring doesn't
 /// have them either (pre-existing, shared gap; `era`/`eraYear` are
 /// `undefined` for iso8601 on real Node, `daysInWeek` is trivially 7,
-/// `yearOfWeek` is `weekOfYear().year` -- easy to add later alongside
+/// `yearOfWeek` has its own getter -- easy to add later alongside
 /// fixing PlainDate's own gap, out of scope here).
 fn zdtGetMonthCode(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
     const self = interp(ctx);
     const zdt = try zdtSelf(self, this_value);
     const pd = zdt.toPlainDate(allocator, ioHandle()) catch |e| return temporalErr(self, e);
-    var buf: [3]u8 = undefined;
+    var buf: [4]u8 = undefined;
     return self.gcNewString(pd.monthCode(&buf));
 }
 fn zdtGetDayOfYear(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1959,7 +1993,7 @@ fn zdtGetWeekOfYear(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     const self = interp(ctx);
     const zdt = try zdtSelf(self, this_value);
     const pd = zdt.toPlainDate(allocator, ioHandle()) catch |e| return temporalErr(self, e);
-    return JSValue.fromNumber(@floatFromInt(pd.weekOfYear().week));
+    return JSValue.fromNumber(@floatFromInt(pd.weekOfYear() orelse return JSValue.UNDEFINED));
 }
 
 // ----- Pure getters (no I/O: derived from epochNanoseconds/the fixed timeZoneId) -----
@@ -2042,22 +2076,14 @@ fn zdtGetTimeZoneTransition(ctx: *anyopaque, allocator: Allocator, this_value: J
 fn zdtToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
     const self = interp(ctx);
-    var zdt = try zdtSelf(self, this_value);
+    const zdt = try zdtSelf(self, this_value);
     // Real spec default (confirmed against Node): show the offset and
     // the time zone name, but not a `[u-ca=iso8601]` calendar
     // annotation (iso8601 is implicit). `toString`'s options object
     // (`offset`/`timeZoneName`/`calendarName`) isn't read here --
     // same "don't chase every formatting option" precedent this
     // engine's other Temporal `toString`s already have.
-    // `toIsoString`'s inferred error set also includes `error.NoSpaceLeft`
-    // from its internal fixed-size offset buffer -- unreachable in
-    // practice (the buffer is sized exactly for "+HH:MM"), but Zig's
-    // inferred set still requires handling it to narrow the rest back
-    // down to `TemporalError` for `temporalErr`.
-    const s = zdt.toIsoString(allocator, ioHandle(), true, true, false) catch |e| switch (e) {
-        error.NoSpaceLeft => unreachable,
-        else => |te| return temporalErr(self, te),
-    };
+    const s = zdt.toString(allocator, ioHandle(), .{}) catch |e| return temporalErr(self, e);
     defer allocator.free(s);
     return self.gcNewString(s);
 }
@@ -2124,7 +2150,7 @@ fn nowInstant(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     _ = this_value;
     _ = args;
     const self = interp(ctx);
-    return self.gcNewTemporal(.{ .instant = ztemporal.Now.instant() });
+    return self.gcNewTemporal(.{ .instant = ztemporal.Now.instant(ioHandle()) });
 }
 
 /// A `timeZoneLike` argument, real spec: when given, must be a string

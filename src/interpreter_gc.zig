@@ -49,7 +49,6 @@ const RegexState = interpreter_mod.RegexState;
 const ClosureCtx = interpreter_mod.ClosureCtx;
 const FiberState = interpreter_mod.FiberState;
 const ClassCtx = interpreter_mod.ClassCtx;
-const classCtxFromOpaque = interpreter_mod.classCtxFromOpaque;
 const builtins = @import("builtins.zig");
 const fiber_mod = @import("fiber.zig");
 
@@ -172,7 +171,7 @@ pub fn heapBoxAddress(v: JSValue) ?usize {
 
 /// The concrete mark-phase visitor (satisfies the `visitor: anytype`
 /// contract every `traceChildren` expects: `.value(JSValue)` and
-/// `.environment(*Environment)`). `reached` records every address
+/// `.environment(*Environment)`, plus `.context(*anyopaque)` for callable nodes). `reached` records every address
 /// visited so a cycle terminates the walk (revisiting an already-marked
 /// node is a no-op) instead of looping forever, and so sweep() can tell
 /// "reachable" apart from "in the registry but never reached" (garbage).
@@ -192,21 +191,49 @@ const Marker = struct {
         const gop = self.reached.getOrPut(self.interp.gc_allocator, addr) catch return;
         if (gop.found_existing) return;
         e.traceChildren(self);
-        // Environment.traceChildren deliberately skips private_ctx (opaque
-        // there, always really a *ClassCtx) -- resolve it here instead,
-        // where the class machinery is visible.
-        if (e.private_ctx) |pc| classCtxFromOpaque(pc).traceChildren(self);
+        // Environment.traceChildren skips opaque private_ctx. Mark the
+        // registered class context itself before traversing its children.
+        if (e.private_ctx) |pc| self.context(pc);
     }
 
-    /// Marks a FiberState as reachable directly -- used for roots that
-    /// aren't discovered through the normal JSValue/Environment graph
-    /// (see `markRoots`'s conservative "any unfinished fiber is a root"
-    /// pass and `current_fiber`).
-    fn markFiberState(self: *Marker, fs: *FiberState) void {
-        const addr = @intFromPtr(fs);
+    /// Marks the context itself, not just the values it references.
+    pub fn context(self: *Marker, ptr: *anyopaque) void {
+        const addr = @intFromPtr(ptr);
+        const node = self.interp.gc_registry.get(addr) orelse return;
         const gop = self.reached.getOrPut(self.interp.gc_allocator, addr) catch return;
         if (gop.found_existing) return;
-        fs.traceChildren(self);
+        switch (node) {
+            .closure_ctx => |cc| {
+                cc.traceChildren(self);
+                if (cc.private_ctx) |pc| self.context(pc);
+            },
+            .fiber_state => |fs| {
+                fs.traceChildren(self);
+                if (fs.private_ctx) |pc| self.context(pc);
+            },
+            .class_ctx => |cx| cx.traceChildren(self),
+            .promise_cap_ctx => |cap| self.value(cap.promise),
+            .bound_ctx => |bc| {
+                self.value(bc.target);
+                self.value(bc.bound_this);
+                for (bc.pre_args) |a| self.value(a);
+            },
+            .finally_ctx => |c| self.value(c.handler),
+            .all_ctx => |c| {
+                for (c.results) |r| self.value(r);
+                self.value(c.derived);
+            },
+            // The element callback keeps its shared AllCtx reachable.
+            .all_elem_ctx => |c| self.context(c.all),
+            .race_ctx => |c| self.value(c.derived),
+            .revoke_ctx => |c| self.value(c.proxy),
+            .array_iter_ctx => |c| for (c.items) |item| self.value(item),
+            else => {},
+        }
+    }
+
+    fn markFiberState(self: *Marker, fs: *FiberState) void {
+        self.context(fs);
     }
 };
 
@@ -681,30 +708,7 @@ pub fn traceValueChildren(self: *Interpreter, v: JSValue, visitor: anytype) void
         .function => |box| {
             if (box.value.prototype) |p| visitor.value(p);
             if (box.value.statics) |s| visitor.value(s);
-            if (self.gc_registry.get(@intFromPtr(box.value.ctx))) |node| switch (node) {
-                .closure_ctx => |cc| cc.traceChildren(visitor),
-                .fiber_state => |fs| fs.traceChildren(visitor),
-                .class_ctx => |cx| cx.traceChildren(visitor),
-                .promise_cap_ctx => |cap| visitor.value(cap.promise),
-                .bound_ctx => |bc| {
-                    visitor.value(bc.target);
-                    visitor.value(bc.bound_this);
-                    for (bc.pre_args) |a| visitor.value(a);
-                },
-                .finally_ctx => |c| visitor.value(c.handler),
-                .all_ctx => |c| {
-                    for (c.results) |r| visitor.value(r);
-                    visitor.value(c.derived);
-                },
-                // .all_elem_ctx's `all: *AllCtx` is a borrowed
-                // traversal link (AllCtx is independently reachable
-                // via the shared on_r's ctx) -- nothing owned to trace.
-                .all_elem_ctx => {},
-                .race_ctx => |c| visitor.value(c.derived),
-                .revoke_ctx => |c| visitor.value(c.proxy),
-                .array_iter_ctx => |c| for (c.items) |item| visitor.value(item),
-                else => {},
-            };
+            visitor.context(box.value.ctx);
         },
         .promise => |box| {
             if (box.value.result) |r| visitor.value(r);
@@ -789,7 +793,7 @@ pub fn markRoots(self: *Interpreter, marker: *Marker) void {
     }
     if (self.symbol_async_iterator) |v| marker.value(v);
     if (self.symbol_to_primitive) |v| marker.value(v);
-    inline for (std.meta.fields(Protos)) |f| marker.value(@field(self.protos, f.name));
+    inline for (@typeInfo(Protos).@"struct".field_names) |name| marker.value(@field(self.protos, name));
 }
 
 /// GC prep (phase 4): tears down one node already determined to be
@@ -1107,7 +1111,7 @@ pub fn freeAllGcNodes(self: *Interpreter) void {
     if (self.wrap_for_valid_iterator_proto) |v| sweeper.value(v);
     if (self.symbol_async_iterator) |v| sweeper.value(v);
     if (self.symbol_to_primitive) |v| sweeper.value(v);
-    inline for (std.meta.fields(Protos)) |f| sweeper.value(@field(self.protos, f.name));
+    inline for (@typeInfo(Protos).@"struct".field_names) |name| sweeper.value(@field(self.protos, name));
 }
 
 // ===== Exception machinery =====

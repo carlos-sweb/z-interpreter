@@ -117,25 +117,26 @@ fn fnBind(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
 fn functionConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
     const self = interp(ctx);
+    const ast_allocator = self.arena_state.allocator();
     var src: std.ArrayList(u8) = .empty;
-    try src.appendSlice(allocator, "(function anonymous(");
+    try src.appendSlice(ast_allocator, "(function anonymous(");
     if (args.len > 1) {
         for (args[0 .. args.len - 1], 0..) |a, i| {
-            if (i != 0) try src.appendSlice(allocator, ", ");
+            if (i != 0) try src.appendSlice(ast_allocator, ", ");
             const s = try self.toDisplayStringJS(allocator, a);
             defer allocator.free(s);
-            try src.appendSlice(allocator, s);
+            try src.appendSlice(ast_allocator, s);
         }
     }
-    try src.appendSlice(allocator, "\n) {\n");
+    try src.appendSlice(ast_allocator, "\n) {\n");
     if (args.len > 0) {
         const body = try self.toDisplayStringJS(allocator, args[args.len - 1]);
         defer allocator.free(body);
-        try src.appendSlice(allocator, body);
+        try src.appendSlice(ast_allocator, body);
     }
-    try src.appendSlice(allocator, "\n})");
+    try src.appendSlice(ast_allocator, "\n})");
 
-    const parser = zfunctions.Parser.init(allocator, src.items) catch {
+    const parser = zfunctions.Parser.init(ast_allocator, src.items) catch {
         return self.throwError(.syntax_error, "Invalid function source", .{});
     };
     const node = parser.parseExpression() catch |err| {

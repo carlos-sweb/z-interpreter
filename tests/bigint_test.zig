@@ -76,6 +76,11 @@ test "division by zero and a negative exponent are RangeErrors, not TypeErrors" 
     try helpers.expectUncaught("2n ** -1n;", .range_error, "Exponent must be positive");
 }
 
+test "BigInt exponent size limits become catchable RangeErrors" {
+    try helpers.expectUncaught("2n ** 4294967296n;", .range_error, "Maximum BigInt size exceeded");
+    try helpers.expectStdout("console.log(1n ** 4294967296n, 0n ** 4294967296n);", "1n 0n\n");
+}
+
 test "mixing BigInt and Number in an arithmetic operator is a real TypeError, matching Node's exact message" {
     try helpers.expectUncaught("1n + 1;", .type_error, "Cannot mix BigInt and other types, use explicit conversions");
     try helpers.expectUncaught("1n - 1;", .type_error, "Cannot mix BigInt and other types, use explicit conversions");
