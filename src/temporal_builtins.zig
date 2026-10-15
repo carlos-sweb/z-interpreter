@@ -1702,10 +1702,10 @@ fn pmdEquals(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
 }
 
 fn pmdToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = args;
     const self = interp(ctx);
     const pmd = try pmdSelf(self, this_value);
-    const s = pmd.toString(allocator, .{}) catch |e| return temporalErr(self, e);
+    const calendar_name = try surfaceEnum(self, arg(args, 0), "calendarName", ztemporal.CalendarName, .auto);
+    const s = pmd.toString(allocator, .{ .calendarName = calendar_name }) catch |e| return temporalErr(self, e);
     defer allocator.free(s);
     return self.gcNewString(s);
 }

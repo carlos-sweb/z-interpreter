@@ -120,6 +120,17 @@ test "PlainMonthDay: construction and toPlainDate, no arithmetic methods exist" 
     , "M02 29 02-29\n2024-02-29\nundefined undefined\n");
 }
 
+test "PlainMonthDay.toString honors calendarName and preserves the reference year" {
+    try helpers.expectStdout(
+        \\const md = new Temporal.PlainDate(1970, 12, 24).toPlainMonthDay();
+        \\console.log(md.toString(), md.toString({ calendarName: 'always' }));
+        \\console.log(md.toString({ calendarName: 'critical' }), md.toString({ calendarName: 'never' }));
+        \\let reads = 0;
+        \\console.log(md.toString({ get calendarName() { reads++; return 'always'; } }), reads);
+        \\try { md.toString({ calendarName: 'invalid' }); } catch (e) { console.log(e.name); }
+    , "12-24 1972-12-24[u-ca=iso8601]\n1972-12-24[!u-ca=iso8601] 12-24\n1972-12-24[u-ca=iso8601] 1\nRangeError\n");
+}
+
 test "Instant: fromEpochMilliseconds, getters, arithmetic" {
     try helpers.expectStdout(
         \\const inst = Temporal.Instant.fromEpochMilliseconds(1718000000000);
