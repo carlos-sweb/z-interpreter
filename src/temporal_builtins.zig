@@ -115,14 +115,18 @@ fn optionalTemporalString(self: *Interpreter, obj: JSValue, key: []const u8) any
 }
 
 fn optionalBagMonthCode(self: *Interpreter, obj: JSValue) anyerror!?[]const u8 {
-    // Calendar-bearing property bags belong to the separate calendar conversion work.
-    // Only the default ISO identifier is within this conversion's scope.
-    if (obj == .object) {
-        if (obj.object.value.get("calendar")) |calendar| {
-            if (calendar != .string or !std.mem.eql(u8, calendar.string.value.data, "iso8601")) return null;
-        }
-    }
     return optionalTemporalString(self, obj, "monthCode");
+}
+
+fn optionalBagCalendar(self: *Interpreter, obj: JSValue) anyerror!?[]const u8 {
+    const calendar = try optionalTemporalString(self, obj, "calendar") orelse return null;
+    return try surfaceCalendar(self, calendar);
+}
+
+fn optionalConstructorCalendar(self: *Interpreter, value: JSValue) anyerror!?[]const u8 {
+    if (value == .undefined) return null;
+    if (value != .string) return self.throwError(.type_error, "calendar must be a string", .{});
+    return value.string.value.data;
 }
 
 /// Duration stores integral JavaScript Numbers, including values outside i64.
@@ -331,7 +335,7 @@ fn coercePlainDate(self: *Interpreter, v: JSValue, overflow: Overflow) anyerror!
     const month_code = try optionalBagMonthCode(self, v);
     if (month == null and month_code == null) return self.throwError(.type_error, "month or monthCode is required", .{});
     const day = (try optionalI32(self, v, "day")) orelse return self.throwError(.type_error, "day is required", .{});
-    return ztemporal.PlainDate.from(.{ .fields = .{ .year = year, .month = month, .monthCode = month_code, .day = day } }, .{ .overflow = overflow }) catch |e| temporalErr(self, e);
+    return ztemporal.PlainDate.from(.{ .fields = .{ .year = year, .month = month, .monthCode = month_code, .day = day, .calendar = try optionalBagCalendar(self, v) } }, .{ .overflow = overflow }) catch |e| temporalErr(self, e);
 }
 
 fn coercePlainTime(self: *Interpreter, v: JSValue, overflow: Overflow) anyerror!ztemporal.PlainTime {
@@ -377,6 +381,7 @@ fn coercePlainDateTime(self: *Interpreter, v: JSValue, overflow: Overflow) anyer
             .month = month,
             .monthCode = month_code,
             .day = day,
+            .calendar = try optionalBagCalendar(self, v),
             .hour = (try optionalI32(self, v, "hour")) orelse 0,
             .minute = (try optionalI32(self, v, "minute")) orelse 0,
             .second = (try optionalI32(self, v, "second")) orelse 0,
@@ -424,7 +429,7 @@ fn coercePlainYearMonth(self: *Interpreter, v: JSValue, overflow: Overflow) anye
     const month = try optionalI32(self, v, "month");
     const month_code = try optionalBagMonthCode(self, v);
     if (month == null and month_code == null) return self.throwError(.type_error, "month or monthCode is required", .{});
-    return ztemporal.PlainYearMonth.from(.{ .fields = .{ .year = year, .month = month, .monthCode = month_code } }, .{ .overflow = overflow }) catch |e| temporalErr(self, e);
+    return ztemporal.PlainYearMonth.from(.{ .fields = .{ .year = year, .month = month, .monthCode = month_code, .calendar = try optionalBagCalendar(self, v) } }, .{ .overflow = overflow }) catch |e| temporalErr(self, e);
 }
 
 fn coercePlainMonthDay(self: *Interpreter, v: JSValue, overflow: Overflow) anyerror!ztemporal.PlainMonthDay {
@@ -441,7 +446,7 @@ fn coercePlainMonthDay(self: *Interpreter, v: JSValue, overflow: Overflow) anyer
     const month_code = try optionalBagMonthCode(self, v);
     if (month == null and month_code == null) return self.throwError(.type_error, "month or monthCode is required", .{});
     const day = (try optionalI32(self, v, "day")) orelse return self.throwError(.type_error, "day is required", .{});
-    return ztemporal.PlainMonthDay.from(.{ .fields = .{ .month = month, .monthCode = month_code, .day = day, .year = try optionalI32(self, v, "year") } }, .{ .overflow = overflow }) catch |e| temporalErr(self, e);
+    return ztemporal.PlainMonthDay.from(.{ .fields = .{ .month = month, .monthCode = month_code, .day = day, .year = try optionalI32(self, v, "year"), .calendar = try optionalBagCalendar(self, v) } }, .{ .overflow = overflow }) catch |e| temporalErr(self, e);
 }
 
 /// Installs a JS-string-valued getter accessor onto `proto`, backed by a
@@ -483,7 +488,7 @@ fn plainDateConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     const year = try requireI32(self, arg(args, 0), "year");
     const month = try requireI32(self, arg(args, 1), "month");
     const day = try requireI32(self, arg(args, 2), "day");
-    const pd = ztemporal.PlainDate.init(year, month, day, null) catch |e| return temporalErr(self, e);
+    const pd = ztemporal.PlainDate.init(year, month, day, try optionalConstructorCalendar(self, arg(args, 3))) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_date = pd });
 }
 
@@ -872,7 +877,7 @@ fn plainDateTimeConstructor(ctx: *anyopaque, allocator: Allocator, this_value: J
     const ms = if (args.len > 6) try requireI32(self, arg(args, 6), "millisecond") else 0;
     const us = if (args.len > 7) try requireI32(self, arg(args, 7), "microsecond") else 0;
     const ns = if (args.len > 8) try requireI32(self, arg(args, 8), "nanosecond") else 0;
-    const pdt = ztemporal.PlainDateTime.init(year, month, day, hour, minute, second, ms, us, ns, null) catch |e| return temporalErr(self, e);
+    const pdt = ztemporal.PlainDateTime.init(year, month, day, hour, minute, second, ms, us, ns, try optionalConstructorCalendar(self, arg(args, 9))) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_date_time = pdt });
 }
 
@@ -1501,7 +1506,7 @@ fn plainYearMonthConstructor(ctx: *anyopaque, allocator: Allocator, this_value: 
     const year = try requireI32(self, arg(args, 0), "year");
     const month = try requireI32(self, arg(args, 1), "month");
     const reference_day: ?i32 = if (arg(args, 3) == .undefined) null else try requireI32(self, arg(args, 3), "referenceISODay");
-    const pym = ztemporal.PlainYearMonth.init(year, month, null, reference_day) catch |e| return temporalErr(self, e);
+    const pym = ztemporal.PlainYearMonth.init(year, month, try optionalConstructorCalendar(self, arg(args, 2)), reference_day) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_year_month = pym });
 }
 
@@ -1798,25 +1803,6 @@ fn zdtSelf(self: *Interpreter, this_value: JSValue) anyerror!ztemporal.ZonedDate
     return requireTemporal(self, this_value, .zoned_date_time, "Temporal.ZonedDateTime");
 }
 
-/// `new Temporal.ZonedDateTime(epochNanoseconds, timeZone, calendar?)`.
-/// The `calendar` argument is accepted but not read/validated -- same
-/// precedent every other wired Temporal type here already has (none
-/// reads its own trailing `calendar` constructor argument; the library
-/// only supports iso8601, so there is nothing else to select).
-/// The `calendar` argument, real spec: `undefined`/omitted defaults to
-/// `"iso8601"`; anything else must be a string equal to a recognized
-/// calendar ID -- narrowed here to exactly `"iso8601"`, the only one
-/// this library supports (its own README: "non-iso8601 calendar
-/// annotations are rejected"). A non-string throws TypeError the same
-/// observable way real ToTemporalCalendarIdentifier would (a Symbol
-/// can't even be ToString'd; a number/bigint/object stringifies to
-/// something that isn't a valid calendar ID either way).
-fn requireIso8601Calendar(self: *Interpreter, v: JSValue) anyerror!void {
-    if (v == .undefined) return;
-    if (v == .string and std.mem.eql(u8, v.string.value.data, "iso8601")) return;
-    return self.throwError(.type_error, "Invalid calendar", .{});
-}
-
 fn zonedDateTimeConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
     const self = interp(ctx);
@@ -1824,8 +1810,8 @@ fn zonedDateTimeConstructor(ctx: *anyopaque, allocator: Allocator, this_value: J
     const ns = try coerceEpochNanoseconds(self, arg(args, 0), "epochNanoseconds");
     const tz_arg = arg(args, 1);
     if (tz_arg != .string) return self.throwError(.type_error, "timeZone must be a string", .{});
-    try requireIso8601Calendar(self, arg(args, 2));
-    const zdt = ztemporal.ZonedDateTime.init(allocator, ioHandle(), ns, tz_arg.string.value.data, null) catch |e| return temporalErr(self, e);
+    const calendar = try optionalConstructorCalendar(self, arg(args, 2));
+    const zdt = ztemporal.ZonedDateTime.init(allocator, ioHandle(), ns, tz_arg.string.value.data, calendar) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .zoned_date_time = zdt });
 }
 
@@ -1846,6 +1832,10 @@ fn coerceZonedDateTime(self: *Interpreter, allocator: Allocator, v: JSValue, ove
         .disambiguation = disambiguation,
     }) catch |e| temporalErr(self, e);
     if (v != .object) return self.throwError(.type_error, "Temporal.ZonedDateTime.from requires a string or an object", .{});
+    const calendar = try optionalBagCalendar(self, v);
+    // Validate the calendar before requiring the remaining ZonedDateTime fields.
+    // An invalid calendar must not be masked by a missing timeZone.
+    if (calendar) |id| _ = ztemporal.PlainDate.init(1970, 1, 1, id) catch |e| return temporalErr(self, e);
     const tz_v = v.object.value.get("timeZone") orelse return self.throwError(.type_error, "timeZone is required", .{});
     if (tz_v != .string) return self.throwError(.type_error, "timeZone must be a string", .{});
     const year = (try optionalI32(self, v, "year")) orelse return self.throwError(.type_error, "year is required", .{});
@@ -1859,6 +1849,7 @@ fn coerceZonedDateTime(self: *Interpreter, allocator: Allocator, v: JSValue, ove
             .month = month,
             .monthCode = month_code,
             .day = day,
+            .calendar = calendar,
             .hour = (try optionalI32(self, v, "hour")) orelse 0,
             .minute = (try optionalI32(self, v, "minute")) orelse 0,
             .second = (try optionalI32(self, v, "second")) orelse 0,
@@ -2754,6 +2745,7 @@ fn surfaceZoned(self: *Interpreter, allocator: Allocator, item: JSValue) anyerro
     defer freeSurfaceFields(self, fields);
     if (fields.calendar) |text| {
         const identifier = try surfaceCalendar(self, text);
+        _ = ztemporal.PlainDate.init(1970, 1, 1, identifier) catch |e| return temporalErr(self, e);
         const owned = try self.gc_allocator.dupe(u8, identifier);
         self.gc_allocator.free(text);
         fields.calendar = owned;
