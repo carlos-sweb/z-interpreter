@@ -2,6 +2,7 @@
 const std = @import("std");
 const testing = std.testing;
 const helpers = @import("helpers.zig");
+const ztemporal = @import("ztemporal");
 
 test "Temporal global exists with all 8 wired types" {
     try helpers.expectStdout(
@@ -129,6 +130,28 @@ test "PlainMonthDay.toString honors calendarName and preserves the reference yea
         \\console.log(md.toString({ get calendarName() { reads++; return 'always'; } }), reads);
         \\try { md.toString({ calendarName: 'invalid' }); } catch (e) { console.log(e.name); }
     , "12-24 1972-12-24[u-ca=iso8601]\n1972-12-24[!u-ca=iso8601] 12-24\n1972-12-24[u-ca=iso8601] 1\nRangeError\n");
+}
+
+test "PlainMonthDay constructor passes calendar and referenceISOYear" {
+    try helpers.expectStdout(
+        \\const md = new Temporal.PlainMonthDay(5, 2, 'iso8601', 2000);
+        \\console.log(md.calendarId, md.toString(), md.toString({ calendarName: 'always' }));
+        \\console.log(new Temporal.PlainMonthDay(5, 2, undefined, 2000).toString({ calendarName: 'always' }));
+        \\for (const calendar of [1, 'invalid']) {
+        \\  try { new Temporal.PlainMonthDay(5, 2, calendar); console.log('accepted'); }
+        \\  catch (e) { console.log(e.name); }
+        \\}
+    , "iso8601 05-02 2000-05-02[u-ca=iso8601]\n2000-05-02[u-ca=iso8601]\nTypeError\nRangeError\n");
+}
+
+test "PlainMonthDay non-ISO calendar formatting follows native ICU availability" {
+    const native_intl = if (ztemporal.PlainMonthDay.init(5, 2, "buddhist", 1972)) |_| true else |_| false;
+    try helpers.expectStdout(
+        \\try {
+        \\  const md = new Temporal.PlainMonthDay(5, 2, 'buddhist', 1972);
+        \\  console.log(md.calendarId, md.toString({ calendarName: 'never' }), md.toString({ calendarName: 'auto' }));
+        \\} catch (e) { console.log(e.name); }
+    , if (native_intl) "buddhist 1972-05-02 1972-05-02[u-ca=buddhist]\n" else "RangeError\n");
 }
 
 test "Instant: fromEpochMilliseconds, getters, arithmetic" {

@@ -1635,7 +1635,10 @@ fn plainMonthDayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: J
     const self = interp(ctx);
     const month = try requireI32(self, arg(args, 0), "month");
     const day = try requireI32(self, arg(args, 1), "day");
-    const pmd = ztemporal.PlainMonthDay.init(month, day, null, null) catch |e| return temporalErr(self, e);
+    const calendar_arg = arg(args, 2);
+    const calendar: ?[]const u8 = if (calendar_arg == .undefined) null else if (calendar_arg == .string) calendar_arg.string.value.data else return self.throwError(.type_error, "calendar must be a string", .{});
+    const reference_year: ?i32 = if (arg(args, 3) == .undefined) null else try requireI32(self, arg(args, 3), "referenceISOYear");
+    const pmd = ztemporal.PlainMonthDay.init(month, day, calendar, reference_year) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_month_day = pmd });
 }
 

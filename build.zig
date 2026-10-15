@@ -3,6 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const temporal_intl = b.option(bool, "temporal-intl", "Enable ICU calendars in z-temporal") orelse false;
 
     const zparser_dep = b.dependency("zparser", .{ .target = target, .optimize = optimize });
     const zparser_module = zparser_dep.module("zparser");
@@ -59,7 +60,7 @@ pub fn build(b: *std.Build) void {
     const zbuffer_dep = b.dependency("zbuffer", .{ .target = target, .optimize = optimize });
     const zbuffer_module = zbuffer_dep.module("zbuffer");
 
-    const ztemporal_dep = b.dependency("ztemporal", .{ .target = target, .optimize = optimize });
+    const ztemporal_dep = b.dependency("ztemporal", .{ .target = target, .optimize = optimize, .intl = temporal_intl });
     const ztemporal_module = ztemporal_dep.module("ztemporal");
     // JSValue payloads and builtins must share the same Temporal types.
     zvalue_module.addImport("ztemporal", ztemporal_module);

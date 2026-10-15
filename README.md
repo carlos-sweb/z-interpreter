@@ -10,6 +10,13 @@ A minimal **tree-walking interpreter** for the z-* ECMAScript engine — the fif
 Uses z-temporal v0.2.0, fixing four PlainTime calendar-annotation failures and
 three Instant rounding-increment failures in Test262. The build gives z-value
 and the interpreter the same Temporal module so their payload types agree.
+
+On `master`, z-temporal v0.2.1 also preserves the reference year when
+`PlainMonthDay.toString({ calendarName: "never" })` formats a non-ISO calendar.
+The `PlainMonthDay` constructor now passes its optional calendar and
+`referenceISOYear` arguments to z-temporal. Non-ISO calendars require
+`zig build test -Dtemporal-intl=true` (and installed ICU development libraries);
+the default build remains ISO-only. No z-interpreter release includes this change yet.
 Other Temporal binding limitations remain unchanged.
 
 ## Scope: enough to make closures, loops, and console output actually work
