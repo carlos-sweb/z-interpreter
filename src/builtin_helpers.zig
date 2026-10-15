@@ -189,10 +189,10 @@ pub fn toBigIntValue(self: *Interpreter, allocator: Allocator, a_in: JSValue) an
         .bigint => a.retain(),
         .boolean => |b| self.gcNewBigIntValue(try zbigint.ZBigInt.fromInt(self.gc_allocator, if (b) 1 else 0)),
         .string => |box| {
-            const trimmed = std.mem.trim(u8, box.value.data, " \t\n\r");
-            const text = if (trimmed.len == 0) "0" else trimmed;
-            const v = zbigint.ZBigInt.fromDigitText(self.gc_allocator, text) catch
-                return self.throwError(.syntax_error, "Cannot convert {s} to a BigInt", .{box.value.data});
+            const v = zbigint.ZBigInt.fromEcmaString(self.gc_allocator, box.value.data) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return self.throwError(.syntax_error, "Cannot convert {s} to a BigInt", .{box.value.data}),
+            };
             return self.gcNewBigIntValue(v);
         },
         .undefined => self.throwError(.type_error, "Cannot convert undefined to a BigInt", .{}),

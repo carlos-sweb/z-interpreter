@@ -54,6 +54,7 @@ pub fn build(b: *std.Build) void {
 
     const zbigint_dep = b.dependency("zbigint", .{ .target = target, .optimize = optimize });
     const zbigint_module = zbigint_dep.module("zbigint");
+    zvalue_module.addImport("zbigint", zbigint_module);
 
     const zbuffer_dep = b.dependency("zbuffer", .{ .target = target, .optimize = optimize });
     const zbuffer_module = zbuffer_dep.module("zbuffer");

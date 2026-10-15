@@ -56,6 +56,17 @@ test "BigInt.asIntN/asUintN wrap to a fixed-width two's-complement representatio
     try helpers.expectUncaught("BigInt.asUintN(8, 5);", .type_error, "Cannot convert 5 to a BigInt");
 }
 
+test "ToBigInt strings use the ECMAScript grammar" {
+    try helpers.expectStdout(
+        \\console.log(BigInt.asUintN(8, ' 0xff '));
+        \\console.log(BigInt.asUintN(8, ''));
+        \\for (const text of ['1_0', '-0x10']) {
+        \\  try { BigInt.asUintN(8, text); console.log('accepted'); }
+        \\  catch (e) { console.log(e.name); }
+        \\}
+    , "255n\n0n\nSyntaxError\nSyntaxError\n");
+}
+
 // Phase 4: arithmetic/bitwise mixing rules. Every value cross-checked
 // against real Node (`node --input-type=module`), including the exact
 // error messages/kinds.

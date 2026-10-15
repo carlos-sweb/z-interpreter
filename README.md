@@ -59,11 +59,14 @@ basic text fallback because this engine does not implement ECMA-402/Intl.
 `Date.prototype.toTemporalInstant` converts valid Date timestamps exactly, and
 `Object.getOwnPropertyDescriptors` supports reflection used by Temporal helpers.
 The bindings use the existing lazy I/O handle for named IANA zones.
+Epoch nanoseconds cross the JS/native boundary as exact `BigInt`/`i128` values;
+nanosecond constructors reject `Number` inputs, while `epochNanoseconds` accessors return
+JavaScript `BigInt`. The conversion uses z-bigint v0.1.1.
 
-This is not full Temporal conformance. Remaining gaps include BigInt epoch
-nanosecond representation/precision, some existing property-bag coercions and
-instance property operations, formatting options, and native algorithm edge
-cases. See [the surface verification report](docs/analysis/temporal-surface-2026-10-14/README.md)
+This is not full Temporal conformance. Remaining gaps include some property-bag
+coercions and instance property operations, formatting options, and native
+algorithm edge cases. See the [Temporal nanosecond verification](docs/analysis/temporal-nanoseconds-2026-10-15/README.md)
+and the earlier [surface verification report](docs/analysis/temporal-surface-2026-10-14/README.md)
 for the measured scope and remaining failures.
 
 ## Iteration

@@ -15,6 +15,34 @@ test "Temporal global exists with all 8 wired types" {
     , "object function function function function function function function function object function\n");
 }
 
+test "Temporal epoch nanoseconds preserve BigInt type and exact values" {
+    try helpers.expectStdout(
+        \\const n = 957270896987654321n;
+        \\const instant = new Temporal.Instant(n);
+        \\const zoned = new Temporal.ZonedDateTime(n, 'UTC');
+        \\console.log(typeof instant.epochNanoseconds, instant.epochNanoseconds === n);
+        \\console.log(typeof zoned.epochNanoseconds, zoned.epochNanoseconds === n);
+        \\console.log(Temporal.Instant.fromEpochNanoseconds(-n).epochNanoseconds === -n);
+        \\console.log(Temporal.Instant.fromEpochNanoseconds(0n).epochNanoseconds === 0n);
+        \\console.log(Temporal.Instant.fromEpochNanoseconds(8640000000000000000000n).epochNanoseconds === 8640000000000000000000n);
+        \\console.log(Temporal.Instant.fromEpochNanoseconds(-8640000000000000000000n).epochNanoseconds === -8640000000000000000000n);
+    , "bigint true\nbigint true\ntrue\ntrue\ntrue\ntrue\n");
+}
+
+test "Temporal epoch nanoseconds use ToBigInt and reject out-of-range values" {
+    try helpers.expectStdout(
+        \\console.log(new Temporal.Instant('123').epochNanoseconds === 123n);
+        \\console.log(new Temporal.Instant(true).epochNanoseconds === 1n);
+        \\console.log(new Temporal.Instant({ valueOf() { return -123n; } }).epochNanoseconds === -123n);
+        \\for (const input of [1, 1.5, 8640000000000000000001n, -8640000000000000000001n, 170141183460469231731687303715884105728n]) {
+        \\  try { new Temporal.Instant(input); console.log('accepted'); }
+        \\  catch (e) { console.log(e.name); }
+        \\}
+        \\try { new Temporal.ZonedDateTime(1, 'UTC'); console.log('accepted'); }
+        \\catch (e) { console.log(e.name); }
+    , "true\ntrue\ntrue\nTypeError\nTypeError\nRangeError\nRangeError\nRangeError\nTypeError\n");
+}
+
 test "PlainDate: construction, getters, leap year" {
     try helpers.expectStdout(
         \\const pd = new Temporal.PlainDate(2024, 6, 15);

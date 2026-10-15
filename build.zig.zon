@@ -78,8 +78,8 @@
             .hash = "zsymbol-0.1.0--_-46A5FAADblMb_Etysuux6m0d6eekqqGcosK9eoVoC",
         },
         .zbigint = .{
-            .url = "https://github.com/carlos-sweb/z-bigint/archive/refs/tags/v0.1.0.tar.gz",
-            .hash = "zbigint-0.1.0-PA8m8TgNAQDF0cJPy3JN67NMRsXgqJUCJlEatiV66rMQ",
+            .url = "https://github.com/carlos-sweb/z-bigint/archive/refs/tags/v0.1.1.tar.gz",
+            .hash = "zbigint-0.1.1-PA8m8fUUAQADoXc77HdlXnJX2eNf9grFx_VvAy4rL8j0",
         },
         .zbuffer = .{
             .url = "https://github.com/carlos-sweb/z-buffer/archive/refs/tags/v0.1.0.tar.gz",

@@ -1,0 +1,512 @@
+[
+  {
+    "path": "test/built-ins/Date/prototype/toTemporalInstant/this-value-valid-date.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Instant/prototype/toJSON/negative-epochnanoseconds.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Instant/prototype/toJSON/year-format.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/argument-zoneddatetime-negative-epochnanoseconds.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-string-calendar-annotation.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-string-date-with-utc-offset.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-string-time-separators.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-string-time-zone-annotation.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-string-unknown-annotation.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-string-with-time-designator.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-zoneddatetime-negative-epochnanoseconds.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/leap-second.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/plaintime-propertybag-no-time-units.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/basic.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/constant-offset.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/disambiguation.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/fixed-offset-near-date-time-limits.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/negative-year.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/options-object.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/two-digit-year.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/year-zero.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/argument-zoneddatetime-negative-epochnanoseconds.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/add-large-subseconds.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/argument-duration-max.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/argument-string-fractional-units-rounding-mode.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/argument-string-negative-fractional-units.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/blank-duration.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/negative-epochnanoseconds.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/options-object.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/overflow-undefined.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/negative-epochnanoseconds.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/negative-time.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/rounding-direction.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingincrement-non-integer.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingincrement-undefined.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-ceil.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-expand.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-floor.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-halfCeil.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-halfEven.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-halfExpand.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-halfFloor.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-halfTrunc.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-trunc.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-undefined.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/balance-negative-time-units.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/casts-argument.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/defaults-to-returning-hours.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/largestunit-undefined.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/largestunit.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/negative-epochnanoseconds.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/options-undefined.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/rounding-increments.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingincrement-non-integer.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingincrement-undefined.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-ceil.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-expand.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-floor.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-halfCeil.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-halfEven.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-halfExpand.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-halfFloor.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-halfTrunc.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-trunc.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/smallestunit-undefined.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/argument-duration-max.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/argument-string-fractional-units-rounding-mode.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/argument-string-negative-fractional-units.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/blank-duration.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/negative-epochnanoseconds.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/options-object.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/overflow-undefined.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/subtract-large-subseconds.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/balance-negative-time-units.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/largestunit-undefined.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/negative-epochnanoseconds.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/options-undefined.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingincrement-non-integer.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingincrement-undefined.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-ceil.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-expand.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-floor.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-halfCeil.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-halfEven.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-halfExpand.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-halfFloor.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-halfTrunc.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-trunc.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/smallestunit-undefined.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/copy-properties-not-undefined.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/offset-undefined.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/options-object.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/overflow-undefined.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-string-calendar-annotation.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-string-date-with-utc-offset.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-string-time-separators.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-string-time-zone-annotation.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-string-unknown-annotation.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-string-with-time-designator.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-zoneddatetime-negative-epochnanoseconds.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/leap-second.js",
+    "before": "FAIL",
+    "after": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/plaintime-propertybag-no-time-units.js",
+    "before": "FAIL",
+    "after": "PASS"
+  }
+]

@@ -22,6 +22,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const zvalue = @import("zvalue");
 const ztemporal = @import("ztemporal");
+const zbigint = @import("zbigint");
 const JSValue = zvalue.JSValue;
 const TemporalValue = zvalue.TemporalValue;
 const Interpreter = @import("interpreter.zig").Interpreter;
@@ -1055,26 +1056,10 @@ fn instSelf(self: *Interpreter, this_value: JSValue) anyerror!ztemporal.Instant 
     return requireTemporal(self, this_value, .instant, "Temporal.Instant");
 }
 
-/// `epochNanoseconds` is a BigInt in real Temporal (nanosecond precision
-/// exceeds Number.MAX_SAFE_INTEGER routinely). NARROWING: z-bigint has no
-/// i128 extraction yet (only `toFloat`), so a bigint argument here goes
-/// through a float round-trip -- exact for a plain JS number, lossy past
-/// 2^53 for a real bigint literal. A number argument is accepted directly
-/// (also real spec behavior for `fromEpochMilliseconds`, just not for
-/// nanoseconds -- kept permissive here rather than rejecting outright).
 fn coerceEpochNanoseconds(self: *Interpreter, v: JSValue, what: []const u8) anyerror!i128 {
-    const n = switch (v) {
-        .number => |num| num,
-        .bigint => |box| box.value.toFloat(),
-        else => return self.throwError(.type_error, "{s} must be a number or bigint", .{what}),
-    };
-    if (!std.math.isFinite(n)) return self.throwError(.range_error, "{s} must be finite", .{what});
-    // Bounds-checked BEFORE @intFromFloat (panics, not a catchable error,
-    // past i128's range) -- same discipline as requireI64 above.
-    const maxf: f64 = @floatFromInt(std.math.maxInt(i128));
-    const minf: f64 = @floatFromInt(std.math.minInt(i128));
-    if (n < minf or n > maxf) return self.throwError(.range_error, "{s} out of range", .{what});
-    return @intFromFloat(n);
+    const bigint_value = try @import("builtin_helpers.zig").toBigIntValue(self, self.gc_allocator, v);
+    defer bigint_value.deinit();
+    return bigint_value.bigint.value.toI128() catch return self.throwError(.range_error, "{s} out of range", .{what});
 }
 
 fn instantConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1125,13 +1110,11 @@ fn instGetEpochMilliseconds(ctx: *anyopaque, allocator: Allocator, this_value: J
     return JSValue.fromNumber(@floatFromInt((try instSelf(interp(ctx), this_value)).epochMilliseconds()));
 }
 
-/// NARROWING: real `.epochNanoseconds` is a BigInt getter; exposed here
-/// as a Number (precision-lossy past 2^53), same tradeoff as
-/// `coerceEpochNanoseconds` above, until z-bigint gets i128 support.
 fn instGetEpochNanoseconds(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     _ = args;
-    return JSValue.fromNumber(@floatFromInt((try instSelf(interp(ctx), this_value)).epochNanoseconds()));
+    const self = interp(ctx);
+    return self.gcNewBigIntValue(try zbigint.ZBigInt.fromI128(self.gc_allocator, (try instSelf(self, this_value)).epochNanoseconds()));
 }
 
 fn instAdd(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -2008,7 +1991,8 @@ fn zdtGetEpochMilliseconds(ctx: *anyopaque, allocator: Allocator, this_value: JS
 fn zdtGetEpochNanoseconds(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     _ = args;
-    return JSValue.fromNumber(@floatFromInt((try zdtSelf(interp(ctx), this_value)).toInstant().epochNanoseconds()));
+    const self = interp(ctx);
+    return self.gcNewBigIntValue(try zbigint.ZBigInt.fromI128(self.gc_allocator, (try zdtSelf(self, this_value)).toInstant().epochNanoseconds()));
 }
 fn zdtGetTimeZoneId(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;

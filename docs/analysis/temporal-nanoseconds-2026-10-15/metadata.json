@@ -1,0 +1,41 @@
+{
+  "date": "2026-10-15",
+  "interpreter_base": "c1bd76d3f90a4e0de15a5ad8c49e3ed58081b9e4",
+  "zbigint_release": "v0.1.1",
+  "zbigint_commit": "3b6c9ff",
+  "zbigint_package_hash": "zbigint-0.1.1-PA8m8fUUAQADoXc77HdlXnJX2eNf9grFx_VvAy4rL8j0",
+  "frozen_epoch_paths": 102,
+  "previous_surface_targets": 833,
+  "segment_paths": 4611,
+  "baseline_execution": {
+    "binary": "/tmp/temporal-surface-20261014-implementation/fast/bin/z-run",
+    "sha256": "4dd41592c5dc641f407da51b0e6d4ab862a3dcab7369c730ba334f19c24aeb5f",
+    "suite_commit": "9e61c12835c5e4a3bdba93850427e6742c4f64c4",
+    "runner_sha256": "e01cbe71a33946476a60c2def57e45f68e2b9b4098d1becd2772d028f9d6093a",
+    "workers": 8,
+    "timeout": 5,
+    "address_space_limit": 2147483648
+  },
+  "candidate_execution": {
+    "binary": "/tmp/temporal-bigint-20261015/release-fast/bin/z-run",
+    "sha256": "e4ab988a43ed1b4e0ceb687908d4609ab81d23de0344f64d3e7092320d93dc5f",
+    "suite_commit": "9e61c12835c5e4a3bdba93850427e6742c4f64c4",
+    "runner_sha256": "e01cbe71a33946476a60c2def57e45f68e2b9b4098d1becd2772d028f9d6093a",
+    "workers": 8,
+    "timeout": 5,
+    "address_space_limit": 2147483648
+  },
+  "segment_before": {
+    "PASS": 3377,
+    "FAIL": 1234
+  },
+  "segment_after": {
+    "PASS": 3597,
+    "FAIL": 1014
+  },
+  "transitions": {
+    "FAIL->FAIL": 1014,
+    "FAIL->PASS": 220,
+    "PASS->PASS": 3377
+  }
+}
