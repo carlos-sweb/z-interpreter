@@ -141,3 +141,20 @@ test "console.log renders a Temporal instance with its kind name and ISO string"
         \\console.log(new Temporal.PlainDate(2024, 6, 15));
     , "Temporal.PlainDate 2024-06-15\n");
 }
+
+test "z-temporal v0.2.0: PlainTime ignores unknown calendar annotations" {
+    try helpers.expectStdout(
+        \\const a = Temporal.PlainTime.from('12:34:56.987654321[!u-ca=unknown]');
+        \\const b = Temporal.PlainTime.from('1970-01-01T12:34:56.987654321[u-ca=hebrew]');
+        \\console.log(a.toString(), a.equals(b), a.until(b).blank, a.since(b).blank);
+    , "12:34:56.987654321 true true true\n");
+}
+
+test "z-temporal v0.2.0: Instant rounding increments use a full day" {
+    try helpers.expectStdout(
+        \\const a = Temporal.Instant.from('1976-11-18T14:23:30.123456789Z');
+        \\console.log(a.round({ smallestUnit: 'minute', roundingIncrement: 1440 }).toString());
+        \\console.log(a.round({ smallestUnit: 'second', roundingIncrement: 86400 }).toString());
+        \\console.log(a.round({ smallestUnit: 'millisecond', roundingIncrement: 86400000 }).toString());
+    , "1976-11-19T00:00:00Z\n1976-11-19T00:00:00Z\n1976-11-19T00:00:00Z\n");
+}

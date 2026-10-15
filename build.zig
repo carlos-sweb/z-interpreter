@@ -60,6 +60,8 @@ pub fn build(b: *std.Build) void {
 
     const ztemporal_dep = b.dependency("ztemporal", .{ .target = target, .optimize = optimize });
     const ztemporal_module = ztemporal_dep.module("ztemporal");
+    // JSValue payloads and builtins must share the same Temporal types.
+    zvalue_module.addImport("ztemporal", ztemporal_module);
 
     const zurlcode_dep = b.dependency("zurlcode", .{ .target = target, .optimize = optimize });
     const zurlcode_module = zurlcode_dep.module("zurlcode");

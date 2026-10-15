@@ -5,6 +5,13 @@
 
 A minimal **tree-walking interpreter** for the z-* ECMAScript engine — the fifth repo, and the first that actually *executes* code instead of only tokenizing/parsing it. Ties together [z-parser](https://github.com/carlos-sweb/z-parser) (§13 expressions), [z-statements](https://github.com/carlos-sweb/z-statements) (§14 statements), [z-functions](https://github.com/carlos-sweb/z-functions) (§15 functions/arrows), and [z-value](https://github.com/carlos-sweb/z-value) (`JSValue`) into something that produces observable behavior — including a real `console.log("Hello World")`. Part of the [z-*](https://github.com/carlos-sweb) micro-library family.
 
+## Release 0.2.1
+
+Uses z-temporal v0.2.0, fixing four PlainTime calendar-annotation failures and
+three Instant rounding-increment failures in Test262. The build gives z-value
+and the interpreter the same Temporal module so their payload types agree.
+Other Temporal binding limitations remain unchanged.
+
 ## Scope: enough to make closures, loops, and console output actually work
 
 Not spec completeness — validating the whole pipeline end-to-end for the first time. In scope: all literals, identifiers, template literals, array/object literals (including spread), every non-bitwise operator, member access (`.`/`[]`/`?.`), call expressions with correct `this`-binding for method calls, function declarations/expressions/arrows (with closures that genuinely capture and mutate variables across calls), default/rest parameters, `if`/`while`/`do-while`/C-style `for` with correct `break`/`continue`/`return` semantics across arbitrarily nested blocks, and a `console` global. See [Known gaps](#known-gaps-deferred-to-future-phases) for what's deliberately not wired up yet (each raises `error.NotImplemented`, not a crash or silent wrong answer).
