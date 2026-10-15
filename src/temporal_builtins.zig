@@ -637,10 +637,10 @@ fn pdEquals(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
 }
 
 fn pdToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = args;
     const self = interp(ctx);
     const pd = try pdSelf(self, this_value);
-    const s = pd.toString(allocator, .{}) catch |e| return temporalErr(self, e);
+    const calendar_name = try surfaceEnum(self, arg(args, 0), "calendarName", ztemporal.CalendarName, .auto);
+    const s = pd.toString(allocator, .{ .calendarName = calendar_name }) catch |e| return temporalErr(self, e);
     defer allocator.free(s);
     return self.gcNewString(s);
 }
@@ -819,10 +819,10 @@ fn ptEquals(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
 }
 
 fn ptToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = args;
     const self = interp(ctx);
     const pt = try ptSelf(self, this_value);
-    const s = pt.toString(allocator, .{}) catch |e| return temporalErr(self, e);
+    const options = try surfaceStringOptions(self, arg(args, 0), .plain_time);
+    const s = pt.toString(allocator, options) catch |e| return temporalErr(self, e);
     defer allocator.free(s);
     return self.gcNewString(s);
 }
@@ -1064,10 +1064,10 @@ fn pdtEquals(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
 }
 
 fn pdtToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = args;
     const self = interp(ctx);
     const pdt = try pdtSelf(self, this_value);
-    const s = pdt.toString(allocator, .{}) catch |e| return temporalErr(self, e);
+    const options = try surfaceStringOptions(self, arg(args, 0), .plain_date_time);
+    const s = pdt.toString(allocator, options) catch |e| return temporalErr(self, e);
     defer allocator.free(s);
     return self.gcNewString(s);
 }
@@ -1228,10 +1228,11 @@ fn instEquals(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 }
 
 fn instToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = args;
     const self = interp(ctx);
     const inst = try instSelf(self, this_value);
-    const s = inst.toString(allocator, .{}) catch |e| return temporalErr(self, e);
+    const options = try surfaceStringOptions(self, arg(args, 0), .instant);
+    defer if (options.timeZone) |zone| self.gc_allocator.free(zone);
+    const s = inst.toString(allocator, options) catch |e| return temporalErr(self, e);
     defer allocator.free(s);
     return self.gcNewString(s);
 }
@@ -1447,10 +1448,10 @@ fn durTotal(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
 }
 
 fn durToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = args;
     const self = interp(ctx);
     const d = try durSelf(self, this_value);
-    const s = d.toString(allocator, .{}) catch |e| return temporalErr(self, e);
+    const options = try surfaceStringOptions(self, arg(args, 0), .duration);
+    const s = d.toString(allocator, options) catch |e| return temporalErr(self, e);
     defer allocator.free(s);
     return self.gcNewString(s);
 }
@@ -2124,21 +2125,16 @@ fn zdtGetTimeZoneTransition(ctx: *anyopaque, allocator: Allocator, this_value: J
     return self.gcNewTemporal(.{ .zoned_date_time = found });
 }
 fn zdtToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = args;
     const self = interp(ctx);
     const zdt = try zdtSelf(self, this_value);
-    // Real spec default (confirmed against Node): show the offset and
-    // the time zone name, but not a `[u-ca=iso8601]` calendar
-    // annotation (iso8601 is implicit). `toString`'s options object
-    // (`offset`/`timeZoneName`/`calendarName`) isn't read here --
-    // same "don't chase every formatting option" precedent this
-    // engine's other Temporal `toString`s already have.
-    const s = zdt.toString(allocator, ioHandle(), .{}) catch |e| return temporalErr(self, e);
+    const options = try surfaceStringOptions(self, arg(args, 0), .zoned_date_time);
+    const s = zdt.toString(allocator, ioHandle(), options) catch |e| return temporalErr(self, e);
     defer allocator.free(s);
     return self.gcNewString(s);
 }
 fn zdtToJSON(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    return zdtToString(ctx, allocator, this_value, args);
+    _ = args;
+    return zdtToString(ctx, allocator, this_value, &.{});
 }
 fn zdtValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
@@ -2338,6 +2334,53 @@ fn surfaceEnum(self: *Interpreter, options: JSValue, key: []const u8, comptime T
         if (std.mem.eql(u8, text, name)) return @field(T, name);
     }
     return self.throwError(.range_error, "Invalid {s}: {s}", .{ key, text });
+}
+
+const StringOptionsKind = enum { plain_time, plain_date_time, duration, instant, zoned_date_time };
+
+fn surfaceStringOptions(self: *Interpreter, options: JSValue, comptime kind: StringOptionsKind) anyerror!ztemporal.StringOptions {
+    try surfaceOptions(self, options);
+    if (options == .undefined) return .{};
+    var out: ztemporal.StringOptions = .{};
+    if (comptime kind == .plain_date_time or kind == .zoned_date_time) {
+        out.calendarName = try surfaceEnum(self, options, "calendarName", ztemporal.CalendarName, .auto);
+    }
+    const digits = try self.getProperty(options, "fractionalSecondDigits");
+    defer digits.deinit();
+    if (digits != .undefined) {
+        if (digits == .number) {
+            const n = @floor(digits.number);
+            if (!std.math.isFinite(n) or n < 0 or n > 9) return self.throwError(.range_error, "Invalid fractionalSecondDigits", .{});
+            out.fractionalSecondDigits = @intFromFloat(n);
+        } else {
+            const digits_text = try self.toDisplayStringJS(self.gc_allocator, digits);
+            defer self.gc_allocator.free(digits_text);
+            if (!std.mem.eql(u8, digits_text, "auto")) return self.throwError(.range_error, "Invalid fractionalSecondDigits", .{});
+        }
+    }
+    if (comptime kind == .zoned_date_time) {
+        out.offset = try surfaceEnum(self, options, "offset", @TypeOf(out.offset), .auto);
+    }
+    out.roundingMode = try surfaceEnum(self, options, "roundingMode", RoundingMode, .trunc);
+    const smallest = try self.getProperty(options, "smallestUnit");
+    defer smallest.deinit();
+    if (smallest != .undefined) {
+        const name = try self.toDisplayStringJS(self.gc_allocator, smallest);
+        defer self.gc_allocator.free(name);
+        out.smallestUnit = try unitFromString(self, name, "smallestUnit");
+    }
+    if (comptime kind == .zoned_date_time) {
+        out.timeZoneName = try surfaceEnum(self, options, "timeZoneName", ztemporal.TimeZoneName, .auto);
+    }
+    if (comptime kind == .instant) {
+        const zone = try self.getProperty(options, "timeZone");
+        defer zone.deinit();
+        if (zone != .undefined) {
+            out.timeZone = try surfaceZoneArgument(self, zone);
+            out.io = ioHandle();
+        }
+    }
+    return out;
 }
 
 fn surfaceI32(self: *Interpreter, object: JSValue, key: []const u8) anyerror!?i32 {
