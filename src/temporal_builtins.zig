@@ -115,7 +115,24 @@ fn optionalTemporalString(self: *Interpreter, obj: JSValue, key: []const u8) any
 }
 
 fn optionalBagMonthCode(self: *Interpreter, obj: JSValue) anyerror!?[]const u8 {
-    return optionalTemporalString(self, obj, "monthCode");
+    const code = try optionalTemporalString(self, obj, "monthCode") orelse return null;
+    // Month-code syntax precedes year coercion; calendar suitability follows it.
+    if ((code.len != 3 and code.len != 4) or code[0] != 'M' or
+        !std.ascii.isDigit(code[1]) or !std.ascii.isDigit(code[2]) or
+        (code.len == 4 and code[3] != 'L'))
+    {
+        return self.throwError(.range_error, "Invalid monthCode syntax", .{});
+    }
+    return code;
+}
+
+fn rejectWithCalendarOrTimeZone(self: *Interpreter, fields: JSValue) anyerror!void {
+    const calendar = try self.getProperty(fields, "calendar");
+    defer calendar.deinit();
+    if (calendar != .undefined) return self.throwError(.type_error, "with forbids calendar", .{});
+    const time_zone = try self.getProperty(fields, "timeZone");
+    defer time_zone.deinit();
+    if (time_zone != .undefined) return self.throwError(.type_error, "with forbids timeZone", .{});
 }
 
 fn optionalBagCalendar(self: *Interpreter, obj: JSValue) anyerror!?[]const u8 {
@@ -330,9 +347,9 @@ fn coercePlainDate(self: *Interpreter, v: JSValue, overflow: Overflow) anyerror!
     };
     if (v == .string) return ztemporal.PlainDate.from(.{ .string = v.string.value.data }, .{}) catch |e| temporalErr(self, e);
     if (v != .object) return self.throwError(.type_error, "Temporal.PlainDate.from requires a string or an object", .{});
+    const month_code = try optionalBagMonthCode(self, v);
     const year = (try optionalI32(self, v, "year")) orelse return self.throwError(.type_error, "year is required", .{});
     const month = try optionalI32(self, v, "month");
-    const month_code = try optionalBagMonthCode(self, v);
     if (month == null and month_code == null) return self.throwError(.type_error, "month or monthCode is required", .{});
     const day = (try optionalI32(self, v, "day")) orelse return self.throwError(.type_error, "day is required", .{});
     return ztemporal.PlainDate.from(.{ .fields = .{ .year = year, .month = month, .monthCode = month_code, .day = day, .calendar = try optionalBagCalendar(self, v) } }, .{ .overflow = overflow }) catch |e| temporalErr(self, e);
@@ -370,9 +387,9 @@ fn coercePlainDateTime(self: *Interpreter, v: JSValue, overflow: Overflow) anyer
     };
     if (v == .string) return ztemporal.PlainDateTime.from(.{ .string = v.string.value.data }, .{}) catch |e| temporalErr(self, e);
     if (v != .object) return self.throwError(.type_error, "Temporal.PlainDateTime.from requires a string or an object", .{});
+    const month_code = try optionalBagMonthCode(self, v);
     const year = (try optionalI32(self, v, "year")) orelse return self.throwError(.type_error, "year is required", .{});
     const month = try optionalI32(self, v, "month");
-    const month_code = try optionalBagMonthCode(self, v);
     if (month == null and month_code == null) return self.throwError(.type_error, "month or monthCode is required", .{});
     const day = (try optionalI32(self, v, "day")) orelse return self.throwError(.type_error, "day is required", .{});
     return ztemporal.PlainDateTime.from(.{
@@ -425,9 +442,9 @@ fn coercePlainYearMonth(self: *Interpreter, v: JSValue, overflow: Overflow) anye
     };
     if (v == .string) return ztemporal.PlainYearMonth.from(.{ .string = v.string.value.data }, .{}) catch |e| temporalErr(self, e);
     if (v != .object) return self.throwError(.type_error, "Temporal.PlainYearMonth.from requires a string or an object", .{});
+    const month_code = try optionalBagMonthCode(self, v);
     const year = (try optionalI32(self, v, "year")) orelse return self.throwError(.type_error, "year is required", .{});
     const month = try optionalI32(self, v, "month");
-    const month_code = try optionalBagMonthCode(self, v);
     if (month == null and month_code == null) return self.throwError(.type_error, "month or monthCode is required", .{});
     return ztemporal.PlainYearMonth.from(.{ .fields = .{ .year = year, .month = month, .monthCode = month_code, .calendar = try optionalBagCalendar(self, v) } }, .{ .overflow = overflow }) catch |e| temporalErr(self, e);
 }
@@ -442,8 +459,8 @@ fn coercePlainMonthDay(self: *Interpreter, v: JSValue, overflow: Overflow) anyer
     };
     if (v == .string) return ztemporal.PlainMonthDay.from(.{ .string = v.string.value.data }, .{}) catch |e| temporalErr(self, e);
     if (v != .object) return self.throwError(.type_error, "Temporal.PlainMonthDay.from requires a string or an object", .{});
-    const month = try optionalI32(self, v, "month");
     const month_code = try optionalBagMonthCode(self, v);
+    const month = try optionalI32(self, v, "month");
     if (month == null and month_code == null) return self.throwError(.type_error, "month or monthCode is required", .{});
     const day = (try optionalI32(self, v, "day")) orelse return self.throwError(.type_error, "day is required", .{});
     return ztemporal.PlainMonthDay.from(.{ .fields = .{ .month = month, .monthCode = month_code, .day = day, .year = try optionalI32(self, v, "year"), .calendar = try optionalBagCalendar(self, v) } }, .{ .overflow = overflow }) catch |e| temporalErr(self, e);
@@ -581,6 +598,7 @@ fn pdWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     const pd = try pdSelf(self, this_value);
     const fields = arg(args, 0);
     if (fields != .object) return self.throwError(.type_error, "with() requires an object", .{});
+    try rejectWithCalendarOrTimeZone(self, fields);
     const overflow = try readOverflow(self, arg(args, 1));
     const result = pd.with(.{
         .year = try optionalI32(self, fields, "year"),
@@ -1588,6 +1606,7 @@ fn pymWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const pym = try pymSelf(self, this_value);
     const fields = arg(args, 0);
     if (fields != .object) return self.throwError(.type_error, "with() requires an object", .{});
+    try rejectWithCalendarOrTimeZone(self, fields);
     const overflow = try readOverflow(self, arg(args, 1));
     const result = pym.with(.{
         .year = try optionalI32(self, fields, "year"),
@@ -1838,9 +1857,9 @@ fn coerceZonedDateTime(self: *Interpreter, allocator: Allocator, v: JSValue, ove
     if (calendar) |id| _ = ztemporal.PlainDate.init(1970, 1, 1, id) catch |e| return temporalErr(self, e);
     const tz_v = v.object.value.get("timeZone") orelse return self.throwError(.type_error, "timeZone is required", .{});
     if (tz_v != .string) return self.throwError(.type_error, "timeZone must be a string", .{});
+    const month_code = try optionalBagMonthCode(self, v);
     const year = (try optionalI32(self, v, "year")) orelse return self.throwError(.type_error, "year is required", .{});
     const month = try optionalI32(self, v, "month");
-    const month_code = try optionalBagMonthCode(self, v);
     if (month == null and month_code == null) return self.throwError(.type_error, "month or monthCode is required", .{});
     const day = (try optionalI32(self, v, "day")) orelse return self.throwError(.type_error, "day is required", .{});
     return ztemporal.ZonedDateTime.from(allocator, ioHandle(), .{
