@@ -1,4 +1,4 @@
-# Historical Test262 regression comparison
+# Same-day Test262 segment comparison
 
 Identical coverage: **4,611 unique test paths**.
 
@@ -17,17 +17,6 @@ Identical coverage: **4,611 unique test paths**.
 |---|---:|
 | FAIL -> PASS | 718 |
 
-## Serial rechecks
-
-Reproduced PASS losses (FAIL/CRASH): **0**.
-Candidates recovered to PASS: **0**.
-Unresolved or not rechecked: **0**.
-
-These are changes against historical outcomes, not proof of which source commit introduced them.
-The old executable must also be rerun under identical conditions for a same-day A/B diagnosis.
-
-| Area of reproduced PASS loss | Count |
-|---|---:|
-
-## Current crashes
-
+Both executables ran against the same 4,611 paths under identical limits. There
+were no PASS losses, crashes, or timeouts requiring serial rechecks. See
+[metadata.json](metadata.json) for the binary and runner hashes.
