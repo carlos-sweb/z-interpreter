@@ -106,6 +106,25 @@ fn optionalI32(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!?i32 
     return try requireI32(self, v, key);
 }
 
+fn optionalTemporalString(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!?[]const u8 {
+    if (obj != .object) return null;
+    const v = obj.object.value.get(key) orelse return null;
+    if (v == .undefined) return null;
+    if (v != .string) return self.throwError(.type_error, "{s} must be a string", .{key});
+    return v.string.value.data;
+}
+
+fn optionalBagMonthCode(self: *Interpreter, obj: JSValue) anyerror!?[]const u8 {
+    // Calendar-bearing property bags belong to the separate calendar conversion work.
+    // Only the default ISO identifier is within this conversion's scope.
+    if (obj == .object) {
+        if (obj.object.value.get("calendar")) |calendar| {
+            if (calendar != .string or !std.mem.eql(u8, calendar.string.value.data, "iso8601")) return null;
+        }
+    }
+    return optionalTemporalString(self, obj, "monthCode");
+}
+
 /// Duration stores integral JavaScript Numbers, including values outside i64.
 /// Let z-temporal validate component magnitudes and mixed signs.
 fn requireDurationNumber(self: *Interpreter, v: JSValue, what: []const u8) anyerror!f64 {
@@ -300,16 +319,28 @@ fn coerceDuration(self: *Interpreter, v: JSValue) anyerror!ztemporal.Duration {
 /// throw -- month 13 constrains to 12).
 fn coercePlainDate(self: *Interpreter, v: JSValue, overflow: Overflow) anyerror!ztemporal.PlainDate {
     if (v == .temporal and v.temporal.value == .plain_date) return v.temporal.value.plain_date;
+    if (v == .temporal) switch (v.temporal.value) {
+        .plain_date_time => |date_time| return date_time.toPlainDate(),
+        .zoned_date_time => |zoned| return zoned.toPlainDate(self.gc_allocator, ioHandle()) catch |e| temporalErr(self, e),
+        else => {},
+    };
     if (v == .string) return ztemporal.PlainDate.from(.{ .string = v.string.value.data }, .{}) catch |e| temporalErr(self, e);
     if (v != .object) return self.throwError(.type_error, "Temporal.PlainDate.from requires a string or an object", .{});
     const year = (try optionalI32(self, v, "year")) orelse return self.throwError(.type_error, "year is required", .{});
-    const month = (try optionalI32(self, v, "month")) orelse return self.throwError(.type_error, "month is required", .{});
+    const month = try optionalI32(self, v, "month");
+    const month_code = try optionalBagMonthCode(self, v);
+    if (month == null and month_code == null) return self.throwError(.type_error, "month or monthCode is required", .{});
     const day = (try optionalI32(self, v, "day")) orelse return self.throwError(.type_error, "day is required", .{});
-    return ztemporal.PlainDate.from(.{ .fields = .{ .year = year, .month = month, .day = day } }, .{ .overflow = overflow }) catch |e| temporalErr(self, e);
+    return ztemporal.PlainDate.from(.{ .fields = .{ .year = year, .month = month, .monthCode = month_code, .day = day } }, .{ .overflow = overflow }) catch |e| temporalErr(self, e);
 }
 
 fn coercePlainTime(self: *Interpreter, v: JSValue, overflow: Overflow) anyerror!ztemporal.PlainTime {
     if (v == .temporal and v.temporal.value == .plain_time) return v.temporal.value.plain_time;
+    if (v == .temporal) switch (v.temporal.value) {
+        .plain_date_time => |date_time| return date_time.toPlainTime(),
+        .zoned_date_time => |zoned| return zoned.toPlainTime(self.gc_allocator, ioHandle()) catch |e| temporalErr(self, e),
+        else => {},
+    };
     if (v == .string) return ztemporal.PlainTime.from(.{ .string = v.string.value.data }, .{}) catch |e| temporalErr(self, e);
     if (v != .object) return self.throwError(.type_error, "Temporal.PlainTime.from requires a string or an object", .{});
     return ztemporal.PlainTime.from(.{
@@ -328,15 +359,23 @@ fn coercePlainTime(self: *Interpreter, v: JSValue, overflow: Overflow) anyerror!
 
 fn coercePlainDateTime(self: *Interpreter, v: JSValue, overflow: Overflow) anyerror!ztemporal.PlainDateTime {
     if (v == .temporal and v.temporal.value == .plain_date_time) return v.temporal.value.plain_date_time;
+    if (v == .temporal) switch (v.temporal.value) {
+        .plain_date => |date| return date.toPlainDateTime(null) catch |e| temporalErr(self, e),
+        .zoned_date_time => |zoned| return zoned.toPlainDateTime(self.gc_allocator, ioHandle()) catch |e| temporalErr(self, e),
+        else => {},
+    };
     if (v == .string) return ztemporal.PlainDateTime.from(.{ .string = v.string.value.data }, .{}) catch |e| temporalErr(self, e);
     if (v != .object) return self.throwError(.type_error, "Temporal.PlainDateTime.from requires a string or an object", .{});
     const year = (try optionalI32(self, v, "year")) orelse return self.throwError(.type_error, "year is required", .{});
-    const month = (try optionalI32(self, v, "month")) orelse return self.throwError(.type_error, "month is required", .{});
+    const month = try optionalI32(self, v, "month");
+    const month_code = try optionalBagMonthCode(self, v);
+    if (month == null and month_code == null) return self.throwError(.type_error, "month or monthCode is required", .{});
     const day = (try optionalI32(self, v, "day")) orelse return self.throwError(.type_error, "day is required", .{});
     return ztemporal.PlainDateTime.from(.{
         .fields = .{
             .year = year,
             .month = month,
+            .monthCode = month_code,
             .day = day,
             .hour = (try optionalI32(self, v, "hour")) orelse 0,
             .minute = (try optionalI32(self, v, "minute")) orelse 0,
@@ -361,6 +400,7 @@ fn coercePlainDateTime(self: *Interpreter, v: JSValue, overflow: Overflow) anyer
 /// plan's own Node cross-check, not anticipated in the design.
 fn coerceInstant(self: *Interpreter, allocator: Allocator, v: JSValue) anyerror!ztemporal.Instant {
     if (v == .temporal and v.temporal.value == .instant) return v.temporal.value.instant;
+    if (v == .temporal and v.temporal.value == .zoned_date_time) return v.temporal.value.zoned_date_time.toInstant();
     if (v == .object) {
         const s = try self.toDisplayStringJS(allocator, v);
         defer allocator.free(s);
@@ -372,20 +412,36 @@ fn coerceInstant(self: *Interpreter, allocator: Allocator, v: JSValue) anyerror!
 
 fn coercePlainYearMonth(self: *Interpreter, v: JSValue, overflow: Overflow) anyerror!ztemporal.PlainYearMonth {
     if (v == .temporal and v.temporal.value == .plain_year_month) return v.temporal.value.plain_year_month;
+    if (v == .temporal) switch (v.temporal.value) {
+        .plain_date => |date| return date.toPlainYearMonth() catch |e| temporalErr(self, e),
+        .plain_date_time => |date_time| return date_time.toPlainYearMonth() catch |e| temporalErr(self, e),
+        .zoned_date_time => |zoned| return zoned.toPlainYearMonth(self.gc_allocator, ioHandle()) catch |e| temporalErr(self, e),
+        else => {},
+    };
     if (v == .string) return ztemporal.PlainYearMonth.from(.{ .string = v.string.value.data }, .{}) catch |e| temporalErr(self, e);
     if (v != .object) return self.throwError(.type_error, "Temporal.PlainYearMonth.from requires a string or an object", .{});
     const year = (try optionalI32(self, v, "year")) orelse return self.throwError(.type_error, "year is required", .{});
-    const month = (try optionalI32(self, v, "month")) orelse return self.throwError(.type_error, "month is required", .{});
-    return ztemporal.PlainYearMonth.from(.{ .fields = .{ .year = year, .month = month } }, .{ .overflow = overflow }) catch |e| temporalErr(self, e);
+    const month = try optionalI32(self, v, "month");
+    const month_code = try optionalBagMonthCode(self, v);
+    if (month == null and month_code == null) return self.throwError(.type_error, "month or monthCode is required", .{});
+    return ztemporal.PlainYearMonth.from(.{ .fields = .{ .year = year, .month = month, .monthCode = month_code } }, .{ .overflow = overflow }) catch |e| temporalErr(self, e);
 }
 
 fn coercePlainMonthDay(self: *Interpreter, v: JSValue, overflow: Overflow) anyerror!ztemporal.PlainMonthDay {
     if (v == .temporal and v.temporal.value == .plain_month_day) return v.temporal.value.plain_month_day;
+    if (v == .temporal) switch (v.temporal.value) {
+        .plain_date => |date| return date.toPlainMonthDay() catch |e| temporalErr(self, e),
+        .plain_date_time => |date_time| return date_time.toPlainMonthDay() catch |e| temporalErr(self, e),
+        .zoned_date_time => |zoned| return zoned.toPlainMonthDay(self.gc_allocator, ioHandle()) catch |e| temporalErr(self, e),
+        else => {},
+    };
     if (v == .string) return ztemporal.PlainMonthDay.from(.{ .string = v.string.value.data }, .{}) catch |e| temporalErr(self, e);
     if (v != .object) return self.throwError(.type_error, "Temporal.PlainMonthDay.from requires a string or an object", .{});
-    const month = (try optionalI32(self, v, "month")) orelse return self.throwError(.type_error, "month is required", .{});
+    const month = try optionalI32(self, v, "month");
+    const month_code = try optionalBagMonthCode(self, v);
+    if (month == null and month_code == null) return self.throwError(.type_error, "month or monthCode is required", .{});
     const day = (try optionalI32(self, v, "day")) orelse return self.throwError(.type_error, "day is required", .{});
-    return ztemporal.PlainMonthDay.from(.{ .fields = .{ .month = month, .day = day } }, .{ .overflow = overflow }) catch |e| temporalErr(self, e);
+    return ztemporal.PlainMonthDay.from(.{ .fields = .{ .month = month, .monthCode = month_code, .day = day, .year = try optionalI32(self, v, "year") } }, .{ .overflow = overflow }) catch |e| temporalErr(self, e);
 }
 
 /// Installs a JS-string-valued getter accessor onto `proto`, backed by a
@@ -524,6 +580,7 @@ fn pdWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     const result = pd.with(.{
         .year = try optionalI32(self, fields, "year"),
         .month = try optionalI32(self, fields, "month"),
+        .monthCode = try optionalTemporalString(self, fields, "monthCode"),
         .day = try optionalI32(self, fields, "day"),
     }, .{
         .overflow = overflow,
@@ -935,6 +992,7 @@ fn pdtWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const result = pdt.with(.{
         .year = try optionalI32(self, fields, "year"),
         .month = try optionalI32(self, fields, "month"),
+        .monthCode = try optionalTemporalString(self, fields, "monthCode"),
         .day = try optionalI32(self, fields, "day"),
         .hour = try optionalI32(self, fields, "hour"),
         .minute = try optionalI32(self, fields, "minute"),
@@ -1790,12 +1848,15 @@ fn coerceZonedDateTime(self: *Interpreter, allocator: Allocator, v: JSValue, ove
     const tz_v = v.object.value.get("timeZone") orelse return self.throwError(.type_error, "timeZone is required", .{});
     if (tz_v != .string) return self.throwError(.type_error, "timeZone must be a string", .{});
     const year = (try optionalI32(self, v, "year")) orelse return self.throwError(.type_error, "year is required", .{});
-    const month = (try optionalI32(self, v, "month")) orelse return self.throwError(.type_error, "month is required", .{});
+    const month = try optionalI32(self, v, "month");
+    const month_code = try optionalBagMonthCode(self, v);
+    if (month == null and month_code == null) return self.throwError(.type_error, "month or monthCode is required", .{});
     const day = (try optionalI32(self, v, "day")) orelse return self.throwError(.type_error, "day is required", .{});
     return ztemporal.ZonedDateTime.from(allocator, ioHandle(), .{
         .fields = .{
             .year = year,
             .month = month,
+            .monthCode = month_code,
             .day = day,
             .hour = (try optionalI32(self, v, "hour")) orelse 0,
             .minute = (try optionalI32(self, v, "minute")) orelse 0,
