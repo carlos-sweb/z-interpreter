@@ -16,8 +16,8 @@
 //! threading `Io` through `Interpreter` itself (a bigger, separate
 //! architectural change this plan deliberately avoided).
 //!
-//! ZonedDateTime arithmetic and locale formatting are available in
-//! z-temporal v0.1.0 but are not exposed by these bindings yet.
+//! Temporal values and algorithms come from z-temporal; this adapter owns
+//! JavaScript receivers, coercions, descriptors, symbols and exceptions.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const zvalue = @import("zvalue");
@@ -405,7 +405,8 @@ fn orderToJs(order: std.math.Order) f64 {
 
 fn installGetter(self: *Interpreter, proto: JSValue, name: []const u8, call_fn: NativeFn) !void {
     // Real spec: every accessor getter has arity 0 (takes no arguments).
-    const getter = try native(self, name, 0, call_fn);
+    const getter_name = try std.fmt.allocPrint(self.arena_state.allocator(), "get {s}", .{name});
+    const getter = try native(self, getter_name, 0, call_fn);
     try proto.object.value.defineAccessor(name, getter, null, JSValue.UNDEFINED);
     const rec = proto.object.value.getOwnRecordMut(name).?;
     rec.descriptor.enumerable = false;
@@ -1457,7 +1458,8 @@ fn plainYearMonthConstructor(ctx: *anyopaque, allocator: Allocator, this_value: 
     const self = interp(ctx);
     const year = try requireI32(self, arg(args, 0), "year");
     const month = try requireI32(self, arg(args, 1), "month");
-    const pym = ztemporal.PlainYearMonth.init(year, month, null, null) catch |e| return temporalErr(self, e);
+    const reference_day: ?i32 = if (arg(args, 3) == .undefined) null else try requireI32(self, arg(args, 3), "referenceISODay");
+    const pym = ztemporal.PlainYearMonth.init(year, month, null, reference_day) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_year_month = pym });
 }
 
@@ -1598,10 +1600,10 @@ fn pymEquals(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
 }
 
 fn pymToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = args;
     const self = interp(ctx);
     const pym = try pymSelf(self, this_value);
-    const s = pym.toString(allocator, .{}) catch |e| return temporalErr(self, e);
+    const calendar_name = try surfaceEnum(self, arg(args, 0), "calendarName", ztemporal.CalendarName, .auto);
+    const s = pym.toString(allocator, .{ .calendarName = calendar_name }) catch |e| return temporalErr(self, e);
     defer allocator.free(s);
     return self.gcNewString(s);
 }
@@ -2239,5 +2241,528 @@ pub fn install(self: *Interpreter) !void {
     try dneMethod(now_obj, "timeZoneId", try native(self, "timeZoneId", 0, nowTimeZoneId));
     try dneMethod(temporal_ns, "Now", now_obj);
 
+    try installSurface(self, temporal_ns);
     try self.global_env.define(self.gc_allocator, "Temporal", temporal_ns);
+}
+
+// JavaScript surface shared by the typed Temporal adapters.
+pub fn isIntrinsicConstructor(value: JSValue) bool {
+    if (value != .function) return false;
+    inline for (.{ plainDateConstructor, plainTimeConstructor, plainDateTimeConstructor, plainYearMonthConstructor, plainMonthDayConstructor, instantConstructor, durationConstructor, zonedDateTimeConstructor }) |callback| {
+        if (value.function.value.call == callback) return true;
+    }
+    return false;
+}
+
+pub fn installTags(self: *Interpreter, key: []const u8) !void {
+    const attrs = zvalue.PropertyDescriptor{ .writable = false, .enumerable = false, .configurable = true };
+    try self.protos.temporal_plain_date.object.value.defineProperty(key, try self.gcNewString("Temporal.PlainDate"), attrs);
+    try self.protos.temporal_plain_time.object.value.defineProperty(key, try self.gcNewString("Temporal.PlainTime"), attrs);
+    try self.protos.temporal_plain_date_time.object.value.defineProperty(key, try self.gcNewString("Temporal.PlainDateTime"), attrs);
+    try self.protos.temporal_plain_year_month.object.value.defineProperty(key, try self.gcNewString("Temporal.PlainYearMonth"), attrs);
+    try self.protos.temporal_plain_month_day.object.value.defineProperty(key, try self.gcNewString("Temporal.PlainMonthDay"), attrs);
+    try self.protos.temporal_instant.object.value.defineProperty(key, try self.gcNewString("Temporal.Instant"), attrs);
+    try self.protos.temporal_duration.object.value.defineProperty(key, try self.gcNewString("Temporal.Duration"), attrs);
+    try self.protos.temporal_zoned_date_time.object.value.defineProperty(key, try self.gcNewString("Temporal.ZonedDateTime"), attrs);
+    if (self.global_env.get("Temporal")) |ns| {
+        try ns.object.value.defineProperty(key, try self.gcNewString("Temporal"), attrs);
+        if (ns.object.value.get("Now")) |now| try now.object.value.defineProperty(key, try self.gcNewString("Temporal.Now"), attrs);
+    }
+}
+
+fn surfaceObject(self: *Interpreter, value: JSValue) anyerror!void {
+    if (Interpreter.isPrimitiveTag(value)) return self.throwError(.type_error, "Temporal requires an object", .{});
+}
+
+fn surfaceOptions(self: *Interpreter, value: JSValue) anyerror!void {
+    if (value != .undefined) try surfaceObject(self, value);
+}
+
+fn surfaceEnum(self: *Interpreter, options: JSValue, key: []const u8, comptime T: type, default: T) anyerror!T {
+    try surfaceOptions(self, options);
+    if (options == .undefined) return default;
+    const value = try self.getProperty(options, key);
+    defer value.deinit();
+    if (value == .undefined) return default;
+    const text = try self.toDisplayStringJS(self.gc_allocator, value);
+    defer self.gc_allocator.free(text);
+    inline for (@typeInfo(T).@"enum".field_names) |name| {
+        if (std.mem.eql(u8, text, name)) return @field(T, name);
+    }
+    return self.throwError(.range_error, "Invalid {s}: {s}", .{ key, text });
+}
+
+fn surfaceI32(self: *Interpreter, object: JSValue, key: []const u8) anyerror!?i32 {
+    const value = try self.getProperty(object, key);
+    defer value.deinit();
+    if (value == .undefined) return null;
+    const n = try self.toNumberJS(value);
+    if (!std.math.isFinite(n) or @trunc(n) < std.math.minInt(i32) or @trunc(n) > std.math.maxInt(i32)) return self.throwError(.range_error, "Invalid Temporal field {s}", .{key});
+    return @intFromFloat(@trunc(n));
+}
+
+fn surfaceString(self: *Interpreter, object: JSValue, key: []const u8) anyerror!?[]const u8 {
+    const value = try self.getProperty(object, key);
+    defer value.deinit();
+    if (value == .undefined) return null;
+    if ((std.mem.eql(u8, key, "calendar") or std.mem.eql(u8, key, "offset")) and value != .string) return self.throwError(.type_error, "Temporal {s} must be a string", .{key});
+    if (std.mem.eql(u8, key, "timeZone")) return try surfaceZoneArgument(self, value);
+    return try self.toDisplayStringJS(self.gc_allocator, value);
+}
+
+fn surfaceValue(self: *Interpreter, value: anytype) anyerror!JSValue {
+    return switch (@typeInfo(@TypeOf(value))) {
+        .optional => if (value) |v| surfaceValue(self, v) else JSValue.UNDEFINED,
+        .int, .comptime_int => JSValue.fromNumber(@floatFromInt(value)),
+        .float => JSValue.fromNumber(value),
+        .pointer => self.gcNewString(value),
+        else => @compileError("Unsupported Temporal getter result"),
+    };
+}
+
+fn surfaceGetter(comptime tag: std.meta.Tag(TemporalValue), comptime method: []const u8) NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, allocator: Allocator, receiver: JSValue, args: []const JSValue) anyerror!JSValue {
+            _ = args;
+            const self = interp(ctx);
+            const value = try requireTemporal(self, receiver, tag, "Temporal getter");
+            const result = if (comptime tag == .zoned_date_time and !std.mem.eql(u8, method, "daysInWeek"))
+                @field(@TypeOf(value), method)(value, allocator, ioHandle()) catch |e| return temporalErr(self, e)
+            else
+                @field(@TypeOf(value), method)(value);
+            return surfaceValue(self, result);
+        }
+    }.call;
+}
+
+fn surfaceSerialize(comptime tag: std.meta.Tag(TemporalValue)) NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, allocator: Allocator, receiver: JSValue, args: []const JSValue) anyerror!JSValue {
+            _ = args;
+            const self = interp(ctx);
+            const value = try requireTemporal(self, receiver, tag, "Temporal serialization");
+            const text = if (tag == .zoned_date_time)
+                value.toString(allocator, ioHandle(), .{}) catch |e| return temporalErr(self, e)
+            else
+                value.toString(allocator, .{}) catch |e| return temporalErr(self, e);
+            defer allocator.free(text);
+            return self.gcNewString(text);
+        }
+    }.call;
+}
+
+fn surfaceValueOf(ctx: *anyopaque, allocator: Allocator, receiver: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = receiver;
+    _ = args;
+    return interp(ctx).throwError(.type_error, "Temporal values cannot be converted to primitives", .{});
+}
+
+fn installSurface(self: *Interpreter, ns: JSValue) !void {
+    {
+        const proto = self.protos.temporal_plain_date;
+        proto.object.value.getOwnRecordMut("constructor").?.descriptor.enumerable = false;
+        try dneMethod(proto, "toJSON", try native(self, "toJSON", 0, surfaceSerialize(.plain_date)));
+        try dneMethod(proto, "valueOf", try native(self, "valueOf", 0, surfaceValueOf));
+        try dneMethod(proto, "toLocaleString", try native(self, "toLocaleString", 0, surfaceSerialize(.plain_date)));
+        try installGetter(self, proto, "daysInWeek", surfaceGetter(.plain_date, "daysInWeek"));
+        try installGetter(self, proto, "era", surfaceGetter(.plain_date, "era"));
+        try installGetter(self, proto, "eraYear", surfaceGetter(.plain_date, "eraYear"));
+        try installGetter(self, proto, "yearOfWeek", surfaceGetter(.plain_date, "yearOfWeek"));
+        try dneMethod(proto, "toPlainDateTime", try native(self, "toPlainDateTime", 0, surfacePdToDateTime));
+        try dneMethod(proto, "toPlainYearMonth", try native(self, "toPlainYearMonth", 0, surfacePdToYearMonth));
+        try dneMethod(proto, "toPlainMonthDay", try native(self, "toPlainMonthDay", 0, surfacePdToMonthDay));
+        try dneMethod(proto, "toZonedDateTime", try native(self, "toZonedDateTime", 1, surfacePdToZoned));
+        try dneMethod(proto, "withCalendar", try native(self, "withCalendar", 1, surfaceWithCalendar(.plain_date)));
+    }
+    {
+        const proto = self.protos.temporal_plain_time;
+        proto.object.value.getOwnRecordMut("constructor").?.descriptor.enumerable = false;
+        try dneMethod(proto, "toJSON", try native(self, "toJSON", 0, surfaceSerialize(.plain_time)));
+        try dneMethod(proto, "valueOf", try native(self, "valueOf", 0, surfaceValueOf));
+        try dneMethod(proto, "toLocaleString", try native(self, "toLocaleString", 0, surfaceSerialize(.plain_time)));
+    }
+    {
+        const proto = self.protos.temporal_plain_date_time;
+        proto.object.value.getOwnRecordMut("constructor").?.descriptor.enumerable = false;
+        try dneMethod(proto, "toJSON", try native(self, "toJSON", 0, surfaceSerialize(.plain_date_time)));
+        try dneMethod(proto, "valueOf", try native(self, "valueOf", 0, surfaceValueOf));
+        try dneMethod(proto, "toLocaleString", try native(self, "toLocaleString", 0, surfaceSerialize(.plain_date_time)));
+        try installGetter(self, proto, "dayOfYear", surfaceGetter(.plain_date_time, "dayOfYear"));
+        try installGetter(self, proto, "daysInWeek", surfaceGetter(.plain_date_time, "daysInWeek"));
+        try installGetter(self, proto, "daysInYear", surfaceGetter(.plain_date_time, "daysInYear"));
+        try installGetter(self, proto, "era", surfaceGetter(.plain_date_time, "era"));
+        try installGetter(self, proto, "eraYear", surfaceGetter(.plain_date_time, "eraYear"));
+        try installGetter(self, proto, "monthsInYear", surfaceGetter(.plain_date_time, "monthsInYear"));
+        try installGetter(self, proto, "weekOfYear", surfaceGetter(.plain_date_time, "weekOfYear"));
+        try installGetter(self, proto, "yearOfWeek", surfaceGetter(.plain_date_time, "yearOfWeek"));
+        try dneMethod(proto, "withPlainTime", try native(self, "withPlainTime", 0, surfaceWithPlainTime(.plain_date_time)));
+        try dneMethod(proto, "withCalendar", try native(self, "withCalendar", 1, surfaceWithCalendar(.plain_date_time)));
+        try dneMethod(proto, "toZonedDateTime", try native(self, "toZonedDateTime", 1, surfacePdtToZoned));
+    }
+    {
+        const proto = self.protos.temporal_plain_year_month;
+        proto.object.value.getOwnRecordMut("constructor").?.descriptor.enumerable = false;
+        try dneMethod(proto, "toJSON", try native(self, "toJSON", 0, surfaceSerialize(.plain_year_month)));
+        try dneMethod(proto, "valueOf", try native(self, "valueOf", 0, surfaceValueOf));
+        try dneMethod(proto, "toLocaleString", try native(self, "toLocaleString", 0, surfaceSerialize(.plain_year_month)));
+        try installGetter(self, proto, "era", surfaceGetter(.plain_year_month, "era"));
+        try installGetter(self, proto, "eraYear", surfaceGetter(.plain_year_month, "eraYear"));
+    }
+    {
+        const proto = self.protos.temporal_plain_month_day;
+        proto.object.value.getOwnRecordMut("constructor").?.descriptor.enumerable = false;
+        try dneMethod(proto, "toJSON", try native(self, "toJSON", 0, surfaceSerialize(.plain_month_day)));
+        try dneMethod(proto, "valueOf", try native(self, "valueOf", 0, surfaceValueOf));
+        try dneMethod(proto, "toLocaleString", try native(self, "toLocaleString", 0, surfaceSerialize(.plain_month_day)));
+    }
+    {
+        const proto = self.protos.temporal_instant;
+        proto.object.value.getOwnRecordMut("constructor").?.descriptor.enumerable = false;
+        try dneMethod(proto, "toJSON", try native(self, "toJSON", 0, surfaceSerialize(.instant)));
+        try dneMethod(proto, "valueOf", try native(self, "valueOf", 0, surfaceValueOf));
+        try dneMethod(proto, "toLocaleString", try native(self, "toLocaleString", 0, surfaceSerialize(.instant)));
+    }
+    {
+        const proto = self.protos.temporal_duration;
+        proto.object.value.getOwnRecordMut("constructor").?.descriptor.enumerable = false;
+        try dneMethod(proto, "toJSON", try native(self, "toJSON", 0, surfaceSerialize(.duration)));
+        try dneMethod(proto, "valueOf", try native(self, "valueOf", 0, surfaceValueOf));
+        try dneMethod(proto, "toLocaleString", try native(self, "toLocaleString", 0, surfaceSerialize(.duration)));
+    }
+    {
+        const proto = self.protos.temporal_zoned_date_time;
+        proto.object.value.getOwnRecordMut("constructor").?.descriptor.enumerable = false;
+        try dneMethod(proto, "toLocaleString", try native(self, "toLocaleString", 0, surfaceSerialize(.zoned_date_time)));
+        try installGetter(self, proto, "daysInWeek", surfaceGetter(.zoned_date_time, "daysInWeek"));
+        try installGetter(self, proto, "era", surfaceGetter(.zoned_date_time, "era"));
+        try installGetter(self, proto, "eraYear", surfaceGetter(.zoned_date_time, "eraYear"));
+        try installGetter(self, proto, "yearOfWeek", surfaceGetter(.zoned_date_time, "yearOfWeek"));
+        try dneMethod(proto, "with", try native(self, "with", 1, surfaceZdtWith));
+        try dneMethod(proto, "add", try native(self, "add", 1, surfaceZdtArithmetic(false)));
+        try dneMethod(proto, "subtract", try native(self, "subtract", 1, surfaceZdtArithmetic(true)));
+        try dneMethod(proto, "until", try native(self, "until", 1, surfaceZdtDifference(false)));
+        try dneMethod(proto, "since", try native(self, "since", 1, surfaceZdtDifference(true)));
+        try dneMethod(proto, "round", try native(self, "round", 1, surfaceZdtRound));
+        try dneMethod(proto, "withPlainTime", try native(self, "withPlainTime", 0, surfaceWithPlainTime(.zoned_date_time)));
+        try dneMethod(proto, "withTimeZone", try native(self, "withTimeZone", 1, surfaceZdtWithZone));
+        try dneMethod(proto, "withCalendar", try native(self, "withCalendar", 1, surfaceWithCalendar(.zoned_date_time)));
+    }
+    _ = ns;
+}
+
+fn surfaceFields(self: *Interpreter, value: JSValue, comptime T: type) anyerror!T {
+    return surfaceFieldsMode(self, value, T, false);
+}
+
+fn surfaceFieldsMode(self: *Interpreter, value: JSValue, comptime T: type, comptime partial: bool) anyerror!T {
+    try surfaceObject(self, value);
+    var fields: T = .{};
+    errdefer freeSurfaceFields(self, fields);
+    inline for (.{ "calendar", "day", "hour", "microsecond", "millisecond", "minute", "month", "monthCode", "nanosecond", "offset", "second", "timeZone", "year" }) |key| {
+        if (comptime @hasField(T, key) and !(partial and (std.mem.eql(u8, key, "calendar") or std.mem.eql(u8, key, "timeZone")))) {
+            if (comptime @FieldType(T, key) == ?i32) @field(fields, key) = try surfaceI32(self, value, key) else @field(fields, key) = try surfaceString(self, value, key);
+        }
+    }
+    return fields;
+}
+
+fn surfaceTime(self: *Interpreter, value: JSValue) anyerror!ztemporal.PlainTime {
+    if (value == .temporal) switch (value.temporal.value) {
+        .plain_time => |v| return v,
+        .plain_date_time => |v| return v.time,
+        .zoned_date_time => |v| return v.toPlainTime(self.gc_allocator, ioHandle()) catch |e| temporalErr(self, e),
+        else => {},
+    };
+    if (value == .string) return ztemporal.PlainTime.from(.{ .string = value.string.value.data }, .{}) catch |e| temporalErr(self, e);
+    return ztemporal.PlainTime.from(.{ .fields = try surfaceFields(self, value, ztemporal.PlainTime.Fields) }, .{}) catch |e| temporalErr(self, e);
+}
+
+fn surfaceDuration(self: *Interpreter, value: JSValue) anyerror!ztemporal.Duration {
+    if (value == .string or (value == .temporal and value.temporal.value == .duration)) return coerceDuration(self, value);
+    try surfaceObject(self, value);
+    var fields: ztemporal.Duration.Fields = .{};
+    inline for (.{ "days", "hours", "microseconds", "milliseconds", "minutes", "months", "nanoseconds", "seconds", "weeks", "years" }) |key| {
+        const v = try self.getProperty(value, key);
+        defer v.deinit();
+        if (v != .undefined) {
+            const n = try self.toNumberJS(v);
+            if (!std.math.isFinite(n) or @trunc(n) != n) return self.throwError(.range_error, "Invalid duration field {s}", .{key});
+            @field(fields, key) = n;
+        }
+    }
+    return ztemporal.Duration.from(.{ .fields = fields }) catch |e| temporalErr(self, e);
+}
+
+fn surfaceZone(self: *Interpreter, value: JSValue) anyerror![]const u8 {
+    if (value == .temporal and value.temporal.value == .zoned_date_time) return value.temporal.value.zoned_date_time.timeZoneId();
+    if (value != .string) return self.throwError(.type_error, "Time zone must be a string or ZonedDateTime", .{});
+    return surfaceZoneText(self, value.string.value.data);
+}
+
+fn surfaceZoneText(self: *Interpreter, text: []const u8) anyerror![]const u8 {
+    const is_iso = text.len >= 8 and ((std.ascii.isDigit(text[0]) and std.ascii.isDigit(text[1]) and std.ascii.isDigit(text[2]) and std.ascii.isDigit(text[3])) or ((text[0] == '+' or text[0] == '-') and text.len >= 13));
+    if (!is_iso) return text;
+    // Validate the ISO grammar before extracting its time zone identifier.
+    if (ztemporal.PlainDateTime.from(.{ .string = text }, .{})) |_| {} else |_| {
+        _ = ztemporal.Instant.from(.{ .string = text }) catch |e| return temporalErr(self, e);
+    }
+    // ToTemporalTimeZoneIdentifier accepts a zone annotation or an ISO offset.
+    if (std.mem.indexOfScalar(u8, text, '[')) |open| {
+        if (std.mem.indexOfScalarPos(u8, text, open, ']')) |close| {
+            const inner = text[open + 1 .. close];
+            if (std.mem.indexOfScalar(u8, inner, '=') == null) return if (std.mem.startsWith(u8, inner, "!")) inner[1..] else inner;
+        }
+    }
+    if (std.mem.indexOfAny(u8, text, "Tt ")) |time| {
+        if (std.mem.endsWith(u8, text, "Z") or std.mem.endsWith(u8, text, "z")) return "UTC";
+        if (std.mem.indexOfAnyPos(u8, text, time + 1, "+-")) |offset| return text[offset..];
+        return self.throwError(.range_error, "ISO time zone string requires an offset", .{});
+    }
+    return text;
+}
+
+fn surfaceZoneArgument(self: *Interpreter, value: JSValue) anyerror![]const u8 {
+    // The returned identifier may be a slice of an owned getter result.
+    const zone = try surfaceZone(self, value);
+    return self.gc_allocator.dupe(u8, zone);
+}
+
+fn surfaceWithCalendar(comptime tag: std.meta.Tag(TemporalValue)) NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, allocator: Allocator, receiver: JSValue, args: []const JSValue) anyerror!JSValue {
+            const self = interp(ctx);
+            const value = try requireTemporal(self, receiver, tag, "Temporal.withCalendar");
+            const calendar = arg(args, 0);
+            if (calendar != .string) return self.throwError(.type_error, "Calendar must be a string", .{});
+            const text = try self.toDisplayStringJS(allocator, calendar);
+            defer allocator.free(text);
+            const identifier = try surfaceCalendar(self, text);
+            const result = value.withCalendar(identifier) catch |e| return temporalErr(self, e);
+            return self.gcNewTemporal(@unionInit(TemporalValue, @tagName(tag), result));
+        }
+    }.call;
+}
+
+fn surfaceWithPlainTime(comptime tag: std.meta.Tag(TemporalValue)) NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, allocator: Allocator, receiver: JSValue, args: []const JSValue) anyerror!JSValue {
+            const self = interp(ctx);
+            const value = try requireTemporal(self, receiver, tag, "Temporal.withPlainTime");
+            const time: ?ztemporal.PlainTime = if (arg(args, 0) == .undefined) null else try surfaceTime(self, arg(args, 0));
+            const result = if (tag == .zoned_date_time)
+                value.withPlainTime(allocator, ioHandle(), time) catch |e| return temporalErr(self, e)
+            else
+                value.withPlainTime(time) catch |e| return temporalErr(self, e);
+            return self.gcNewTemporal(@unionInit(TemporalValue, @tagName(tag), result));
+        }
+    }.call;
+}
+
+fn surfacePdToDateTime(ctx: *anyopaque, allocator: Allocator, receiver: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const date = try pdSelf(self, receiver);
+    const time: ?ztemporal.PlainTime = if (arg(args, 0) == .undefined) null else try surfaceTime(self, arg(args, 0));
+    return self.gcNewTemporal(.{ .plain_date_time = date.toPlainDateTime(time) catch |e| return temporalErr(self, e) });
+}
+
+fn surfacePdToYearMonth(ctx: *anyopaque, allocator: Allocator, receiver: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = args;
+    const self = interp(ctx);
+    const date = try pdSelf(self, receiver);
+    return self.gcNewTemporal(.{ .plain_year_month = date.toPlainYearMonth() catch |e| return temporalErr(self, e) });
+}
+
+fn surfacePdToMonthDay(ctx: *anyopaque, allocator: Allocator, receiver: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = args;
+    const self = interp(ctx);
+    const date = try pdSelf(self, receiver);
+    return self.gcNewTemporal(.{ .plain_month_day = date.toPlainMonthDay() catch |e| return temporalErr(self, e) });
+}
+
+fn surfacePdToZoned(ctx: *anyopaque, allocator: Allocator, receiver: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self = interp(ctx);
+    const date = try pdSelf(self, receiver);
+    const item = arg(args, 0);
+    var zone_value = item.retain();
+    defer zone_value.deinit();
+    var time_value = JSValue.UNDEFINED;
+    defer time_value.deinit();
+    if (!Interpreter.isPrimitiveTag(item)) {
+        const v = try self.getProperty(item, "timeZone");
+        if (v != .undefined) {
+            zone_value.deinit();
+            zone_value = v;
+            time_value = try self.getProperty(item, "plainTime");
+        } else v.deinit();
+    }
+    const zone = try surfaceZoneArgument(self, zone_value);
+    defer self.gc_allocator.free(zone);
+    const time: ?ztemporal.PlainTime = if (time_value == .undefined) null else try surfaceTime(self, time_value);
+    return self.gcNewTemporal(.{ .zoned_date_time = date.toZonedDateTime(allocator, ioHandle(), zone, time) catch |e| return temporalErr(self, e) });
+}
+
+fn surfacePdtToZoned(ctx: *anyopaque, allocator: Allocator, receiver: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self = interp(ctx);
+    const dt = try pdtSelf(self, receiver);
+    const zone = try surfaceZoneArgument(self, arg(args, 0));
+    defer self.gc_allocator.free(zone);
+    const disambiguation = try surfaceEnum(self, arg(args, 1), "disambiguation", ztemporal.Disambiguation, .compatible);
+    return self.gcNewTemporal(.{ .zoned_date_time = dt.toZonedDateTime(allocator, ioHandle(), zone, disambiguation) catch |e| return temporalErr(self, e) });
+}
+
+fn surfaceZdtWithZone(ctx: *anyopaque, allocator: Allocator, receiver: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self = interp(ctx);
+    const dt = try zdtSelf(self, receiver);
+    const zone = try surfaceZoneArgument(self, arg(args, 0));
+    defer self.gc_allocator.free(zone);
+    return self.gcNewTemporal(.{ .zoned_date_time = dt.withTimeZone(allocator, ioHandle(), zone) catch |e| return temporalErr(self, e) });
+}
+
+fn surfaceZdtWith(ctx: *anyopaque, allocator: Allocator, receiver: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self = interp(ctx);
+    const dt = try zdtSelf(self, receiver);
+    const item = arg(args, 0);
+    try surfaceObject(self, item);
+    if (item == .temporal) return self.throwError(.type_error, "with requires a partial property bag", .{});
+    const calendar = try self.getProperty(item, "calendar");
+    defer calendar.deinit();
+    if (calendar != .undefined) return self.throwError(.type_error, "with forbids calendar", .{});
+    const zone = try self.getProperty(item, "timeZone");
+    defer zone.deinit();
+    if (zone != .undefined) return self.throwError(.type_error, "with forbids timeZone", .{});
+    const fields = try surfaceFieldsMode(self, item, ztemporal.ZonedDateTime.Fields, true);
+    defer freeSurfaceFields(self, fields);
+    const options = arg(args, 1);
+    const disambiguation = try surfaceEnum(self, options, "disambiguation", ztemporal.Disambiguation, .compatible);
+    const offset = try surfaceEnum(self, options, "offset", ztemporal.OffsetOption, .prefer);
+    const overflow = try surfaceEnum(self, options, "overflow", Overflow, .constrain);
+    return self.gcNewTemporal(.{ .zoned_date_time = dt.with(allocator, ioHandle(), fields, .{ .overflow = overflow, .offset = offset, .disambiguation = disambiguation }) catch |e| return temporalErr(self, e) });
+}
+
+fn surfaceZdtArithmetic(comptime subtract: bool) NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, allocator: Allocator, receiver: JSValue, args: []const JSValue) anyerror!JSValue {
+            const self = interp(ctx);
+            const dt = try zdtSelf(self, receiver);
+            const duration = try surfaceDuration(self, arg(args, 0));
+            const overflow = try surfaceEnum(self, arg(args, 1), "overflow", Overflow, .constrain);
+            const result = if (subtract) dt.subtract(allocator, ioHandle(), duration, overflow) catch |e| return temporalErr(self, e) else dt.add(allocator, ioHandle(), duration, overflow) catch |e| return temporalErr(self, e);
+            return self.gcNewTemporal(.{ .zoned_date_time = result });
+        }
+    }.call;
+}
+
+fn surfaceZoned(self: *Interpreter, allocator: Allocator, item: JSValue) anyerror!ztemporal.ZonedDateTime {
+    if (item == .temporal and item.temporal.value == .zoned_date_time) return item.temporal.value.zoned_date_time;
+    if (item == .string) return ztemporal.ZonedDateTime.from(allocator, ioHandle(), .{ .string = item.string.value.data }, .{}) catch |e| temporalErr(self, e);
+    var fields = try surfaceFields(self, item, ztemporal.ZonedDateTime.Fields);
+    defer freeSurfaceFields(self, fields);
+    if (fields.calendar) |text| {
+        const identifier = try surfaceCalendar(self, text);
+        const owned = try self.gc_allocator.dupe(u8, identifier);
+        self.gc_allocator.free(text);
+        fields.calendar = owned;
+    }
+    if (fields.timeZone) |text| {
+        const zone = try surfaceZoneText(self, text);
+        const owned = try self.gc_allocator.dupe(u8, zone);
+        self.gc_allocator.free(text);
+        fields.timeZone = owned;
+    }
+    return ztemporal.ZonedDateTime.from(allocator, ioHandle(), .{ .fields = fields }, .{}) catch |e| temporalErr(self, e);
+}
+
+fn surfaceRounding(self: *Interpreter, options: JSValue, comptime T: type, default_mode: RoundingMode, shorthand: bool) anyerror!T {
+    var result: T = .{ .roundingMode = default_mode };
+    if (shorthand and options == .string) {
+        result.smallestUnit = try unitFromString(self, options.string.value.data, "smallestUnit");
+        return result;
+    }
+    try surfaceOptions(self, options);
+    if (options == .undefined) return result;
+    if (comptime T == RoundingOptions) {
+        const largest = try surfaceString(self, options, "largestUnit");
+        defer if (largest) |text| self.gc_allocator.free(text);
+        if (largest) |text| if (!std.mem.eql(u8, text, "auto")) {
+            result.largestUnit = try unitFromString(self, text, "largestUnit");
+        };
+    }
+    const increment = try self.getProperty(options, "roundingIncrement");
+    defer increment.deinit();
+    if (increment != .undefined) {
+        const n = try self.toNumberJS(increment);
+        if (!std.math.isFinite(n) or @trunc(n) < 1 or @trunc(n) > 1_000_000_000) return self.throwError(.range_error, "Invalid roundingIncrement", .{});
+        result.roundingIncrement = @intFromFloat(@trunc(n));
+    }
+    result.roundingMode = try surfaceEnum(self, options, "roundingMode", RoundingMode, default_mode);
+    if (try surfaceString(self, options, "smallestUnit")) |text| {
+        defer self.gc_allocator.free(text);
+        result.smallestUnit = try unitFromString(self, text, "smallestUnit");
+    }
+    return result;
+}
+
+fn surfaceZdtDifference(comptime since: bool) NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, allocator: Allocator, receiver: JSValue, args: []const JSValue) anyerror!JSValue {
+            const self = interp(ctx);
+            const dt = try zdtSelf(self, receiver);
+            const other = try surfaceZoned(self, allocator, arg(args, 0));
+            var options = try surfaceRounding(self, arg(args, 1), RoundingOptions, .trunc, false);
+            // Resolve the JS ZonedDateTime default before the native time-unit
+            // path delegates to Instant, whose own default is seconds.
+            if (options.largestUnit == null) {
+                options.largestUnit = if (options.smallestUnit) |unit|
+                    (if (@backingInt(unit) < @backingInt(Unit.hour)) unit else .hour)
+                else
+                    .hour;
+            }
+            const result = if (since) dt.since(allocator, ioHandle(), other, options) catch |e| return temporalErr(self, e) else dt.until(allocator, ioHandle(), other, options) catch |e| return temporalErr(self, e);
+            return self.gcNewTemporal(.{ .duration = result });
+        }
+    }.call;
+}
+
+fn surfaceZdtRound(ctx: *anyopaque, allocator: Allocator, receiver: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self = interp(ctx);
+    const dt = try zdtSelf(self, receiver);
+    if (arg(args, 0) == .undefined) return self.throwError(.type_error, "round requires options", .{});
+    const options = try surfaceRounding(self, arg(args, 0), RoundOptions, .halfExpand, true);
+    return self.gcNewTemporal(.{ .zoned_date_time = dt.round(allocator, ioHandle(), options) catch |e| return temporalErr(self, e) });
+}
+
+fn freeSurfaceFields(self: *Interpreter, fields: anytype) void {
+    inline for (@typeInfo(@TypeOf(fields)).@"struct".field_names) |key| {
+        if (comptime @FieldType(@TypeOf(fields), key) == ?[]const u8) {
+            if (@field(fields, key)) |text| self.gc_allocator.free(text);
+        }
+    }
+}
+
+fn surfaceCalendar(self: *Interpreter, text: []const u8) anyerror![]const u8 {
+    if (std.ascii.eqlIgnoreCase(text, "iso8601")) return "iso8601";
+    if (text.len < 2 or (!std.ascii.isDigit(text[0]) and text[0] != '+' and text[0] != '-' and text[0] != 'T' and text[0] != 't')) return text;
+    if (ztemporal.PlainDate.from(.{ .string = text }, .{})) |_| {} else |_| {
+        if (ztemporal.PlainTime.from(.{ .string = text }, .{})) |_| {} else |_| {
+            if (ztemporal.PlainYearMonth.from(.{ .string = text }, .{})) |_| {} else |_| {
+                if (ztemporal.PlainMonthDay.from(.{ .string = text }, .{})) |_| {} else |_| {
+                    _ = ztemporal.Instant.from(.{ .string = text }) catch |e| return temporalErr(self, e);
+                }
+            }
+        }
+    }
+    // Calendar-like ISO strings select their first calendar annotation;
+    // the typed calendar operation validates the extracted identifier.
+    const normal = std.mem.indexOf(u8, text, "[u-ca=");
+    const critical = std.mem.indexOf(u8, text, "[!u-ca=");
+    if (normal != null or critical != null) {
+        const use_critical = critical != null and (normal == null or critical.? < normal.?);
+        const value_start = if (use_critical) critical.? + 7 else normal.? + 6;
+        if (std.mem.indexOfScalarPos(u8, text, value_start, ']')) |end| return text[value_start..end];
+    }
+    return "iso8601";
 }

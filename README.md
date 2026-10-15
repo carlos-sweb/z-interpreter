@@ -49,9 +49,22 @@ The z-* ecosystem's already-implemented methods are exposed to JS as native func
 
 ## Temporal
 
-[z-temporal](https://github.com/carlos-sweb/z-temporal) (TC39's modern date/time API, built independently as its own general-purpose Zig library) is wired in behind a single `.temporal` `JSValue` variant wrapping an internal `TemporalValue` union — one variant, not eight, so every OTHER exhaustive switch across this engine (equality, GC tracing, coercion, `Object()`, `instanceof`'s prototype lookup, ...) only needed one new arm instead of eight. `Temporal.PlainDate`/`PlainTime`/`PlainDateTime`/`PlainYearMonth`/`PlainMonthDay`/`Instant`/`Duration` are all fully constructable with accessor getters (`.year`, not `.year()`), `with`/`add`/`subtract`/`until`/`since`/`round`/`compare`/`equals`/`toString`, and the right `.from()` static per type (string, another instance, or a fields object). `Temporal.now.instant()` works too.
+The interpreter uses z-temporal v0.2.0 for typed values and algorithms. It exposes
+all eight Temporal constructors and `Temporal.Now`, including ZonedDateTime
+arithmetic, rounding, differences, calendar/zone changes, and Plain conversions.
+Prototype accessors, constructor descriptors, `Symbol.toStringTag`, `toJSON`, and
+`valueOf` are installed as JavaScript properties. `toLocaleString` uses Temporal's
+basic text fallback because this engine does not implement ECMA-402/Intl.
 
-**`Temporal.ZonedDateTime` and every `Temporal.now.*` function except `.instant()` are NOT wired** — both need real `std.Io` (to read IANA tzdata via z-date's `Timezone.loadNamed`), and **this repo's core has no ambient `Io` instance available in native-function context**, the identical architectural gap `new Date()`'s own clock read already documents above (worked around there with a raw Linux syscall instead of `std.Io`, since Date only needs the current instant, not file I/O). Closing this for real needs one of: (a) threading an `io: std.Io` field through `Interpreter` end-to-end (a real, deliberate architectural change — `Interpreter.init`'s signature, every call site, and probably z-run's own `main.zig` would need to change), or (b) the self-contained-`Io.Threaded`-per-native-call trick [z-print](https://github.com/carlos-sweb/z-print)'s `stdio.zig` already uses elsewhere in this ecosystem for the same "need `Io`, have no ambient one" problem, applied narrowly to just the ZonedDateTime/timezone-reading call sites. Neither has been decided yet — this is a known, deliberate scope boundary, not an oversight.
+`Date.prototype.toTemporalInstant` converts valid Date timestamps exactly, and
+`Object.getOwnPropertyDescriptors` supports reflection used by Temporal helpers.
+The bindings use the existing lazy I/O handle for named IANA zones.
+
+This is not full Temporal conformance. Remaining gaps include BigInt epoch
+nanosecond representation/precision, some existing property-bag coercions and
+instance property operations, formatting options, and native algorithm edge
+cases. See [the surface verification report](docs/analysis/temporal-surface-2026-10-14/README.md)
+for the measured scope and remaining failures.
 
 ## Iteration
 

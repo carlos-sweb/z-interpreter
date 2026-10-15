@@ -411,6 +411,7 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
         // F.myProp = 1 -- the old "functions have no property bag"
         // gap is gone).
         if (std.mem.eql(u8, key, "prototype")) {
+            if (@import("temporal_builtins.zig").isIntrinsicConstructor(obj)) return self.throwError(.type_error, "Cannot assign to read only Temporal prototype", .{});
             if (value != .object) return self.throwError(.type_error, "Setting a function's prototype to a non-object is not supported yet", .{});
             // Old one released only after the new one is stored, so
             // `F.prototype = F.prototype` never drops it to zero midway.
@@ -861,6 +862,7 @@ pub fn materializeProtos(self: *Interpreter) !void {
     if (self.symbol_to_string_tag) |tag_sym| {
         const tag_key = try self.encodeKey(tag_sym);
         defer self.gc_allocator.free(tag_key);
+        try @import("temporal_builtins.zig").installTags(self, tag_key);
         const tag_attrs = zvalue.PropertyDescriptor{ .writable = false, .enumerable = false, .configurable = true };
         try self.protos.map.object.value.defineProperty(tag_key, try self.gcNewString("Map"), tag_attrs);
         try self.protos.set.object.value.defineProperty(tag_key, try self.gcNewString("Set"), tag_attrs);

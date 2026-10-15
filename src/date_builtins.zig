@@ -22,6 +22,7 @@ const requireTag = builtin_helpers.requireTag;
 pub const date_methods = std.StaticStringMap(MethodSpec).initComptime(.{
     // Local-time getters
     .{ "getTime", MethodSpec{ .call = dateGetTime, .arity = 0 } },
+    .{ "toTemporalInstant", MethodSpec{ .call = dateToTemporalInstant, .arity = 0 } },
     .{ "valueOf", MethodSpec{ .call = dateGetTime, .arity = 0 } },
     .{ "getFullYear", MethodSpec{ .call = dateGetter("getFullYear"), .arity = 0 } },
     .{ "getMonth", MethodSpec{ .call = dateGetter("getMonth"), .arity = 0 } },
@@ -358,4 +359,15 @@ pub fn install(self: *Interpreter) !void {
         .{ .name = "parse", .value = .{ .method = .{ .call = dateParse, .arity = 1 } } },
         .{ .name = "UTC", .value = .{ .method = .{ .call = dateUTC, .arity = 7 } } },
     } });
+}
+
+fn dateToTemporalInstant(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = args;
+    const self = interp(ctx);
+    const date = try requireDate(ctx, this_value, "toTemporalInstant");
+    const ms = date.date.value.getTime();
+    if (ms > 8_640_000_000_000_000 or ms < -8_640_000_000_000_000) return self.throwError(.range_error, "Invalid Date", .{});
+    const instant = @import("ztemporal").Instant.fromEpochMilliseconds(ms) catch return self.throwError(.range_error, "Invalid Date", .{});
+    return self.gcNewTemporal(.{ .instant = instant });
 }

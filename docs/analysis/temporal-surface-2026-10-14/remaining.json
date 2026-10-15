@@ -1,0 +1,3046 @@
+[
+  {
+    "path": "test/built-ins/Date/prototype/toTemporalInstant/this-value-valid-date.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: the (Unix) epoch Expected SameValue(\u00ab0\u00bb, \u00ab0n\u00bb) to be true }",
+    "features": [
+      "Temporal",
+      "BigInt"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "the (Unix) epoch Expected SameValue(\u00ab0\u00bb, \u00ab0n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/Instant/prototype/toJSON/negative-epochnanoseconds.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: Expected SameValue(\u00ab\"1969-07-24T16:50:35Z\"\u00bb, \u00ab\"1969-07-24T16:50:35.000000001Z\"\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "Expected SameValue(\u00ab\"1969-07-24T16:50:35Z\"\u00bb, \u00ab\"1969-07-24T16:50:35.000000001Z\"\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/Instant/prototype/toJSON/year-format.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: large negative year formatted as 6-digit Expected SameValue(\u00ab\"-100000-07-01T21:30:35.999879168Z\"\u00bb, \u00ab\"-100000-07-01T21:30:36Z\"\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "large negative year formatted as 6-digit Expected SameValue(\u00ab\"-100000-07-01T21:30:35.999879168Z\"\u00bb, \u00ab\"-100000-07-01T21:30:36Z\"\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/compare/argument-plaindatetime.js",
+    "result": "FAIL",
+    "reason": "Uncaught TypeError: Object.defineProperty called on non-object",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "existing-interpreter-instance-property-model",
+    "certainty": "confirmed",
+    "evidence": [
+      "definePropertyOn has no .temporal branch."
+    ],
+    "includes": [
+      "compareArray.js",
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/compare/argument-zoneddatetime-slots.js",
+    "result": "FAIL",
+    "reason": "Uncaught TypeError: Temporal.PlainDate.from requires a string or an object",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "existing-interpreter-cross-type-coercion",
+    "certainty": "confirmed",
+    "evidence": [
+      "coercePlainDate accepts only PlainDate instances, strings, or .object bags."
+    ],
+    "includes": [
+      "compareArray.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/from/argument-plaindatetime.js",
+    "result": "FAIL",
+    "reason": "Uncaught TypeError: Object.defineProperty called on non-object",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "existing-interpreter-instance-property-model",
+    "certainty": "confirmed",
+    "evidence": [
+      "definePropertyOn has no .temporal branch."
+    ],
+    "includes": [
+      "compareArray.js",
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/from/argument-zoneddatetime-slots.js",
+    "result": "FAIL",
+    "reason": "Uncaught TypeError: Temporal.PlainDate.from requires a string or an object",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "existing-interpreter-cross-type-coercion",
+    "certainty": "confirmed",
+    "evidence": [
+      "coercePlainDate accepts only PlainDate instances, strings, or .object bags."
+    ],
+    "includes": [
+      "compareArray.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/equals/argument-plaindatetime.js",
+    "result": "FAIL",
+    "reason": "Uncaught TypeError: Object.defineProperty called on non-object",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "existing-interpreter-instance-property-model",
+    "certainty": "confirmed",
+    "evidence": [
+      "definePropertyOn has no .temporal branch."
+    ],
+    "includes": [
+      "compareArray.js",
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/equals/argument-zoneddatetime-slots.js",
+    "result": "FAIL",
+    "reason": "Uncaught TypeError: Temporal.PlainDate.from requires a string or an object",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "existing-interpreter-cross-type-coercion",
+    "certainty": "confirmed",
+    "evidence": [
+      "coercePlainDate accepts only PlainDate instances, strings, or .object bags."
+    ],
+    "includes": [
+      "compareArray.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/since/argument-plaindatetime.js",
+    "result": "FAIL",
+    "reason": "Uncaught TypeError: Object.defineProperty called on non-object",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "existing-interpreter-instance-property-model",
+    "certainty": "confirmed",
+    "evidence": [
+      "definePropertyOn has no .temporal branch."
+    ],
+    "includes": [
+      "compareArray.js",
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/since/argument-zoneddatetime-slots.js",
+    "result": "FAIL",
+    "reason": "Uncaught TypeError: Temporal.PlainDate.from requires a string or an object",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "existing-interpreter-cross-type-coercion",
+    "certainty": "confirmed",
+    "evidence": [
+      "coercePlainDate accepts only PlainDate instances, strings, or .object bags."
+    ],
+    "includes": [
+      "compareArray.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainMonthDay/basic.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: referenceISOYear result: Expected SameValue(\u00ab12\u00bb, \u00ab1972\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "existing-interpreter-PlainMonthDay-format-options",
+    "certainty": "confirmed",
+    "evidence": [
+      "pmdToString ignores calendarName; temporalHelpers extracts the reference year from formatted output."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/argument-string-time-designator-required-for-disambiguation.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: '12-14' is ambiguous and requires T prefix Expected a RangeError to be thrown but no exception was thrown at all }",
+    "features": [
+      "Temporal",
+      "arrow-function"
+    ],
+    "cause": "native-PlainTime-parser",
+    "certainty": "confirmed",
+    "evidence": [
+      "native-evidence.json reproduces PlainTime.from(12-14) acceptance versus Node RangeError."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/argument-zoneddatetime-negative-epochnanoseconds.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: nanosecond result: Expected SameValue(\u00ab0\u00bb, \u00ab1\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "nanosecond result: Expected SameValue(\u00ab0\u00bb, \u00ab1\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/plaintime-propertybag-no-time-units.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: missing time units default to 0 Expected SameValue(\u00ab946686600000000000\u00bb, \u00ab946686600000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "missing time units default to 0 Expected SameValue(\u00ab946686600000000000\u00bb, \u00ab946686600000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-string-time-designator-required-for-disambiguation.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: '12-14' is ambiguous and requires T prefix Expected a RangeError to be thrown but no exception was thrown at all }",
+    "features": [
+      "Temporal",
+      "arrow-function"
+    ],
+    "cause": "native-PlainTime-parser",
+    "certainty": "confirmed",
+    "evidence": [
+      "native-evidence.json reproduces PlainTime.from(12-14) acceptance versus Node RangeError."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-string-time-separators.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: variant time separators (uppercase T) Expected SameValue(\u00ab957270896987654300\u00bb, \u00ab957270896987654321n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "variant time separators (uppercase T) Expected SameValue(\u00ab957270896987654300\u00bb, \u00ab957270896987654321n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-string-time-zone-annotation.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: time zone annotation (named, with no offset) Expected SameValue(\u00ab957270896987654300\u00bb, \u00ab957270896987654321n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "time zone annotation (named, with no offset) Expected SameValue(\u00ab957270896987654300\u00bb, \u00ab957270896987654321n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-string-unknown-annotation.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: unknown annotation (alone) Expected SameValue(\u00ab957270896987654300\u00bb, \u00ab957270896987654321n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "unknown annotation (alone) Expected SameValue(\u00ab957270896987654300\u00bb, \u00ab957270896987654321n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-string-with-time-designator.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: T prefix is accepted: T00:30 Expected SameValue(\u00ab946686600000000000\u00bb, \u00ab946686600000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal",
+      "arrow-function"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "T prefix is accepted: T00:30 Expected SameValue(\u00ab946686600000000000\u00bb, \u00ab946686600000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-string-calendar-annotation.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: calendar annotation (without time zone) Expected SameValue(\u00ab957270896987654300\u00bb, \u00ab957270896987654321n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "calendar annotation (without time zone) Expected SameValue(\u00ab957270896987654300\u00bb, \u00ab957270896987654321n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-string-date-with-utc-offset.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: \"12:34:56.987654321+00\" is a valid UTC offset with time for PlainTime Expected SameValue(\u00ab957270896987654300\u00bb, \u00ab957270896987654321n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "\"12:34:56.987654321+00\" is a valid UTC offset with time for PlainTime Expected SameValue(\u00ab957270896987654300\u00bb, \u00ab957270896987654321n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-zoneddatetime-negative-epochnanoseconds.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: Expected SameValue(\u00ab957286235000000000\u00bb, \u00ab957286235000000001n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "Expected SameValue(\u00ab957286235000000000\u00bb, \u00ab957286235000000001n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/leap-second.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: leap second is a valid ISO string for PlainTime Expected SameValue(\u00ab957311999000000000\u00bb, \u00ab957311999000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "leap second is a valid ISO string for PlainTime Expected SameValue(\u00ab957311999000000000\u00bb, \u00ab957311999000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/until/argument-zoneddatetime-slots.js",
+    "result": "FAIL",
+    "reason": "Uncaught TypeError: Temporal.PlainDate.from requires a string or an object",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "existing-interpreter-cross-type-coercion",
+    "certainty": "confirmed",
+    "evidence": [
+      "coercePlainDate accepts only PlainDate instances, strings, or .object bags."
+    ],
+    "includes": [
+      "compareArray.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/until/argument-plaindatetime.js",
+    "result": "FAIL",
+    "reason": "Uncaught TypeError: Object.defineProperty called on non-object",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "existing-interpreter-instance-property-model",
+    "certainty": "confirmed",
+    "evidence": [
+      "definePropertyOn has no .temporal branch."
+    ],
+    "includes": [
+      "compareArray.js",
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/compare/argument-plaindate.js",
+    "result": "FAIL",
+    "reason": "Uncaught TypeError: Object.defineProperty called on non-object",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "existing-interpreter-instance-property-model",
+    "certainty": "confirmed",
+    "evidence": [
+      "definePropertyOn has no .temporal branch."
+    ],
+    "includes": [
+      "compareArray.js",
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/from/argument-plaindate.js",
+    "result": "FAIL",
+    "reason": "Uncaught TypeError: Object.defineProperty called on non-object",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "existing-interpreter-instance-property-model",
+    "certainty": "confirmed",
+    "evidence": [
+      "definePropertyOn has no .temporal branch."
+    ],
+    "includes": [
+      "compareArray.js",
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/equals/argument-plaindate.js",
+    "result": "FAIL",
+    "reason": "Uncaught TypeError: Object.defineProperty called on non-object",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "existing-interpreter-instance-property-model",
+    "certainty": "confirmed",
+    "evidence": [
+      "definePropertyOn has no .temporal branch."
+    ],
+    "includes": [
+      "compareArray.js",
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/since/argument-plaindate.js",
+    "result": "FAIL",
+    "reason": "Uncaught TypeError: Object.defineProperty called on non-object",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "existing-interpreter-instance-property-model",
+    "certainty": "confirmed",
+    "evidence": [
+      "definePropertyOn has no .temporal branch."
+    ],
+    "includes": [
+      "compareArray.js",
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/basic.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: nanoseconds Expected SameValue(\u00ab1577836800000000000\u00bb, \u00ab1577836800000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "nanoseconds Expected SameValue(\u00ab1577836800000000000\u00bb, \u00ab1577836800000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/constant-offset.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: Result is 2019-02-16T20:15Z regardless of disambiguation Expected SameValue(\u00ab1550348100000000000\u00bb, \u00ab1550348100000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "Result is 2019-02-16T20:15Z regardless of disambiguation Expected SameValue(\u00ab1550348100000000000\u00bb, \u00ab1550348100000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/disambiguation.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: epoch nanoseconds remains constant Expected SameValue(\u00ab972783900000000000\u00bb, \u00ab972783900000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "epoch nanoseconds remains constant Expected SameValue(\u00ab972783900000000000\u00bb, \u00ab972783900000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/two-digit-year.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: Result is 0098-10-29T04:46:38.271986102Z regardless of disambiguation Expected SameValue(\u00ab-59048507601728010000\u00bb, \u00ab-59048507601728013898n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "Result is 0098-10-29T04:46:38.271986102Z regardless of disambiguation Expected SameValue(\u00ab-59048507601728010000\u00bb, \u00ab-59048507601728013898n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/year-zero.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: Result is 0000-10-29T04:46:38.271986102Z regardless of disambiguation Expected SameValue(\u00ab-62141109201728010000\u00bb, \u00ab-62141109201728013898n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "Result is 0000-10-29T04:46:38.271986102Z regardless of disambiguation Expected SameValue(\u00ab-62141109201728010000\u00bb, \u00ab-62141109201728013898n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/fixed-offset-near-date-time-limits.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: Expected SameValue(\u00ab-8.64e+21\u00bb, \u00ab-8640000000000000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal",
+      "exponentiation"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "Expected SameValue(\u00ab-8.64e+21\u00bb, \u00ab-8640000000000000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/negative-year.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: Result is -001000-10-29T04:46:38.271986102Z regardless of disambiguation Expected SameValue(\u00ab-93698104401728010000\u00bb, \u00ab-93698104401728013898n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "Result is -001000-10-29T04:46:38.271986102Z regardless of disambiguation Expected SameValue(\u00ab-93698104401728010000\u00bb, \u00ab-93698104401728013898n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/options-object.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: options may be an empty plain object Expected SameValue(\u00ab957225600000000000\u00bb, \u00ab957225600000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "options may be an empty plain object Expected SameValue(\u00ab957225600000000000\u00bb, \u00ab957225600000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/until/argument-plaindate.js",
+    "result": "FAIL",
+    "reason": "Uncaught TypeError: Object.defineProperty called on non-object",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "existing-interpreter-instance-property-model",
+    "certainty": "confirmed",
+    "evidence": [
+      "definePropertyOn has no .temporal branch."
+    ],
+    "includes": [
+      "compareArray.js",
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/argument-string-time-designator-required-for-disambiguation.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: '12-14' is ambiguous and requires T prefix Expected a RangeError to be thrown but no exception was thrown at all }",
+    "features": [
+      "Temporal",
+      "arrow-function"
+    ],
+    "cause": "native-PlainTime-parser",
+    "certainty": "confirmed",
+    "evidence": [
+      "native-evidence.json reproduces PlainTime.from(12-14) acceptance versus Node RangeError."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/argument-zoneddatetime-negative-epochnanoseconds.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: nanosecond result: Expected SameValue(\u00ab0\u00bb, \u00ab1\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "nanosecond result: Expected SameValue(\u00ab0\u00bb, \u00ab1\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainTime/from/argument-plaindatetime.js",
+    "result": "FAIL",
+    "reason": "Uncaught TypeError: Object.defineProperty called on non-object",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "existing-interpreter-instance-property-model",
+    "certainty": "confirmed",
+    "evidence": [
+      "definePropertyOn has no .temporal branch."
+    ],
+    "includes": [
+      "compareArray.js",
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/from/basic.js",
+    "result": "FAIL",
+    "reason": "Uncaught TypeError: month is required",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "existing-interpreter-monthCode-coercion",
+    "certainty": "confirmed",
+    "evidence": [
+      "coercePlainYearMonth requires month and does not extract monthCode."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/from/overflow-constrain.js",
+    "result": "FAIL",
+    "reason": "Uncaught TypeError: month is required",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "existing-interpreter-monthCode-coercion",
+    "certainty": "confirmed",
+    "evidence": [
+      "coercePlainYearMonth requires month and does not extract monthCode."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/with/basic.js",
+    "result": "FAIL",
+    "reason": "Uncaught TypeError: Invalid or missing Temporal field",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "unresolved-semantic-edge",
+    "certainty": "unresolved",
+    "evidence": [
+      "API is installed; the first failure is semantic. Adapter/native ownership has not been established."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/argument-duration-max.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: operation succeeds with string with max years Expected SameValue(\u00ab8.64e+21\u00bb, \u00ab8640000000000000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "operation succeeds with string with max years Expected SameValue(\u00ab8.64e+21\u00bb, \u00ab8640000000000000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/argument-string-fractional-units-rounding-mode.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: positive fractional units rounded with correct rounding mode Expected SameValue(\u00ab3712500000000\u00bb, \u00ab3712500000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "positive fractional units rounded with correct rounding mode Expected SameValue(\u00ab3712500000000\u00bb, \u00ab3712500000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/add-large-subseconds.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: Expected SameValue(\u00ab1591973847002353700\u00bb, \u00ab1591973847002353569n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "Expected SameValue(\u00ab1591973847002353700\u00bb, \u00ab1591973847002353569n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/argument-string-negative-fractional-units.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: negative fractional hours Expected SameValue(\u00ab999911555595557200\u00bb, \u00ab999911555595557200n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "negative fractional hours Expected SameValue(\u00ab999911555595557200\u00bb, \u00ab999911555595557200n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/blank-duration.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: result is unchanged Expected SameValue(\u00ab1\u00bb, \u00ab1n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "result is unchanged Expected SameValue(\u00ab1\u00bb, \u00ab1n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/negative-epochnanoseconds.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: Expected SameValue(\u00ab-13763365000000000\u00bb, \u00ab-13763364999999999n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "Expected SameValue(\u00ab-13763365000000000\u00bb, \u00ab-13763364999999999n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/options-object.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: UTC Expected SameValue(\u00ab31536000000000000\u00bb, \u00ab31536000000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "UTC Expected SameValue(\u00ab31536000000000000\u00bb, \u00ab31536000000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/overflow-undefined.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: default overflow is constrain Expected SameValue(\u00ab5097599999999999\u00bb, \u00ab5097599999999999n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "default overflow is constrain Expected SameValue(\u00ab5097599999999999\u00bb, \u00ab5097599999999999n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/negative-epochnanoseconds.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: Expected SameValue(\u00ab-13849765000000000\u00bb, \u00ab-13849765000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "Expected SameValue(\u00ab-13849765000000000\u00bb, \u00ab-13849765000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/negative-time.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: Rounding with halfCeil rounds to the closest hour Expected SameValue(\u00ab-1000000800000000000\u00bb, \u00ab-1000000800000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "Rounding with halfCeil rounds to the closest hour Expected SameValue(\u00ab-1000000800000000000\u00bb, \u00ab-1000000800000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/rounding-direction.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: Rounding down is towards the Big Bang, not the epoch or 1 BCE (roundingMode floor) Expected SameValue(\u00ab-65261246400000000000\u00bb, \u00ab-65261246400000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "Rounding down is towards the Big Bang, not the epoch or 1 BCE (roundingMode floor) Expected SameValue(\u00ab-65261246400000000000\u00bb, \u00ab-65261246400000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingincrement-non-integer.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: roundingIncrement 2.5 truncates to 2 Expected SameValue(\u00ab1000000000000000000\u00bb, \u00ab1000000000000000006n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "roundingIncrement 2.5 truncates to 2 Expected SameValue(\u00ab1000000000000000000\u00bb, \u00ab1000000000000000006n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingincrement-undefined.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: default roundingIncrement is 1 Expected SameValue(\u00ab1000000001000000000\u00bb, \u00ab1000000001000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "default roundingIncrement is 1 Expected SameValue(\u00ab1000000001000000000\u00bb, \u00ab1000000001000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-ceil.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: rounds to day (roundingMode = ceil) Expected SameValue(\u00ab217206000000000000\u00bb, \u00ab217206000000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "rounds to day (roundingMode = ceil) Expected SameValue(\u00ab217206000000000000\u00bb, \u00ab217206000000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-expand.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: rounds to day (roundingMode = expand) Expected SameValue(\u00ab217206000000000000\u00bb, \u00ab217206000000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "rounds to day (roundingMode = expand) Expected SameValue(\u00ab217206000000000000\u00bb, \u00ab217206000000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-floor.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: rounds to day (roundingMode = floor) Expected SameValue(\u00ab217119600000000000\u00bb, \u00ab217119600000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "rounds to day (roundingMode = floor) Expected SameValue(\u00ab217119600000000000\u00bb, \u00ab217119600000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-halfCeil.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: rounds to day (roundingMode = halfCeil) Expected SameValue(\u00ab217206000000000000\u00bb, \u00ab217206000000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "rounds to day (roundingMode = halfCeil) Expected SameValue(\u00ab217206000000000000\u00bb, \u00ab217206000000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-halfEven.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: rounds to day (roundingMode = halfEven) Expected SameValue(\u00ab217206000000000000\u00bb, \u00ab217206000000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "rounds to day (roundingMode = halfEven) Expected SameValue(\u00ab217206000000000000\u00bb, \u00ab217206000000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-halfExpand.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: rounds to day (roundingMode = halfExpand) Expected SameValue(\u00ab217206000000000000\u00bb, \u00ab217206000000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "rounds to day (roundingMode = halfExpand) Expected SameValue(\u00ab217206000000000000\u00bb, \u00ab217206000000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-halfFloor.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: rounds to day (roundingMode = halfFloor) Expected SameValue(\u00ab217206000000000000\u00bb, \u00ab217206000000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "rounds to day (roundingMode = halfFloor) Expected SameValue(\u00ab217206000000000000\u00bb, \u00ab217206000000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-halfTrunc.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: rounds to day (roundingMode = halfTrunc) Expected SameValue(\u00ab217206000000000000\u00bb, \u00ab217206000000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "rounds to day (roundingMode = halfTrunc) Expected SameValue(\u00ab217206000000000000\u00bb, \u00ab217206000000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-trunc.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: rounds to day (roundingMode = trunc) Expected SameValue(\u00ab217119600000000000\u00bb, \u00ab217119600000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "rounds to day (roundingMode = trunc) Expected SameValue(\u00ab217119600000000000\u00bb, \u00ab217119600000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-undefined.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: default roundingMode is halfExpand Expected SameValue(\u00ab1000000000123987000\u00bb, \u00ab1000000000123988000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "default roundingMode is halfExpand Expected SameValue(\u00ab1000000000123987000\u00bb, \u00ab1000000000123988000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-at-limits.js",
+    "result": "FAIL",
+    "reason": "Uncaught RangeError: Invalid or out-of-range Temporal value",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "unresolved-semantic-edge",
+    "certainty": "unresolved",
+    "evidence": [
+      "API is installed; the first failure is semantic. Adapter/native ownership has not been established."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-string-limits.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: \"-271821-04-19T23:00-01:00[-01:00]\" is outside the representable range of ZonedDateTime Expected a RangeError to be thrown but no exception was thrown at all }",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "native-ZonedDateTime-local-range",
+    "certainty": "confirmed",
+    "evidence": [
+      "native-evidence.json reproduces lower local-date limit acceptance versus Node RangeError."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-string-multiple-time-zone.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: reject more than one time zone annotation: 1970-01-01T00:00[UTC][UTC] Expected a RangeError to be thrown but no exception was thrown at all }",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "native-ZonedDateTime-duplicate-zone-parser",
+    "certainty": "confirmed",
+    "evidence": [
+      "native-evidence.json reproduces duplicate [UTC] acceptance versus Node RangeError."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/balance-negative-time-units.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: nanoseconds balance: nanoseconds result Expected SameValue(\u00ab960\u00bb, \u00ab999\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "nanoseconds balance: nanoseconds result Expected SameValue(\u00ab960\u00bb, \u00ab999\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/casts-argument.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: nanoseconds result Expected SameValue(\u00ab-200\u00bb, \u00ab-211\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "nanoseconds result Expected SameValue(\u00ab-200\u00bb, \u00ab-211\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/defaults-to-returning-hours.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: nanoseconds result Expected SameValue(\u00ab0\u00bb, \u00ab1\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "nanoseconds result Expected SameValue(\u00ab0\u00bb, \u00ab1\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/exact-multiple-of-larger-unit.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: P7D days..weeks ceil: days result: Expected SameValue(\u00ab1\u00bb, \u00ab0\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "unresolved-semantic-edge",
+    "certainty": "unresolved",
+    "evidence": [
+      "API is installed; the first failure is semantic. Adapter/native ownership has not been established."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/largestunit-undefined.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: default largestUnit is hour: nanoseconds result Expected SameValue(\u00ab272\u00bb, \u00ab321\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "default largestUnit is hour: nanoseconds result Expected SameValue(\u00ab272\u00bb, \u00ab321\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/largestunit.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: does not include higher units than necessary (largest unit unspecified): microseconds result: Expected SameValue(\u00ab110\u00bb, \u00ab111\u00bb) to be true }",
+    "features": [
+      "Temporal",
+      "BigInt"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "does not include higher units than necessary (largest unit unspecified): microseconds result: Expected SameValue(\u00ab110\u00bb, \u00ab111\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/negative-epochnanoseconds.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: seconds result: Expected SameValue(\u00ab-25\u00bb, \u00ab-24\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "seconds result: Expected SameValue(\u00ab-25\u00bb, \u00ab-24\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/options-undefined.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: default smallest unit is nanoseconds and no rounding Expected SameValue(\u00ab0\u00bb, \u00ab1\u00bb) to be true }",
+    "features": [
+      "BigInt",
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "default smallest unit is nanoseconds and no rounding Expected SameValue(\u00ab0\u00bb, \u00ab1\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/order-of-operations.js",
+    "result": "FAIL",
+    "reason": "Uncaught TypeError: Temporal offset must be a string",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "unresolved-semantic-edge",
+    "certainty": "unresolved",
+    "evidence": [
+      "API is installed; the first failure is semantic. Adapter/native ownership has not been established."
+    ],
+    "includes": [
+      "compareArray.js",
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/rounding-increments.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: nanoseconds result Expected SameValue(\u00ab630\u00bb, \u00ab530\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "nanoseconds result Expected SameValue(\u00ab630\u00bb, \u00ab530\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-halfCeil.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: rounds to microseconds (rounding mode = halfCeil, negative case): microseconds result: Expected SameValue(\u00ab-198\u00bb, \u00ab-197\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "rounds to microseconds (rounding mode = halfCeil, negative case): microseconds result: Expected SameValue(\u00ab-198\u00bb, \u00ab-197\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-halfEven.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: rounds to nanoseconds (roundingMode = halfEven, positive case): nanoseconds result Expected SameValue(\u00ab632\u00bb, \u00ab500\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "rounds to nanoseconds (roundingMode = halfEven, positive case): nanoseconds result Expected SameValue(\u00ab632\u00bb, \u00ab500\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-halfExpand.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: rounds to nanoseconds (roundingMode = halfExpand, positive case): nanoseconds result Expected SameValue(\u00ab632\u00bb, \u00ab500\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "rounds to nanoseconds (roundingMode = halfExpand, positive case): nanoseconds result Expected SameValue(\u00ab632\u00bb, \u00ab500\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-halfFloor.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: rounds to microseconds (roundingMode = halfFloor, positive case): microseconds result: Expected SameValue(\u00ab198\u00bb, \u00ab197\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "rounds to microseconds (roundingMode = halfFloor, positive case): microseconds result: Expected SameValue(\u00ab198\u00bb, \u00ab197\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-halfTrunc.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: rounds to microseconds (roundingMode = halfTrunc, positive case): microseconds result: Expected SameValue(\u00ab198\u00bb, \u00ab197\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "rounds to microseconds (roundingMode = halfTrunc, positive case): microseconds result: Expected SameValue(\u00ab198\u00bb, \u00ab197\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-trunc.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: rounds to nanoseconds (roundingMode = trunc, positive case): nanoseconds result Expected SameValue(\u00ab632\u00bb, \u00ab500\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "rounds to nanoseconds (roundingMode = trunc, positive case): nanoseconds result Expected SameValue(\u00ab632\u00bb, \u00ab500\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/argument-duration-max.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: operation succeeds with string with max years Expected SameValue(\u00ab-8.64e+21\u00bb, \u00ab-8640000000000000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "operation succeeds with string with max years Expected SameValue(\u00ab-8.64e+21\u00bb, \u00ab-8640000000000000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/argument-string-fractional-units-rounding-mode.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: positive fractional units rounded with correct rounding mode Expected SameValue(\u00ab-3712500000000\u00bb, \u00ab-3712500000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "positive fractional units rounded with correct rounding mode Expected SameValue(\u00ab-3712500000000\u00bb, \u00ab-3712500000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/argument-string-negative-fractional-units.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: negative fractional hours Expected SameValue(\u00ab1000088444404442800\u00bb, \u00ab1000088444404442800n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "negative fractional hours Expected SameValue(\u00ab1000088444404442800\u00bb, \u00ab1000088444404442800n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/blank-duration.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: result is unchanged Expected SameValue(\u00ab1\u00bb, \u00ab1n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "result is unchanged Expected SameValue(\u00ab1\u00bb, \u00ab1n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/negative-epochnanoseconds.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: Expected SameValue(\u00ab-13936165000000000\u00bb, \u00ab-13936164999999999n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "Expected SameValue(\u00ab-13936165000000000\u00bb, \u00ab-13936164999999999n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingincrement-non-integer.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: roundingIncrement 2.5 truncates to 2: nanoseconds result Expected SameValue(\u00ab0\u00bb, \u00ab4\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "roundingIncrement 2.5 truncates to 2: nanoseconds result Expected SameValue(\u00ab0\u00bb, \u00ab4\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingincrement-undefined.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: default roundingIncrement is 1: nanoseconds result Expected SameValue(\u00ab88\u00bb, \u00ab1\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "default roundingIncrement is 1: nanoseconds result Expected SameValue(\u00ab88\u00bb, \u00ab1\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-ceil.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: rounds to nanoseconds (roundingMode = ceil, positive case): nanoseconds result Expected SameValue(\u00ab632\u00bb, \u00ab500\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "rounds to nanoseconds (roundingMode = ceil, positive case): nanoseconds result Expected SameValue(\u00ab632\u00bb, \u00ab500\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-expand.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: rounds to nanoseconds (roundingMode = expand, positive case): nanoseconds result Expected SameValue(\u00ab632\u00bb, \u00ab500\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "rounds to nanoseconds (roundingMode = expand, positive case): nanoseconds result Expected SameValue(\u00ab632\u00bb, \u00ab500\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-floor.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: rounds to nanoseconds (roundingMode = floor, positive case): nanoseconds result Expected SameValue(\u00ab632\u00bb, \u00ab500\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "rounds to nanoseconds (roundingMode = floor, positive case): nanoseconds result Expected SameValue(\u00ab632\u00bb, \u00ab500\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/options-object.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: UTC Expected SameValue(\u00ab-31536000000000000\u00bb, \u00ab-31536000000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "UTC Expected SameValue(\u00ab-31536000000000000\u00bb, \u00ab-31536000000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/overflow-undefined.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: default overflow is constrain Expected SameValue(\u00ab-2678400000000001\u00bb, \u00ab-2678400000000001n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "default overflow is constrain Expected SameValue(\u00ab-2678400000000001\u00bb, \u00ab-2678400000000001n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/smallestunit-undefined.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: default smallestUnit is nanosecond: nanoseconds result Expected SameValue(\u00ab272\u00bb, \u00ab321\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "default smallestUnit is nanosecond: nanoseconds result Expected SameValue(\u00ab272\u00bb, \u00ab321\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/subtract-large-subseconds.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: Expected SameValue(\u00ab1573959448492871700\u00bb, \u00ab1573959448492871587n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "Expected SameValue(\u00ab1573959448492871700\u00bb, \u00ab1573959448492871587n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-string-limits.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: \"-271821-04-19T23:00-01:00[-01:00]\" is outside the representable range of ZonedDateTime Expected a RangeError to be thrown but no exception was thrown at all }",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "native-ZonedDateTime-local-range",
+    "certainty": "confirmed",
+    "evidence": [
+      "native-evidence.json reproduces lower local-date limit acceptance versus Node RangeError."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-string-multiple-time-zone.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: reject more than one time zone annotation: 1970-01-01T00:00[UTC][UTC] Expected a RangeError to be thrown but no exception was thrown at all }",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "native-ZonedDateTime-duplicate-zone-parser",
+    "certainty": "confirmed",
+    "evidence": [
+      "native-evidence.json reproduces duplicate [UTC] acceptance versus Node RangeError."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/exact-multiple-of-larger-unit.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: P7D days..weeks ceil: days result: Expected SameValue(\u00ab1\u00bb, \u00ab0\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "unresolved-semantic-edge",
+    "certainty": "unresolved",
+    "evidence": [
+      "API is installed; the first failure is semantic. Adapter/native ownership has not been established."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-at-limits.js",
+    "result": "FAIL",
+    "reason": "Uncaught RangeError: Invalid or out-of-range Temporal value",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "unresolved-semantic-edge",
+    "certainty": "unresolved",
+    "evidence": [
+      "API is installed; the first failure is semantic. Adapter/native ownership has not been established."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/balance-negative-time-units.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: nanoseconds balance: nanoseconds result Expected SameValue(\u00ab960\u00bb, \u00ab999\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "nanoseconds balance: nanoseconds result Expected SameValue(\u00ab960\u00bb, \u00ab999\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/largestunit-undefined.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: default largestUnit is hour: nanoseconds result Expected SameValue(\u00ab272\u00bb, \u00ab321\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "default largestUnit is hour: nanoseconds result Expected SameValue(\u00ab272\u00bb, \u00ab321\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/negative-epochnanoseconds.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: seconds result: Expected SameValue(\u00ab25\u00bb, \u00ab24\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "seconds result: Expected SameValue(\u00ab25\u00bb, \u00ab24\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/options-undefined.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: default smallest unit is nanoseconds and no rounding Expected SameValue(\u00ab0\u00bb, \u00ab1\u00bb) to be true }",
+    "features": [
+      "BigInt",
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "default smallest unit is nanoseconds and no rounding Expected SameValue(\u00ab0\u00bb, \u00ab1\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/order-of-operations.js",
+    "result": "FAIL",
+    "reason": "Uncaught TypeError: Temporal offset must be a string",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "unresolved-semantic-edge",
+    "certainty": "unresolved",
+    "evidence": [
+      "API is installed; the first failure is semantic. Adapter/native ownership has not been established."
+    ],
+    "includes": [
+      "compareArray.js",
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingincrement-non-integer.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: roundingIncrement 2.5 truncates to 2: nanoseconds result Expected SameValue(\u00ab0\u00bb, \u00ab4\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "roundingIncrement 2.5 truncates to 2: nanoseconds result Expected SameValue(\u00ab0\u00bb, \u00ab4\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-halfExpand.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: rounds to nanoseconds (roundingMode = halfExpand, positive case): nanoseconds result Expected SameValue(\u00ab632\u00bb, \u00ab500\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "rounds to nanoseconds (roundingMode = halfExpand, positive case): nanoseconds result Expected SameValue(\u00ab632\u00bb, \u00ab500\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-halfFloor.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: rounds to microseconds (roundingMode = halfFloor, positive case): microseconds result: Expected SameValue(\u00ab198\u00bb, \u00ab197\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "rounds to microseconds (roundingMode = halfFloor, positive case): microseconds result: Expected SameValue(\u00ab198\u00bb, \u00ab197\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-halfTrunc.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: rounds to microseconds (roundingMode = halfTrunc, positive case): microseconds result: Expected SameValue(\u00ab198\u00bb, \u00ab197\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "rounds to microseconds (roundingMode = halfTrunc, positive case): microseconds result: Expected SameValue(\u00ab198\u00bb, \u00ab197\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-trunc.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: rounds to nanoseconds (roundingMode = trunc, positive case): nanoseconds result Expected SameValue(\u00ab632\u00bb, \u00ab500\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "rounds to nanoseconds (roundingMode = trunc, positive case): nanoseconds result Expected SameValue(\u00ab632\u00bb, \u00ab500\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/basic.js",
+    "result": "FAIL",
+    "reason": "Uncaught TypeError: Invalid or missing Temporal field",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "unresolved-semantic-edge",
+    "certainty": "unresolved",
+    "evidence": [
+      "API is installed; the first failure is semantic. Adapter/native ownership has not been established."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/offset-undefined.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: default offset is prefer Expected SameValue(\u00ab1572757261000000000\u00bb, \u00ab1572757261000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "default offset is prefer Expected SameValue(\u00ab1572757261000000000\u00bb, \u00ab1572757261000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/options-object.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: UTC Expected SameValue(\u00ab345600000000000\u00bb, \u00ab345600000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "UTC Expected SameValue(\u00ab345600000000000\u00bb, \u00ab345600000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/options-read-before-algorithmic-validation.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: exception thrown when month code incorrect for calendar Expected a RangeError but got a TypeError }",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "unresolved-semantic-edge",
+    "certainty": "unresolved",
+    "evidence": [
+      "API is installed; the first failure is semantic. Adapter/native ownership has not been established."
+    ],
+    "includes": [
+      "compareArray.js",
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/options-wrong-type.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: Partial datetime processed before throwing TypeError Expected a RangeError but got a TypeError }",
+    "features": [
+      "BigInt",
+      "Symbol",
+      "Temporal"
+    ],
+    "cause": "unresolved-semantic-edge",
+    "certainty": "unresolved",
+    "evidence": [
+      "API is installed; the first failure is semantic. Adapter/native ownership has not been established."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/copy-properties-not-undefined.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: only the properties that are present and defined in the plain object are copied (nanosecond value) Expected SameValue(\u00ab768\u00bb, \u00ab789\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "only the properties that are present and defined in the plain object are copied (nanosecond value) Expected SameValue(\u00ab768\u00bb, \u00ab789\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/order-of-operations.js",
+    "result": "FAIL",
+    "reason": "Uncaught TypeError: Temporal offset must be a string",
+    "features": [
+      "Temporal"
+    ],
+    "cause": "unresolved-semantic-edge",
+    "certainty": "unresolved",
+    "evidence": [
+      "API is installed; the first failure is semantic. Adapter/native ownership has not been established."
+    ],
+    "includes": [
+      "compareArray.js",
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/overflow-undefined.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: default overflow is constrain Expected SameValue(\u00ab1000000019987654300\u00bb, \u00ab1000000019987654321n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "default overflow is constrain Expected SameValue(\u00ab1000000019987654300\u00bb, \u00ab1000000019987654321n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-string-calendar-annotation.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: calendar annotation (without time zone) Expected SameValue(\u00ab45296987654321\u00bb, \u00ab45296987654321n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "calendar annotation (without time zone) Expected SameValue(\u00ab45296987654321\u00bb, \u00ab45296987654321n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-string-date-with-utc-offset.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: \"12:34:56.987654321+00\" is a valid UTC offset with time for PlainTime Expected SameValue(\u00ab45296987654321\u00bb, \u00ab45296987654321n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "\"12:34:56.987654321+00\" is a valid UTC offset with time for PlainTime Expected SameValue(\u00ab45296987654321\u00bb, \u00ab45296987654321n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/smallestunit-undefined.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: default smallestUnit is nanosecond: nanoseconds result Expected SameValue(\u00ab272\u00bb, \u00ab321\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "default smallestUnit is nanosecond: nanoseconds result Expected SameValue(\u00ab272\u00bb, \u00ab321\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-string-time-designator-required-for-disambiguation.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: '12-14' is ambiguous and requires T prefix Expected a RangeError to be thrown but no exception was thrown at all }",
+    "features": [
+      "Temporal",
+      "arrow-function"
+    ],
+    "cause": "native-PlainTime-parser",
+    "certainty": "confirmed",
+    "evidence": [
+      "native-evidence.json reproduces PlainTime.from(12-14) acceptance versus Node RangeError."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-string-time-separators.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: variant time separators (uppercase T) Expected SameValue(\u00ab45296987654321\u00bb, \u00ab45296987654321n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "variant time separators (uppercase T) Expected SameValue(\u00ab45296987654321\u00bb, \u00ab45296987654321n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-string-time-zone-annotation.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: time zone annotation (named, with no offset) Expected SameValue(\u00ab45296987654321\u00bb, \u00ab45296987654321n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "time zone annotation (named, with no offset) Expected SameValue(\u00ab45296987654321\u00bb, \u00ab45296987654321n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-string-unknown-annotation.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: unknown annotation (alone) Expected SameValue(\u00ab45296987654321\u00bb, \u00ab45296987654321n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "unknown annotation (alone) Expected SameValue(\u00ab45296987654321\u00bb, \u00ab45296987654321n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-string-with-time-designator.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: T prefix is accepted: T00:30 Expected SameValue(\u00ab999995400000000000\u00bb, \u00ab999995400000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal",
+      "arrow-function"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "T prefix is accepted: T00:30 Expected SameValue(\u00ab999995400000000000\u00bb, \u00ab999995400000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingincrement-undefined.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: default roundingIncrement is 1: nanoseconds result Expected SameValue(\u00ab88\u00bb, \u00ab1\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "default roundingIncrement is 1: nanoseconds result Expected SameValue(\u00ab88\u00bb, \u00ab1\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-ceil.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: rounds to nanoseconds (roundingMode = ceil, positive case): nanoseconds result Expected SameValue(\u00ab632\u00bb, \u00ab500\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "rounds to nanoseconds (roundingMode = ceil, positive case): nanoseconds result Expected SameValue(\u00ab632\u00bb, \u00ab500\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-expand.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: rounds to nanoseconds (roundingMode = expand, positive case): nanoseconds result Expected SameValue(\u00ab632\u00bb, \u00ab500\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "rounds to nanoseconds (roundingMode = expand, positive case): nanoseconds result Expected SameValue(\u00ab632\u00bb, \u00ab500\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-floor.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: rounds to nanoseconds (roundingMode = floor, positive case): nanoseconds result Expected SameValue(\u00ab632\u00bb, \u00ab500\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "rounds to nanoseconds (roundingMode = floor, positive case): nanoseconds result Expected SameValue(\u00ab632\u00bb, \u00ab500\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-halfCeil.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: rounds to microseconds (rounding mode = halfCeil, negative case): microseconds result: Expected SameValue(\u00ab-198\u00bb, \u00ab-197\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "rounds to microseconds (rounding mode = halfCeil, negative case): microseconds result: Expected SameValue(\u00ab-198\u00bb, \u00ab-197\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-halfEven.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: rounds to nanoseconds (roundingMode = halfEven, positive case): nanoseconds result Expected SameValue(\u00ab632\u00bb, \u00ab500\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "rounds to nanoseconds (roundingMode = halfEven, positive case): nanoseconds result Expected SameValue(\u00ab632\u00bb, \u00ab500\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": [
+      "temporalHelpers.js"
+    ]
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-zoneddatetime-negative-epochnanoseconds.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: Expected SameValue(\u00ab60635000000000\u00bb, \u00ab60635000000001n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "Expected SameValue(\u00ab60635000000000\u00bb, \u00ab60635000000001n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/leap-second.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: leap second is a valid ISO string for PlainTime Expected SameValue(\u00ab1000079999000000000\u00bb, \u00ab1000079999000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "leap second is a valid ISO string for PlainTime Expected SameValue(\u00ab1000079999000000000\u00bb, \u00ab1000079999000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/plaintime-propertybag-no-time-units.js",
+    "result": "FAIL",
+    "reason": "Uncaught { message: missing time units default to 0 Expected SameValue(\u00ab999995400000000000\u00bb, \u00ab999995400000000000n\u00bb) to be true }",
+    "features": [
+      "Temporal"
+    ],
+    "reference_probe": [
+      {
+        "result": "PASS"
+      },
+      {
+        "result": "FAIL",
+        "message": "missing time units default to 0 Expected SameValue(\u00ab999995400000000000\u00bb, \u00ab999995400000000000n\u00bb) to be true"
+      }
+    ],
+    "cause": "existing-interpreter-epoch-BigInt-type-or-precision",
+    "certainty": "confirmed",
+    "evidence": [
+      "Node passes; emulating the existing float constructor conversion and Number epoch getter reproduces the identical first assertion."
+    ],
+    "includes": []
+  }
+]

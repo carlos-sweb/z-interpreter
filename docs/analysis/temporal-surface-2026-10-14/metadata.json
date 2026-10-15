@@ -1,0 +1,42 @@
+{
+  "interpreter_base": "319649c53b6f858a9f230ab86fa2ddba3409e7d4",
+  "branch": "feat/temporal-surface",
+  "zrun_commit": "aa982386238025c241c85268b1c6ea018744733f",
+  "temporal_commit": "dd7700ac77754ebc56246fdff970f3a66cce1ef3",
+  "zig_version": "0.17.0",
+  "suite_commit": "9e61c12835c5e4a3bdba93850427e6742c4f64c4",
+  "historical_sweep": "/tmp/zrun-v020-test262-20261014/results.jsonl",
+  "target_count": 833,
+  "full_count": 4611,
+  "baseline_mode": "ReleaseFast",
+  "production_manifests_changed": false,
+  "baseline_execution": {
+    "binary": "/tmp/zrun-v012-validation/bin/z-run",
+    "sha256": "d6981de0dcc3d59efa2f172d06311288ed8abb953e7b5a94e36da0aae11f82de",
+    "suite_commit": "9e61c12835c5e4a3bdba93850427e6742c4f64c4",
+    "runner_sha256": "e01cbe71a33946476a60c2def57e45f68e2b9b4098d1becd2772d028f9d6093a",
+    "workers": 8,
+    "timeout": 5,
+    "address_space_limit": 2147483648
+  },
+  "candidate_execution": {
+    "binary": "/tmp/temporal-surface-20261014-implementation/fast/bin/z-run",
+    "sha256": "4dd41592c5dc641f407da51b0e6d4ab862a3dcab7369c730ba334f19c24aeb5f",
+    "suite_commit": "9e61c12835c5e4a3bdba93850427e6742c4f64c4",
+    "runner_sha256": "e01cbe71a33946476a60c2def57e45f68e2b9b4098d1becd2772d028f9d6093a",
+    "workers": 8,
+    "timeout": 5,
+    "address_space_limit": 2147483648
+  },
+  "attribution_reference": "Node.js v26.5.0, ICU 78.3, tz 2026b",
+  "baseline_measurement": {
+    "start_utc": "2026-10-15T02:15:44.859860+00:00",
+    "end_utc": "2026-10-15T02:15:47.627758+00:00",
+    "elapsed_seconds": 2.768
+  },
+  "completed_measurement": {
+    "start_utc": "2026-10-15T02:44:53.132400+00:00",
+    "end_utc": "2026-10-15T02:45:03.317773+00:00",
+    "elapsed_seconds": 10.185
+  }
+}

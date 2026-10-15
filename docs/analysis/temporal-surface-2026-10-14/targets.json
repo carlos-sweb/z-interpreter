@@ -1,0 +1,5000 @@
+[
+  {
+    "path": "test/built-ins/Date/prototype/toTemporalInstant/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Date/prototype/toTemporalInstant/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Date/prototype/toTemporalInstant/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Date/prototype/toTemporalInstant/this-value-non-date.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Date/prototype/toTemporalInstant/this-value-non-object.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Date/prototype/toTemporalInstant/this-value-valid-date.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/Duration/prototype/constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Duration/prototype/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Duration/prototype/round/relativeto-zoneddatetime-slots.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Duration/prototype/toJSON/balance-subseconds.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Duration/prototype/toJSON/basic.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Duration/prototype/toJSON/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Duration/prototype/toJSON/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Duration/prototype/toJSON/large-with-small-units.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Duration/prototype/toJSON/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Duration/prototype/toJSON/max-value.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Duration/prototype/toJSON/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Duration/prototype/toJSON/negative-components.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Duration/prototype/toJSON/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Duration/prototype/toJSON/options.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Duration/prototype/toJSON/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Duration/prototype/toLocaleString/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Duration/prototype/toLocaleString/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Duration/prototype/toLocaleString/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Duration/prototype/toLocaleString/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Duration/prototype/toLocaleString/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Duration/prototype/toLocaleString/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Duration/prototype/toLocaleString/return-string.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Duration/prototype/toStringTag/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Duration/prototype/valueOf/basic.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Duration/prototype/valueOf/branding.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Duration/prototype/valueOf/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Instant/prototype/constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Instant/prototype/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Instant/prototype/toJSON/basic.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Instant/prototype/toJSON/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Instant/prototype/toJSON/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Instant/prototype/toJSON/fromEpochMilliseconds.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Instant/prototype/toJSON/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Instant/prototype/toJSON/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Instant/prototype/toJSON/negative-epochnanoseconds.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/Instant/prototype/toJSON/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Instant/prototype/toJSON/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Instant/prototype/toJSON/year-format.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/Instant/prototype/toLocaleString/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Instant/prototype/toLocaleString/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Instant/prototype/toLocaleString/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Instant/prototype/toLocaleString/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Instant/prototype/toLocaleString/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Instant/prototype/toLocaleString/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Instant/prototype/toLocaleString/return-string.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Instant/prototype/toStringTag/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Instant/prototype/valueOf/basic.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Instant/prototype/valueOf/branding.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Instant/prototype/valueOf/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/Now/toStringTag/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/compare/argument-plaindatetime.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/compare/argument-zoneddatetime-slots.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/from/argument-plaindatetime.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/from/argument-zoneddatetime-slots.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/daysInWeek/basic.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/daysInWeek/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/daysInWeek/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/equals/argument-plaindatetime.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/equals/argument-zoneddatetime-slots.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/era/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/era/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/eraYear/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/eraYear/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/since/argument-plaindatetime.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/since/argument-zoneddatetime-slots.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toJSON/basic.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toJSON/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toJSON/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toJSON/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toJSON/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toJSON/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toJSON/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toJSON/year-format.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toLocaleString/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toLocaleString/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toLocaleString/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toLocaleString/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toLocaleString/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toLocaleString/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toLocaleString/return-string.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/argument-object.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/argument-propertybag-optional-properties.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/argument-string-calendar-annotation-invalid-key.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/argument-string-calendar-annotation.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/argument-string-critical-unknown-annotation.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/argument-string-date-with-utc-offset.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/argument-string-minus-sign.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/argument-string-multiple-calendar.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/argument-string-multiple-time-zone.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/argument-string-no-implicit-midnight.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/argument-string-time-designator-required-for-disambiguation.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/argument-string-time-separators.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/argument-string-time-zone-annotation.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/argument-string-too-many-decimals.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/argument-string-unknown-annotation.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/argument-string-with-time-designator.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/argument-string-with-utc-designator.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/argument-wrong-type.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/argument-zoneddatetime-balance-negative-time-units.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/argument-zoneddatetime-negative-epochnanoseconds.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/basic.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/leap-second.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/limits.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/order-of-operations.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/plaintime-propertybag-no-time-units.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/time-undefined.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainDateTime/year-zero.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainMonthDay/basic.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainMonthDay/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainMonthDay/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainMonthDay/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainMonthDay/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainMonthDay/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainMonthDay/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainYearMonth/basic.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainYearMonth/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainYearMonth/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainYearMonth/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainYearMonth/limits.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainYearMonth/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainYearMonth/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toPlainYearMonth/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toStringTag/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-object-get-plainTime-throws.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-object-get-timezone-throws.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-propertybag-optional-properties.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-string-calendar-annotation-invalid-key.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-string-calendar-annotation.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-string-critical-unknown-annotation.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-string-date-with-utc-offset.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-string-minus-sign.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-string-multiple-calendar.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-string-multiple-time-zone.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-string-no-implicit-midnight.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-string-time-designator-required-for-disambiguation.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-string-time-separators.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-string-time-zone-annotation.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-string-too-many-decimals.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-string-unknown-annotation.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-string-with-time-designator.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-string-with-utc-designator.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-wrong-type.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/argument-zoneddatetime-negative-epochnanoseconds.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/basic.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/get-epoch-nanoseconds-for-throws.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/get-start-of-day-throws.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/leap-second.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/no-observable-array-iteration.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/order-of-operations.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/plaintime-argument-zoneddatetime-balance-negative-time-units.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/plaintime-propertybag-no-time-units.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/throws-if-combined-date-time-outside-valid-iso-range.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/timezone-case-insensitive.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/timezone-string-datetime.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/timezone-string-leap-second.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/timezone-string-multiple-offsets.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/timezone-string-sub-minute-offset.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/timezone-string-year-zero.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/timezone-string.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/timezone-wrong-type.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/toZonedDateTime/year-zero.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/until/argument-plaindatetime.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/until/argument-zoneddatetime-slots.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/valueOf/basic.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/valueOf/branding.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/valueOf/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/withCalendar/basic.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/withCalendar/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/withCalendar/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/withCalendar/calendar-case-insensitive.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/withCalendar/calendar-iso-string.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/withCalendar/calendar-string-leap-second.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/withCalendar/calendar-string.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/withCalendar/calendar-time-string.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/withCalendar/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/withCalendar/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/withCalendar/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/withCalendar/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/yearOfWeek/basic.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/yearOfWeek/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDate/prototype/yearOfWeek/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/compare/argument-plaindate.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/from/argument-plaindate.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/dayOfYear/basic.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/dayOfYear/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/dayOfYear/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/daysInWeek/basic.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/daysInWeek/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/daysInWeek/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/daysInYear/basic.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/daysInYear/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/daysInYear/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/equals/argument-plaindate.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/era/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/era/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/eraYear/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/eraYear/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/monthsInYear/basic.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/monthsInYear/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/monthsInYear/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/since/argument-plaindate.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toJSON/basic.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toJSON/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toJSON/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toJSON/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toJSON/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toJSON/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toJSON/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toJSON/year-format.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toLocaleString/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toLocaleString/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toLocaleString/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toLocaleString/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toLocaleString/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toLocaleString/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toLocaleString/return-string.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toStringTag/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/basic.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/constant-offset.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/disambiguation-invalid-string.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/disambiguation.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/fixed-offset-near-date-time-limits.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/invalid-instant.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/negative-year.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/no-observable-array-iteration.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/options-object.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/options-read-before-algorithmic-validation.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/order-of-operations.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/plain-date-time-near-limits.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/timezone-case-insensitive.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/timezone-string-datetime.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/timezone-string-leap-second.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/timezone-string-multiple-offsets.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/timezone-string-year-zero.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/timezone-string.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/timezone-wrong-type.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/two-digit-year.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/toZonedDateTime/year-zero.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/until/argument-plaindate.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/valueOf/basic.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/valueOf/branding.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/valueOf/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/weekOfYear/basic.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/weekOfYear/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/weekOfYear/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withCalendar/basic.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withCalendar/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withCalendar/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withCalendar/calendar-case-insensitive.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withCalendar/calendar-iso-string.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withCalendar/calendar-string-leap-second.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withCalendar/calendar-string.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withCalendar/calendar-time-string.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withCalendar/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withCalendar/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withCalendar/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withCalendar/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/argument-object-insufficient-data.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/argument-propertybag-optional-properties.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/argument-string-calendar-annotation-invalid-key.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/argument-string-calendar-annotation.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/argument-string-critical-unknown-annotation.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/argument-string-date-with-utc-offset.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/argument-string-minus-sign.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/argument-string-multiple-calendar.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/argument-string-multiple-time-zone.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/argument-string-no-implicit-midnight.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/argument-string-time-designator-required-for-disambiguation.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/argument-string-time-separators.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/argument-string-time-zone-annotation.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/argument-string-too-many-decimals.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/argument-string-unknown-annotation.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/argument-string-with-time-designator.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/argument-string-with-utc-designator.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/argument-string-without-time-designator.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/argument-time.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/argument-wrong-type.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/argument-zoneddatetime-balance-negative-time-units.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/argument-zoneddatetime-negative-epochnanoseconds.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/leap-second.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/no-argument-default-to-midnight.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/order-of-operations.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/plaintime-propertybag-no-time-units.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/throws-if-combined-date-time-outside-valid-iso-range.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/time-undefined.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/withPlainTime/year-zero.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/yearOfWeek/basic.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/yearOfWeek/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainDateTime/prototype/yearOfWeek/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainMonthDay/prototype/constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainMonthDay/prototype/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainMonthDay/prototype/toJSON/basic.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainMonthDay/prototype/toJSON/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainMonthDay/prototype/toJSON/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainMonthDay/prototype/toJSON/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainMonthDay/prototype/toJSON/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainMonthDay/prototype/toJSON/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainMonthDay/prototype/toJSON/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainMonthDay/prototype/toLocaleString/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainMonthDay/prototype/toLocaleString/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainMonthDay/prototype/toLocaleString/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainMonthDay/prototype/toLocaleString/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainMonthDay/prototype/toLocaleString/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainMonthDay/prototype/toLocaleString/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainMonthDay/prototype/toLocaleString/return-string.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainMonthDay/prototype/toStringTag/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainMonthDay/prototype/valueOf/basic.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainMonthDay/prototype/valueOf/branding.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainMonthDay/prototype/valueOf/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainTime/from/argument-plaindatetime.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainTime/prototype/constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainTime/prototype/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainTime/prototype/toJSON/basic.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainTime/prototype/toJSON/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainTime/prototype/toJSON/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainTime/prototype/toJSON/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainTime/prototype/toJSON/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainTime/prototype/toJSON/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainTime/prototype/toJSON/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainTime/prototype/toLocaleString/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainTime/prototype/toLocaleString/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainTime/prototype/toLocaleString/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainTime/prototype/toLocaleString/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainTime/prototype/toLocaleString/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainTime/prototype/toLocaleString/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainTime/prototype/toLocaleString/return-string.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainTime/prototype/toStringTag/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainTime/prototype/valueOf/basic.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainTime/prototype/valueOf/branding.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainTime/prototype/valueOf/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/basic.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/from/argument-plainyearmonth.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/from/argument-string-calendar-annotation.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/from/argument-string-date-with-utc-offset.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/from/argument-string-time-separators.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/from/argument-string-time-zone-annotation.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/from/argument-string-unknown-annotation.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/from/argument-string.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/from/basic.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/from/leap-second.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/from/limits.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/from/one-of-era-erayear-undefined.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/from/overflow-constrain.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/from/overflow-undefined.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/from/subclassing-ignored.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/limits.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/add/argument-duration-max.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/add/argument-duration-object.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/add/argument-object.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/add/argument-string.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/add/blank-duration.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/add/options-object.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/add/overflow-undefined.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/era/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/era/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/eraYear/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/eraYear/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/subtract/argument-duration-max.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/subtract/argument-duration-object.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/subtract/argument-object.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/subtract/argument-string.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/subtract/blank-duration.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/subtract/options-object.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/subtract/overflow-undefined.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/toJSON/basic.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/toJSON/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/toJSON/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/toJSON/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/toJSON/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/toJSON/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/toJSON/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/toJSON/year-format.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/toLocaleString/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/toLocaleString/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/toLocaleString/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/toLocaleString/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/toLocaleString/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/toLocaleString/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/toLocaleString/return-string.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/toStringTag/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/valueOf/basic.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/valueOf/branding.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/valueOf/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/with/basic.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/with/copy-properties-not-undefined.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/with/options-object.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/prototype/with/overflow-undefined.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/PlainYearMonth/refisoday-undefined.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/compare/disregard-time-zone-ids-if-exact-times-are-equal.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/add-duration.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/add-large-subseconds.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/argument-duration-max-plus-min-date.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/argument-duration-max.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/argument-duration-out-of-range.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/argument-mixed-sign.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/argument-not-object.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/argument-propertybag-optional-properties.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/argument-string-fractional-units-rounding-mode.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/argument-string-negative-fractional-units.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/blank-duration.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/casts-argument.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/constrain-when-ambiguous-result.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/cross-epoch.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/math-order-of-operations-add-constrain.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/math-order-of-operations-add-none.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/math-order-of-operations-add-reject.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/negative-epochnanoseconds.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/non-integer-throws-rangeerror.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/options-object.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/options-read-before-algorithmic-validation.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/options-undefined.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/order-of-operations.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/overflow-adding-months-to-max-year.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/overflow-invalid-string.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/overflow-undefined.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/overflow.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/symmetrical-wrt-negative-durations-in-time-part.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/throw-when-ambiguous-result-with-reject.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/add/throw-when-intermediate-datetime-outside-valid-limits.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/dayOfYear/basic.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/daysInMonth/basic.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/daysInWeek/basic.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/daysInWeek/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/daysInWeek/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/daysInYear/basic.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/equals/argument-object.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/equals/argument-valid.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/era/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/era/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/inLeapYear/basic.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/day-rounding-out-of-range.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/get-start-of-day-throws.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/negative-epochnanoseconds.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/negative-time.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/options-read-before-algorithmic-validation.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/order-of-operations.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/rounded-date-time-outside-valid-limits.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/rounding-direction.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/rounding-increments.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/rounding-is-noop.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingincrement-nan.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingincrement-non-integer.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingincrement-out-of-range.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingincrement-undefined.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-ceil.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-expand.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-floor.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-halfCeil.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-halfEven.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-halfExpand.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-halfFloor.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-halfTrunc.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-invalid-string.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-trunc.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundingmode-undefined.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/roundto-invalid-string.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/smallestunit-invalid-string.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/smallestunit-plurals-accepted.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/smallestunit-string-shorthand.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/smallestunit.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/string-shorthand-no-object-prototype-pollution.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/throws-on-invalid-increments.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/throws-without-smallestunit.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/round/valid-increments.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-at-limits.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-propertybag-calendar-case-insensitive.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-propertybag-calendar-iso-string.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-propertybag-calendar-leap-second.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-propertybag-calendar-string.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-propertybag-calendar-year-zero.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-propertybag-invalid-offset-string.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-propertybag-offset-not-agreeing-with-timezone.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-propertybag-optional-properties.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-propertybag-timezone-string-datetime.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-propertybag-timezone-string-leap-second.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-propertybag-timezone-string-multiple-offsets.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-propertybag-timezone-string-sub-minute-offset.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-propertybag-timezone-string-year-zero.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-propertybag-timezone-string.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-propertybag-timezone-wrong-type.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-string-calendar-annotation-invalid-key.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-string-calendar-annotation.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-string-critical-unknown-annotation.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-string-date-with-utc-offset.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-string-limits.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-string-minus-sign.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-string-multiple-calendar.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-string-multiple-time-zone.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-string-sub-minute-offset.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-string-time-separators.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-string-time-zone-annotation.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-string-too-many-decimals.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-string-unknown-annotation.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/argument-wrong-type.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/balance-negative-time-units.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/blank-result.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/can-return-lower-or-higher-units.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/casts-argument.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/defaults-to-returning-hours.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/does-not-include-higher-units-than-necessary.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/exact-multiple-of-larger-unit.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/float64-representable-integer.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/infinity-throws-rangeerror.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/invalid-rounding-increments.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/largestunit-default.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/largestunit-invalid-string.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/largestunit-plurals-accepted.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/largestunit-smallestunit-mismatch.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/largestunit-undefined.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/largestunit.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/leap-second.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/negative-epochnanoseconds.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/no-fractional-minutes-hours.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/options-object.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/options-read-before-algorithmic-validation.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/options-undefined.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/order-of-operations.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/reversibility-of-differences.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/round-cross-unit-boundary.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/rounding-increments.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingincrement-addition-out-of-range.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingincrement-nan.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingincrement-non-integer.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingincrement-out-of-range.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingincrement-undefined.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-ceil.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-expand.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-floor.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-half-boundary.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-halfCeil.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-halfEven.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-halfExpand.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-halfFloor.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-halfTrunc.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-invalid-string.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-trunc.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/roundingmode-undefined.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/rounds-relative-to-receiver.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/same-epoch-nanoseconds.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/since-until.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/smallestunit-invalid-string.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/smallestunit-plurals-accepted.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/smallestunit-undefined.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/subseconds.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/valid-rounding-increments.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/weeks-and-months-are-mutually-exclusive.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/year-zero.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/zoneddatetime-string-multiple-offsets.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/since/zoneddatetime-string.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/argument-duration-max-plus-min-date.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/argument-duration-max.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/argument-duration-out-of-range.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/argument-mixed-sign.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/argument-not-object.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/argument-propertybag-optional-properties.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/argument-string-fractional-units-rounding-mode.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/argument-string-negative-fractional-units.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/blank-duration.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/casts-argument.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/constrain-when-ambiguous-result.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/math-order-of-operations-subtract-constrain.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/math-order-of-operations-subtract-none.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/math-order-of-operations-subtract-reject.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/negative-epochnanoseconds.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/non-integer-throws-rangeerror.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/options-object.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/options-read-before-algorithmic-validation.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/options-undefined.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/order-of-operations.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/overflow-invalid-string.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/overflow-subtracting-months-from-min-year.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/overflow-undefined.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/overflow.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/subtract-duration-object.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/subtract-large-subseconds.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/symmetrical-wrt-negative-durations.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/throw-when-ambiguous-result-with-reject.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/subtract/throw-when-intermediate-datetime-outside-valid-limits.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/toLocaleString/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/toLocaleString/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/toLocaleString/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/toLocaleString/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/toLocaleString/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/toLocaleString/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/toLocaleString/return-string.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/toStringTag/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-at-limits.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-propertybag-calendar-case-insensitive.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-propertybag-calendar-iso-string.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-propertybag-calendar-leap-second.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-propertybag-calendar-string.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-propertybag-calendar-year-zero.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-propertybag-invalid-offset-string.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-propertybag-offset-not-agreeing-with-timezone.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-propertybag-optional-properties.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-propertybag-timezone-string-datetime.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-propertybag-timezone-string-leap-second.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-propertybag-timezone-string-multiple-offsets.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-propertybag-timezone-string-sub-minute-offset.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-propertybag-timezone-string-year-zero.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-propertybag-timezone-string.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-propertybag-timezone-wrong-type.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-string-calendar-annotation-invalid-key.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-string-calendar-annotation.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-string-critical-unknown-annotation.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-string-date-with-utc-offset.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-string-limits.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-string-minus-sign.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-string-multiple-calendar.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-string-multiple-time-zone.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-string-sub-minute-offset.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-string-time-separators.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-string-time-zone-annotation.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-string-too-many-decimals.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-string-unknown-annotation.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/argument-wrong-type.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/balance-negative-time-units.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/blank-result.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/can-return-lower-or-higher-units.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/casts-argument.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/defaults-to-returning-hours.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/does-not-include-higher-units-than-necessary.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/exact-multiple-of-larger-unit.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/float64-representable-integer.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/infinity-throws-rangeerror.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/invalid-increments.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/largestunit-default.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/largestunit-invalid-string.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/largestunit-plurals-accepted.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/largestunit-smallestunit-mismatch.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/largestunit-undefined.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/leap-second.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/negative-epochnanoseconds.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/no-fractional-minutes-hours.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/options-object.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/options-read-before-algorithmic-validation.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/options-undefined.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/order-of-operations.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/round-cross-unit-boundary.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/rounding-increments.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingincrement-addition-out-of-range.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingincrement-nan.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingincrement-non-integer.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingincrement-out-of-range.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingincrement-undefined.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-ceil.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-expand.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-floor.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-half-boundary.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-halfCeil.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-halfEven.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-halfExpand.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-halfFloor.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-halfTrunc.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-invalid-string.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-trunc.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/roundingmode-undefined.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/rounds-relative-to-receiver.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/same-epoch-nanoseconds.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/smallestunit-invalid-string.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/smallestunit-plurals-accepted.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/smallestunit-undefined.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/subseconds.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/until-since.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/valid-rounding-increments.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/weeks-and-months-are-mutually-exclusive.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/year-zero.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/zoneddatetime-string-multiple-offsets.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/until/zoneddatetime-string.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/weekOfYear/basic.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/basic.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/copy-properties-not-undefined.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/disambiguation-invalid-string.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/incorrectly-spelled-properties-ignored.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/infinity-throws-rangeerror.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/invalid-disambiguation.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/invalid-offset.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/minimum-instant-with-one-hour-offset.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/month-and-month-code-must-agree.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/offset-invalid-string.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/offset-property-invalid-string.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/offset-undefined.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/options-object.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/options-read-before-algorithmic-validation.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/options-undefined.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/options-wrong-type.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/order-of-operations.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/overflow-invalid-string.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/overflow-options.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/overflow-reject-throws.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/overflow-undefined.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/zoned-datetime-like-at-minimum-date-time-with-offset.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/with/zoned-datetime-like-at-minimum-date-time.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withCalendar/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withCalendar/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withCalendar/calendar-case-insensitive.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withCalendar/calendar-iso-string.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withCalendar/calendar-string-leap-second.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withCalendar/calendar-string.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withCalendar/calendar-time-string.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withCalendar/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withCalendar/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withCalendar/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withCalendar/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-propertybag-optional-properties.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-string-calendar-annotation-invalid-key.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-string-calendar-annotation.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-string-critical-unknown-annotation.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-string-date-with-utc-offset.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-string-minus-sign.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-string-multiple-calendar.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-string-multiple-time-zone.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-string-no-implicit-midnight.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-string-time-designator-required-for-disambiguation.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-string-time-separators.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-string-time-zone-annotation.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-string-too-many-decimals.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-string-unknown-annotation.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-string-with-time-designator.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-string-with-utc-designator.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-wrong-type.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-zoneddatetime-balance-negative-time-units.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/argument-zoneddatetime-negative-epochnanoseconds.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/basic.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/get-start-of-day-throws.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/incorrectly-spelled-properties-ignored.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/leap-second.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/order-of-operations.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/plaintime-propertybag-no-time-units.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "FAIL"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/throws-if-epoch-nanoseconds-outside-valid-limits.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/time-undefined.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withPlainTime/year-zero.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withTimeZone/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withTimeZone/builtin.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withTimeZone/length.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withTimeZone/name.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withTimeZone/not-a-constructor.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withTimeZone/preserves-instant.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withTimeZone/prop-desc.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withTimeZone/timezone-case-insensitive.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withTimeZone/timezone-string-datetime.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withTimeZone/timezone-string-leap-second.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withTimeZone/timezone-string-multiple-offsets.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withTimeZone/timezone-string-sub-minute-offset.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withTimeZone/timezone-string-year-zero.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withTimeZone/timezone-string.js",
+    "bucket": "missing-method",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/withTimeZone/timezone-wrong-type.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/yearOfWeek/basic.js",
+    "bucket": "unexposed-API",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/yearOfWeek/branding.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/ZonedDateTime/prototype/yearOfWeek/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  },
+  {
+    "path": "test/built-ins/Temporal/toStringTag/prop-desc.js",
+    "bucket": "descriptors",
+    "baseline": "FAIL",
+    "current": "PASS"
+  }
+]

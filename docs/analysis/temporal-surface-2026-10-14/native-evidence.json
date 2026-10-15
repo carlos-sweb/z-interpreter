@@ -1,0 +1,29 @@
+[
+  {
+    "case": {
+      "kind": "PlainTime",
+      "op": "from",
+      "a": "12-14"
+    },
+    "native": "{\"result\":\"12:00:00\"}",
+    "reference": "{\"errorName\":\"RangeError\"}"
+  },
+  {
+    "case": {
+      "kind": "ZonedDateTime",
+      "op": "from",
+      "a": "1970-01-01T00:00[UTC][UTC]"
+    },
+    "native": "{\"result\":\"1970-01-01T00:00:00+00:00[UTC]\"}",
+    "reference": "{\"errorName\":\"RangeError\"}"
+  },
+  {
+    "case": {
+      "kind": "ZonedDateTime",
+      "op": "from",
+      "a": "-271821-04-19T23:00-01:00[-01:00]"
+    },
+    "native": "{\"result\":\"-271821-04-19T23:00:00-01:00[-01:00]\"}",
+    "reference": "{\"errorName\":\"RangeError\"}"
+  }
+]

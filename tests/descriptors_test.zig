@@ -101,3 +101,18 @@ test "dropping a builtin prototype's descriptor keeps the prototype alive" {
         \\console.log(Reflect.get(Function, "prototype") === Object.getPrototypeOf(function () {}), Object.hasOwnProperty("prototype"), Reflect.get(Object, "prototype") === Object.getPrototypeOf({}));
     , "true true true\n");
 }
+
+test "getOwnPropertyDescriptors: non-enumerable accessors and symbols without invoking getters" {
+    try helpers.expectStdout(
+        \\const s = Symbol('s'); const o = {};
+        \\Object.defineProperty(o, 'x', { get() { throw 'getter invoked'; }, configurable: true });
+        \\o[s] = 9;
+        \\const d = Object.getOwnPropertyDescriptors(o);
+        \\console.log(typeof d.x.get, d.x.enumerable, d[s].value);
+        \\const a = [3]; a.extra = 4; a[s] = 5;
+        \\const ad = Object.getOwnPropertyDescriptors(a);
+        \\console.log(ad[0].value, ad.length.value, ad.extra.value, ad[s].value);
+        \\const str = Object.getOwnPropertyDescriptors('hi');
+        \\console.log(str[0].value, str[0].writable, str.length.value);
+    , "function false 9\n3 1 4 5\nh false 2\n");
+}

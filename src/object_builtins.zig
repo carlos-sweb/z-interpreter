@@ -326,6 +326,8 @@ pub fn objToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     _ = allocator;
     _ = args;
     const self = interp(ctx);
+    var owned_tag = JSValue.UNDEFINED;
+    defer owned_tag.deinit();
     const tag: []const u8 = switch (this_value) {
         .undefined => "Undefined",
         .null => "Null",
@@ -361,12 +363,12 @@ pub fn objToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
         // the two via whichever prototype `arrayBufferProto` dispatched
         // this value's [[Prototype]] to (materializeProtos installs a
         // different string on each).
-        .array_buffer, .symbol, .bigint => blk: {
+        .array_buffer, .symbol, .bigint, .temporal => blk: {
             if (self.symbol_to_string_tag) |tag_sym| {
                 const tag_key = try self.encodeKey(tag_sym);
                 defer self.gc_allocator.free(tag_key);
-                const tag_val = try self.getProperty(this_value, tag_key);
-                if (tag_val == .string) break :blk tag_val.string.value.data;
+                owned_tag = try self.getProperty(this_value, tag_key);
+                if (owned_tag == .string) break :blk owned_tag.string.value.data;
             }
             break :blk "Object";
         },
@@ -386,8 +388,8 @@ pub fn objToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
             if (self.symbol_to_string_tag) |tag_sym| {
                 const tag_key = try self.encodeKey(tag_sym);
                 defer self.gc_allocator.free(tag_key);
-                const tag_val = try self.getProperty(this_value, tag_key);
-                if (tag_val == .string) break :blk tag_val.string.value.data;
+                owned_tag = try self.getProperty(this_value, tag_key);
+                if (owned_tag == .string) break :blk owned_tag.string.value.data;
             }
             break :blk "Object";
         },
@@ -539,6 +541,19 @@ fn definePropertyFromJs(self: *Interpreter, obj: JSValue, key: []const u8, desc:
 /// value (no per-index descriptors in this model) and named keys via the
 /// array_props object. Non-objects are a TypeError.
 pub fn definePropertyOn(self: *Interpreter, what: []const u8, obj: JSValue, key: []const u8, desc: JSValue) anyerror!void {
+    if (std.mem.eql(u8, key, "prototype") and @import("temporal_builtins.zig").isIntrinsicConstructor(obj)) {
+        if (desc != .object) return self.throwError(.type_error, "Property description must be an object", .{});
+        const proto = try self.functionPrototype(obj);
+        const d = desc.object.value;
+        if (d.hasOwnProperty("get") or d.hasOwnProperty("set")) return self.throwError(.type_error, "Cannot redefine Temporal prototype", .{});
+        inline for (.{ "writable", "enumerable", "configurable" }) |flag| {
+            if (d.get(flag)) |v| if (coercion.isTruthy(v)) return self.throwError(.type_error, "Cannot redefine Temporal prototype", .{});
+        }
+        if (d.get("value")) |v| {
+            if (v != .object or v.object != proto.object) return self.throwError(.type_error, "Cannot redefine Temporal prototype", .{});
+        }
+        return;
+    }
     switch (obj) {
         .object => try definePropertyFromJs(self, obj, key, desc),
         .function => try definePropertyFromJs(self, try self.functionStatics(obj), key, desc),
@@ -706,7 +721,7 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, thi
             if (std.mem.eql(u8, key, "prototype") and !isProxyConstructor(self, obj) and (box.value.prototype != null or box.value.constructable))
                 // dataDescObj keeps the value it gets; functionPrototype()
                 // only lends the callable's own reference.
-                return dataDescObj(self, (try self.functionPrototype(obj)).retain(), true, false, false);
+                return dataDescObj(self, (try self.functionPrototype(obj)).retain(), !@import("temporal_builtins.zig").isIntrinsicConstructor(obj), false, false);
             if (box.value.statics) |bag| {
                 if (bag.object.value.getOwnRecord(key)) |rec| return descFromRecord(self, rec);
             }
@@ -1079,20 +1094,66 @@ pub fn install(self: *Interpreter) !void {
     });
     const object_statics = try self.functionStatics(object_ctor);
     inline for (.{
-        .{ "keys", 1, objectKeys },                                         .{ "values", 1, objectValues },
-        .{ "entries", 1, objectEntries },                                   .{ "assign", 2, objectAssign },
-        .{ "defineProperty", 3, objectDefineProperty },                     .{ "defineProperties", 2, objectDefineProperties },
-        .{ "getOwnPropertyDescriptor", 2, objectGetOwnPropertyDescriptor }, .{ "getOwnPropertyNames", 1, objectGetOwnPropertyNames },
-        .{ "getOwnPropertySymbols", 1, objectGetOwnPropertySymbols },       .{ "create", 2, objectCreate },
-        .{ "freeze", 1, objectFreeze },                                     .{ "isFrozen", 1, objectIsFrozen },
-        .{ "seal", 1, objectSeal },                                         .{ "isSealed", 1, objectIsSealed },
-        .{ "preventExtensions", 1, objectPreventExtensions },               .{ "isExtensible", 1, objectIsExtensible },
-        .{ "setPrototypeOf", 2, objectSetPrototypeOf },                     .{ "getPrototypeOf", 1, objectGetPrototypeOf },
-        .{ "is", 2, objectIs },                                             .{ "hasOwn", 2, objectHasOwn },
-        .{ "fromEntries", 1, objectFromEntries },
+        .{ "keys", 1, objectKeys },                                           .{ "values", 1, objectValues },
+        .{ "entries", 1, objectEntries },                                     .{ "assign", 2, objectAssign },
+        .{ "defineProperty", 3, objectDefineProperty },                       .{ "defineProperties", 2, objectDefineProperties },
+        .{ "getOwnPropertyDescriptors", 1, objectGetOwnPropertyDescriptors }, .{ "getOwnPropertyDescriptor", 2, objectGetOwnPropertyDescriptor },
+        .{ "getOwnPropertyNames", 1, objectGetOwnPropertyNames },             .{ "getOwnPropertySymbols", 1, objectGetOwnPropertySymbols },
+        .{ "create", 2, objectCreate },                                       .{ "freeze", 1, objectFreeze },
+        .{ "isFrozen", 1, objectIsFrozen },                                   .{ "seal", 1, objectSeal },
+        .{ "isSealed", 1, objectIsSealed },                                   .{ "preventExtensions", 1, objectPreventExtensions },
+        .{ "isExtensible", 1, objectIsExtensible },                           .{ "setPrototypeOf", 2, objectSetPrototypeOf },
+        .{ "getPrototypeOf", 1, objectGetPrototypeOf },                       .{ "is", 2, objectIs },
+        .{ "hasOwn", 2, objectHasOwn },                                       .{ "fromEntries", 1, objectFromEntries },
     }) |entry| {
         try dneMethod(object_statics, entry[0], try native(self, entry[0], entry[1], entry[2]));
     }
     self.protos.object = try self.functionPrototype(object_ctor);
     try g.define(arena, "Object", object_ctor);
+}
+
+fn objectGetOwnPropertyDescriptors(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self = interp(ctx);
+    const value = arg(args, 0);
+    if (value == .null or value == .undefined) return self.throwError(.type_error, "Cannot convert undefined or null to object", .{});
+    const result = try self.ordinaryObject();
+    errdefer result.deinit();
+    if (value == .string) {
+        const length = try self.getProperty(value, "length");
+        try result.object.value.set("length", try dataDescObj(self, length, false, false, false));
+        const n: usize = @intFromFloat(length.number);
+        for (0..n) |i| {
+            const key = try std.fmt.allocPrint(allocator, "{d}", .{i});
+            defer allocator.free(key);
+            try result.object.value.set(key, try dataDescObj(self, try self.getProperty(value, key), false, true, false));
+        }
+        return result;
+    }
+    const names = try objectGetOwnPropertyNames(ctx, allocator, this_value, args);
+    defer names.deinit();
+    const bag: ?JSValue = switch (value) {
+        .object => value,
+        .function => |box| box.value.statics,
+        .array => |box| self.array_props.get(@intFromPtr(box)),
+        .regex => self.regexProps(value),
+        else => null,
+    };
+    if (bag) |props| {
+        const keys = try props.object.value.getOwnPropertyNames(allocator);
+        defer allocator.free(keys);
+        for (keys) |key| {
+            if (isSymbolKey(key)) {
+                if (self.symbol_keys.get(key)) |symbol| _ = try names.array.value.push(symbol.retain());
+            } else _ = try names.array.value.push(try self.gcNewString(key));
+        }
+    }
+    for (names.array.value.toSlice()) |key_value| {
+        const key = try self.encodeKey(key_value);
+        defer allocator.free(key);
+        if (result.object.value.hasOwnProperty(key)) continue;
+        const desc = try objectGetOwnPropertyDescriptor(ctx, allocator, this_value, &.{ value, key_value });
+        if (desc == .undefined) continue;
+        try result.object.value.set(key, desc);
+    }
+    return result;
 }

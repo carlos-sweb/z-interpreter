@@ -1,13 +1,4 @@
-//! `Temporal.*` end-to-end through the interpreter (z-temporal wiring --
-//! see `/home/sweb/z-test262/REPORT.md`'s analysis: this was the single
-//! largest FAIL bucket, 0% pass, because the already-built z-temporal
-//! library was never connected). Same discipline as date_test.zig: real
-//! JS scripts through the whole engine, not just the Zig glue in
-//! isolation. `ZonedDateTime` arithmetic (`add`/`subtract`/`until`/
-//! `since`/`round`/`with*`) isn't wired -- z-temporal's own library
-//! doesn't implement it yet (see temporal_builtins.zig's top doc
-//! comment and temporal-zoneddatetime-now-wiring.md) -- no tests for
-//! it here.
+//! End-to-end Temporal integration, metadata, conversions, arithmetic and GC.
 const std = @import("std");
 const testing = std.testing;
 const helpers = @import("helpers.zig");
@@ -157,4 +148,108 @@ test "z-temporal v0.2.0: Instant rounding increments use a full day" {
         \\console.log(a.round({ smallestUnit: 'second', roundingIncrement: 86400 }).toString());
         \\console.log(a.round({ smallestUnit: 'millisecond', roundingIncrement: 86400000 }).toString());
     , "1976-11-19T00:00:00Z\n1976-11-19T00:00:00Z\n1976-11-19T00:00:00Z\n");
+}
+
+test "Temporal surface: constructor attributes and ordinary function controls" {
+    try helpers.expectStdout(
+        \\for (const C of [Temporal.PlainDate, Temporal.PlainTime, Temporal.PlainDateTime, Temporal.PlainYearMonth, Temporal.PlainMonthDay, Temporal.Instant, Temporal.Duration, Temporal.ZonedDateTime]) {
+        \\  const p = Object.getOwnPropertyDescriptor(C, 'prototype');
+        \\  if (p.writable || p.enumerable || p.configurable) throw 'prototype attributes';
+        \\  const c = Object.getOwnPropertyDescriptor(C.prototype, 'constructor');
+        \\  if (!c.writable || c.enumerable || !c.configurable || c.value !== C) throw 'constructor attributes';
+        \\  Object.defineProperty(C, 'prototype', { value: C.prototype });
+        \\  try { C.prototype = {}; throw 'assignment accepted'; } catch (e) { if (!(e instanceof TypeError)) throw e; }
+        \\  try { Object.defineProperty(C, 'prototype', { writable: true }); throw 'redefinition accepted'; } catch (e) { if (!(e instanceof TypeError)) throw e; }
+        \\}
+        \\function F() {} F.prototype = { ok: true };
+        \\console.log(F.prototype.ok, Object.getOwnPropertyDescriptor(F, 'prototype').writable);
+    , "true true\n");
+}
+
+test "Temporal surface: dynamic symbols and branded getter metadata" {
+    try helpers.expectStdout(
+        \\const d = new Temporal.PlainDate(2024, 2, 29);
+        \\console.log(Object.prototype.toString.call(d), Object.prototype.toString.call(Temporal), Object.prototype.toString.call(Temporal.Now));
+        \\const descriptor = Object.getOwnPropertyDescriptor(Temporal.PlainDate.prototype, Symbol.toStringTag);
+        \\console.log(descriptor.writable, descriptor.enumerable, descriptor.configurable);
+        \\Object.defineProperty(Temporal.PlainDate.prototype, Symbol.toStringTag, { value: 'Changed', configurable: true });
+        \\console.log(Object.prototype.toString.call(d));
+        \\delete Temporal.PlainDate.prototype[Symbol.toStringTag];
+        \\console.log(Object.prototype.toString.call(d));
+        \\const g = Object.getOwnPropertyDescriptor(Temporal.PlainDate.prototype, 'era').get;
+        \\console.log(g.name, g.length, d.era, d.daysInWeek, d.yearOfWeek);
+        \\try { g.call({}); } catch (e) { console.log(e instanceof TypeError); }
+    , "[object Temporal.PlainDate] [object Temporal] [object Temporal.Now]\nfalse false true\n[object Changed]\n[object Object]\nget era 0 undefined 7 2024\ntrue\n");
+}
+
+test "Temporal surface: serialization, locale fallback and rejecting valueOf" {
+    try helpers.expectStdout(
+        \\const values = [new Temporal.PlainDate(2024, 2, 29), new Temporal.PlainTime(12), new Temporal.PlainDateTime(2024, 2, 29), new Temporal.PlainYearMonth(2024, 2), new Temporal.PlainMonthDay(2, 29), new Temporal.Instant(0n), new Temporal.Duration(0, 0, 0, 1), new Temporal.ZonedDateTime(0n, 'UTC')];
+        \\for (const v of values) {
+        \\  if (v.toJSON() !== v.toString() || v.toLocaleString('en', {}) !== v.toString()) throw 'serialization';
+        \\  try { v.valueOf(); throw 'valueOf accepted'; } catch (e) { if (!(e instanceof TypeError)) throw e; }
+        \\  try { v.toJSON.call({}); throw 'receiver accepted'; } catch (e) { if (!(e instanceof TypeError)) throw e; }
+        \\}
+        \\console.log('ok');
+    , "ok\n");
+}
+
+test "Temporal surface: Plain conversions and calendar-preserving changes" {
+    try helpers.expectStdout(
+        \\const d = new Temporal.PlainDate(2024, 2, 29);
+        \\console.log(d.toPlainDateTime().toString(), d.toPlainYearMonth().toString(), d.toPlainMonthDay().toString());
+        \\console.log(d.toZonedDateTime({ timeZone: 'UTC', plainTime: { hour: 12 } }).hour);
+        \\const dt = d.toPlainDateTime('12:34');
+        \\console.log(dt.withPlainTime().hour, dt.withPlainTime({ hour: '9' }).hour, dt.withCalendar('iso8601').calendarId);
+        \\console.log(dt.toZonedDateTime('UTC').hour, d.withCalendar('iso8601').calendarId);
+        \\console.log(d.withCalendar('01-01').calendarId, dt.withCalendar('2024-02').calendarId);
+    , "2024-02-29T00:00:00 2024-02 02-29\n12\n0 9 iso8601\n12 iso8601\niso8601 iso8601\n");
+}
+
+test "Temporal surface: ZonedDateTime arithmetic, DST and differences" {
+    try helpers.expectStdout(
+        \\const a = Temporal.ZonedDateTime.from('2024-03-09T12:00[America/New_York]');
+        \\const b = a.add({ days: 1 });
+        \\console.log(b.hour, a.add({ hours: 24 }).hour, a.until(b, { largestUnit: 'hour' }).hours, b.since(a, { largestUnit: 'hour' }).hours);
+        \\console.log(b.subtract({ days: 1 }).equals(a), b.with({ hour: 9 }).hour, b.withPlainTime().hour);
+        \\console.log(a.until(b).hours, a.until(b, { largestUnit: 'auto' }).hours);
+        \\console.log(b.withTimeZone('UTC').hour, b.withCalendar('iso8601').calendarId, b.round('day').hour);
+    , "12 13 23 23\ntrue 9 0\n23 23\n16 iso8601 0\n");
+}
+
+test "Temporal surface: PlainYearMonth calendar formatting preserves reference day" {
+    try helpers.expectStdout(
+        \\const y = new Temporal.PlainYearMonth(2024, 2, 'iso8601', 15);
+        \\console.log(y.toString(), y.toString({ calendarName: 'always' }), y.toString({ calendarName: 'critical' }), y.toString({ calendarName: 'never' }));
+        \\const f = () => {}; f.calendarName = 'always'; console.log(y.toString(f));
+    , "2024-02 2024-02-15[u-ca=iso8601] 2024-02-15[!u-ca=iso8601] 2024-02\n2024-02-15[u-ca=iso8601]\n");
+}
+
+test "Temporal surface: Date conversion validates brand and preserves exact milliseconds" {
+    try helpers.expectStdout(
+        \\console.log(new Date(-1).toTemporalInstant().toString());
+        \\console.log(new Date(8640000000000000).toTemporalInstant().toString());
+        \\try { new Date(NaN).toTemporalInstant(); } catch (e) { console.log(e instanceof RangeError); }
+        \\try { Date.prototype.toTemporalInstant.call({}); } catch (e) { console.log(e instanceof TypeError); }
+    , "1969-12-31T23:59:59.999Z\n+275760-09-13T00:00:00Z\ntrue\ntrue\n");
+}
+
+test "Temporal surface: converted values remain reachable through collection" {
+    const zinterpreter = @import("zinterpreter");
+    var output = std.Io.Writer.Allocating.init(testing.allocator);
+    defer output.deinit();
+    var interpreter = try zinterpreter.Interpreter.init(testing.allocator, &output.writer);
+    defer interpreter.deinit();
+    const initial = try interpreter.run(
+        \\var date = new Temporal.PlainDate(2024, 2, 29);
+        \\var zoned = date.toZonedDateTime('UTC').add({ days: 1 }).withTimeZone('America/New_York');
+        \\var describe = () => Object.getOwnPropertyDescriptors(Temporal.PlainDate.prototype);
+    );
+    initial.deinit();
+    interpreter.collectGarbage();
+    const result = try interpreter.run(
+        \\console.log(zoned.toPlainDate().day, typeof describe().era.get, Object.prototype.toString.call(date));
+    );
+    defer result.deinit();
+    try testing.expectEqualStrings("29 function [object Temporal.PlainDate]\n", output.written());
 }
