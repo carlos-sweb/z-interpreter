@@ -91,11 +91,8 @@ fn reflectDeleteProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
 fn reflectOwnKeys(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const target = try reflectRequireObject(ctx, "ownKeys", arg(args, 0));
     const names = try objectGetOwnPropertyNames(ctx, allocator, this_value, args);
-    // Only plain objects can carry symbol-keyed properties in this
-    // engine (arrays/functions/proxies don't -- same narrowing
-    // objectGetOwnPropertySymbols itself already enforces via
-    // requirePlainObject), so skip the symbol pass for anything else.
-    if (target != .object) return names;
+    // Temporal's own-property bag can hold symbol keys too.
+    if (target != .object and target != .temporal) return names;
     const symbols = try objectGetOwnPropertySymbols(ctx, allocator, this_value, args);
     defer symbols.deinit();
     for (symbols.array.value.toSlice()) |s| _ = try names.array.value.push(s.retain());

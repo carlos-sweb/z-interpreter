@@ -325,6 +325,7 @@ pub fn deinit(self: *Interpreter) void {
     self.object_slots.deinit(self.gc_allocator);
     self.proto_refs.deinit(self.gc_allocator);
     self.array_props.deinit(self.gc_allocator);
+    self.temporal_props.deinit(self.gc_allocator);
     self.primitive_wrapper_data.deinit(self.gc_allocator);
     self.deleted_fn_props.deinit(self.gc_allocator);
     self.pending_jobs.deinit(self.gc_allocator);
@@ -372,6 +373,9 @@ pub fn gcOnBoxDestroyed(ctx: *anyopaque, box: *anyopaque) void {
     // Per-address side tables: an entry left behind would leak its value
     // and be inherited by the next box allocated at the same address.
     if (self.array_props.fetchRemove(@intFromPtr(box))) |kv| {
+        if (!self.tearing_down) kv.value.deinit();
+    }
+    if (self.temporal_props.fetchRemove(@intFromPtr(box))) |kv| {
         if (!self.tearing_down) kv.value.deinit();
     }
     if (self.primitive_wrapper_data.fetchRemove(@intFromPtr(box))) |kv| {
@@ -668,20 +672,16 @@ pub fn traceValueChildren(self: *Interpreter, v: JSValue, visitor: anytype) void
         // leaf/boxed split (Step 1b/1c) -- don't expect the two lists to
         // match. heapBoxAddress asks "does this variant live in the GC
         // registry at all" (4 inline variants: no); this switch asks
-        // "does this variant hold any JSValue to recurse into" (11
-        // variants: no) -- string/regex/symbol/date/bigint/array_buffer/
-        // temporal ARE heap-boxed and DO need registry tracking, they
-        // just have no JSValue children to trace. This switch has no
+        // "does this variant hold any JSValue to recurse into" --
+        // string/regex/symbol/date/bigint/array_buffer are heap-boxed
+        // but have no JSValue children. Temporal's native value is also
+        // pure, while its optional own-property bag is an edge. This switch has no
         // `else`, so Zig already forces a case for any newly-added
         // JSValue variant (unlike gcTrack's old bug) -- the audit here
         // (z-interpreter-refactor.md, Step 1d) is confirming *this*
-        // leaf group is genuinely correct, not just present: every
-        // sibling library backing these 7 types (z-string/z-regex/
-        // z-symbol/z-date/z-bigint/z-buffer/z-temporal) has zero
-        // dependency on z-value, so none of them can hold a JSValue even
-        // in principle -- verified via each one's build.zig.zon, not
-        // assumed.
-        .undefined, .null, .boolean, .number, .string, .regex, .symbol, .date, .bigint, .array_buffer, .temporal => {},
+        // leaf group is genuinely correct, not just present.
+        .undefined, .null, .boolean, .number, .string, .regex, .symbol, .date, .bigint, .array_buffer => {},
+        .temporal => |box| if (self.temporal_props.get(@intFromPtr(box))) |bag| visitor.value(bag),
         .array => |box| {
             for (box.value.toSliceMut()) |*child| visitor.value(child.*);
             // The array's named-property bag hangs off the array, like
@@ -890,7 +890,7 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
             box.destroy();
         },
         .temporal => |box| {
-            // Every z-temporal type is a pure value, same as .date.
+            if (self.temporal_props.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             box.destroy();
         },
         .bigint => |box| {
@@ -1095,6 +1095,8 @@ pub fn freeAllGcNodes(self: *Interpreter) void {
     while (srit2.next()) |v| sweeper.value(v.*);
     var apit2 = self.array_props.valueIterator();
     while (apit2.next()) |v| sweeper.value(v.*);
+    var tpit2 = self.temporal_props.valueIterator();
+    while (tpit2.next()) |v| sweeper.value(v.*);
     var pwit2 = self.primitive_wrapper_data.valueIterator();
     while (pwit2.next()) |v| sweeper.value(v.*);
     var mcit2 = self.method_cache.valueIterator();

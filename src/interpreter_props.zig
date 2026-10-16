@@ -189,6 +189,13 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             break :blk JSValue.UNDEFINED;
         },
         .temporal => |box| blk: {
+            if (self.temporal_props.get(@intFromPtr(box))) |bag| {
+                if (bag.object.value.getOwnRecord(key)) |rec| {
+                    if (!rec.isAccessor()) break :blk rec.value.retain();
+                    const getter = rec.getter orelse break :blk JSValue.UNDEFINED;
+                    break :blk try getter.function.value.call(getter.function.value.ctx, self.gc_allocator, obj, &.{});
+                }
+            }
             const proto = self.protos.temporalProtoFor(box.value);
             if (try self.getFromProto(obj, proto, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
@@ -405,6 +412,31 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
     if (obj == .undefined or obj == .null) {
         return self.throwError(.type_error, "Cannot set properties of {s} (setting '{s}')", .{ if (obj == .null) "null" else "undefined", key });
     }
+    if (obj == .temporal) {
+        const bag = try self.temporalPropsObject(obj);
+        if (bag.object.value.getOwnRecord(key)) |rec| {
+            if (rec.isAccessor()) {
+                const setter = rec.setter orelse return self.throwError(.type_error, "Cannot set getter-only Temporal property {s}", .{key});
+                const result = try setter.function.value.call(setter.function.value.ctx, self.gc_allocator, obj, &.{value});
+                result.deinit();
+                return;
+            }
+        } else {
+            const proto = self.protos.temporalProtoFor(obj.temporal.value);
+            var current: ?*const @TypeOf(proto.object.value) = &proto.object.value;
+            while (current) |p| : (current = p.getPrototype()) {
+                const rec = p.getOwnRecord(key) orelse continue;
+                if (rec.isAccessor()) {
+                    const setter = rec.setter orelse return self.throwError(.type_error, "Cannot set getter-only Temporal property {s}", .{key});
+                    const result = try setter.function.value.call(setter.function.value.ctx, self.gc_allocator, obj, &.{value});
+                    result.deinit();
+                    return;
+                }
+                break;
+            }
+        }
+        return self.setObjectProperty(bag, key, value);
+    }
     if (obj == .function) {
         // `F.prototype = {...}` overwrites the callable's slot;
         // everything else goes into the statics bag (class statics,
@@ -594,6 +626,10 @@ pub fn deletePropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8) 
             return coercion.isTruthy(result);
         }
         if (box.value.target == .object) return self.deleteObjectProperty(box.value.target, key);
+        return true;
+    }
+    if (obj == .temporal) {
+        if (self.temporalProps(obj)) |bag| return self.deleteObjectProperty(bag, key);
         return true;
     }
     if (obj == .function) {

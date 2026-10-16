@@ -193,6 +193,18 @@ pub fn arrayPropsObject(self: *Interpreter, array: JSValue) !JSValue {
     return gop.value_ptr.*;
 }
 
+pub fn temporalProps(self: *Interpreter, value: JSValue) ?JSValue {
+    return self.temporal_props.get(@intFromPtr(value.temporal));
+}
+
+pub fn temporalPropsObject(self: *Interpreter, value: JSValue) !JSValue {
+    if (self.temporalProps(value)) |bag| return bag;
+    const bag = try self.gcNewObject();
+    errdefer bag.deinit();
+    try self.temporal_props.put(self.gc_allocator, @intFromPtr(value.temporal), bag);
+    return bag;
+}
+
 /// A RegExp's own-property bag (other than `lastIndex`), if it has one.
 pub fn regexProps(self: *Interpreter, re: JSValue) ?JSValue {
     return self.regexState(re).props;

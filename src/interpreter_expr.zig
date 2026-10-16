@@ -503,9 +503,11 @@ pub fn evalIn(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
         .regex => JSValue.fromBool(std.mem.eql(u8, key, "lastIndex") or
             (if (self.regexProps(r)) |bag| bag.object.value.hasOwnProperty(key) else false) or
             self.protos.regex.object.value.has(key)),
+        .temporal => |box| JSValue.fromBool((if (self.temporal_props.get(@intFromPtr(box))) |bag| bag.object.value.hasOwnProperty(key) else false) or
+            self.protos.temporalProtoFor(box.value).object.value.has(key)),
         // A BigInt is a primitive: the real TypeError.
         .bigint => self.throwError(.type_error, "Cannot use 'in' operator to search for '{s}' in a BigInt", .{key}),
-        .function, .symbol, .map, .set, .@"error", .date, .promise, .array_buffer, .data_view, .typed_array, .temporal => self.throwError(.type_error, "The 'in' operator on a {s} is not supported yet", .{@tagName(r)}),
+        .function, .symbol, .map, .set, .@"error", .date, .promise, .array_buffer, .data_view, .typed_array => self.throwError(.type_error, "The 'in' operator on a {s} is not supported yet", .{@tagName(r)}),
     };
 }
 

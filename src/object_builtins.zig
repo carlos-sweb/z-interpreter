@@ -100,6 +100,7 @@ pub fn ownEnumerableKeys(ctx: *anyopaque, allocator: Allocator, v: JSValue) anye
     }
     const borrowed: [][]const u8 = switch (v) {
         .object => |box| try box.value.keys(allocator),
+        .temporal => if (self.temporalProps(v)) |bag| try bag.object.value.keys(allocator) else try allocator.alloc([]const u8, 0),
         .function => |box| if (box.value.statics) |bag| try bag.object.value.keys(allocator) else try allocator.alloc([]const u8, 0),
         .undefined, .null => return interp(ctx).throwError(.type_error, "Cannot convert undefined or null to object", .{}),
         // Neither had a case here at all (fell to the `else` empty-array
@@ -294,15 +295,17 @@ fn objHasOwnProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
         // own `.regex` cases).
         .regex => JSValue.fromBool(std.mem.eql(u8, key, "lastIndex") or
             (if (interp(ctx).regexProps(this_value)) |bag| bag.object.value.hasOwnProperty(key) else false)),
+        .temporal => JSValue.fromBool(if (interp(ctx).temporalProps(this_value)) |bag| bag.object.value.hasOwnProperty(key) else false),
         else => JSValue.fromBool(false),
     };
 }
 
 fn objPropertyIsEnumerable(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    if (this_value != .object) return JSValue.fromBool(false);
     const key = try interp(ctx).encodeKey(arg(args, 0));
     defer allocator.free(key);
-    return JSValue.fromBool(this_value.object.value.propertyIsEnumerable(key));
+    if (this_value == .object) return JSValue.fromBool(this_value.object.value.propertyIsEnumerable(key));
+    if (this_value == .temporal) return JSValue.fromBool(if (interp(ctx).temporalProps(this_value)) |bag| bag.object.value.propertyIsEnumerable(key) else false);
+    return JSValue.fromBool(false);
 }
 
 /// ECMA-262 20.1.3.6 Object.prototype.toString's built-in tag table --
@@ -558,6 +561,7 @@ pub fn definePropertyOn(self: *Interpreter, what: []const u8, obj: JSValue, key:
         .object => try definePropertyFromJs(self, obj, key, desc),
         .function => try definePropertyFromJs(self, try self.functionStatics(obj), key, desc),
         .array => try arrayDefineProperty(self, obj, key, desc),
+        .temporal => try definePropertyFromJs(self, try self.temporalPropsObject(obj), key, desc),
         .regex => if (std.mem.eql(u8, key, "lastIndex"))
             try regex_builtins.regexDefineProperty(self, obj, key, desc)
         else
@@ -612,7 +616,7 @@ fn objectDefineProperties(ctx: *anyopaque, allocator: Allocator, this_value: JSV
     _ = this_value;
     const self = interp(ctx);
     const obj = arg(args, 0);
-    if (obj != .object and obj != .function and obj != .array and obj != .regex)
+    if (obj != .object and obj != .function and obj != .array and obj != .regex and obj != .temporal)
         return self.throwError(.type_error, "Object.defineProperties called on non-object", .{});
     const props = arg(args, 1);
     if (props != .object) return self.throwError(.type_error, "Property description must be an object", .{});
@@ -768,6 +772,12 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, thi
             }
             return JSValue.UNDEFINED;
         },
+        .temporal => {
+            if (self.temporalProps(obj)) |bag| {
+                if (bag.object.value.getOwnRecord(key)) |rec| return descFromRecord(self, rec);
+            }
+            return JSValue.UNDEFINED;
+        },
         // Other object-likes (date/map/...) have no string-keyed own
         // data properties in this model yet.
         else => return JSValue.UNDEFINED,
@@ -831,6 +841,15 @@ pub fn objectGetOwnPropertyNames(ctx: *anyopaque, allocator: Allocator, this_val
                 }
             }
         },
+        .temporal => {
+            if (self.temporalProps(o)) |bag| {
+                const names = try bag.object.value.getOwnPropertyNames(allocator);
+                defer allocator.free(names);
+                for (names) |name| {
+                    if (!isSymbolKey(name)) _ = try result.array.value.push(try self.gcNewString(name));
+                }
+            }
+        },
         .undefined, .null => return self.throwError(.type_error, "Cannot convert undefined or null to object", .{}),
         .proxy => |box| {
             if (try self.proxyTrap(box, "ownKeys")) |trap_fn| {
@@ -856,8 +875,9 @@ pub fn objectGetOwnPropertyNames(ctx: *anyopaque, allocator: Allocator, this_val
 pub fn objectGetOwnPropertySymbols(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
     const self = interp(ctx);
-    const o = try requirePlainObject(ctx, arg(args, 0), "Object.getOwnPropertySymbols");
-    const names = try o.object.value.getOwnPropertyNames(allocator);
+    const o = arg(args, 0);
+    const bag = if (o == .temporal) self.temporalProps(o) orelse return self.gcNewArray() else try requirePlainObject(ctx, o, "Object.getOwnPropertySymbols");
+    const names = try bag.object.value.getOwnPropertyNames(allocator);
     defer allocator.free(names);
     var result = try interp(ctx).gcNewArray();
     for (names) |n| {
@@ -900,6 +920,7 @@ fn extensibilityBag(self: *Interpreter, v: JSValue) ?JSValue {
         .function => |box| box.value.statics,
         .array => |box| self.array_props.get(@intFromPtr(box)),
         .regex => self.regexProps(v),
+        .temporal => self.temporalProps(v),
         else => null,
     };
 }
@@ -913,6 +934,7 @@ fn extensibilityBagForWrite(self: *Interpreter, v: JSValue) anyerror!?JSValue {
         .function => try self.functionStatics(v),
         .array => try self.arrayPropsObject(v),
         .regex => try self.regexPropsObject(v),
+        .temporal => try self.temporalPropsObject(v),
         else => null,
     };
 }
@@ -934,7 +956,7 @@ fn objectIsFrozen(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     const self = interp(ctx);
     const v = arg(args, 0);
     if (extensibilityBag(self, v)) |bag| return JSValue.fromBool(bag.object.value.is_frozen);
-    return JSValue.fromBool(!(v == .array or v == .function));
+    return JSValue.fromBool(!(v == .array or v == .function or v == .temporal));
 }
 
 fn objectSeal(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -952,7 +974,7 @@ fn objectIsSealed(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     const self = interp(ctx);
     const v = arg(args, 0);
     if (extensibilityBag(self, v)) |bag| return JSValue.fromBool(bag.object.value.is_sealed or bag.object.value.is_frozen);
-    return JSValue.fromBool(!(v == .array or v == .function));
+    return JSValue.fromBool(!(v == .array or v == .function or v == .temporal));
 }
 
 fn objectPreventExtensions(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -970,7 +992,7 @@ fn objectIsExtensible(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     const self = interp(ctx);
     const v = arg(args, 0);
     if (extensibilityBag(self, v)) |bag| return JSValue.fromBool(bag.object.value.is_extensible);
-    return JSValue.fromBool(v == .array or v == .function);
+    return JSValue.fromBool(v == .array or v == .function or v == .temporal);
 }
 
 fn objectSetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1136,6 +1158,7 @@ fn objectGetOwnPropertyDescriptors(ctx: *anyopaque, allocator: Allocator, this_v
         .function => |box| box.value.statics,
         .array => |box| self.array_props.get(@intFromPtr(box)),
         .regex => self.regexProps(value),
+        .temporal => self.temporalProps(value),
         else => null,
     };
     if (bag) |props| {

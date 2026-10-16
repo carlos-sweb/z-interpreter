@@ -825,6 +825,9 @@ pub const Interpreter = struct {
     /// bag is an edge of its array (not a root), and the entry goes when
     /// the array dies.
     array_props: std.AutoHashMapUnmanaged(usize, JSValue) = .empty,
+    /// Own data/accessor properties of Temporal instances. The native
+    /// TemporalValue remains an internal slot; this bag is an edge of its box.
+    temporal_props: std.AutoHashMapUnmanaged(usize, JSValue) = .empty,
     /// The boxed primitive inside a `new String()`/`new Number()`/
     /// `new Boolean()` wrapper object -- these constructors return an
     /// ordinary object (no internal-slot concept exists on JSValue's
@@ -934,6 +937,8 @@ pub const Interpreter = struct {
     pub const setArrayExtra = interpreter_support.setArrayExtra;
     pub const arrayExtra = interpreter_support.arrayExtra;
     pub const arrayPropsObject = interpreter_support.arrayPropsObject;
+    pub const temporalPropsObject = interpreter_support.temporalPropsObject;
+    pub const temporalProps = interpreter_support.temporalProps;
     pub const regexPropsObject = interpreter_support.regexPropsObject;
     pub const recompileRegex = interpreter_support.recompileRegex;
     pub const regexProps = interpreter_support.regexProps;
@@ -1478,6 +1483,63 @@ test "collectGarbage frees an array whose cycle goes through its own array_props
     // The bag, the wrapper and its string are gone, and so is the array,
     // which the baseline already counted (`let r = []`).
     try testing.expectEqual(boxes - 1, interp.gc_registry.count());
+}
+
+test "Temporal own properties survive marking and cycles are collected" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+
+    const temporal = try interp.run(
+        \\var temporal_box = new Temporal.PlainDate(2024, 5, 2);
+        \\Object.defineProperty(temporal_box, 'self', {value: temporal_box, configurable: true});
+        \\temporal_box;
+    );
+    const address = @intFromPtr(temporal.temporal);
+    const count = interp.temporal_props.count();
+    try testing.expect(interp.temporal_props.contains(address));
+    interp.collectGarbage();
+    const observed = try interp.run("temporal_box.self === temporal_box;");
+    try testing.expect(observed.boolean);
+    observed.deinit();
+
+    const properties = try interp.run(
+        \\temporal_box.constructor = 123;
+        \\Object.defineProperty(temporal_box, 'extra', {value: 9, enumerable: true, configurable: true});
+        \\var temporal_key = Symbol('own');
+        \\temporal_box[temporal_key] = 10;
+        \\if (temporal_box.constructor !== 123 || !Object.hasOwn(temporal_box, 'extra')) throw new Error('own properties');
+        \\if (!Object.keys(temporal_box).includes('extra') || !Reflect.ownKeys(temporal_box).includes(temporal_key)) throw new Error('reflection');
+        \\if (Object.getOwnPropertyDescriptor(temporal_box, 'extra').value !== 9) throw new Error('descriptor');
+        \\if (!delete temporal_box.extra || Object.hasOwn(temporal_box, 'extra')) throw new Error('delete');
+        \\Object.defineProperty(temporal_box, 'year', {get: function() { throw new Error('internal slot shadowed'); }});
+        \\if (Temporal.PlainDate.from(temporal_box).year !== 2024) throw new Error('internal slot conversion');
+    );
+    properties.deinit();
+
+    const cleared = try interp.run("temporal_box = null;");
+    cleared.deinit();
+    temporal.deinit();
+    interp.collectGarbage();
+    try testing.expect(!interp.temporal_props.contains(address));
+    try testing.expectEqual(count - 1, interp.temporal_props.count());
+
+    // A later box, even at the same address, cannot inherit old properties.
+    for (0..64) |_| {
+        const fresh = try interp.run("new Temporal.PlainDate(2024, 5, 2);");
+        try testing.expect(!interp.temporal_props.contains(@intFromPtr(fresh.temporal)));
+        fresh.deinit();
+    }
+
+    const ordinary = try interp.run("var temporal_plain = new Temporal.PlainDate(2024, 5, 2); temporal_plain.note = 1; temporal_plain;");
+    const ordinary_address = @intFromPtr(ordinary.temporal);
+    try testing.expect(interp.temporal_props.contains(ordinary_address));
+    const dropped = try interp.run("temporal_plain = null;");
+    dropped.deinit();
+    ordinary.deinit();
+    try testing.expect(!interp.temporal_props.contains(ordinary_address));
 }
 
 /// The FiberState behind a generator object (its own `next` native's ctx).
