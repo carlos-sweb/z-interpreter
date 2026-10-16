@@ -177,6 +177,7 @@ fn observableDurationNumber(self: *Interpreter, obj: JSValue, key: []const u8) a
 /// `.constrain` (real spec default for `.from`/`.with`). `options` may be
 /// `undefined`.
 fn readOverflow(self: *Interpreter, options: JSValue) anyerror!Overflow {
+    try surfaceOptions(self, options);
     if (options != .object) return .constrain;
     const v = try self.getProperty(options, "overflow");
     defer v.deinit();
@@ -211,6 +212,7 @@ fn ioHandle() std.Io {
 /// "reject"), defaulting to `.compatible` (real spec default). `options`
 /// may be `undefined`.
 fn readDisambiguation(self: *Interpreter, options: JSValue) anyerror!ztemporal.Disambiguation {
+    try surfaceOptions(self, options);
     if (options != .object) return .compatible;
     const v = options.object.value.get("disambiguation") orelse return .compatible;
     if (v == .undefined) return .compatible;
@@ -227,6 +229,7 @@ fn readDisambiguation(self: *Interpreter, options: JSValue) anyerror!ztemporal.D
 /// to `.reject` (real spec default -- a DIFFERENT default axis than
 /// `disambiguation`'s own). `options` may be `undefined`.
 fn readOffsetOption(self: *Interpreter, options: JSValue) anyerror!ztemporal.OffsetOption {
+    try surfaceOptions(self, options);
     if (options != .object) return .reject;
     const v = options.object.value.get("offset") orelse return .reject;
     if (v == .undefined) return .reject;
@@ -304,6 +307,7 @@ fn readRoundingOptionsGeneric(self: *Interpreter, comptime T: type, options: JSV
 }
 
 fn readRoundingOptions(self: *Interpreter, options: JSValue) anyerror!RoundingOptions {
+    try surfaceOptions(self, options);
     return readRoundingOptionsGeneric(self, RoundingOptions, options, .trunc);
 }
 
@@ -540,7 +544,7 @@ fn plainDateConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
 }
 
 fn observableFromOverflow(self: *Interpreter, options: JSValue) anyerror!Overflow {
-    if (options == .null) return self.throwError(.type_error, "Temporal.from options cannot be null", .{});
+    try surfaceOptions(self, options);
     if (options != .proxy) return readOverflow(self, options);
     const value = try self.getProperty(options, "overflow");
     defer value.deinit();
