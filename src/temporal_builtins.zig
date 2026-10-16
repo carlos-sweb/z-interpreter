@@ -715,12 +715,12 @@ fn plainTimeConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
-    const hour = if (args.len > 0) try requireI32(self, arg(args, 0), "hour") else 0;
-    const minute = if (args.len > 1) try requireI32(self, arg(args, 1), "minute") else 0;
-    const second = if (args.len > 2) try requireI32(self, arg(args, 2), "second") else 0;
-    const ms = if (args.len > 3) try requireI32(self, arg(args, 3), "millisecond") else 0;
-    const us = if (args.len > 4) try requireI32(self, arg(args, 4), "microsecond") else 0;
-    const ns = if (args.len > 5) try requireI32(self, arg(args, 5), "nanosecond") else 0;
+    const hour = if (arg(args, 0) != .undefined) try requireI32(self, arg(args, 0), "hour") else 0;
+    const minute = if (arg(args, 1) != .undefined) try requireI32(self, arg(args, 1), "minute") else 0;
+    const second = if (arg(args, 2) != .undefined) try requireI32(self, arg(args, 2), "second") else 0;
+    const ms = if (arg(args, 3) != .undefined) try requireI32(self, arg(args, 3), "millisecond") else 0;
+    const us = if (arg(args, 4) != .undefined) try requireI32(self, arg(args, 4), "microsecond") else 0;
+    const ns = if (arg(args, 5) != .undefined) try requireI32(self, arg(args, 5), "nanosecond") else 0;
     const pt = ztemporal.PlainTime.init(hour, minute, second, ms, us, ns) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_time = pt });
 }
@@ -897,12 +897,12 @@ fn plainDateTimeConstructor(ctx: *anyopaque, allocator: Allocator, this_value: J
     const year = try coerceConstructorI32(self, arg(args, 0), "year");
     const month = try coerceConstructorI32(self, arg(args, 1), "month");
     const day = try coerceConstructorI32(self, arg(args, 2), "day");
-    const hour = if (args.len > 3) try coerceConstructorI32(self, arg(args, 3), "hour") else 0;
-    const minute = if (args.len > 4) try coerceConstructorI32(self, arg(args, 4), "minute") else 0;
-    const second = if (args.len > 5) try coerceConstructorI32(self, arg(args, 5), "second") else 0;
-    const ms = if (args.len > 6) try coerceConstructorI32(self, arg(args, 6), "millisecond") else 0;
-    const us = if (args.len > 7) try coerceConstructorI32(self, arg(args, 7), "microsecond") else 0;
-    const ns = if (args.len > 8) try coerceConstructorI32(self, arg(args, 8), "nanosecond") else 0;
+    const hour = if (arg(args, 3) != .undefined) try coerceConstructorI32(self, arg(args, 3), "hour") else 0;
+    const minute = if (arg(args, 4) != .undefined) try coerceConstructorI32(self, arg(args, 4), "minute") else 0;
+    const second = if (arg(args, 5) != .undefined) try coerceConstructorI32(self, arg(args, 5), "second") else 0;
+    const ms = if (arg(args, 6) != .undefined) try coerceConstructorI32(self, arg(args, 6), "millisecond") else 0;
+    const us = if (arg(args, 7) != .undefined) try coerceConstructorI32(self, arg(args, 7), "microsecond") else 0;
+    const ns = if (arg(args, 8) != .undefined) try coerceConstructorI32(self, arg(args, 8), "nanosecond") else 0;
     const pdt = ztemporal.PlainDateTime.init(year, month, day, hour, minute, second, ms, us, ns, try optionalConstructorCalendar(self, arg(args, 9))) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_date_time = pdt });
 }
@@ -1316,7 +1316,9 @@ fn durationConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
     _ = this_value;
     const self = interp(ctx);
     var vals: [10]f64 = @splat(0);
-    for (0..@min(args.len, 10)) |i| vals[i] = try requireDurationNumber(self, args[i], "duration field");
+    for (0..@min(args.len, 10)) |i| {
+        if (args[i] != .undefined) vals[i] = try requireDurationNumber(self, args[i], "duration field");
+    }
     const d = ztemporal.Duration.init(vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7], vals[8], vals[9]) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .duration = d });
 }
