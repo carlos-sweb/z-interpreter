@@ -536,6 +536,7 @@ fn plainDateConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
+    if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor Temporal.PlainDate requires 'new'", .{});
     const year = try requireI32(self, arg(args, 0), "year");
     const month = try requireI32(self, arg(args, 1), "month");
     const day = try requireI32(self, arg(args, 2), "day");
@@ -799,6 +800,7 @@ fn plainTimeConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
+    if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor Temporal.PlainTime requires 'new'", .{});
     const hour = if (arg(args, 0) != .undefined) try requireI32(self, arg(args, 0), "hour") else 0;
     const minute = if (arg(args, 1) != .undefined) try requireI32(self, arg(args, 1), "minute") else 0;
     const second = if (arg(args, 2) != .undefined) try requireI32(self, arg(args, 2), "second") else 0;
@@ -993,6 +995,7 @@ fn plainDateTimeConstructor(ctx: *anyopaque, allocator: Allocator, this_value: J
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
+    if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor Temporal.PlainDateTime requires 'new'", .{});
     const year = try coerceConstructorI32(self, arg(args, 0), "year");
     const month = try coerceConstructorI32(self, arg(args, 1), "month");
     const day = try coerceConstructorI32(self, arg(args, 2), "day");
@@ -1299,6 +1302,7 @@ fn instantConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
+    if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor Temporal.Instant requires 'new'", .{});
     const ns = try coerceEpochNanoseconds(self, arg(args, 0), "epochNanoseconds");
     const inst = ztemporal.Instant.fromEpochNanoseconds(ns) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .instant = inst });
@@ -1459,6 +1463,7 @@ fn durationConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
+    if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor Temporal.Duration requires 'new'", .{});
     var vals: [10]f64 = @splat(0);
     for (0..@min(args.len, 10)) |i| {
         if (args[i] != .undefined) vals[i] = try requireDurationNumber(self, args[i], "duration field");
@@ -1675,6 +1680,7 @@ fn plainYearMonthConstructor(ctx: *anyopaque, allocator: Allocator, this_value: 
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
+    if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor Temporal.PlainYearMonth requires 'new'", .{});
     const year = try coerceConstructorI32(self, arg(args, 0), "year");
     const month = try coerceConstructorI32(self, arg(args, 1), "month");
     const reference_day: ?i32 = if (arg(args, 3) == .undefined) null else try coerceConstructorI32(self, arg(args, 3), "referenceISODay");
@@ -1901,6 +1907,7 @@ fn plainMonthDayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: J
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
+    if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor Temporal.PlainMonthDay requires 'new'", .{});
     const month = try coerceConstructorI32(self, arg(args, 0), "month");
     const day = try coerceConstructorI32(self, arg(args, 1), "day");
     const calendar_arg = arg(args, 2);
