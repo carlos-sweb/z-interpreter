@@ -166,10 +166,11 @@ fn optionalDurationNumber(self: *Interpreter, obj: JSValue, key: []const u8) any
 /// `undefined`.
 fn readOverflow(self: *Interpreter, options: JSValue) anyerror!Overflow {
     if (options != .object) return .constrain;
-    const v = options.object.value.get("overflow") orelse return .constrain;
+    const v = try self.getProperty(options, "overflow");
+    defer v.deinit();
     if (v == .undefined) return .constrain;
-    if (v != .string) return self.throwError(.type_error, "overflow must be a string", .{});
-    const s = v.string.value.data;
+    const s = try self.toDisplayStringJS(self.gc_allocator, v);
+    defer self.gc_allocator.free(s);
     if (std.mem.eql(u8, s, "constrain")) return .constrain;
     if (std.mem.eql(u8, s, "reject")) return .reject;
     return self.throwError(.range_error, "overflow must be \"constrain\" or \"reject\"", .{});
@@ -723,8 +724,10 @@ fn plainTimeFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
+    const value = arg(args, 0);
+    const parsed_string: ?ztemporal.PlainTime = if (value == .string) try coercePlainTime(self, value, .constrain) else null;
     const overflow = try readOverflow(self, arg(args, 1));
-    const pt = try coercePlainTime(self, arg(args, 0), overflow);
+    const pt = parsed_string orelse try coercePlainTime(self, value, overflow);
     return self.gcNewTemporal(.{ .plain_time = pt });
 }
 
