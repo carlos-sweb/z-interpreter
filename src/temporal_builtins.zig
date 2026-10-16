@@ -1906,6 +1906,25 @@ fn plainMonthDayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: J
     return self.gcNewTemporal(.{ .plain_month_day = pmd });
 }
 
+fn validatePlainMonthDayMonthCodeSyntax(self: *Interpreter, code: []const u8) anyerror!void {
+    if ((code.len != 3 and code.len != 4) or code[0] != 'M' or
+        !std.ascii.isDigit(code[1]) or !std.ascii.isDigit(code[2]) or
+        (code.len == 4 and code[3] != 'L'))
+    {
+        return self.throwError(.range_error, "Invalid monthCode syntax", .{});
+    }
+}
+
+fn validatePlainMonthDayMonthCode(self: *Interpreter, code: []const u8, month: ?i32) anyerror!void {
+    const code_month: i32 = @as(i32, code[1] - '0') * 10 + @as(i32, code[2] - '0');
+    if (code_month < 1 or code_month > 12 or code.len == 4)
+        return self.throwError(.range_error, "Invalid monthCode", .{});
+    if (month) |numeric_month| {
+        if (numeric_month >= 1 and numeric_month <= 12 and numeric_month != code_month)
+            return self.throwError(.range_error, "month and monthCode conflict", .{});
+    }
+}
+
 fn plainMonthDayFromObservedBag(self: *Interpreter, fields: JSValue, options: JSValue) anyerror!ztemporal.PlainMonthDay {
     const calendar_value = try self.getProperty(fields, "calendar");
     defer calendar_value.deinit();
@@ -1921,8 +1940,10 @@ fn plainMonthDayFromObservedBag(self: *Interpreter, fields: JSValue, options: JS
         return self.throwError(.type_error, "monthCode must be a string", .{});
     const month_code = if (month_code_value == .undefined) null else try self.toDisplayStringJS(self.gc_allocator, month_code_value);
     defer if (month_code) |code| self.gc_allocator.free(code);
+    if (month_code) |code| try validatePlainMonthDayMonthCodeSyntax(self, code);
     const year = try observedTemporalIntegerField(self, fields, "year");
     const overflow = try observableFromOverflow(self, options);
+    if (month_code) |code| try validatePlainMonthDayMonthCode(self, code, month);
     return ztemporal.PlainMonthDay.from(.{ .fields = .{
         .monthCode = month_code,
         .month = month,
