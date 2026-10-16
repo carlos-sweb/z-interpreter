@@ -109,6 +109,7 @@ fn fnBind(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
         .name = name,
         .arity = bound_arity,
         .call = boundCall,
+        .constructable = target.function.value.constructable,
     });
 }
 
