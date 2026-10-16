@@ -166,6 +166,13 @@ fn optionalDurationNumber(self: *Interpreter, obj: JSValue, key: []const u8) any
     return try requireDurationNumber(self, v, key);
 }
 
+fn observableDurationNumber(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!?f64 {
+    const value = try self.getProperty(obj, key);
+    defer value.deinit();
+    if (value == .undefined) return null;
+    return try requireDurationNumber(self, JSValue.fromNumber(try self.toNumberJS(value)), key);
+}
+
 /// Reads `options.overflow` ("constrain"/"reject"), defaulting to
 /// `.constrain` (real spec default for `.from`/`.with`). `options` may be
 /// `undefined`.
@@ -320,6 +327,23 @@ fn requireTemporal(self: *Interpreter, v: JSValue, comptime tag: std.meta.Tag(Te
 fn coerceDuration(self: *Interpreter, v: JSValue) anyerror!ztemporal.Duration {
     if (v == .temporal and v.temporal.value == .duration) return v.temporal.value.duration;
     if (v == .string) return ztemporal.Duration.from(.{ .string = v.string.value.data }) catch |e| temporalErr(self, e);
+    if (v == .proxy) {
+        const days = try observableDurationNumber(self, v, "days");
+        const hours = try observableDurationNumber(self, v, "hours");
+        const microseconds = try observableDurationNumber(self, v, "microseconds");
+        const milliseconds = try observableDurationNumber(self, v, "milliseconds");
+        const minutes = try observableDurationNumber(self, v, "minutes");
+        const months = try observableDurationNumber(self, v, "months");
+        const nanoseconds = try observableDurationNumber(self, v, "nanoseconds");
+        const seconds = try observableDurationNumber(self, v, "seconds");
+        const weeks = try observableDurationNumber(self, v, "weeks");
+        const years = try observableDurationNumber(self, v, "years");
+        return ztemporal.Duration.from(.{ .fields = .{
+            .years = years, .months = months, .weeks = weeks, .days = days,
+            .hours = hours, .minutes = minutes, .seconds = seconds,
+            .milliseconds = milliseconds, .microseconds = microseconds, .nanoseconds = nanoseconds,
+        } }) catch |e| temporalErr(self, e);
+    }
     if (v != .object) return self.throwError(.type_error, "Duration-like value required", .{});
     return ztemporal.Duration.from(.{ .fields = .{
         .years = try optionalDurationNumber(self, v, "years"),
