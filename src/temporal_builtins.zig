@@ -141,8 +141,23 @@ fn rejectWithCalendarOrTimeZone(self: *Interpreter, fields: JSValue) anyerror!vo
 }
 
 fn optionalBagCalendar(self: *Interpreter, obj: JSValue) anyerror!?[]const u8 {
-    const calendar = try optionalTemporalString(self, obj, "calendar") orelse return null;
-    return try surfaceCalendar(self, calendar);
+    const calendar = try self.getProperty(obj, "calendar");
+    defer calendar.deinit();
+    return calendarFromValue(self, calendar);
+}
+
+fn calendarFromValue(self: *Interpreter, value: JSValue) anyerror!?[]const u8 {
+    if (value == .undefined) return null;
+    if (value == .string) return try surfaceCalendar(self, value.string.value.data);
+    if (value == .temporal) switch (value.temporal.value) {
+        .plain_date => |date| return date.calendarId(),
+        .plain_date_time => |date_time| return date_time.calendarId(),
+        .plain_year_month => |year_month| return year_month.calendarId(),
+        .plain_month_day => |month_day| return month_day.calendarId(),
+        .zoned_date_time => |zoned| return zoned.calendarId(),
+        else => {},
+    };
+    return self.throwError(.type_error, "calendar must be a string or Temporal calendar carrier", .{});
 }
 
 fn optionalConstructorCalendar(self: *Interpreter, value: JSValue) anyerror!?[]const u8 {
@@ -572,10 +587,7 @@ fn observedTemporalIntegerField(self: *Interpreter, fields: JSValue, key: []cons
 fn plainDateFromObservedBag(self: *Interpreter, fields: JSValue, options: JSValue) anyerror!ztemporal.PlainDate {
     const calendar_value = try self.getProperty(fields, "calendar");
     defer calendar_value.deinit();
-    const calendar: ?[]const u8 = if (calendar_value == .undefined) null else blk: {
-        if (calendar_value != .string) return self.throwError(.type_error, "calendar must be a string", .{});
-        break :blk try surfaceCalendar(self, calendar_value.string.value.data);
-    };
+    const calendar = try calendarFromValue(self, calendar_value);
     const day = try observedTemporalIntegerField(self, fields, "day");
     const month = try observedTemporalIntegerField(self, fields, "month");
     const month_code_value = try self.getProperty(fields, "monthCode");
@@ -1012,10 +1024,7 @@ fn plainDateTimeConstructor(ctx: *anyopaque, allocator: Allocator, this_value: J
 fn plainDateTimeFromObservedBag(self: *Interpreter, fields: JSValue, options: JSValue) anyerror!ztemporal.PlainDateTime {
     const calendar_value = try self.getProperty(fields, "calendar");
     defer calendar_value.deinit();
-    const calendar: ?[]const u8 = if (calendar_value == .undefined) null else blk: {
-        if (calendar_value != .string) return self.throwError(.type_error, "calendar must be a string", .{});
-        break :blk try surfaceCalendar(self, calendar_value.string.value.data);
-    };
+    const calendar = try calendarFromValue(self, calendar_value);
     const day = try observedTemporalIntegerField(self, fields, "day");
     const hour = try observedTemporalIntegerField(self, fields, "hour");
     const microsecond = try observedTemporalIntegerField(self, fields, "microsecond");
@@ -1691,10 +1700,7 @@ fn plainYearMonthConstructor(ctx: *anyopaque, allocator: Allocator, this_value: 
 fn plainYearMonthFromObservedBag(self: *Interpreter, fields: JSValue, options: JSValue) anyerror!ztemporal.PlainYearMonth {
     const calendar_value = try self.getProperty(fields, "calendar");
     defer calendar_value.deinit();
-    const calendar: ?[]const u8 = if (calendar_value == .undefined) null else blk: {
-        if (calendar_value != .string) return self.throwError(.type_error, "calendar must be a string", .{});
-        break :blk try surfaceCalendar(self, calendar_value.string.value.data);
-    };
+    const calendar = try calendarFromValue(self, calendar_value);
     const month = try observedTemporalIntegerField(self, fields, "month");
     const month_code_value = try self.getProperty(fields, "monthCode");
     defer month_code_value.deinit();
@@ -1939,10 +1945,7 @@ fn validatePlainMonthDayMonthCode(self: *Interpreter, code: []const u8, month: ?
 fn plainMonthDayFromObservedBag(self: *Interpreter, fields: JSValue, options: JSValue) anyerror!ztemporal.PlainMonthDay {
     const calendar_value = try self.getProperty(fields, "calendar");
     defer calendar_value.deinit();
-    const calendar: ?[]const u8 = if (calendar_value == .undefined) null else blk: {
-        if (calendar_value != .string) return self.throwError(.type_error, "calendar must be a string", .{});
-        break :blk try surfaceCalendar(self, calendar_value.string.value.data);
-    };
+    const calendar = try calendarFromValue(self, calendar_value);
     const day = try observedTemporalIntegerField(self, fields, "day");
     const month = try observedTemporalIntegerField(self, fields, "month");
     const month_code_value = try self.getProperty(fields, "monthCode");
