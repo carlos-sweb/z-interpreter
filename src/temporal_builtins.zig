@@ -72,6 +72,11 @@ fn requireI32(self: *Interpreter, v: JSValue, what: []const u8) anyerror!i32 {
     return @intFromFloat(n);
 }
 
+fn coerceConstructorI32(self: *Interpreter, v: JSValue, what: []const u8) anyerror!i32 {
+    const n = try self.toNumberJS(v);
+    return requireI32(self, JSValue.fromNumber(n), what);
+}
+
 /// Bounds-checked BEFORE `@intFromFloat` (which panics -- not a catchable
 /// error -- on a magnitude beyond the target type's range). Test262's
 /// Duration tests specifically probe this with values like
@@ -889,15 +894,15 @@ fn plainDateTimeConstructor(ctx: *anyopaque, allocator: Allocator, this_value: J
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
-    const year = try requireI32(self, arg(args, 0), "year");
-    const month = try requireI32(self, arg(args, 1), "month");
-    const day = try requireI32(self, arg(args, 2), "day");
-    const hour = if (args.len > 3) try requireI32(self, arg(args, 3), "hour") else 0;
-    const minute = if (args.len > 4) try requireI32(self, arg(args, 4), "minute") else 0;
-    const second = if (args.len > 5) try requireI32(self, arg(args, 5), "second") else 0;
-    const ms = if (args.len > 6) try requireI32(self, arg(args, 6), "millisecond") else 0;
-    const us = if (args.len > 7) try requireI32(self, arg(args, 7), "microsecond") else 0;
-    const ns = if (args.len > 8) try requireI32(self, arg(args, 8), "nanosecond") else 0;
+    const year = try coerceConstructorI32(self, arg(args, 0), "year");
+    const month = try coerceConstructorI32(self, arg(args, 1), "month");
+    const day = try coerceConstructorI32(self, arg(args, 2), "day");
+    const hour = if (args.len > 3) try coerceConstructorI32(self, arg(args, 3), "hour") else 0;
+    const minute = if (args.len > 4) try coerceConstructorI32(self, arg(args, 4), "minute") else 0;
+    const second = if (args.len > 5) try coerceConstructorI32(self, arg(args, 5), "second") else 0;
+    const ms = if (args.len > 6) try coerceConstructorI32(self, arg(args, 6), "millisecond") else 0;
+    const us = if (args.len > 7) try coerceConstructorI32(self, arg(args, 7), "microsecond") else 0;
+    const ns = if (args.len > 8) try coerceConstructorI32(self, arg(args, 8), "nanosecond") else 0;
     const pdt = ztemporal.PlainDateTime.init(year, month, day, hour, minute, second, ms, us, ns, try optionalConstructorCalendar(self, arg(args, 9))) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_date_time = pdt });
 }
