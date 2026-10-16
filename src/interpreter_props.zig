@@ -138,6 +138,11 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             // hasOwnProperty(fn, "prototype") flip to true right after
             // the first plain read, since that check ORs in
             // `prototype != null`.
+            if (std.mem.eql(u8, key, "prototype")) {
+                if (box.value.prototype) |p| break :blk p.retain();
+                if (!box.value.constructable) break :blk JSValue.UNDEFINED;
+                break :blk (try self.functionPrototype(obj)).retain();
+            }
             // The statics bag (class statics, F.myProp = 1) shadows
             // the Function.prototype methods, like an own property
             // would. Recursing through getProperty gives accessor
@@ -161,14 +166,6 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
                     // is the class; RegExp[Symbol.species] is RegExp).
                     if (try self.getFromProto(obj, bag, key)) |v| break :blk v;
                 }
-            }
-            // An explicitly defined own `prototype` property, including an
-            // accessor, shadows the callable's lazily materialized internal
-            // prototype just like any other function own property.
-            if (std.mem.eql(u8, key, "prototype")) {
-                if (box.value.prototype) |p| break :blk p.retain();
-                if (!box.value.constructable) break :blk JSValue.UNDEFINED;
-                break :blk (try self.functionPrototype(obj)).retain();
             }
             if (std.mem.eql(u8, key, "name")) break :blk try self.gcNewString(box.value.name);
             if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.arity));
