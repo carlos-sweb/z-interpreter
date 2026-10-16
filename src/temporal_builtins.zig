@@ -304,19 +304,28 @@ fn readRoundingOptionsGeneric(self: *Interpreter, comptime T: type, options: JSV
     if (options != .object) return out;
     const o = options.object.value;
     if (o.get("smallestUnit")) |v| if (v != .undefined) {
-        if (v != .string) return self.throwError(.type_error, "smallestUnit must be a string", .{});
-        out.smallestUnit = try unitFromString(self, v.string.value.data, "smallestUnit");
+        const text = if (v == .null) "null" else blk: {
+            if (v != .string) return self.throwError(.type_error, "smallestUnit must be a string", .{});
+            break :blk v.string.value.data;
+        };
+        out.smallestUnit = try unitFromString(self, text, "smallestUnit");
     };
     if (o.get("largestUnit")) |v| if (v != .undefined) {
-        if (v != .string) return self.throwError(.type_error, "largestUnit must be a string", .{});
-        out.largestUnit = try unitFromString(self, v.string.value.data, "largestUnit");
+        const text = if (v == .null) "null" else blk: {
+            if (v != .string) return self.throwError(.type_error, "largestUnit must be a string", .{});
+            break :blk v.string.value.data;
+        };
+        out.largestUnit = try unitFromString(self, text, "largestUnit");
     };
     if (o.get("roundingIncrement")) |v| if (v != .undefined) {
-        out.roundingIncrement = try requireU32(self, v, "roundingIncrement");
+        out.roundingIncrement = try requireU32(self, if (v == .null) JSValue.fromNumber(0) else v, "roundingIncrement");
     };
     if (o.get("roundingMode")) |v| if (v != .undefined) {
-        if (v != .string) return self.throwError(.type_error, "roundingMode must be a string", .{});
-        out.roundingMode = try roundingModeFromString(self, v.string.value.data);
+        const text = if (v == .null) "null" else blk: {
+            if (v != .string) return self.throwError(.type_error, "roundingMode must be a string", .{});
+            break :blk v.string.value.data;
+        };
+        out.roundingMode = try roundingModeFromString(self, text);
     };
     return out;
 }
