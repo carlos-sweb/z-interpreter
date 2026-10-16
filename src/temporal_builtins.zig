@@ -539,8 +539,8 @@ fn plainDateConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     return self.gcNewTemporal(.{ .plain_date = pd });
 }
 
-fn plainDateFromOverflow(self: *Interpreter, options: JSValue) anyerror!Overflow {
-    if (options == .null) return self.throwError(.type_error, "PlainDate.from options cannot be null", .{});
+fn observableFromOverflow(self: *Interpreter, options: JSValue) anyerror!Overflow {
+    if (options == .null) return self.throwError(.type_error, "Temporal.from options cannot be null", .{});
     if (options != .proxy) return readOverflow(self, options);
     const value = try self.getProperty(options, "overflow");
     defer value.deinit();
@@ -552,7 +552,7 @@ fn plainDateFromOverflow(self: *Interpreter, options: JSValue) anyerror!Overflow
     return self.throwError(.range_error, "overflow must be \"constrain\" or \"reject\"", .{});
 }
 
-fn observedPlainDateField(self: *Interpreter, fields: JSValue, key: []const u8) anyerror!?i32 {
+fn observedTemporalIntegerField(self: *Interpreter, fields: JSValue, key: []const u8) anyerror!?i32 {
     const value = try self.getProperty(fields, key);
     defer value.deinit();
     if (value == .undefined) return null;
@@ -571,14 +571,14 @@ fn plainDateFromObservedBag(self: *Interpreter, fields: JSValue, options: JSValu
         if (calendar_value != .string) return self.throwError(.type_error, "calendar must be a string", .{});
         break :blk try surfaceCalendar(self, calendar_value.string.value.data);
     };
-    const day = try observedPlainDateField(self, fields, "day");
-    const month = try observedPlainDateField(self, fields, "month");
+    const day = try observedTemporalIntegerField(self, fields, "day");
+    const month = try observedTemporalIntegerField(self, fields, "month");
     const month_code_value = try self.getProperty(fields, "monthCode");
     defer month_code_value.deinit();
     const month_code = if (month_code_value == .undefined) null else try self.toDisplayStringJS(self.gc_allocator, month_code_value);
     defer if (month_code) |code| self.gc_allocator.free(code);
-    const year = try observedPlainDateField(self, fields, "year");
-    const overflow = try plainDateFromOverflow(self, options);
+    const year = try observedTemporalIntegerField(self, fields, "year");
+    const overflow = try observableFromOverflow(self, options);
     return ztemporal.PlainDate.from(.{ .fields = .{
         .year = year orelse return self.throwError(.type_error, "year is required", .{}),
         .month = month,
@@ -598,7 +598,7 @@ fn plainDateFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     const pd = if (value == .proxy)
         try plainDateFromObservedBag(self, value, options)
     else blk: {
-        const overflow = try plainDateFromOverflow(self, options);
+        const overflow = try observableFromOverflow(self, options);
         break :blk parsed_string orelse try coercePlainDate(self, value, overflow);
     };
     return self.gcNewTemporal(.{ .plain_date = pd });
@@ -811,8 +811,23 @@ fn plainTimeFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     const self = interp(ctx);
     const value = arg(args, 0);
     const parsed_string: ?ztemporal.PlainTime = if (value == .string) try coercePlainTime(self, value, .constrain) else null;
-    const overflow = try readOverflow(self, arg(args, 1));
-    const pt = parsed_string orelse try coercePlainTime(self, value, overflow);
+    const options = arg(args, 1);
+    const pt = if (value == .object or value == .proxy) blk: {
+        const hour = try observedTemporalIntegerField(self, value, "hour");
+        const microsecond = try observedTemporalIntegerField(self, value, "microsecond");
+        const millisecond = try observedTemporalIntegerField(self, value, "millisecond");
+        const minute = try observedTemporalIntegerField(self, value, "minute");
+        const nanosecond = try observedTemporalIntegerField(self, value, "nanosecond");
+        const second = try observedTemporalIntegerField(self, value, "second");
+        const overflow = try observableFromOverflow(self, options);
+        break :blk ztemporal.PlainTime.from(.{ .fields = .{
+            .hour = hour, .minute = minute, .second = second,
+            .millisecond = millisecond, .microsecond = microsecond, .nanosecond = nanosecond,
+        } }, .{ .overflow = overflow }) catch |e| return temporalErr(self, e);
+    } else blk: {
+        const overflow = try observableFromOverflow(self, options);
+        break :blk parsed_string orelse try coercePlainTime(self, value, overflow);
+    };
     return self.gcNewTemporal(.{ .plain_time = pt });
 }
 
