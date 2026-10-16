@@ -1906,12 +1906,45 @@ fn plainMonthDayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: J
     return self.gcNewTemporal(.{ .plain_month_day = pmd });
 }
 
+fn plainMonthDayFromObservedBag(self: *Interpreter, fields: JSValue, options: JSValue) anyerror!ztemporal.PlainMonthDay {
+    const calendar_value = try self.getProperty(fields, "calendar");
+    defer calendar_value.deinit();
+    const calendar: ?[]const u8 = if (calendar_value == .undefined) null else blk: {
+        if (calendar_value != .string) return self.throwError(.type_error, "calendar must be a string", .{});
+        break :blk try surfaceCalendar(self, calendar_value.string.value.data);
+    };
+    const day = try observedTemporalIntegerField(self, fields, "day");
+    const month = try observedTemporalIntegerField(self, fields, "month");
+    const month_code_value = try self.getProperty(fields, "monthCode");
+    defer month_code_value.deinit();
+    if (month_code_value != .undefined and month_code_value != .string)
+        return self.throwError(.type_error, "monthCode must be a string", .{});
+    const month_code = if (month_code_value == .undefined) null else try self.toDisplayStringJS(self.gc_allocator, month_code_value);
+    defer if (month_code) |code| self.gc_allocator.free(code);
+    const year = try observedTemporalIntegerField(self, fields, "year");
+    const overflow = try observableFromOverflow(self, options);
+    return ztemporal.PlainMonthDay.from(.{ .fields = .{
+        .monthCode = month_code,
+        .month = month,
+        .day = day orelse return self.throwError(.type_error, "day is required", .{}),
+        .year = year,
+        .calendar = calendar,
+    } }, .{ .overflow = overflow }) catch |e| temporalErr(self, e);
+}
+
 fn plainMonthDayFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
-    const overflow = try readOverflow(self, arg(args, 1));
-    const pmd = try coercePlainMonthDay(self, arg(args, 0), overflow);
+    const value = arg(args, 0);
+    const options = arg(args, 1);
+    const parsed_string: ?ztemporal.PlainMonthDay = if (value == .string) try coercePlainMonthDay(self, value, .constrain) else null;
+    const pmd = if (value == .object or value == .proxy)
+        try plainMonthDayFromObservedBag(self, value, options)
+    else blk: {
+        const overflow = try observableFromOverflow(self, options);
+        break :blk parsed_string orelse try coercePlainMonthDay(self, value, overflow);
+    };
     return self.gcNewTemporal(.{ .plain_month_day = pmd });
 }
 
