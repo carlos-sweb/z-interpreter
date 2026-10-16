@@ -304,27 +304,21 @@ fn readRoundingOptionsGeneric(self: *Interpreter, comptime T: type, options: JSV
     if (options != .object) return out;
     const o = options.object.value;
     if (o.get("smallestUnit")) |v| if (v != .undefined) {
-        const text = if (v == .null) "null" else blk: {
-            if (v != .string) return self.throwError(.type_error, "smallestUnit must be a string", .{});
-            break :blk v.string.value.data;
-        };
+        const text = try self.toDisplayStringJS(self.gc_allocator, v);
+        defer self.gc_allocator.free(text);
         out.smallestUnit = try unitFromString(self, text, "smallestUnit");
     };
     if (o.get("largestUnit")) |v| if (v != .undefined) {
-        const text = if (v == .null) "null" else blk: {
-            if (v != .string) return self.throwError(.type_error, "largestUnit must be a string", .{});
-            break :blk v.string.value.data;
-        };
+        const text = try self.toDisplayStringJS(self.gc_allocator, v);
+        defer self.gc_allocator.free(text);
         out.largestUnit = try unitFromString(self, text, "largestUnit");
     };
     if (o.get("roundingIncrement")) |v| if (v != .undefined) {
-        out.roundingIncrement = try requireU32(self, if (v == .null) JSValue.fromNumber(0) else v, "roundingIncrement");
+        out.roundingIncrement = try requireU32(self, JSValue.fromNumber(try self.toNumberJS(v)), "roundingIncrement");
     };
     if (o.get("roundingMode")) |v| if (v != .undefined) {
-        const text = if (v == .null) "null" else blk: {
-            if (v != .string) return self.throwError(.type_error, "roundingMode must be a string", .{});
-            break :blk v.string.value.data;
-        };
+        const text = try self.toDisplayStringJS(self.gc_allocator, v);
+        defer self.gc_allocator.free(text);
         out.roundingMode = try roundingModeFromString(self, text);
     };
     return out;
