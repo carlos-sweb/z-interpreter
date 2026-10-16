@@ -1936,10 +1936,11 @@ fn plainMonthDayFromObservedBag(self: *Interpreter, fields: JSValue, options: JS
     const month = try observedTemporalIntegerField(self, fields, "month");
     const month_code_value = try self.getProperty(fields, "monthCode");
     defer month_code_value.deinit();
-    if (month_code_value != .undefined and month_code_value != .string)
-        return self.throwError(.type_error, "monthCode must be a string", .{});
     const month_code = if (month_code_value == .undefined) null else try self.toDisplayStringJS(self.gc_allocator, month_code_value);
     defer if (month_code) |code| self.gc_allocator.free(code);
+    if (month == null and month_code == null)
+        return self.throwError(.type_error, "month or monthCode is required", .{});
+    const required_day = day orelse return self.throwError(.type_error, "day is required", .{});
     if (month_code) |code| try validatePlainMonthDayMonthCodeSyntax(self, code);
     const year = try observedTemporalIntegerField(self, fields, "year");
     const overflow = try observableFromOverflow(self, options);
@@ -1947,7 +1948,7 @@ fn plainMonthDayFromObservedBag(self: *Interpreter, fields: JSValue, options: JS
     return ztemporal.PlainMonthDay.from(.{ .fields = .{
         .monthCode = month_code,
         .month = month,
-        .day = day orelse return self.throwError(.type_error, "day is required", .{}),
+        .day = required_day,
         .year = year,
         .calendar = calendar,
     } }, .{ .overflow = overflow }) catch |e| temporalErr(self, e);
