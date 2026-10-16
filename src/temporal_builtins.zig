@@ -515,12 +515,68 @@ fn plainDateConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     return self.gcNewTemporal(.{ .plain_date = pd });
 }
 
+fn plainDateFromOverflow(self: *Interpreter, options: JSValue) anyerror!Overflow {
+    if (options == .null) return self.throwError(.type_error, "PlainDate.from options cannot be null", .{});
+    if (options != .proxy) return readOverflow(self, options);
+    const value = try self.getProperty(options, "overflow");
+    defer value.deinit();
+    if (value == .undefined) return .constrain;
+    const text = try self.toDisplayStringJS(self.gc_allocator, value);
+    defer self.gc_allocator.free(text);
+    if (std.mem.eql(u8, text, "constrain")) return .constrain;
+    if (std.mem.eql(u8, text, "reject")) return .reject;
+    return self.throwError(.range_error, "overflow must be \"constrain\" or \"reject\"", .{});
+}
+
+fn observedPlainDateField(self: *Interpreter, fields: JSValue, key: []const u8) anyerror!?i32 {
+    const value = try self.getProperty(fields, key);
+    defer value.deinit();
+    if (value == .undefined) return null;
+    const number = try self.toNumberJS(value);
+    if (!std.math.isFinite(number)) return self.throwError(.range_error, "{s} must be finite", .{key});
+    const integer = @trunc(number);
+    if (integer < std.math.minInt(i32) or integer > std.math.maxInt(i32))
+        return self.throwError(.range_error, "{s} out of range", .{key});
+    return @intFromFloat(integer);
+}
+
+fn plainDateFromObservedBag(self: *Interpreter, fields: JSValue, options: JSValue) anyerror!ztemporal.PlainDate {
+    const calendar_value = try self.getProperty(fields, "calendar");
+    defer calendar_value.deinit();
+    const calendar: ?[]const u8 = if (calendar_value == .undefined) null else blk: {
+        if (calendar_value != .string) return self.throwError(.type_error, "calendar must be a string", .{});
+        break :blk try surfaceCalendar(self, calendar_value.string.value.data);
+    };
+    const day = try observedPlainDateField(self, fields, "day");
+    const month = try observedPlainDateField(self, fields, "month");
+    const month_code_value = try self.getProperty(fields, "monthCode");
+    defer month_code_value.deinit();
+    const month_code = if (month_code_value == .undefined) null else try self.toDisplayStringJS(self.gc_allocator, month_code_value);
+    defer if (month_code) |code| self.gc_allocator.free(code);
+    const year = try observedPlainDateField(self, fields, "year");
+    const overflow = try plainDateFromOverflow(self, options);
+    return ztemporal.PlainDate.from(.{ .fields = .{
+        .year = year orelse return self.throwError(.type_error, "year is required", .{}),
+        .month = month,
+        .monthCode = month_code,
+        .day = day orelse return self.throwError(.type_error, "day is required", .{}),
+        .calendar = calendar,
+    } }, .{ .overflow = overflow }) catch |e| temporalErr(self, e);
+}
+
 fn plainDateFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
-    const overflow = try readOverflow(self, arg(args, 1));
-    const pd = try coercePlainDate(self, arg(args, 0), overflow);
+    const value = arg(args, 0);
+    const options = arg(args, 1);
+    const parsed_string: ?ztemporal.PlainDate = if (value == .string) try coercePlainDate(self, value, .constrain) else null;
+    const pd = if (value == .proxy)
+        try plainDateFromObservedBag(self, value, options)
+    else blk: {
+        const overflow = try plainDateFromOverflow(self, options);
+        break :blk parsed_string orelse try coercePlainDate(self, value, overflow);
+    };
     return self.gcNewTemporal(.{ .plain_date = pd });
 }
 
