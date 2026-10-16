@@ -1671,9 +1671,9 @@ fn plainYearMonthConstructor(ctx: *anyopaque, allocator: Allocator, this_value: 
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
-    const year = try requireI32(self, arg(args, 0), "year");
-    const month = try requireI32(self, arg(args, 1), "month");
-    const reference_day: ?i32 = if (arg(args, 3) == .undefined) null else try requireI32(self, arg(args, 3), "referenceISODay");
+    const year = try coerceConstructorI32(self, arg(args, 0), "year");
+    const month = try coerceConstructorI32(self, arg(args, 1), "month");
+    const reference_day: ?i32 = if (arg(args, 3) == .undefined) null else try coerceConstructorI32(self, arg(args, 3), "referenceISODay");
     const pym = ztemporal.PlainYearMonth.init(year, month, try optionalConstructorCalendar(self, arg(args, 2)), reference_day) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_year_month = pym });
 }
@@ -1897,11 +1897,11 @@ fn plainMonthDayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: J
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
-    const month = try requireI32(self, arg(args, 0), "month");
-    const day = try requireI32(self, arg(args, 1), "day");
+    const month = try coerceConstructorI32(self, arg(args, 0), "month");
+    const day = try coerceConstructorI32(self, arg(args, 1), "day");
     const calendar_arg = arg(args, 2);
     const calendar: ?[]const u8 = if (calendar_arg == .undefined) null else if (calendar_arg == .string) calendar_arg.string.value.data else return self.throwError(.type_error, "calendar must be a string", .{});
-    const reference_year: ?i32 = if (arg(args, 3) == .undefined) null else try requireI32(self, arg(args, 3), "referenceISOYear");
+    const reference_year: ?i32 = if (arg(args, 3) == .undefined) null else try coerceConstructorI32(self, arg(args, 3), "referenceISOYear");
     const pmd = ztemporal.PlainMonthDay.init(month, day, calendar, reference_year) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_month_day = pmd });
 }
