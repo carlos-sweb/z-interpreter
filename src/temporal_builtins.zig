@@ -178,6 +178,7 @@ fn optionalDurationNumber(self: *Interpreter, obj: JSValue, key: []const u8) any
     if (obj != .object) return null;
     const v = obj.object.value.get(key) orelse return null;
     if (v == .undefined) return null;
+    if (v == .bigint) return self.throwError(.type_error, "{s} must be a number", .{key});
     return try requireDurationNumber(self, JSValue.fromNumber(try self.toNumberJS(v)), key);
 }
 
