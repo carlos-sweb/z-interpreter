@@ -178,7 +178,7 @@ fn optionalDurationNumber(self: *Interpreter, obj: JSValue, key: []const u8) any
     if (obj != .object) return null;
     const v = obj.object.value.get(key) orelse return null;
     if (v == .undefined) return null;
-    return try requireDurationNumber(self, v, key);
+    return try requireDurationNumber(self, JSValue.fromNumber(try self.toNumberJS(v)), key);
 }
 
 fn observableDurationNumber(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!?f64 {
