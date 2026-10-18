@@ -900,6 +900,7 @@ fn ptWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     const pt = try ptSelf(self, this_value);
     const fields = arg(args, 0);
     if (fields != .object) return self.throwError(.type_error, "with() requires an object", .{});
+    try rejectWithCalendarOrTimeZone(self, fields);
     const overflow = try readOverflow(self, arg(args, 1));
     const result = pt.with(.{
         .hour = try optionalI32(self, fields, "hour"),
@@ -1180,6 +1181,7 @@ fn pdtWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const pdt = try pdtSelf(self, this_value);
     const fields = arg(args, 0);
     if (fields != .object) return self.throwError(.type_error, "with() requires an object", .{});
+    try rejectWithCalendarOrTimeZone(self, fields);
     const overflow = try readOverflow(self, arg(args, 1));
     const result = pdt.with(.{
         .year = try optionalI32(self, fields, "year"),
@@ -1595,6 +1597,13 @@ fn readRelativeTo(self: *Interpreter, options: JSValue) anyerror!?ztemporal.Dura
         .zoned_date_time => |dt| return .{ .zonedDateTime = dt },
         else => {},
     };
+    // A property bag with timeZone denotes a ZonedDateTime. Route it through
+    // the shared coercer so the timeZone type and identifier are validated.
+    if (v == .object) {
+        const time_zone = try self.getProperty(v, "timeZone");
+        defer time_zone.deinit();
+        if (time_zone != .undefined) return .{ .zonedDateTime = try coerceZonedDateTime(self, self.gc_allocator, v, .constrain, .compatible, .reject) };
+    }
     // temporal-argument-coercion.md: `relativeTo` accepts a string or
     // property-bag too (real spec's ToRelativeTemporalObject), not
     // just an already-constructed instance -- found during that
