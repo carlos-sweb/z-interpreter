@@ -326,6 +326,7 @@ pub fn deinit(self: *Interpreter) void {
     self.proto_refs.deinit(self.gc_allocator);
     self.array_props.deinit(self.gc_allocator);
     self.temporal_props.deinit(self.gc_allocator);
+    self.temporal_protos.deinit(self.gc_allocator);
     self.primitive_wrapper_data.deinit(self.gc_allocator);
     self.deleted_fn_props.deinit(self.gc_allocator);
     self.pending_jobs.deinit(self.gc_allocator);
@@ -376,6 +377,9 @@ pub fn gcOnBoxDestroyed(ctx: *anyopaque, box: *anyopaque) void {
         if (!self.tearing_down) kv.value.deinit();
     }
     if (self.temporal_props.fetchRemove(@intFromPtr(box))) |kv| {
+        if (!self.tearing_down) kv.value.deinit();
+    }
+    if (self.temporal_protos.fetchRemove(@intFromPtr(box))) |kv| {
         if (!self.tearing_down) kv.value.deinit();
     }
     if (self.primitive_wrapper_data.fetchRemove(@intFromPtr(box))) |kv| {
@@ -681,7 +685,10 @@ pub fn traceValueChildren(self: *Interpreter, v: JSValue, visitor: anytype) void
         // (z-interpreter-refactor.md, Step 1d) is confirming *this*
         // leaf group is genuinely correct, not just present.
         .undefined, .null, .boolean, .number, .string, .regex, .symbol, .date, .bigint, .array_buffer => {},
-        .temporal => |box| if (self.temporal_props.get(@intFromPtr(box))) |bag| visitor.value(bag),
+        .temporal => |box| {
+            if (self.temporal_props.get(@intFromPtr(box))) |bag| visitor.value(bag);
+            if (self.temporal_protos.get(@intFromPtr(box))) |proto| visitor.value(proto);
+        },
         .array => |box| {
             for (box.value.toSliceMut()) |*child| visitor.value(child.*);
             // The array's named-property bag hangs off the array, like
@@ -891,6 +898,7 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
         },
         .temporal => |box| {
             if (self.temporal_props.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
+            if (self.temporal_protos.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             box.destroy();
         },
         .bigint => |box| {
@@ -1097,6 +1105,8 @@ pub fn freeAllGcNodes(self: *Interpreter) void {
     while (apit2.next()) |v| sweeper.value(v.*);
     var tpit2 = self.temporal_props.valueIterator();
     while (tpit2.next()) |v| sweeper.value(v.*);
+    var tprotit2 = self.temporal_protos.valueIterator();
+    while (tprotit2.next()) |v| sweeper.value(v.*);
     var pwit2 = self.primitive_wrapper_data.valueIterator();
     while (pwit2.next()) |v| sweeper.value(v.*);
     var mcit2 = self.method_cache.valueIterator();

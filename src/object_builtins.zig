@@ -1088,7 +1088,7 @@ pub fn objectGetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: J
         .array_buffer => |box| self.arrayBufferProto(box.value.is_shared).retain(),
         .data_view => self.protos.data_view.retain(),
         .typed_array => |box| self.typedArrayProto(box.value.kind).retain(),
-        .temporal => |box| self.protos.temporalProtoFor(box.value).retain(),
+        .temporal => self.temporalPrototype(obj).retain(),
         // No getPrototypeOf trap dispatch yet (Proxy plan, later phase)
         // -- delegates transparently to target, correct for the
         // no-trap case.

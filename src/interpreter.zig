@@ -828,6 +828,10 @@ pub const Interpreter = struct {
     /// Own data/accessor properties of Temporal instances. The native
     /// TemporalValue remains an internal slot; this bag is an edge of its box.
     temporal_props: std.AutoHashMapUnmanaged(usize, JSValue) = .empty,
+    /// Per-instance Temporal [[Prototype]] overrides. No entry means the
+    /// intrinsic prototype selected by the TemporalValue tag; an eventual
+    /// `.null` entry represents an explicitly cleared prototype.
+    temporal_protos: std.AutoHashMapUnmanaged(usize, JSValue) = .empty,
     /// The boxed primitive inside a `new String()`/`new Number()`/
     /// `new Boolean()` wrapper object -- these constructors return an
     /// ordinary object (no internal-slot concept exists on JSValue's
@@ -939,6 +943,14 @@ pub const Interpreter = struct {
     pub const arrayPropsObject = interpreter_support.arrayPropsObject;
     pub const temporalPropsObject = interpreter_support.temporalPropsObject;
     pub const temporalProps = interpreter_support.temporalProps;
+
+    /// Returns a Temporal instance's effective [[Prototype]]. The override
+    /// table is intentionally read-only in this first subclassing commit.
+    pub fn temporalPrototype(self: *const Interpreter, value: JSValue) JSValue {
+        std.debug.assert(value == .temporal);
+        return self.temporal_protos.get(@intFromPtr(value.temporal)) orelse
+            self.protos.temporalProtoFor(value.temporal.value);
+    }
     pub const regexPropsObject = interpreter_support.regexPropsObject;
     pub const recompileRegex = interpreter_support.recompileRegex;
     pub const regexProps = interpreter_support.regexProps;

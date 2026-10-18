@@ -451,7 +451,10 @@ pub fn evalInstanceof(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSVal
         .array_buffer => |box| &self.arrayBufferProto(box.value.is_shared).object.value,
         .data_view => &self.protos.data_view.object.value,
         .@"error" => &self.protos.@"error".object.value,
-        .temporal => |box| &self.protos.temporalProtoFor(box.value).object.value,
+        .temporal => blk: {
+            const temporal_proto = self.temporalPrototype(l);
+            break :blk if (temporal_proto == .object) &temporal_proto.object.value else null;
+        },
         else => return JSValue.fromBool(false), // primitives are never instances
     };
     while (current) |p| : (current = p.getPrototype()) {

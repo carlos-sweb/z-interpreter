@@ -196,8 +196,10 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
                     break :blk try getter.function.value.call(getter.function.value.ctx, self.gc_allocator, obj, &.{});
                 }
             }
-            const proto = self.protos.temporalProtoFor(box.value);
-            if (try self.getFromProto(obj, proto, key)) |m| break :blk m;
+            const proto = self.temporalPrototype(obj);
+            if (proto == .object) {
+                if (try self.getFromProto(obj, proto, key)) |m| break :blk m;
+            }
             break :blk JSValue.UNDEFINED;
         },
         // get(target, property, receiver) -- receiver is the proxy
