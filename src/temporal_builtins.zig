@@ -315,6 +315,7 @@ fn readRoundingOptionsGeneric(self: *Interpreter, comptime T: type, options: JSV
         out.largestUnit = try unitFromString(self, text, "largestUnit");
     };
     if (o.get("roundingIncrement")) |v| if (v != .undefined) {
+        if (v == .bigint) return self.throwError(.type_error, "roundingIncrement must be a number", .{});
         out.roundingIncrement = try requireU32(self, JSValue.fromNumber(try self.toNumberJS(v)), "roundingIncrement");
     };
     if (o.get("roundingMode")) |v| if (v != .undefined) {
