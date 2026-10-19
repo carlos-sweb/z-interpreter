@@ -6,6 +6,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const zparser = @import("zparser");
 const zfunctions = @import("zfunctions");
+const zstatements = @import("zstatements");
 const zvalue = @import("zvalue");
 const JSValue = zvalue.JSValue;
 
@@ -102,6 +103,131 @@ fn fieldDisplayName(key: []const u8) []const u8 {
     if (key.len == 0 or key[0] != 0) return key;
     if (std.mem.lastIndexOfScalar(u8, key, '|')) |i| return key[i + 1 ..];
     return key;
+}
+
+/// A deliberately conservative lexical scan. Returning true for syntax we do
+/// not traverse preserves the old eager behavior; only a proven absence of an
+/// `arguments` identifier skips allocation. Nested ordinary functions own
+/// their arguments, while nested arrows inherit the enclosing binding.
+fn functionNeedsArguments(self: *Interpreter, fnode: *zfunctions.FunctionNode) bool {
+    if (fnode.kind == .arrow) return false;
+    const key = @intFromPtr(fnode);
+    if (self.function_needs_arguments.get(key)) |cached| return cached;
+    const needs = functionBodyUsesArguments(fnode);
+    self.function_needs_arguments.put(self.gc_allocator, key, needs) catch return true;
+    return needs;
+}
+
+fn functionBodyUsesArguments(fnode: *const zfunctions.FunctionNode) bool {
+    for (fnode.params.items) |param| {
+        if (bindingPatternUsesArguments(param.pattern)) return true;
+        if (param.default) |default_value| if (nodeUsesArguments(default_value)) return true;
+    }
+    if (fnode.params.rest) |rest| if (bindingPatternUsesArguments(rest)) return true;
+    return switch (fnode.body) {
+        .block => |body| statementUsesArguments(body),
+        .expression => |body| nodeUsesArguments(body),
+    };
+}
+
+fn bindingPatternUsesArguments(pattern: *const zstatements.BindingPattern) bool {
+    return switch (pattern.*) {
+        .identifier => false,
+        .array => |array| blk: {
+            for (array.elements) |element| if (element) |item| {
+                if (bindingPatternUsesArguments(item.pattern)) break :blk true;
+                if (item.default) |default_value| if (nodeUsesArguments(default_value)) break :blk true;
+            };
+            if (array.rest) |rest| if (bindingPatternUsesArguments(rest)) break :blk true;
+            break :blk false;
+        },
+        .object => |object| blk: {
+            for (object.properties) |property| {
+                if (bindingPatternUsesArguments(property.value)) break :blk true;
+                if (property.default) |default_value| if (nodeUsesArguments(default_value)) break :blk true;
+            }
+            break :blk false;
+        },
+    };
+}
+
+fn nodeUsesArguments(node: *const zparser.Node) bool {
+    return switch (node.data) {
+        .identifier => |name| std.mem.eql(u8, name, "arguments"),
+        .template_literal => |template| blk: {
+            for (template.expressions) |expression| if (nodeUsesArguments(expression)) break :blk true;
+            break :blk false;
+        },
+        .array_literal => |items| blk: {
+            for (items) |item| if (item) |expression| if (nodeUsesArguments(expression)) break :blk true;
+            break :blk false;
+        },
+        .object_literal => |items| blk: {
+            for (items) |item| switch (item) {
+                .spread => |expression| if (nodeUsesArguments(expression)) break :blk true,
+                .property => |property| {
+                    if (property.computed and nodeUsesArguments(property.key)) break :blk true;
+                    if (nodeUsesArguments(property.value)) break :blk true;
+                },
+            };
+            break :blk false;
+        },
+        .spread, .paren, .await_expr => |operand| nodeUsesArguments(operand),
+        .unary => |unary| nodeUsesArguments(unary.operand),
+        .binary => |binary| nodeUsesArguments(binary.left) or nodeUsesArguments(binary.right),
+        .logical => |logical| nodeUsesArguments(logical.left) or nodeUsesArguments(logical.right),
+        .assignment => |assignment| nodeUsesArguments(assignment.target) or nodeUsesArguments(assignment.value),
+        .conditional => |conditional| nodeUsesArguments(conditional.test_expr) or nodeUsesArguments(conditional.consequent) or nodeUsesArguments(conditional.alternate),
+        .sequence => |items| blk: {
+            for (items) |item| if (nodeUsesArguments(item)) break :blk true;
+            break :blk false;
+        },
+        .call => |call| blk: {
+            if (nodeUsesArguments(call.callee)) break :blk true;
+            for (call.args) |argument| if (nodeUsesArguments(argument)) break :blk true;
+            break :blk false;
+        },
+        .new_expr => |new_expr| blk: {
+            if (nodeUsesArguments(new_expr.callee)) break :blk true;
+            if (new_expr.args) |args| for (args) |argument| if (nodeUsesArguments(argument)) break :blk true;
+            break :blk false;
+        },
+        .member => |member| nodeUsesArguments(member.object) or (member.computed and nodeUsesArguments(member.property)),
+        .function_like => |function_ptr| blk: {
+            const nested = zfunctions.asFunctionNode(function_ptr);
+            break :blk nested.kind == .arrow and functionBodyUsesArguments(nested);
+        },
+        // A class can evaluate an outer lexical `arguments` in heritage,
+        // computed names, or field initializers. Keep the eager path until
+        // that AST has a dedicated scanner.
+        .class_like => true,
+        .yield_expr => |yield_expr| if (yield_expr.argument) |argument| nodeUsesArguments(argument) else false,
+        .number_literal, .bigint_literal, .string_literal, .boolean_literal,
+        .null_literal, .regex_literal, .this_expr, .super_expr => false,
+    };
+}
+
+fn statementUsesArguments(statement: *const zstatements.Statement) bool {
+    return switch (statement.data) {
+        .empty, .continue_stmt, .break_stmt, .debugger, .import_decl, .function_declaration => false,
+        .expr_stmt, .throw_stmt => |expression| nodeUsesArguments(expression),
+        .block => |statements| blk: {
+            for (statements) |child| if (statementUsesArguments(child)) break :blk true;
+            break :blk false;
+        },
+        .variable => |variable| blk: {
+            for (variable.declarators) |declarator| {
+                if (bindingPatternUsesArguments(declarator.pattern)) break :blk true;
+                if (declarator.init) |init| if (nodeUsesArguments(init)) break :blk true;
+            }
+            break :blk false;
+        },
+        .if_stmt => |if_stmt| nodeUsesArguments(if_stmt.test_expr) or statementUsesArguments(if_stmt.consequent) or (if_stmt.alternate != null and statementUsesArguments(if_stmt.alternate.?)),
+        .while_stmt => |loop| nodeUsesArguments(loop.test_expr) or statementUsesArguments(loop.body),
+        .do_while => |loop| statementUsesArguments(loop.body) or nodeUsesArguments(loop.test_expr),
+        .for_stmt, .try_stmt, .switch_stmt, .labelled, .with_stmt, .class_declaration, .export_decl => true,
+        .return_stmt => |value| if (value) |expression| nodeUsesArguments(expression) else false,
+    };
 }
 
 pub fn makeClosure(self: *Interpreter, env: *Environment, fnode: *zfunctions.FunctionNode) anyerror!JSValue {
@@ -574,12 +700,13 @@ pub fn invokeFunctionNode(
     call_env.private_ctx = private_ctx;
     if (home_object) |ho| call_env.home_object = ho.retain();
 
-    // `arguments`: every non-arrow call gets one (arrows inherit the
-    // enclosing function's via the scope chain -- no binding here).
+    // `arguments`: arrows inherit the enclosing function's binding. For an
+    // ordinary function, materialize the snapshot only when its conservative
+    // parse-tree analysis found a possible use.
     // Materialized as a real array snapshot (always-strict => unmapped;
     // narrowing: not the exotic Arguments object -- see README). Defined
     // BEFORE params so a parameter/rest named `arguments` shadows it.
-    if (fnode.kind != .arrow) {
+    if (functionNeedsArguments(self, fnode)) {
         var arguments = try self.gcNewArray();
         for (args) |a| _ = try arguments.array.value.push(a.retain());
         try call_env.define(allocator, "arguments", arguments);

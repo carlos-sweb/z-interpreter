@@ -836,6 +836,9 @@ pub const Interpreter = struct {
     /// intrinsic prototype selected by the TemporalValue tag; an eventual
     /// `.null` entry represents an explicitly cleared prototype.
     temporal_protos: std.AutoHashMapUnmanaged(usize, JSValue) = .empty,
+    /// Per-FunctionNode conservative `arguments` usage analysis. AST nodes
+    /// outlive the interpreter, so their addresses are stable cache keys.
+    function_needs_arguments: std.AutoHashMapUnmanaged(usize, bool) = .empty,
     /// The boxed primitive inside a `new String()`/`new Number()`/
     /// `new Boolean()` wrapper object -- these constructors return an
     /// ordinary object (no internal-slot concept exists on JSValue's

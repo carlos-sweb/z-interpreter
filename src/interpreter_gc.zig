@@ -327,6 +327,7 @@ pub fn deinit(self: *Interpreter) void {
     self.array_props.deinit(self.gc_allocator);
     self.temporal_props.deinit(self.gc_allocator);
     self.temporal_protos.deinit(self.gc_allocator);
+    self.function_needs_arguments.deinit(self.gc_allocator);
     self.primitive_wrapper_data.deinit(self.gc_allocator);
     self.deleted_fn_props.deinit(self.gc_allocator);
     self.pending_jobs.deinit(self.gc_allocator);
