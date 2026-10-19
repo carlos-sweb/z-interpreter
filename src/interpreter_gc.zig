@@ -926,8 +926,7 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
             box.destroy();
         },
         .environment => |e| {
-            var it = e.bindings.valueIterator();
-            while (it.next()) |v| sweeper.value(v.*);
+            for (e.bindings.items) |binding| sweeper.value(binding.value);
             if (e.this_value) |v| sweeper.value(v);
             if (e.super_proto) |v| sweeper.value(v);
             if (e.super_ctor) |v| sweeper.value(v);

@@ -707,19 +707,17 @@ pub fn evalForIn(self: *Interpreter, env: *Environment, head: anytype, body: *zs
             if (self.global_object) |go| {
                 if (target.object == go.object) {
                     if (self.global_var_env) |gve| {
-                        var it = gve.bindings.keyIterator();
-                        while (it.next()) |k| {
-                            if (seen.contains(k.*)) continue;
-                            try seen.put(arena, k.*, {});
-                            try keys_list.append(arena, k.*);
+                        for (gve.bindings.items) |binding| {
+                            if (seen.contains(binding.name)) continue;
+                            try seen.put(arena, binding.name, {});
+                            try keys_list.append(arena, binding.name);
                         }
                     }
-                    var it2 = self.global_env.bindings.keyIterator();
-                    while (it2.next()) |k| {
-                        if (self.global_builtin_names.contains(k.*)) continue;
-                        if (seen.contains(k.*)) continue;
-                        try seen.put(arena, k.*, {});
-                        try keys_list.append(arena, k.*);
+                    for (self.global_env.bindings.items) |binding| {
+                        if (self.global_builtin_names.contains(binding.name)) continue;
+                        if (seen.contains(binding.name)) continue;
+                        try seen.put(arena, binding.name, {});
+                        try keys_list.append(arena, binding.name);
                     }
                 }
             }

@@ -591,7 +591,7 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
     // built-ins/undefined+NaN+Infinity/prop-desc.js).
     if (self.global_object) |go| {
         if (obj.object == go.object) {
-            if (self.global_env.bindings.contains(key)) {
+            if (self.global_env.containsBinding(key)) {
                 self.global_env.assign(key, value.retain()) catch |e| switch (e) {
                     error.ImmutableBinding => return self.throwError(.type_error, "Cannot assign to read only property '{s}' of object '#<Object>'", .{key}),
                     else => return e,
@@ -687,8 +687,8 @@ pub fn deletePropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8) 
                 if (std.mem.eql(u8, key, "undefined") or std.mem.eql(u8, key, "NaN") or std.mem.eql(u8, key, "Infinity") or self.global_var_names.contains(key)) {
                     return self.throwError(.type_error, "Cannot delete property '{s}' of #<Object>", .{key});
                 }
-                if (self.global_env.bindings.fetchRemove(key)) |kv| {
-                    kv.value.deinit();
+                if (self.global_env.removeBinding(key)) |binding| {
+                    binding.value.deinit();
                     return true;
                 }
                 return true;

@@ -10,6 +10,13 @@ pub const AssignError = error{ ReferenceError, BeforeInitialization, ImmutableBi
 /// still in its temporal dead zone (`x; let x = 1;`), or nothing at all.
 pub const Lookup = union(enum) { value: JSValue, tdz, not_found };
 
+/// A local binding. Environments usually contain only a handful of these,
+/// so a linear scan avoids the hash-map overhead on ordinary function calls.
+pub const Binding = struct {
+    name: []const u8,
+    value: JSValue,
+};
+
 /// A lexical scope. Environments are arena-allocated for the whole
 /// interpreter run and never individually freed -- see Interpreter's own
 /// doc comment for why (closures need their defining environment to
@@ -17,12 +24,7 @@ pub const Lookup = union(enum) { value: JSValue, tdz, not_found };
 /// environment graph is out of scope for a first interpreter).
 pub const Environment = struct {
     parent: ?*Environment,
-    bindings: std.StringHashMapUnmanaged(JSValue) = .empty,
-    /// One-entry cache for a binding owned by this environment. The hash-map
-    /// API does not expose stable entry indexes; cache the value slot instead
-    /// and invalidate before every mutation that could rehash it.
-    last_name: ?[]const u8 = null,
-    last_binding: ?*JSValue = null,
+    bindings: std.ArrayListUnmanaged(Binding) = .empty,
     /// Names declared (let/const/class) in this scope but not yet
     /// initialized -- the temporal dead zone. Marked by the lexical
     /// hoisting pre-pass at scope entry; cleared by `define` when the
@@ -72,18 +74,44 @@ pub const Environment = struct {
     /// Declarations and function parameters all land here. Always defines
     /// in THIS environment (never walks up). Clears any TDZ mark on the
     /// name -- an executing declaration IS the initialization.
+    pub fn bindingIndex(self: *const Environment, name: []const u8) ?usize {
+        for (self.bindings.items, 0..) |binding, index| {
+            if (std.mem.eql(u8, binding.name, name)) return index;
+        }
+        return null;
+    }
+
+    pub fn containsBinding(self: *const Environment, name: []const u8) bool {
+        return self.bindingIndex(name) != null;
+    }
+
+    pub fn getLocalBinding(self: *const Environment, name: []const u8) ?JSValue {
+        const index = self.bindingIndex(name) orelse return null;
+        return self.bindings.items[index].value;
+    }
+
+    pub fn getLocalBindingPtr(self: *Environment, name: []const u8) ?*JSValue {
+        const index = self.bindingIndex(name) orelse return null;
+        return &self.bindings.items[index].value;
+    }
+
+    pub fn removeBinding(self: *Environment, name: []const u8) ?Binding {
+        const index = self.bindingIndex(name) orelse return null;
+        return self.bindings.orderedRemove(index);
+    }
+
     pub fn define(self: *Environment, arena: Allocator, name: []const u8, value: JSValue) !void {
-        self.last_name = null;
-        self.last_binding = null;
         _ = self.tdz.remove(name);
-        try self.bindings.put(arena, name, value);
+        if (self.bindingIndex(name)) |index| {
+            self.bindings.items[index].value = value;
+            return;
+        }
+        try self.bindings.append(arena, .{ .name = name, .value = value });
     }
 
     /// Marks a lexically-declared name as existing-but-uninitialized in
     /// this scope. Set by the hoisting pre-pass at scope entry.
     pub fn markTDZ(self: *Environment, arena: Allocator, name: []const u8) !void {
-        self.last_name = null;
-        self.last_binding = null;
         try self.tdz.put(arena, name, {});
     }
 
@@ -97,7 +125,7 @@ pub const Environment = struct {
     /// True when this environment itself already declares the name (as a
     /// live binding or a TDZ mark) -- the redeclaration check.
     pub fn declaresLocally(self: *Environment, name: []const u8) bool {
-        return self.bindings.contains(name) or self.tdz.contains(name);
+        return self.containsBinding(name) or self.tdz.contains(name);
     }
 
     /// Walks the parent chain. Returns null if the name isn't bound
@@ -107,7 +135,7 @@ pub const Environment = struct {
     pub fn get(self: *Environment, name: []const u8) ?JSValue {
         var env: ?*Environment = self;
         while (env) |e| : (env = e.parent) {
-            if (e.bindings.get(name)) |v| return v;
+            if (e.getLocalBinding(name)) |v| return v;
         }
         return null;
     }
@@ -118,21 +146,10 @@ pub const Environment = struct {
     /// zone correctly shadows an initialized outer `x`
     /// (`let x = 1; { x; let x = 2; }` is the real ReferenceError).
     pub fn lookup(self: *Environment, name: []const u8) Lookup {
-        if (self.last_name) |cached_name| {
-            if (std.mem.eql(u8, cached_name, name)) {
-                if (self.last_binding) |slot| return .{ .value = slot.* };
-            }
-        }
-        if (self.tdz.contains(name)) return .tdz;
-        if (self.bindings.getPtr(name)) |slot| {
-            self.last_name = name;
-            self.last_binding = slot;
-            return .{ .value = slot.* };
-        }
-        var env = self.parent;
+        var env: ?*Environment = self;
         while (env) |e| : (env = e.parent) {
             if (e.tdz.contains(name)) return .tdz;
-            if (e.bindings.get(name)) |v| return .{ .value = v };
+            if (e.getLocalBinding(name)) |v| return .{ .value = v };
         }
         return .not_found;
     }
@@ -151,7 +168,7 @@ pub const Environment = struct {
         var env: ?*Environment = self;
         while (env) |e| : (env = e.parent) {
             if (e.tdz.contains(name)) return AssignError.BeforeInitialization;
-            if (e.bindings.getPtr(name)) |slot| {
+            if (e.getLocalBindingPtr(name)) |slot| {
                 if (e.consts.contains(name)) return AssignError.ImmutableBinding;
                 slot.deinit();
                 slot.* = value;
@@ -233,8 +250,7 @@ pub const Environment = struct {
     /// after calling this, once it has the real type back.
     pub fn traceChildren(self: *const Environment, visitor: anytype) void {
         if (self.parent) |p| visitor.environment(p);
-        var it = self.bindings.valueIterator();
-        while (it.next()) |v| visitor.value(v.*);
+        for (self.bindings.items) |binding| visitor.value(binding.value);
         if (self.this_value) |v| visitor.value(v);
         if (self.super_proto) |v| visitor.value(v);
         if (self.super_ctor) |v| visitor.value(v);

@@ -167,7 +167,7 @@ pub fn hoistVarForBinding(self: *Interpreter, env: *Environment, binding: zstate
 pub fn hoistVarPattern(self: *Interpreter, env: *Environment, pattern: *const zstatements.BindingPattern) anyerror!void {
     const arena = self.gc_allocator;
     switch (pattern.*) {
-        .identifier => |id| if (!env.bindings.contains(id.name)) {
+        .identifier => |id| if (!env.containsBinding(id.name)) {
             try env.define(arena, id.name, JSValue.UNDEFINED);
             try markGlobalVarName(self, env, id.name);
         },
@@ -179,7 +179,7 @@ pub fn hoistVarPattern(self: *Interpreter, env: *Environment, pattern: *const zs
         },
         .object => |obj| {
             for (obj.properties) |p| try self.hoistVarPattern(env, p.value);
-            if (obj.rest) |r| if (!env.bindings.contains(r.name)) {
+            if (obj.rest) |r| if (!env.containsBinding(r.name)) {
                 try env.define(arena, r.name, JSValue.UNDEFINED);
                 try markGlobalVarName(self, env, r.name);
             };

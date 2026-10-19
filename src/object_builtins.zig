@@ -83,19 +83,17 @@ pub fn ownEnumerableKeys(ctx: *anyopaque, allocator: Allocator, v: JSValue) anye
     // bag, same gap as getOwnPropertyDescriptor/getOwnPropertyNames above.
     if (v == .object and isGlobalObject(self, v)) {
         if (self.global_var_env) |gve| {
-            var it = gve.bindings.keyIterator();
-            while (it.next()) |k| {
-                if (seen.contains(k.*)) continue;
-                try seen.put(allocator, k.*, {});
-                try owned.append(allocator, try allocator.dupe(u8, k.*));
+            for (gve.bindings.items) |binding| {
+                if (seen.contains(binding.name)) continue;
+                try seen.put(allocator, binding.name, {});
+                try owned.append(allocator, try allocator.dupe(u8, binding.name));
             }
         }
-        var it2 = self.global_env.bindings.keyIterator();
-        while (it2.next()) |k| {
-            if (self.global_builtin_names.contains(k.*)) continue;
-            if (seen.contains(k.*)) continue;
-            try seen.put(allocator, k.*, {});
-            try owned.append(allocator, try allocator.dupe(u8, k.*));
+        for (self.global_env.bindings.items) |binding| {
+            if (self.global_builtin_names.contains(binding.name)) continue;
+            if (seen.contains(binding.name)) continue;
+            try seen.put(allocator, binding.name, {});
+            try owned.append(allocator, try allocator.dupe(u8, binding.name));
         }
     }
     const borrowed: [][]const u8 = switch (v) {
@@ -654,14 +652,14 @@ fn isGlobalObject(self: *Interpreter, obj: JSValue) bool {
 fn globalPropertyDescriptor(self: *Interpreter, key: []const u8) !?JSValue {
     if (self.global_var_names.contains(key)) {
         const env = self.global_var_env orelse self.global_env;
-        if (env.bindings.get(key)) |v| return try dataDescObj(self, v.retain(), true, true, false);
+        if (env.getLocalBinding(key)) |v| return try dataDescObj(self, v.retain(), true, true, false);
         return null;
     }
     if (std.mem.eql(u8, key, "undefined") or std.mem.eql(u8, key, "NaN") or std.mem.eql(u8, key, "Infinity")) {
-        if (self.global_env.bindings.get(key)) |v| return try dataDescObj(self, v.retain(), false, false, false);
+        if (self.global_env.getLocalBinding(key)) |v| return try dataDescObj(self, v.retain(), false, false, false);
         return null;
     }
-    if (self.global_env.bindings.get(key)) |v| {
+    if (self.global_env.getLocalBinding(key)) |v| {
         const is_builtin = self.global_builtin_names.contains(key);
         return try dataDescObj(self, v.retain(), true, !is_builtin, true);
     }
@@ -793,18 +791,16 @@ pub fn objectGetOwnPropertyNames(ctx: *anyopaque, allocator: Allocator, this_val
             var seen: std.StringHashMapUnmanaged(void) = .empty;
             defer seen.deinit(allocator);
             if (isGlobalObject(self, o)) {
-                var it = self.global_env.bindings.keyIterator();
-                while (it.next()) |k| {
-                    if (seen.contains(k.*)) continue;
-                    try seen.put(allocator, k.*, {});
-                    _ = try result.array.value.push(try interp(ctx).gcNewString(k.*));
+                for (self.global_env.bindings.items) |binding| {
+                    if (seen.contains(binding.name)) continue;
+                    try seen.put(allocator, binding.name, {});
+                    _ = try result.array.value.push(try interp(ctx).gcNewString(binding.name));
                 }
                 if (self.global_var_env) |gve| {
-                    var vit = gve.bindings.keyIterator();
-                    while (vit.next()) |k| {
-                        if (seen.contains(k.*)) continue;
-                        try seen.put(allocator, k.*, {});
-                        _ = try result.array.value.push(try interp(ctx).gcNewString(k.*));
+                    for (gve.bindings.items) |binding| {
+                        if (seen.contains(binding.name)) continue;
+                        try seen.put(allocator, binding.name, {});
+                        _ = try result.array.value.push(try interp(ctx).gcNewString(binding.name));
                     }
                 }
             }
