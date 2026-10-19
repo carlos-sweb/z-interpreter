@@ -2,16 +2,16 @@
 
 ## Temporal status 2026-10-19
 
-The latest focused Temporal Test262 sweep (`/tmp/sweep-72288bd.jsonl`) reports
-**4,274 PASS / 337 FAIL** out of 4,611 Temporal tests. This is a point-in-time
+The latest focused Temporal Test262 sweep (`/tmp/sweep-f4ef98d.jsonl`) reports
+**4,301 PASS / 310 FAIL (93.3%)** out of 4,611 Temporal tests. This is a point-in-time
 binding measurement, not a conformance claim.
 
-The remaining 337 failures are grouped by Temporal type as follows:
+The remaining 310 failures are grouped by Temporal type as follows:
 
 | Type | FAIL |
 | --- | ---: |
-| ZonedDateTime | 77 |
-| Duration | 61 |
+| ZonedDateTime | 67 |
+| Duration | 44 |
 | PlainYearMonth | 44 |
 | PlainDateTime | 40 |
 | PlainDate | 36 |
@@ -22,7 +22,7 @@ The remaining 337 failures are grouped by Temporal type as follows:
 
 The remaining work is concentrated in per-type edge cases: calendar and time-zone
 validation, range boundaries, option/property-bag ordering, and method-specific
-rounding or arithmetic behavior. Consult the 337-failure sweep above before
+rounding or arithmetic behavior. Consult the 310-failure sweep above before
 selecting another block; it remains the source of truth for paths and messages.
 
 Recent binding work added per-instance Temporal subclass prototypes and adoption

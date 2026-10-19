@@ -14,6 +14,6 @@ public API:
 - `265e23f` and `f4ef98d`: validate `relativeTo.timeZone` and coerce
   `relativeTo` for `Duration.prototype.round()` and `total()`.
 
-The latest focused Temporal Test262 sweep reports **4,274 PASS / 4,611**.
+The latest focused Temporal Test262 sweep reports **4,301 PASS / 4,611 (93.3%)**.
 No JavaScript API additions, removals, or signature changes are included in this
 work.
