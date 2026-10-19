@@ -980,39 +980,57 @@ pub fn isConstructor(self: *Interpreter, v: JSValue) bool {
 }
 
 pub fn constructValue(self: *Interpreter, callee: JSValue, args: []const JSValue, callee_name: []const u8) anyerror!JSValue {
-    if (callee == .proxy) {
-        const box = callee.proxy;
+    return self.constructValueWithNewTarget(callee, args, callee, callee_name);
+}
+
+/// [[Construct]] with target and newTarget kept separate. The newTarget
+/// prototype is read once, before the constructor runs, and retained in the
+/// construction context so native constructors can create branded exotics with
+/// the caller-selected prototype.
+pub fn constructValueWithNewTarget(self: *Interpreter, target: JSValue, args: []const JSValue, new_target: JSValue, callee_name: []const u8) anyerror!JSValue {
+    if (target == .proxy) {
+        const box = target.proxy;
         if (try self.proxyTrap(box, "construct")) |trap_fn| {
             defer trap_fn.deinit();
             const args_array = try self.argsToArray(args);
             defer args_array.deinit();
-            return try trap_fn.function.value.call(trap_fn.function.value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, args_array, callee });
+            return try trap_fn.function.value.call(trap_fn.function.value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, args_array, new_target });
         }
-        return self.constructValue(box.value.target, args, callee_name);
+        return self.constructValueWithNewTarget(box.value.target, args, new_target, callee_name);
     }
-    if (callee != .function or !callee.function.value.constructable) {
+    if (target != .function or !target.function.value.constructable) {
         return self.throwError(.type_error, "{s} is not a constructor", .{callee_name});
     }
-    const proto = try self.functionPrototype(callee);
+
+    // GetPrototypeFromConstructor observes newTarget.prototype exactly once.
+    const observed_proto = try self.getProperty(new_target, "prototype");
+    defer observed_proto.deinit();
+    const proto = if (observed_proto == .object) observed_proto else try self.functionPrototype(target);
+
     const instance = try self.gcNewObject();
-    // Released if the construction fails (the prototype link or the
-    // constructor call itself throws).
     errdefer instance.deinit();
-    // The instance holds its own reference: the constructor may die, or
-    // its `prototype` be reassigned, while the instance lives.
     try self.setOwnedPrototype(instance, proto);
-    // Arm the construct token for exactly this call -- see the field
-    // doc on `construct_target`.
+
     const prev_target = self.construct_target;
-    self.construct_target = callee.function.value.ctx;
-    defer self.construct_target = prev_target;
-    const result = try callee.function.value.call(callee.function.value.ctx, self.gc_allocator, instance, args);
+    const prev_new_target = self.construct_new_target;
+    const prev_proto = self.construct_proto;
+    self.construct_target = target.function.value.ctx;
+    self.construct_new_target = new_target.retain();
+    self.construct_proto = proto.retain();
+    defer {
+        self.construct_target = prev_target;
+        self.construct_new_target.?.deinit();
+        self.construct_new_target = prev_new_target;
+        self.construct_proto.?.deinit();
+        self.construct_proto = prev_proto;
+    }
+
+    const result = try target.function.value.call(target.function.value.ctx, self.gc_allocator, instance, args);
     return switch (result) {
         .object, .array, .function, .regex, .map, .set, .@"error", .date, .promise, .proxy, .array_buffer, .data_view, .typed_array, .temporal => result,
         else => instance,
     };
 }
-
 
 /// A non-computed member access whose property name starts with '#' can
 /// only have come from `.#name` syntax (ordinary identifiers can't contain

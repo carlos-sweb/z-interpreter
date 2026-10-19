@@ -158,16 +158,7 @@ fn reflectConstruct(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     if (!self.isConstructor(new_target)) {
         return self.throwError(.type_error, "newTarget is not a constructor", .{});
     }
-    // GetPrototypeFromConstructor performs an observable Get on
-    // newTarget.prototype. Read it even though constructValue still uses the
-    // target's prototype for the actual allocation, so an abrupt getter
-    // completion is propagated rather than replaced by a TypeError.
-    const new_target_proto = try self.getProperty(new_target, "prototype");
-    defer new_target_proto.deinit();
-    // Narrowing: newTarget's distinct-prototype-source subclassing
-    // behavior is not modeled -- constructValue always uses `target`'s
-    // own prototype, matching plain `new target`.
-    return self.constructValue(target, call_args, "target");
+    return self.constructValueWithNewTarget(target, call_args, new_target, "target");
 }
 
 /// Installs the `Reflect` namespace (statics-only, no constructor).

@@ -706,6 +706,10 @@ pub const Interpreter = struct {
     /// body don't inherit construct-ness). This is how `C()` without
     /// `new` becomes the real TypeError.
     construct_target: ?*anyopaque = null,
+    /// The effective newTarget and already-observed prototype for the current
+    /// construction. Both are owned while active and restored around nesting.
+    construct_new_target: ?JSValue = null,
+    construct_proto: ?JSValue = null,
     /// User code runs in this child of global_env (created on first
     /// run(), persistent across runs). The separation makes the lexical
     /// redeclaration check ("already declared in THIS env") correct:
@@ -950,6 +954,17 @@ pub const Interpreter = struct {
         std.debug.assert(value == .temporal);
         return self.temporal_protos.get(@intFromPtr(value.temporal)) orelse
             self.protos.temporalProtoFor(value.temporal.value);
+    }
+
+    /// Installs an explicit Temporal [[Prototype]] override. The map owns its
+    /// value; absence remains reserved for the intrinsic-prototype fallback.
+    pub fn setTemporalPrototype(self: *Interpreter, value: JSValue, proto: JSValue) !void {
+        std.debug.assert(value == .temporal);
+        std.debug.assert(proto == .object or proto == .null);
+        const gop = try self.temporal_protos.getOrPut(self.gc_allocator, @intFromPtr(value.temporal));
+        const old: ?JSValue = if (gop.found_existing) gop.value_ptr.* else null;
+        gop.value_ptr.* = proto.retain();
+        if (old) |previous| previous.deinit();
     }
     pub const regexPropsObject = interpreter_support.regexPropsObject;
     pub const recompileRegex = interpreter_support.recompileRegex;

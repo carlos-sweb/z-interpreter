@@ -64,6 +64,21 @@ fn temporalErr(self: *Interpreter, e: ztemporal.TemporalError) anyerror {
     };
 }
 
+/// Constructors alone adopt the current newTarget prototype. Static and
+/// instance methods continue to use gcNewTemporal and therefore always return
+/// intrinsic Temporal instances.
+fn constructedTemporal(self: *Interpreter, value: TemporalValue) anyerror!JSValue {
+    const result = try self.gcNewTemporal(value);
+    errdefer result.deinit();
+    if (self.construct_proto) |proto| {
+        const intrinsic = self.protos.temporalProtoFor(result.temporal.value);
+        if (proto != .object or proto.object != intrinsic.object) {
+            try self.setTemporalPrototype(result, proto);
+        }
+    }
+    return result;
+}
+
 fn requireI32(self: *Interpreter, v: JSValue, what: []const u8) anyerror!i32 {
     if (v != .number) return self.throwError(.type_error, "{s} must be a number", .{what});
     const n = v.number;
@@ -561,7 +576,7 @@ fn plainDateConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     const month = try requireI32(self, arg(args, 1), "month");
     const day = try requireI32(self, arg(args, 2), "day");
     const pd = ztemporal.PlainDate.init(year, month, day, try optionalConstructorCalendar(self, arg(args, 3))) catch |e| return temporalErr(self, e);
-    return self.gcNewTemporal(.{ .plain_date = pd });
+    return constructedTemporal(self, .{ .plain_date = pd });
 }
 
 fn observableFromOverflow(self: *Interpreter, options: JSValue) anyerror!Overflow {
@@ -825,7 +840,7 @@ fn plainTimeConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     const us = if (arg(args, 4) != .undefined) try requireI32(self, arg(args, 4), "microsecond") else 0;
     const ns = if (arg(args, 5) != .undefined) try requireI32(self, arg(args, 5), "nanosecond") else 0;
     const pt = ztemporal.PlainTime.init(hour, minute, second, ms, us, ns) catch |e| return temporalErr(self, e);
-    return self.gcNewTemporal(.{ .plain_time = pt });
+    return constructedTemporal(self, .{ .plain_time = pt });
 }
 
 fn plainTimeFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1024,7 +1039,7 @@ fn plainDateTimeConstructor(ctx: *anyopaque, allocator: Allocator, this_value: J
     const us = if (arg(args, 7) != .undefined) try coerceConstructorI32(self, arg(args, 7), "microsecond") else 0;
     const ns = if (arg(args, 8) != .undefined) try coerceConstructorI32(self, arg(args, 8), "nanosecond") else 0;
     const pdt = ztemporal.PlainDateTime.init(year, month, day, hour, minute, second, ms, us, ns, try optionalConstructorCalendar(self, arg(args, 9))) catch |e| return temporalErr(self, e);
-    return self.gcNewTemporal(.{ .plain_date_time = pdt });
+    return constructedTemporal(self, .{ .plain_date_time = pdt });
 }
 
 fn plainDateTimeFromObservedBag(self: *Interpreter, fields: JSValue, options: JSValue) anyerror!ztemporal.PlainDateTime {
@@ -1321,7 +1336,7 @@ fn instantConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor Temporal.Instant requires 'new'", .{});
     const ns = try coerceEpochNanoseconds(self, arg(args, 0), "epochNanoseconds");
     const inst = ztemporal.Instant.fromEpochNanoseconds(ns) catch |e| return temporalErr(self, e);
-    return self.gcNewTemporal(.{ .instant = inst });
+    return constructedTemporal(self, .{ .instant = inst });
 }
 
 fn instantFromEpochMilliseconds(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1485,7 +1500,7 @@ fn durationConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
         if (args[i] != .undefined) vals[i] = try requireDurationNumber(self, args[i], "duration field");
     }
     const d = ztemporal.Duration.init(vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7], vals[8], vals[9]) catch |e| return temporalErr(self, e);
-    return self.gcNewTemporal(.{ .duration = d });
+    return constructedTemporal(self, .{ .duration = d });
 }
 
 fn durationFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1708,7 +1723,7 @@ fn plainYearMonthConstructor(ctx: *anyopaque, allocator: Allocator, this_value: 
     const month = try coerceConstructorI32(self, arg(args, 1), "month");
     const reference_day: ?i32 = if (arg(args, 3) == .undefined) null else try coerceConstructorI32(self, arg(args, 3), "referenceISODay");
     const pym = ztemporal.PlainYearMonth.init(year, month, try optionalConstructorCalendar(self, arg(args, 2)), reference_day) catch |e| return temporalErr(self, e);
-    return self.gcNewTemporal(.{ .plain_year_month = pym });
+    return constructedTemporal(self, .{ .plain_year_month = pym });
 }
 
 fn plainYearMonthFromObservedBag(self: *Interpreter, fields: JSValue, options: JSValue) anyerror!ztemporal.PlainYearMonth {
@@ -1934,7 +1949,7 @@ fn plainMonthDayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: J
     const calendar: ?[]const u8 = if (calendar_arg == .undefined) null else if (calendar_arg == .string) calendar_arg.string.value.data else return self.throwError(.type_error, "calendar must be a string", .{});
     const reference_year: ?i32 = if (arg(args, 3) == .undefined) null else try coerceConstructorI32(self, arg(args, 3), "referenceISOYear");
     const pmd = ztemporal.PlainMonthDay.init(month, day, calendar, reference_year) catch |e| return temporalErr(self, e);
-    return self.gcNewTemporal(.{ .plain_month_day = pmd });
+    return constructedTemporal(self, .{ .plain_month_day = pmd });
 }
 
 fn validatePlainMonthDayMonthCodeSyntax(self: *Interpreter, code: []const u8) anyerror!void {
@@ -2095,7 +2110,7 @@ fn zonedDateTimeConstructor(ctx: *anyopaque, allocator: Allocator, this_value: J
     if (tz_arg != .string) return self.throwError(.type_error, "timeZone must be a string", .{});
     const calendar = try optionalConstructorCalendar(self, arg(args, 2));
     const zdt = ztemporal.ZonedDateTime.init(allocator, ioHandle(), ns, tz_arg.string.value.data, calendar) catch |e| return temporalErr(self, e);
-    return self.gcNewTemporal(.{ .zoned_date_time = zdt });
+    return constructedTemporal(self, .{ .zoned_date_time = zdt });
 }
 
 /// temporal-argument-coercion.md: same "instance/string/property-bag"
