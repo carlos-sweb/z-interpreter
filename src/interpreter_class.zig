@@ -690,7 +690,10 @@ fn classConstructorCall(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
             try self.runInstanceFields(cctx, parent_result);
             return parent_result;
         }
-        parent_result.deinit();
+        // Ordinary parent constructors return the provisional instance (or
+        // another non-Temporal value) without transferring ownership here.
+        // Keep the old path intact: constructValue retains this_value and
+        // returns it after this implicit constructor yields undefined.
         try self.runInstanceFields(cctx, this_value);
     }
     return JSValue.UNDEFINED;
