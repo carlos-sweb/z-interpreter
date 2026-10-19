@@ -202,6 +202,7 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
             defer l.deinit();
             const r = try self.evalExpression(env, b.right);
             defer r.deinit();
+            if (numericBinaryFastPath(b.op, l, r)) |result| return result;
             // instanceof/in need the throw machinery and the prototype
             // chain, which coercion.zig doesn't have -- intercepted
             // here, never delegated.
@@ -682,6 +683,27 @@ pub fn evalAssignment(self: *Interpreter, env: *Environment, a: anytype) anyerro
             return result;
         },
     }
+}
+
+/// Avoid the general coercion dispatcher for the overwhelmingly common
+/// Number/Number arithmetic and relational cases. The operands were still
+/// evaluated left-to-right above; this only skips work after both are values.
+fn numericBinaryFastPath(op: zparser.BinaryOp, left: JSValue, right: JSValue) ?JSValue {
+    if (left != .number or right != .number) return null;
+    const l = left.number;
+    const r = right.number;
+    return switch (op) {
+        .add => JSValue.fromNumber(l + r),
+        .sub => JSValue.fromNumber(l - r),
+        .mul => JSValue.fromNumber(l * r),
+        .div => JSValue.fromNumber(l / r),
+        .mod => JSValue.fromNumber(@rem(l, r)),
+        .lt => JSValue.fromBool(l < r),
+        .gt => JSValue.fromBool(l > r),
+        .le => JSValue.fromBool(l <= r),
+        .ge => JSValue.fromBool(l >= r),
+        else => null,
+    };
 }
 
 /// Every binary operator except `instanceof`/`in` (the caller's). Object
