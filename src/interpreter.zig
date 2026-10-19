@@ -1063,6 +1063,7 @@ pub const Interpreter = struct {
     pub const evalNew = interpreter_expr.evalNew;
     pub const isConstructor = interpreter_expr.isConstructor;
     pub const constructValue = interpreter_expr.constructValue;
+    pub const constructValueWithNewTarget = interpreter_expr.constructValueWithNewTarget;
 
     // z-interpreter-refactor.md, Step 5 Phase C batch 6: regex+arrayextra+
     // boxing+coerce+native cluster, split into interpreter_support.zig.
