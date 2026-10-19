@@ -775,6 +775,14 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
         const this_v = env.resolveThis();
         defer this_v.deinit();
         const result = try sctor.function.value.call(sctor.function.value.ctx, arena, this_v, args);
+        // A Temporal base constructor returns the branded exotic it created.
+        // Adopt it as the derived constructor's this only when commit 2 gave
+        // it an explicit newTarget prototype; ordinary super() returns keep
+        // the provisional ordinary instance.
+        if (result == .temporal and self.temporal_protos.contains(@intFromPtr(result.temporal))) {
+            if (env.this_value) |previous| previous.deinit();
+            env.this_value = result.retain();
+        }
         // The derived class's own instance fields initialize exactly
         // when super() returns (spec order: parent fields ran during
         // the parent ctor; own fields now; rest of the body after).

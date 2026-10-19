@@ -684,7 +684,13 @@ fn classConstructorCall(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     if (cctx.super_ctor) |parent| {
         self.construct_target = parent.function.value.ctx;
         defer self.construct_target = null;
-        _ = try parent.function.value.call(parent.function.value.ctx, allocator, this_value, args);
+        const parent_result = try parent.function.value.call(parent.function.value.ctx, allocator, this_value, args);
+        if (parent_result == .temporal and self.temporal_protos.contains(@intFromPtr(parent_result.temporal))) {
+            errdefer parent_result.deinit();
+            try self.runInstanceFields(cctx, parent_result);
+            return parent_result;
+        }
+        parent_result.deinit();
         try self.runInstanceFields(cctx, this_value);
     }
     return JSValue.UNDEFINED;
