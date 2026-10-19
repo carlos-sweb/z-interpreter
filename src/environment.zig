@@ -18,6 +18,11 @@ pub const Lookup = union(enum) { value: JSValue, tdz, not_found };
 pub const Environment = struct {
     parent: ?*Environment,
     bindings: std.StringHashMapUnmanaged(JSValue) = .empty,
+    /// One-entry cache for a binding owned by this environment. The hash-map
+    /// API does not expose stable entry indexes; cache the value slot instead
+    /// and invalidate before every mutation that could rehash it.
+    last_name: ?[]const u8 = null,
+    last_binding: ?*JSValue = null,
     /// Names declared (let/const/class) in this scope but not yet
     /// initialized -- the temporal dead zone. Marked by the lexical
     /// hoisting pre-pass at scope entry; cleared by `define` when the
@@ -68,6 +73,8 @@ pub const Environment = struct {
     /// in THIS environment (never walks up). Clears any TDZ mark on the
     /// name -- an executing declaration IS the initialization.
     pub fn define(self: *Environment, arena: Allocator, name: []const u8, value: JSValue) !void {
+        self.last_name = null;
+        self.last_binding = null;
         _ = self.tdz.remove(name);
         try self.bindings.put(arena, name, value);
     }
@@ -75,6 +82,8 @@ pub const Environment = struct {
     /// Marks a lexically-declared name as existing-but-uninitialized in
     /// this scope. Set by the hoisting pre-pass at scope entry.
     pub fn markTDZ(self: *Environment, arena: Allocator, name: []const u8) !void {
+        self.last_name = null;
+        self.last_binding = null;
         try self.tdz.put(arena, name, {});
     }
 
@@ -109,7 +118,18 @@ pub const Environment = struct {
     /// zone correctly shadows an initialized outer `x`
     /// (`let x = 1; { x; let x = 2; }` is the real ReferenceError).
     pub fn lookup(self: *Environment, name: []const u8) Lookup {
-        var env: ?*Environment = self;
+        if (self.last_name) |cached_name| {
+            if (std.mem.eql(u8, cached_name, name)) {
+                if (self.last_binding) |slot| return .{ .value = slot.* };
+            }
+        }
+        if (self.tdz.contains(name)) return .tdz;
+        if (self.bindings.getPtr(name)) |slot| {
+            self.last_name = name;
+            self.last_binding = slot;
+            return .{ .value = slot.* };
+        }
+        var env = self.parent;
         while (env) |e| : (env = e.parent) {
             if (e.tdz.contains(name)) return .tdz;
             if (e.bindings.get(name)) |v| return .{ .value = v };
