@@ -32,3 +32,15 @@ primitive option rejection, numeric and rounding conversions, BigInt rejection
 where `ToNumber` requires it, and observable fields. Duration `round()` and
 `total()` now coerce string and property-bag `relativeTo` values, including
 zoned references.
+
+## Rendimiento actual (2026-10-19)
+
+La medición `fib(30) × 5` bajó de **22.068 ms** a **8.858 ms**: una mejora de
+**2,5×**. Los cambios fueron la materialización perezosa de `arguments`, el
+camino rápido numérico para operadores binarios y los bindings de entorno en
+array con búsqueda lineal.
+
+La comparación con Bun es **29 ms**; el intérprete sigue siendo aproximadamente
+**300× más lento**. El límite actual es el tree-walker: el siguiente paso real
+es la Fase 2, una VM de bytecode documentada en
+`docs/design/bytecode-vm.md`.
