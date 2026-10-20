@@ -799,9 +799,17 @@ fn classConstructorCall(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     if (cctx.ctor_fnode) |fnode| {
         if (cctx.super_ctor != null) {
             const prev_pending = self.pending_field_init;
+            const prev_adopted = self.adopted_super_this;
             self.pending_field_init = cctx;
-            defer self.pending_field_init = prev_pending;
-            return invokeFunctionNode(self, fnode, cctx.closure_env, allocator, this_value, cctx.super_proto, cctx.super_ctor, cctx, args, null);
+            self.adopted_super_this = null;
+            defer {
+                self.pending_field_init = prev_pending;
+                if (self.adopted_super_this) |value| value.deinit();
+                self.adopted_super_this = prev_adopted;
+            }
+            const result = try invokeFunctionNode(self, fnode, cctx.closure_env, allocator, this_value, cctx.super_proto, cctx.super_ctor, cctx, args, null);
+            if (result == .undefined) if (self.adopted_super_this) |value| return value.retain();
+            return result;
         }
         return invokeFunctionNode(self, fnode, cctx.closure_env, allocator, this_value, cctx.super_proto, cctx.super_ctor, cctx, args, null);
     }

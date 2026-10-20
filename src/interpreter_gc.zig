@@ -743,6 +743,7 @@ pub fn markRoots(self: *Interpreter, marker: *Marker) void {
     if (self.pending_exception) |ex| marker.value(ex);
     if (self.construct_new_target) |target| marker.value(target);
     if (self.construct_proto) |proto| marker.value(proto);
+    if (self.adopted_super_this) |value| marker.value(value);
     if (self.current_fiber) |fs| marker.markFiberState(fs);
     for (self.pending_jobs.items) |job| {
         if (job.handler) |h| marker.value(h);

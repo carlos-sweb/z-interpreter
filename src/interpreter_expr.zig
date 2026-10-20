@@ -804,6 +804,8 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
         if (result == .temporal and self.temporal_protos.contains(@intFromPtr(result.temporal))) {
             if (env.this_value) |previous| previous.deinit();
             env.this_value = result.retain();
+            if (self.adopted_super_this) |previous| previous.deinit();
+            self.adopted_super_this = result.retain();
         }
         // The derived class's own instance fields initialize exactly
         // when super() returns (spec order: parent fields ran during

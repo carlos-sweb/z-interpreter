@@ -798,6 +798,10 @@ pub const Interpreter = struct {
     /// evalCall's super() branch; save/restore discipline keeps nested
     /// constructions (`constructor() { new Other(); super(); }`) correct.
     pending_field_init: ?*anyopaque = null,
+    /// A branded Temporal value adopted by `super()` while a derived class
+    /// constructor is running. This is a stack slot: classConstructorCall
+    /// saves and restores it around nested derived constructors.
+    adopted_super_this: ?JSValue = null,
     /// JS-level RegExp state, keyed by the `.regex` Rc box pointer --
     /// z-regex is a pure engine, so the mutable `lastIndex`, the flags
     /// string, and the boolean flag set live here (the symbol_keys
