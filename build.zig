@@ -92,6 +92,19 @@ pub fn build(b: *std.Build) void {
     zinterpreter_module.addImport("ztemporal", ztemporal_module);
     zinterpreter_module.addImport("zurlcode", zurlcode_module);
 
+    const vm_bench = b.addExecutable(.{
+        .name = "vm_fib_bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/vm_fib.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    vm_bench.root_module.addImport("zinterpreter", zinterpreter_module);
+    const run_vm_bench = b.addRunArtifact(vm_bench);
+    const bench_vm_step = b.step("bench-vm", "Benchmark VM and AST walker on fib");
+    bench_vm_step.dependOn(&run_vm_bench.step);
+
     const test_step = b.step("test", "Run all tests");
 
     const test_files = [_][]const u8{
