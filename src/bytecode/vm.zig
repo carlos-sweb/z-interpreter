@@ -24,14 +24,14 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, args: []c
     while (pc < block.ops.len) : (pc += 1) {
         const op = block.ops[pc];
         switch (op.opcode) {
-            .load_const => try setRegister(&registers, op.a, try constantValue(allocator, block, op.b)),
-            .load_local => try setRegister(&registers, op.a, try getRegister(registers, op.b).retain()),
-            .store_local => try setRegister(&registers, op.a, try getRegister(registers, op.b).retain()),
-            .add, .add_num => try arithmetic(&registers, op, .add),
-            .sub_num => try arithmetic(&registers, op, .sub),
-            .mul_num => try arithmetic(&registers, op, .mul),
-            .div_num => try arithmetic(&registers, op, .div),
-            .return_value => return getRegister(registers, op.a).retain(),
+            .load_const => try setRegister(registers, op.a, try constantValue(allocator, block, op.b)),
+            .load_local => try setRegister(registers, op.a, (try getRegister(registers, op.b)).retain()),
+            .store_local => try setRegister(registers, op.a, (try getRegister(registers, op.b)).retain()),
+            .add, .add_num => try arithmetic(registers, op, .add),
+            .sub_num => try arithmetic(registers, op, .sub),
+            .mul_num => try arithmetic(registers, op, .mul),
+            .div_num => try arithmetic(registers, op, .div),
+            .return_value => return (try getRegister(registers, op.a)).retain(),
             .return_undefined => return JSValue.UNDEFINED,
             else => return error.UnsupportedOpcode,
         }

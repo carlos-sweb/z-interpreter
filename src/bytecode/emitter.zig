@@ -166,17 +166,16 @@ pub fn disassemble(allocator: Allocator, block: *const codeblock.CodeBlock) ![]u
     var output: std.ArrayListUnmanaged(u8) = .empty;
     errdefer output.deinit(allocator);
     for (block.ops, 0..) |op, index| {
-        const writer = output.writer(allocator);
-        try writer.print("{d:0>4} {s}", .{ index, @tagName(op.opcode) });
+        try output.print(allocator, "{d:0>4} {s}", .{ index, @tagName(op.opcode) });
         switch (op.opcode) {
-            .load_const => try writer.print(" r{d}, #{d}", .{ op.a, op.b }),
-            .load_local => try writer.print(" r{d}, @{d}", .{ op.a, op.b }),
-            .store_local => try writer.print(" @{d}, r{d}", .{ op.a, op.b }),
-            .add, .sub_num, .mul_num, .div_num => try writer.print(" r{d}, r{d}, r{d}", .{ op.a, op.b, op.c }),
-            .return_value => try writer.print(" r{d}", .{op.a}),
+            .load_const => try output.print(allocator, " r{d}, #{d}", .{ op.a, op.b }),
+            .load_local => try output.print(allocator, " r{d}, @{d}", .{ op.a, op.b }),
+            .store_local => try output.print(allocator, " @{d}, r{d}", .{ op.a, op.b }),
+            .add, .sub_num, .mul_num, .div_num => try output.print(allocator, " r{d}, r{d}, r{d}", .{ op.a, op.b, op.c }),
+            .return_value => try output.print(allocator, " r{d}", .{op.a}),
             else => {},
         }
-        try writer.writeByte('\n');
+        try output.append(allocator, '\n');
     }
     return output.toOwnedSlice(allocator);
 }

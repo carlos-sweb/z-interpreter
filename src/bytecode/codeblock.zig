@@ -142,7 +142,7 @@ pub const ScopeAnalyzer = struct {
     free_names: std.StringHashMapUnmanaged(void) = .empty,
     param_count: u16 = 0,
 
-    pub fn analyze(allocator: Allocator, function: *const zfunctions.FunctionNode) !ScopeAnalysis {
+    pub fn analyze(allocator: Allocator, function: *const zfunctions.FunctionNode) anyerror!ScopeAnalysis {
         var self = ScopeAnalyzer{ .allocator = allocator };
         defer self.local_names.deinit(allocator);
         defer self.captured_names.deinit(allocator);
@@ -183,14 +183,14 @@ pub const ScopeAnalyzer = struct {
         };
     }
 
-    fn addLocal(self: *ScopeAnalyzer, name: []const u8, kind: LocalKind) !void {
+    fn addLocal(self: *ScopeAnalyzer, name: []const u8, kind: LocalKind) anyerror!void {
         if (self.local_names.contains(name)) return;
         const slot: u16 = @intCast(self.locals.items.len);
         try self.local_names.put(self.allocator, name, {});
         try self.locals.append(self.allocator, .{ .name = name, .slot = slot, .kind = kind });
     }
 
-    fn addPattern(self: *ScopeAnalyzer, pattern: *const zstatements.BindingPattern, kind: LocalKind) !void {
+    fn addPattern(self: *ScopeAnalyzer, pattern: *const zstatements.BindingPattern, kind: LocalKind) anyerror!void {
         switch (pattern.*) {
             .identifier => |identifier| try self.addLocal(identifier.name, kind),
             .array => |array| {
@@ -204,7 +204,7 @@ pub const ScopeAnalyzer = struct {
         }
     }
 
-    fn collectLocals(self: *ScopeAnalyzer, body: zfunctions.FunctionBody) !void {
+    fn collectLocals(self: *ScopeAnalyzer, body: zfunctions.FunctionBody) anyerror!void {
         if (body == .block) try self.collectStatement(body.block);
     }
 
@@ -216,7 +216,7 @@ pub const ScopeAnalyzer = struct {
         };
     }
 
-    fn collectStatement(self: *ScopeAnalyzer, statement: *const zstatements.Statement) !void {
+    fn collectStatement(self: *ScopeAnalyzer, statement: *const zstatements.Statement) anyerror!void {
         switch (statement.data) {
             .block => |items| for (items) |item| try self.collectStatement(item),
             .variable => |variable| for (variable.declarators) |declarator| try self.addPattern(declarator.pattern, kindFor(variable.kind)),
@@ -251,26 +251,26 @@ pub const ScopeAnalyzer = struct {
         }
     }
 
-    fn addFree(self: *ScopeAnalyzer, name: []const u8) !void {
+    fn addFree(self: *ScopeAnalyzer, name: []const u8) anyerror!void {
         if (self.local_names.contains(name) or self.free_names.contains(name)) return;
         try self.free_names.put(self.allocator, name, {});
         try self.free.append(self.allocator, name);
     }
 
-    fn markCaptured(self: *ScopeAnalyzer, name: []const u8) !void {
+    fn markCaptured(self: *ScopeAnalyzer, name: []const u8) anyerror!void {
         if (!self.local_names.contains(name) or self.captured_names.contains(name)) return;
         try self.captured_names.put(self.allocator, name, {});
         try self.captured.append(self.allocator, name);
     }
 
-    fn scanBody(self: *ScopeAnalyzer, body: zfunctions.FunctionBody) !void {
+    fn scanBody(self: *ScopeAnalyzer, body: zfunctions.FunctionBody) anyerror!void {
         switch (body) {
             .block => |block| try self.scanStatement(block),
             .expression => |expression| try self.scanNode(expression),
         }
     }
 
-    fn scanStatement(self: *ScopeAnalyzer, statement: *const zstatements.Statement) !void {
+    fn scanStatement(self: *ScopeAnalyzer, statement: *const zstatements.Statement) anyerror!void {
         switch (statement.data) {
             .expr_stmt, .throw_stmt => |expression| try self.scanNode(expression),
             .block => |items| for (items) |item| try self.scanStatement(item),
@@ -321,7 +321,7 @@ pub const ScopeAnalyzer = struct {
         }
     }
 
-    fn scanForHead(self: *ScopeAnalyzer, head: zstatements.ForHead) !void {
+    fn scanForHead(self: *ScopeAnalyzer, head: zstatements.ForHead) anyerror!void {
         switch (head) {
             .c_style => |item| {
                 if (item.init) |init| if (init == .expr) try self.scanNode(init.expr);
@@ -333,7 +333,7 @@ pub const ScopeAnalyzer = struct {
         }
     }
 
-    fn scanNested(self: *ScopeAnalyzer, nested: *const zfunctions.FunctionNode) !void {
+    fn scanNested(self: *ScopeAnalyzer, nested: *const zfunctions.FunctionNode) anyerror!void {
         var analysis = try ScopeAnalyzer.analyze(self.allocator, nested);
         defer analysis.deinit(self.allocator);
         for (analysis.free_names) |name| {
@@ -341,7 +341,7 @@ pub const ScopeAnalyzer = struct {
         }
     }
 
-    fn scanClass(self: *ScopeAnalyzer, class: *const zfunctions.ClassNode) !void {
+    fn scanClass(self: *ScopeAnalyzer, class: *const zfunctions.ClassNode) anyerror!void {
         if (class.superclass) |superclass| try self.scanNode(superclass);
         for (class.elements) |element| {
             switch (element.key) {
@@ -353,7 +353,7 @@ pub const ScopeAnalyzer = struct {
         }
     }
 
-    fn scanNode(self: *ScopeAnalyzer, node: *const zparser.Node) !void {
+    fn scanNode(self: *ScopeAnalyzer, node: *const zparser.Node) anyerror!void {
         switch (node.data) {
             .identifier => |name| try self.addFree(name),
             .template_literal => |template| for (template.expressions) |expression| try self.scanNode(expression),

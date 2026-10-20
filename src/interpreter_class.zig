@@ -688,13 +688,21 @@ pub fn invokeFunctionNode(
     home_object: ?JSValue,
 ) anyerror!JSValue {
     if (self.compile_options.use_bytecode_vm) {
+        // Unsupported AST shapes have no CodeBlock and stay on the existing
+        // walker. The VM is selected only after a CodeBlock was emitted.
         var compiled = bytecode_emitter.BytecodeEmitter.emit(self.gc_allocator, fnode) catch |err| switch (err) {
             error.UnsupportedSyntax, error.UnknownLocal => null,
             else => return err,
         };
         if (compiled) |*block| {
             defer block.deinit(self.gc_allocator);
-            return bytecode_vm.vmCall(self.gc_allocator, &block.block, args);
+            const vm_result = bytecode_vm.vmCall(self.gc_allocator, &block.block, args) catch |err| switch (err) {
+                // An older/emitted block may contain an opcode not implemented
+                // by this VM revision. Preserve the AST path in that case.
+                error.UnsupportedOpcode => null,
+                else => return err,
+            };
+            if (vm_result) |value| return value;
         }
     }
     const call_env = try self.gcChildEnv(closure_env);
