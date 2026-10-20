@@ -928,6 +928,10 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
         },
         .environment => |e| {
             for (e.bindings.items) |binding| sweeper.value(binding.value);
+            if (e.lazy_arguments) |args| {
+                for (args) |arg| sweeper.value(arg);
+                self.gc_allocator.free(args);
+            }
             if (e.this_value) |v| sweeper.value(v);
             if (e.super_proto) |v| sweeper.value(v);
             if (e.super_ctor) |v| sweeper.value(v);

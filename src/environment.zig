@@ -25,6 +25,10 @@ pub const Binding = struct {
 pub const Environment = struct {
     parent: ?*Environment,
     bindings: std.ArrayListUnmanaged(Binding) = .empty,
+    /// Retained call arguments for a function whose body has no syntactic
+    /// use of `arguments`. This keeps call ownership independent of the
+    /// heavyweight array snapshot; the GC node releases the slice.
+    lazy_arguments: ?[]JSValue = null,
     /// Names declared (let/const/class) in this scope but not yet
     /// initialized -- the temporal dead zone. Marked by the lexical
     /// hoisting pre-pass at scope entry; cleared by `define` when the
@@ -107,6 +111,14 @@ pub const Environment = struct {
             return;
         }
         try self.bindings.append(arena, .{ .name = name, .value = value });
+    }
+
+    pub fn retainLazyArguments(self: *Environment, allocator: Allocator, args: []const JSValue) !void {
+        if (args.len == 0) return;
+        std.debug.assert(self.lazy_arguments == null);
+        const retained = try allocator.alloc(JSValue, args.len);
+        for (args, retained) |arg, *slot| slot.* = arg.retain();
+        self.lazy_arguments = retained;
     }
 
     /// Marks a lexically-declared name as existing-but-uninitialized in
@@ -251,6 +263,7 @@ pub const Environment = struct {
     pub fn traceChildren(self: *const Environment, visitor: anytype) void {
         if (self.parent) |p| visitor.environment(p);
         for (self.bindings.items) |binding| visitor.value(binding.value);
+        if (self.lazy_arguments) |args| for (args) |arg| visitor.value(arg);
         if (self.this_value) |v| visitor.value(v);
         if (self.super_proto) |v| visitor.value(v);
         if (self.super_ctor) |v| visitor.value(v);

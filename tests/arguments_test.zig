@@ -4,6 +4,7 @@
 //! cross-checked against Node in STRICT mode (the engine's mode).
 const std = @import("std");
 const helpers = @import("helpers.zig");
+const zinterpreter = @import("zinterpreter");
 
 test "length, indexing, and iteration" {
     try helpers.expectNumber("function f() { return arguments.length; } f(1, 2, 3);", 3);
@@ -29,6 +30,33 @@ test "a parameter or rest named arguments shadows the object" {
 test "methods and constructors get their own arguments" {
     try helpers.expectNumber("const o = { m() { return arguments.length; } }; o.m(1, 2);", 2);
     try helpers.expectNumber("class C { constructor() { this.n = arguments.length; } } new C(1, 2, 3).n;", 3);
+}
+
+test "lazy arguments avoid per-callback snapshots under array iteration pressure" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var interpreter = try zinterpreter.Interpreter.init(std.testing.allocator, &output.writer);
+    defer interpreter.deinit();
+
+    const result = try interpreter.run(
+        \\let probe = {};
+        \\let array = [probe];
+        \\array[100000] = probe;
+        \\function callback(value, index, source) { if (source[index] !== value) throw new Error('wrong callback arguments'); }
+        \\array.filter(callback);
+        \\array.forEach(callback);
+        \\probe;
+    );
+    defer result.deinit();
+    try std.testing.expect(result == .object);
+    try std.testing.expectEqual(@as(usize, 16), result.object.refCount());
+
+    var arrays: usize = 0;
+    var nodes = interpreter.gc_registry.iterator();
+    while (nodes.next()) |entry| {
+        if (entry.value_ptr.* == .array) arrays += 1;
+    }
+    try std.testing.expect(arrays <= 2);
 }
 
 test "recursion: each frame has its own arguments" {
