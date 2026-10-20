@@ -80,8 +80,8 @@ fn constructedTemporal(self: *Interpreter, value: TemporalValue) anyerror!JSValu
 }
 
 fn requireI32(self: *Interpreter, v: JSValue, what: []const u8) anyerror!i32 {
-    if (v != .number) return self.throwError(.type_error, "{s} must be a number", .{what});
-    const n = v.number;
+    if (v == .bigint) return self.throwError(.type_error, "{s} must be a number", .{what});
+    const n = try self.toNumberJS(v);
     if (!std.math.isFinite(n) or n != @trunc(n)) return self.throwError(.range_error, "{s} must be an integer", .{what});
     if (n < std.math.minInt(i32) or n > std.math.maxInt(i32)) return self.throwError(.range_error, "{s} out of range", .{what});
     return @intFromFloat(n);
@@ -184,9 +184,10 @@ fn optionalConstructorCalendar(self: *Interpreter, value: JSValue) anyerror!?[]c
 /// Duration stores integral JavaScript Numbers, including values outside i64.
 /// Let z-temporal validate component magnitudes and mixed signs.
 fn requireDurationNumber(self: *Interpreter, v: JSValue, what: []const u8) anyerror!f64 {
-    if (v != .number) return self.throwError(.type_error, "{s} must be a number", .{what});
-    if (!std.math.isFinite(v.number) or v.number != @trunc(v.number)) return self.throwError(.range_error, "{s} must be an integer", .{what});
-    return v.number;
+    if (v == .bigint) return self.throwError(.type_error, "{s} must be a number", .{what});
+    const n = try self.toNumberJS(v);
+    if (!std.math.isFinite(n) or n != @trunc(n)) return self.throwError(.range_error, "{s} must be an integer", .{what});
+    return n;
 }
 
 fn optionalDurationNumber(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!?f64 {
