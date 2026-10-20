@@ -719,13 +719,12 @@ pub fn invokeFunctionNode(
     call_env.private_ctx = private_ctx;
     if (home_object) |ho| call_env.home_object = ho.retain();
 
-    // `arguments`: arrows inherit the enclosing function's binding. For an
-    // ordinary function, materialize the snapshot only when its conservative
-    // parse-tree analysis found a possible use.
+    // `arguments`: every non-arrow call gets one (arrows inherit the
+    // enclosing function's via the scope chain -- no binding here).
     // Materialized as a real array snapshot (always-strict => unmapped;
     // narrowing: not the exotic Arguments object -- see README). Defined
     // BEFORE params so a parameter/rest named `arguments` shadows it.
-    if (functionNeedsArguments(self, fnode)) {
+    if (fnode.kind != .arrow) {
         var arguments = try self.gcNewArray();
         for (args) |a| _ = try arguments.array.value.push(a.retain());
         try call_env.define(allocator, "arguments", arguments);
