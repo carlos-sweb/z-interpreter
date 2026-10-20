@@ -9,6 +9,7 @@ pub const Environment = environment_mod.Environment;
 pub const Completion = completion_mod.Completion;
 pub const CompletionType = completion_mod.CompletionType;
 pub const bytecode = @import("bytecode/codeblock.zig");
+pub const bytecode_emitter = @import("bytecode/emitter.zig");
 
 pub const coercion = @import("coercion.zig");
 pub const inspect = @import("inspect.zig");
@@ -19,6 +20,7 @@ test {
     _ = @import("coercion.zig");
     _ = @import("inspect.zig");
     _ = @import("bytecode/codeblock.zig");
+    _ = @import("bytecode/emitter.zig");
     _ = @import("interpreter.zig");
     _ = @import("fiber.zig");
 }

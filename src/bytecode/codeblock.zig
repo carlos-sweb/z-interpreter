@@ -55,6 +55,7 @@ pub const Op = packed struct(u32) {
 pub const Constant = union(enum) {
     number: f64,
     string: []const u8,
+    boolean: bool,
     bigint: []const u8,
     property_key: []const u8,
 };
