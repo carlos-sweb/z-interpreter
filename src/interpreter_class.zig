@@ -11,6 +11,8 @@ const zvalue = @import("zvalue");
 const JSValue = zvalue.JSValue;
 
 const coercion = @import("coercion.zig");
+const bytecode_emitter = @import("bytecode/emitter.zig");
+const bytecode_vm = @import("bytecode/vm.zig");
 
 const interpreter_mod = @import("interpreter.zig");
 const Interpreter = interpreter_mod.Interpreter;
@@ -202,8 +204,7 @@ fn nodeUsesArguments(node: *const zparser.Node) bool {
         // that AST has a dedicated scanner.
         .class_like => true,
         .yield_expr => |yield_expr| if (yield_expr.argument) |argument| nodeUsesArguments(argument) else false,
-        .number_literal, .bigint_literal, .string_literal, .boolean_literal,
-        .null_literal, .regex_literal, .this_expr, .super_expr => false,
+        .number_literal, .bigint_literal, .string_literal, .boolean_literal, .null_literal, .regex_literal, .this_expr, .super_expr => false,
     };
 }
 
@@ -686,6 +687,16 @@ pub fn invokeFunctionNode(
     args: []const JSValue,
     home_object: ?JSValue,
 ) anyerror!JSValue {
+    if (self.compile_options.use_bytecode_vm) {
+        var compiled = bytecode_emitter.BytecodeEmitter.emit(self.gc_allocator, fnode) catch |err| switch (err) {
+            error.UnsupportedSyntax, error.UnknownLocal => null,
+            else => return err,
+        };
+        if (compiled) |*block| {
+            defer block.deinit(self.gc_allocator);
+            return bytecode_vm.vmCall(self.gc_allocator, &block.block, args);
+        }
+    }
     const call_env = try self.gcChildEnv(closure_env);
     // Etapa 2 de uniform-ownership-contract.md: estos 4 campos son
     // JSValue planos sin mecanismo de liberación propio (viven hasta

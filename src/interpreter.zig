@@ -624,6 +624,11 @@ const interpreter_binding = @import("interpreter_binding.zig");
 const interpreter_stmt = @import("interpreter_stmt.zig");
 const interpreter_expr = @import("interpreter_expr.zig");
 
+pub const CompileOptions = struct {
+    /// Disabled by default while bytecode coverage is deliberately narrow.
+    use_bytecode_vm: bool = false,
+};
+
 pub const Interpreter = struct {
     arena_state: std.heap.ArenaAllocator,
     /// Backs every GC-participating allocation (JSValue's container-shaped
@@ -634,6 +639,7 @@ pub const Interpreter = struct {
     /// OS for real (GC roadmap item 15, phase 3). Same value as the
     /// `backing_allocator` passed to `init` -- not wrapped in an arena.
     gc_allocator: Allocator,
+    compile_options: CompileOptions = .{},
     /// The "all live GC objects" registry (phase 4) -- see `GcNode`/
     /// `GcRegistry`'s own doc comments.
     gc_registry: GcRegistry = .empty,
