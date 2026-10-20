@@ -696,7 +696,7 @@ pub fn invokeFunctionNode(
         };
         if (compiled) |*block| {
             defer block.deinit(self.gc_allocator);
-            const vm_result = bytecode_vm.vmCall(self.gc_allocator, &block.block, args) catch |err| switch (err) {
+            const vm_result = bytecode_vm.vmCall(self.gc_allocator, &block.block, closure_env, args) catch |err| switch (err) {
                 // An older/emitted block may contain an opcode not implemented
                 // by this VM revision. Preserve the AST path in that case.
                 error.UnsupportedOpcode => null,

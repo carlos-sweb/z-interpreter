@@ -30,6 +30,8 @@ pub const Opcode = enum(u8) {
     gt_num,
     le_num,
     ge_num,
+    eq,
+    ne,
     add,
     jump,
     jump_if_true,
