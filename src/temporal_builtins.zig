@@ -1862,21 +1862,52 @@ fn relativeToZonedDateTimeFromObservedBag(self: *Interpreter, fields: JSValue) a
     } }, .{ .overflow = .constrain, .offset = .reject, .disambiguation = .compatible }) catch |e| temporalErr(self, e);
 }
 
+const DurationRoundRaw = struct {
+    largest_unit: ?[]u8 = null,
+    rounding_increment: ?f64 = null,
+    rounding_mode: ?[]u8 = null,
+    smallest_unit: ?[]u8 = null,
+
+    fn deinit(self: *DurationRoundRaw, allocator: Allocator) void {
+        if (self.largest_unit) |value| allocator.free(value);
+        if (self.rounding_mode) |value| allocator.free(value);
+        if (self.smallest_unit) |value| allocator.free(value);
+    }
+};
+
+/// Duration.round has an observable option sequence distinct from the shared
+/// rounding readers. Keep it local so other Temporal methods retain theirs.
+fn readDurationRoundOptions(self: *Interpreter, options: JSValue, allocator: Allocator) anyerror!ztemporal.Duration.RoundOptions {
+    if (options == .undefined) return self.throwError(.type_error, "round() requires an options object", .{});
+    try surfaceOptions(self, options);
+
+    var raw: DurationRoundRaw = .{};
+    defer raw.deinit(self.gc_allocator);
+    // This is the sequence exercised by the current Temporal test suite.
+    raw.largest_unit = try readRoundingOptionString(self, options, "largestUnit");
+    const relative_to = try readDurationCompareOptions(self, options);
+    raw.rounding_increment = try readRoundingOptionNumber(self, options, "roundingIncrement");
+    raw.rounding_mode = try readRoundingOptionString(self, options, "roundingMode");
+    raw.smallest_unit = try readRoundingOptionString(self, options, "smallestUnit");
+
+    var out: ztemporal.Duration.RoundOptions = .{ .relativeTo = relative_to, .allocator = allocator, .io = ioHandle() };
+    if (raw.largest_unit) |text| {
+        if (!std.mem.eql(u8, text, "auto")) out.largestUnit = try unitFromString(self, text, "largestUnit");
+    }
+    if (raw.rounding_increment) |number| {
+        if (!std.math.isFinite(number) or number != @trunc(number) or number < 1 or number > 1_000_000_000)
+            return self.throwError(.range_error, "Invalid roundingIncrement", .{});
+        out.roundingIncrement = @intFromFloat(number);
+    }
+    if (raw.rounding_mode) |text| out.roundingMode = try roundingModeFromString(self, text);
+    if (raw.smallest_unit) |text| out.smallestUnit = try unitFromString(self, text, "smallestUnit");
+    return out;
+}
+
 fn durRound(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const self = interp(ctx);
     const d = try durSelf(self, this_value);
-    const options = arg(args, 0);
-    const opts = try readRoundOptions(self, options);
-    const relative_to = try readRelativeTo(self, options);
-    const result = d.round(.{
-        .relativeTo = relative_to,
-        .largestUnit = opts.largestUnit,
-        .smallestUnit = opts.smallestUnit,
-        .roundingIncrement = opts.roundingIncrement,
-        .roundingMode = opts.roundingMode,
-        .allocator = allocator,
-        .io = ioHandle(),
-    }) catch |e| return temporalErr(self, e);
+    const result = d.round(try readDurationRoundOptions(self, arg(args, 0), allocator)) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .duration = result });
 }
 

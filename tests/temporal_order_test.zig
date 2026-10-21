@@ -62,7 +62,7 @@ test "PlainYearMonth with reads fields before overflow" {
     try testing.expectEqualStrings("calendar,timeZone,month,monthCode,year,overflow", actual);
 }
 
-test "Duration round retains pre-Phase-A option access order" {
+test "Duration round reads B2 options before validation" {
     const actual = try observedOptions(
         "let log = []; let options = { smallestUnit: \"minute\" };" ++
             "for (let pair of [[\"largestUnit\", \"hour\"], [\"roundingIncrement\", 1], [\"roundingMode\", \"halfExpand\"]])" ++
@@ -70,7 +70,7 @@ test "Duration round retains pre-Phase-A option access order" {
             "new Temporal.Duration(0, 0, 0, 0, 1).round(options); log.join(',');",
     );
     defer testing.allocator.free(actual);
-    try testing.expectEqualStrings("", actual);
+    try testing.expectEqualStrings("largestUnit,roundingIncrement,roundingMode", actual);
 }
 
 test "Instant round retains pre-Phase-A option access order" {
@@ -111,4 +111,22 @@ test "Duration.compare rejects primitive options after duration coercion" {
     );
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("TypeError", actual);
+}
+
+test "Duration round reads its options in test262 order" {
+    const actual = try observedOptions(
+        "let log = []; let values = { largestUnit: 'hour', relativeTo: undefined, roundingIncrement: 1, roundingMode: 'halfExpand', smallestUnit: 'minute' };" ++
+            "let options = new Proxy(values, { get(target, key) { log.push(key); return target[key]; } });" ++
+            "new Temporal.Duration(0, 0, 0, 1).round(options); log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("largestUnit,relativeTo,roundingIncrement,roundingMode,smallestUnit", actual);
+}
+
+test "Duration round rejects primitive and omitted options" {
+    const actual = try observedOptions(
+        "let d = new Temporal.Duration(0, 0, 0, 1); let a; let b; try { d.round(null); } catch (e) { a = e.name; } try { d.round(); } catch (e) { b = e.name; } a + ',' + b;",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("TypeError,TypeError", actual);
 }
