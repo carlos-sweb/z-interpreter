@@ -1735,23 +1735,66 @@ fn durAbs(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     return self.gcNewTemporal(.{ .duration = (try durSelf(self, this_value)).abs() });
 }
 
+const DurationWithRaw = struct {
+    days: ?f64,
+    hours: ?f64,
+    microseconds: ?f64,
+    milliseconds: ?f64,
+    minutes: ?f64,
+    months: ?f64,
+    nanoseconds: ?f64,
+    seconds: ?f64,
+    weeks: ?f64,
+    years: ?f64,
+};
+
+fn readDurationWithField(self: *Interpreter, fields: JSValue, key: []const u8) anyerror!?f64 {
+    const value = try self.getProperty(fields, key);
+    defer value.deinit();
+    if (value == .undefined) return null;
+    if (value == .bigint) return self.throwError(.type_error, "{s} must be a number", .{key});
+    return try self.toNumberJS(value);
+}
+
+fn validateDurationWithField(self: *Interpreter, value: ?f64, key: []const u8) anyerror!?f64 {
+    if (value) |number| return try requireDurationNumber(self, JSValue.fromNumber(number), key);
+    return null;
+}
+
+/// Duration.with has no options argument. Its partial-duration fields are read
+/// alphabetically and only then validated.
+fn readDurationWithFields(self: *Interpreter, fields: JSValue) anyerror!DurationWithRaw {
+    if (Interpreter.isPrimitiveTag(fields)) return self.throwError(.type_error, "with() requires an object", .{});
+    return .{
+        .days = try readDurationWithField(self, fields, "days"),
+        .hours = try readDurationWithField(self, fields, "hours"),
+        .microseconds = try readDurationWithField(self, fields, "microseconds"),
+        .milliseconds = try readDurationWithField(self, fields, "milliseconds"),
+        .minutes = try readDurationWithField(self, fields, "minutes"),
+        .months = try readDurationWithField(self, fields, "months"),
+        .nanoseconds = try readDurationWithField(self, fields, "nanoseconds"),
+        .seconds = try readDurationWithField(self, fields, "seconds"),
+        .weeks = try readDurationWithField(self, fields, "weeks"),
+        .years = try readDurationWithField(self, fields, "years"),
+    };
+}
+
 fn durWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const self = interp(ctx);
     const d = try durSelf(self, this_value);
-    const fields = arg(args, 0);
-    if (fields != .object) return self.throwError(.type_error, "with() requires an object", .{});
+    const raw = try readDurationWithFields(self, arg(args, 0));
     const result = d.with(.{
-        .years = try optionalDurationNumber(self, fields, "years"),
-        .months = try optionalDurationNumber(self, fields, "months"),
-        .weeks = try optionalDurationNumber(self, fields, "weeks"),
-        .days = try optionalDurationNumber(self, fields, "days"),
-        .hours = try optionalDurationNumber(self, fields, "hours"),
-        .minutes = try optionalDurationNumber(self, fields, "minutes"),
-        .seconds = try optionalDurationNumber(self, fields, "seconds"),
-        .milliseconds = try optionalDurationNumber(self, fields, "milliseconds"),
-        .microseconds = try optionalDurationNumber(self, fields, "microseconds"),
-        .nanoseconds = try optionalDurationNumber(self, fields, "nanoseconds"),
+        .days = try validateDurationWithField(self, raw.days, "days"),
+        .hours = try validateDurationWithField(self, raw.hours, "hours"),
+        .microseconds = try validateDurationWithField(self, raw.microseconds, "microseconds"),
+        .milliseconds = try validateDurationWithField(self, raw.milliseconds, "milliseconds"),
+        .minutes = try validateDurationWithField(self, raw.minutes, "minutes"),
+        .months = try validateDurationWithField(self, raw.months, "months"),
+        .nanoseconds = try validateDurationWithField(self, raw.nanoseconds, "nanoseconds"),
+        .seconds = try validateDurationWithField(self, raw.seconds, "seconds"),
+        .weeks = try validateDurationWithField(self, raw.weeks, "weeks"),
+        .years = try validateDurationWithField(self, raw.years, "years"),
     }) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .duration = result });
 }

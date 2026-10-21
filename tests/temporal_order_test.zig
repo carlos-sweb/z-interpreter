@@ -187,3 +187,29 @@ test "Duration total rejects calendar unit without relativeTo after reads" {
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("RangeError", actual);
 }
+
+test "Duration with reads proxy fields in alphabetical order" {
+    const actual = try observedOptions(
+        "let log = []; let values = { days: 1, hours: 1, microseconds: 1, milliseconds: 1, minutes: 1, months: 1, nanoseconds: 1, seconds: 1, weeks: 1, years: 1 };" ++
+            "let fields = new Proxy(values, { get(target, key) { log.push(key); return target[key]; } });" ++
+            "new Temporal.Duration().with(fields); log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("days,hours,microseconds,milliseconds,minutes,months,nanoseconds,seconds,weeks,years", actual);
+}
+
+test "Duration with propagates field getter errors" {
+    const actual = try observedOptions(
+        "let fields = { get days() { throw new Error('sentinel'); } }; try { new Temporal.Duration().with(fields); } catch (e) { e.name + ',' + e.message; }",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("Error,sentinel", actual);
+}
+
+test "Duration with rejects primitive field bags" {
+    const actual = try observedOptions(
+        "let d = new Temporal.Duration(); let a; let b; try { d.with(null); } catch (e) { a = e.name; } try { d.with(1); } catch (e) { b = e.name; } a + ',' + b;",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("TypeError,TypeError", actual);
+}
