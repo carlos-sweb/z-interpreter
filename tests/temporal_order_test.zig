@@ -130,3 +130,31 @@ test "Duration round rejects primitive and omitted options" {
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("TypeError,TypeError", actual);
 }
+
+test "Duration round reads relativeTo for calendar smallest units" {
+    const actual = try observedOptions(
+        "let log = []; let values = { largestUnit: undefined, relativeTo: undefined, roundingIncrement: 1, roundingMode: 'halfExpand', smallestUnit: 'day' };" ++
+            "let options = new Proxy(values, { get(target, key) { log.push(key); return target[key]; } });" ++
+            "try { new Temporal.Duration(0, 0, 0, 1).round(options); } catch (e) {} log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("largestUnit,relativeTo,roundingIncrement,roundingMode,smallestUnit", actual);
+}
+
+test "Duration round reads relativeTo for non-calendar smallest units" {
+    const actual = try observedOptions(
+        "let log = []; let values = { largestUnit: undefined, relativeTo: undefined, roundingIncrement: 1, roundingMode: 'halfExpand', smallestUnit: 'hour' };" ++
+            "let options = new Proxy(values, { get(target, key) { log.push(key); return target[key]; } });" ++
+            "new Temporal.Duration(0, 0, 0, 0, 1).round(options); log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("largestUnit,relativeTo,roundingIncrement,roundingMode,smallestUnit", actual);
+}
+
+test "Duration round without units throws RangeError" {
+    const actual = try observedOptions(
+        "try { new Temporal.Duration(0, 0, 0, 0, 1).round({}); 'no error'; } catch (e) { e.name; }",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError", actual);
+}

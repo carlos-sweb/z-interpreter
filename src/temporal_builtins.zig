@@ -1875,22 +1875,36 @@ const DurationRoundRaw = struct {
     }
 };
 
-/// Duration.round has an observable option sequence distinct from the shared
-/// rounding readers. Keep it local so other Temporal methods retain theirs.
+/// Duration.round reads its option fields in the specification's alphabetical
+/// sequence. This is intentionally separate from the shared readers.
 fn readDurationRoundOptions(self: *Interpreter, options: JSValue, allocator: Allocator) anyerror!ztemporal.Duration.RoundOptions {
     if (options == .undefined) return self.throwError(.type_error, "round() requires an options object", .{});
+    if (options == .string) {
+        // The specification creates a null-prototype { smallestUnit } record.
+        // Do not inspect Object.prototype-backed option fields on this path.
+        return .{
+            .smallestUnit = try unitFromString(self, options.string.value.data, "smallestUnit"),
+            .allocator = allocator,
+            .io = ioHandle(),
+        };
+    }
     try surfaceOptions(self, options);
 
     var raw: DurationRoundRaw = .{};
     defer raw.deinit(self.gc_allocator);
-    // This is the sequence exercised by the current Temporal test suite.
+    // GetTemporalUnitValuedOption, GetTemporalRelativeToOption,
+    // GetRoundingIncrementOption, GetRoundingModeOption, then smallestUnit.
     raw.largest_unit = try readRoundingOptionString(self, options, "largestUnit");
     const relative_to = try readDurationCompareOptions(self, options);
     raw.rounding_increment = try readRoundingOptionNumber(self, options, "roundingIncrement");
     raw.rounding_mode = try readRoundingOptionString(self, options, "roundingMode");
     raw.smallest_unit = try readRoundingOptionString(self, options, "smallestUnit");
 
-    var out: ztemporal.Duration.RoundOptions = .{ .relativeTo = relative_to, .allocator = allocator, .io = ioHandle() };
+    var out: ztemporal.Duration.RoundOptions = .{
+        .relativeTo = relative_to,
+        .allocator = allocator,
+        .io = ioHandle(),
+    };
     if (raw.largest_unit) |text| {
         if (!std.mem.eql(u8, text, "auto")) out.largestUnit = try unitFromString(self, text, "largestUnit");
     }
