@@ -1925,22 +1925,34 @@ fn durRound(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
     return self.gcNewTemporal(.{ .duration = result });
 }
 
+/// Duration.total observes relativeTo before unit, then performs the unit and
+/// relative-duration checks only after both values have been acquired.
+fn readDurationTotalOptions(self: *Interpreter, options: JSValue, allocator: Allocator) anyerror!ztemporal.Duration.TotalOptions {
+    if (options == .undefined) return self.throwError(.type_error, "total() requires an options object", .{});
+    if (options == .string) {
+        // The shorthand is a conceptual null-prototype { unit } object.
+        return .{ .unit = try unitFromString(self, options.string.value.data, "unit"), .allocator = allocator, .io = ioHandle() };
+    }
+    try surfaceOptions(self, options);
+
+    const relative_to = try readDurationCompareOptions(self, options);
+    const unit_value = try self.getProperty(options, "unit");
+    defer unit_value.deinit();
+    if (unit_value == .undefined) return self.throwError(.range_error, "total() requires a unit", .{});
+    const unit_text = try self.toDisplayStringJS(self.gc_allocator, unit_value);
+    defer self.gc_allocator.free(unit_text);
+    return .{
+        .relativeTo = relative_to,
+        .unit = try unitFromString(self, unit_text, "unit"),
+        .allocator = allocator,
+        .io = ioHandle(),
+    };
+}
+
 fn durTotal(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const self = interp(ctx);
     const d = try durSelf(self, this_value);
-    const options = arg(args, 0);
-    var unit_str: []const u8 = "";
-    if (options == .string) {
-        unit_str = options.string.value.data;
-    } else if (options == .object) {
-        if (options.object.value.get("unit")) |v| if (v == .string) {
-            unit_str = v.string.value.data;
-        };
-    }
-    if (unit_str.len == 0) return self.throwError(.type_error, "total() requires a unit", .{});
-    const unit = try unitFromString(self, unit_str, "unit");
-    const relative_to = try readRelativeTo(self, options);
-    const result = d.total(.{ .relativeTo = relative_to, .unit = unit, .allocator = allocator, .io = ioHandle() }) catch |e| return temporalErr(self, e);
+    const result = d.total(try readDurationTotalOptions(self, arg(args, 0), allocator)) catch |e| return temporalErr(self, e);
     return JSValue.fromNumber(result);
 }
 

@@ -158,3 +158,32 @@ test "Duration round without units throws RangeError" {
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("RangeError", actual);
 }
+
+test "Duration total reads relativeTo before unit" {
+    const actual = try observedOptions(
+        "let log = []; let values = { relativeTo: undefined, unit: 'hour' };" ++
+            "let options = new Proxy(values, { get(target, key) { log.push(key); return target[key]; } });" ++
+            "new Temporal.Duration(0, 0, 0, 0, 1).total(options); log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("relativeTo,unit", actual);
+}
+
+test "Duration total validates required and converted unit values" {
+    const actual = try observedOptions(
+        "let d = new Temporal.Duration(0, 0, 0, 0, 1); let a, b, c;" ++
+            "try { d.total({}); } catch (e) { a = e.name; }" ++
+            "try { d.total({ unit: 2 }); } catch (e) { b = e.name; }" ++
+            "try { d.total({ unit: Symbol() }); } catch (e) { c = e.name; } a + ',' + b + ',' + c;",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError,RangeError,TypeError", actual);
+}
+
+test "Duration total rejects calendar unit without relativeTo after reads" {
+    const actual = try observedOptions(
+        "try { new Temporal.Duration(1).total({ relativeTo: undefined, unit: 'week' }); 'no error'; } catch (e) { e.name; }",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError", actual);
+}
