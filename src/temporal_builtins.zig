@@ -1662,11 +1662,40 @@ fn durationCompare(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     const a = try coerceDuration(self, arg(args, 0));
     const b = try coerceDuration(self, arg(args, 1));
     const order = ztemporal.Duration.compare(a, b, .{
-        .relativeTo = try readRelativeTo(self, arg(args, 2)),
+        .relativeTo = try readDurationCompareOptions(self, arg(args, 2)),
         .allocator = allocator,
         .io = ioHandle(),
     }) catch |e| return temporalErr(self, e);
     return JSValue.fromNumber(orderToJs(order));
+}
+
+/// Duration.compare has a distinct option record: only relativeTo is
+/// observable. Coerce both duration arguments before rejecting primitive
+/// options, as ToTemporalDuration precedes GetOptions in the specification.
+fn readDurationCompareOptions(self: *Interpreter, options: JSValue) anyerror!?ztemporal.Duration.RelativeTo {
+    try surfaceOptions(self, options);
+    if (options == .undefined) return null;
+    const v = try self.getProperty(options, "relativeTo");
+    defer v.deinit();
+    if (v == .undefined) return null;
+    if (v == .temporal) switch (v.temporal.value) {
+        .plain_date => |date| return .{ .plainDate = date },
+        .plain_date_time => |dt| return .{ .plainDateTime = dt },
+        .zoned_date_time => |dt| return .{ .zonedDateTime = dt },
+        else => {},
+    };
+    if (v == .string) {
+        if (relativeToHasTimeZoneAnnotation(v.string.value.data))
+            return .{ .zonedDateTime = try coerceZonedDateTime(self, self.gc_allocator, v, .constrain, .compatible, .reject) };
+        return .{ .plainDateTime = try coercePlainDateTime(self, v, .constrain) };
+    }
+    if (v == .object or v == .proxy) {
+        const time_zone = try self.getProperty(v, "timeZone");
+        defer time_zone.deinit();
+        if (time_zone != .undefined) return .{ .zonedDateTime = try relativeToZonedDateTimeFromObservedBag(self, v) };
+        return .{ .plainDateTime = try plainDateTimeFromObservedBag(self, v, JSValue.UNDEFINED) };
+    }
+    return .{ .plainDateTime = try coercePlainDateTime(self, v, .constrain) };
 }
 
 fn durField(comptime field: []const u8) NativeFn {

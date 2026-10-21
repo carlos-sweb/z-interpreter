@@ -95,3 +95,20 @@ test "PlainDate direct property bags retain monthCode through from and arithmeti
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("2021-02-16,RangeError,0", actual);
 }
+
+test "Duration.compare reads relativeTo after both arguments" {
+    const actual = try observedOptions(
+        "let log = []; let options = new Proxy({ relativeTo: undefined }, { get(target, key) { log.push(key); return target[key]; } });" ++
+            "Temporal.Duration.compare({ days: 2 }, { days: 1 }, options); log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("relativeTo", actual);
+}
+
+test "Duration.compare rejects primitive options after duration coercion" {
+    const actual = try observedOptions(
+        "try { Temporal.Duration.compare({ hours: 1 }, { hours: 1 }, null); 'no error'; } catch (e) { e.name; }",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("TypeError", actual);
+}
