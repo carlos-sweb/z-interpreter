@@ -120,19 +120,34 @@ fn requireU32(self: *Interpreter, v: JSValue, what: []const u8) anyerror!u32 {
 }
 
 fn optionalI32(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!?i32 {
-    if (Interpreter.isPrimitiveTag(obj)) return null;
-    const v = try self.getProperty(obj, key);
-    defer v.deinit();
+    if (obj != .object) return null;
+    const v = obj.object.value.get(key) orelse return null;
     if (v == .undefined) return null;
     return try requireI32(self, v, key);
 }
 
 fn optionalTemporalString(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!?[]const u8 {
-    if (Interpreter.isPrimitiveTag(obj)) return null;
-    const v = try self.getProperty(obj, key);
-    defer v.deinit();
+    if (obj != .object) return null;
+    const v = obj.object.value.get(key) orelse return null;
     if (v == .undefined) return null;
-    return try self.toDisplayStringJS(self.gc_allocator, v);
+    if (v != .string) return self.throwError(.type_error, "{s} must be a string", .{key});
+    return v.string.value.data;
+}
+
+/// Plain `with()` methods use Get so proxies and accessors remain observable.
+/// Unlike the legacy helpers above, this result owns its converted string.
+fn plainOptionalI32(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!?i32 {
+    const value = try self.getProperty(obj, key);
+    defer value.deinit();
+    if (value == .undefined) return null;
+    return try requireI32(self, value, key);
+}
+
+fn plainOptionalString(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!?[]u8 {
+    const value = try self.getProperty(obj, key);
+    defer value.deinit();
+    if (value == .undefined) return null;
+    return try self.toDisplayStringJS(self.gc_allocator, value);
 }
 
 fn optionalBagMonthCode(self: *Interpreter, obj: JSValue) anyerror!?[]const u8 {
@@ -210,6 +225,20 @@ fn observableDurationNumber(self: *Interpreter, obj: JSValue, key: []const u8) a
 /// `.constrain` (real spec default for `.from`/`.with`). `options` may be
 /// `undefined`.
 fn readOverflow(self: *Interpreter, options: JSValue) anyerror!Overflow {
+    try surfaceOptions(self, options);
+    if (options != .object) return .constrain;
+    const v = try self.getProperty(options, "overflow");
+    defer v.deinit();
+    if (v == .undefined) return .constrain;
+    const s = try self.toDisplayStringJS(self.gc_allocator, v);
+    defer self.gc_allocator.free(s);
+    if (std.mem.eql(u8, s, "constrain")) return .constrain;
+    if (std.mem.eql(u8, s, "reject")) return .reject;
+    return self.throwError(.range_error, "overflow must be \"constrain\" or \"reject\"", .{});
+}
+
+/// Plain operations must observe `overflow` after their field reads.
+fn readPlainOverflow(self: *Interpreter, options: JSValue) anyerror!Overflow {
     try surfaceOptions(self, options);
     if (options == .undefined) return .constrain;
     const v = try self.getProperty(options, "overflow");
@@ -312,6 +341,46 @@ fn roundingModeFromString(self: *Interpreter, s: []const u8) anyerror!RoundingMo
     return self.throwError(.range_error, "Invalid roundingMode: {s}", .{s});
 }
 
+fn readRoundingOptionsGeneric(self: *Interpreter, comptime T: type, options: JSValue, default_mode: RoundingMode) anyerror!T {
+    var out: T = .{ .roundingMode = default_mode };
+    if (options == .string) {
+        // A bare unit string is shorthand for { smallestUnit: options }.
+        out.smallestUnit = try unitFromString(self, options.string.value.data, "smallestUnit");
+        return out;
+    }
+    if (options != .object) return out;
+    const o = options.object.value;
+    if (o.get("smallestUnit")) |v| if (v != .undefined) {
+        const text = try self.toDisplayStringJS(self.gc_allocator, v);
+        defer self.gc_allocator.free(text);
+        out.smallestUnit = try unitFromString(self, text, "smallestUnit");
+    };
+    if (o.get("largestUnit")) |v| if (v != .undefined) {
+        const text = try self.toDisplayStringJS(self.gc_allocator, v);
+        defer self.gc_allocator.free(text);
+        out.largestUnit = try unitFromString(self, text, "largestUnit");
+    };
+    if (o.get("roundingIncrement")) |v| if (v != .undefined) {
+        if (v == .bigint) return self.throwError(.type_error, "roundingIncrement must be a number", .{});
+        out.roundingIncrement = try requireU32(self, JSValue.fromNumber(try self.toNumberJS(v)), "roundingIncrement");
+    };
+    if (o.get("roundingMode")) |v| if (v != .undefined) {
+        const text = try self.toDisplayStringJS(self.gc_allocator, v);
+        defer self.gc_allocator.free(text);
+        out.roundingMode = try roundingModeFromString(self, text);
+    };
+    return out;
+}
+
+fn readRoundingOptions(self: *Interpreter, options: JSValue) anyerror!RoundingOptions {
+    try surfaceOptions(self, options);
+    return readRoundingOptionsGeneric(self, RoundingOptions, options, .trunc);
+}
+
+fn readRoundOptions(self: *Interpreter, options: JSValue) anyerror!RoundOptions {
+    return readRoundingOptionsGeneric(self, RoundOptions, options, .halfExpand);
+}
+
 const RoundingOptionValues = struct {
     largest_unit: ?[]u8 = null,
     rounding_increment: ?f64 = null,
@@ -344,7 +413,7 @@ fn readRoundingOptionNumber(self: *Interpreter, options: JSValue, key: []const u
 /// Performs every observable Get and To* conversion before validating an
 /// option value. GetDifferenceSettings observes largestUnit first; round()
 /// has no largestUnit and starts with roundingIncrement.
-fn readRoundingOptionsGeneric(self: *Interpreter, comptime T: type, options: JSValue, default_mode: RoundingMode, comptime is_difference: bool) anyerror!T {
+fn readPlainRoundingOptionsGeneric(self: *Interpreter, comptime T: type, options: JSValue, default_mode: RoundingMode, comptime is_difference: bool) anyerror!T {
     var out: T = .{ .roundingMode = default_mode };
     if (!is_difference and options == .string) {
         // A bare unit string is shorthand for { smallestUnit: options }.
@@ -374,12 +443,12 @@ fn readRoundingOptionsGeneric(self: *Interpreter, comptime T: type, options: JSV
     return out;
 }
 
-fn readRoundingOptions(self: *Interpreter, options: JSValue) anyerror!RoundingOptions {
-    return readRoundingOptionsGeneric(self, RoundingOptions, options, .trunc, true);
+fn readPlainRoundingOptions(self: *Interpreter, options: JSValue) anyerror!RoundingOptions {
+    return readPlainRoundingOptionsGeneric(self, RoundingOptions, options, .trunc, true);
 }
 
-fn readRoundOptions(self: *Interpreter, options: JSValue) anyerror!RoundOptions {
-    return readRoundingOptionsGeneric(self, RoundOptions, options, .halfExpand, false);
+fn readPlainRoundOptions(self: *Interpreter, options: JSValue) anyerror!RoundOptions {
+    return readPlainRoundingOptionsGeneric(self, RoundOptions, options, .halfExpand, false);
 }
 
 /// Extracts a `T` payload from a `.temporal` JSValue whose inner tag must
@@ -777,14 +846,14 @@ fn pdWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     const self = interp(ctx);
     const pd = try pdSelf(self, this_value);
     const fields = arg(args, 0);
-    if (Interpreter.isPrimitiveTag(fields)) return self.throwError(.type_error, "with() requires an object", .{});
+    if (fields != .object and fields != .proxy) return self.throwError(.type_error, "with() requires an object", .{});
     try rejectWithCalendarOrTimeZone(self, fields);
-    const day = try optionalI32(self, fields, "day");
-    const month = try optionalI32(self, fields, "month");
-    const month_code = try optionalTemporalString(self, fields, "monthCode");
+    const day = try plainOptionalI32(self, fields, "day");
+    const month = try plainOptionalI32(self, fields, "month");
+    const month_code = try plainOptionalString(self, fields, "monthCode");
     defer if (month_code) |value| self.gc_allocator.free(value);
-    const year = try optionalI32(self, fields, "year");
-    const overflow = try readOverflow(self, arg(args, 1));
+    const year = try plainOptionalI32(self, fields, "year");
+    const overflow = try readPlainOverflow(self, arg(args, 1));
     const result = pd.with(.{
         .year = year,
         .month = month,
@@ -801,7 +870,7 @@ fn pdAdd(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []con
     const self = interp(ctx);
     const pd = try pdSelf(self, this_value);
     const d = try coerceDuration(self, arg(args, 0));
-    const overflow = try readOverflow(self, arg(args, 1));
+    const overflow = try readPlainOverflow(self, arg(args, 1));
     const result = pd.add(d, overflow) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_date = result });
 }
@@ -811,7 +880,7 @@ fn pdSubtract(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     const self = interp(ctx);
     const pd = try pdSelf(self, this_value);
     const d = try coerceDuration(self, arg(args, 0));
-    const overflow = try readOverflow(self, arg(args, 1));
+    const overflow = try readPlainOverflow(self, arg(args, 1));
     const result = pd.subtract(d, overflow) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_date = result });
 }
@@ -821,7 +890,7 @@ fn pdUntil(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const self = interp(ctx);
     const pd = try pdSelf(self, this_value);
     const other = try coercePlainDate(self, arg(args, 0), .constrain);
-    const opts = try readRoundingOptions(self, arg(args, 1));
+    const opts = try readPlainRoundingOptions(self, arg(args, 1));
     const d = pd.until(other, opts) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .duration = d });
 }
@@ -831,7 +900,7 @@ fn pdSince(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const self = interp(ctx);
     const pd = try pdSelf(self, this_value);
     const other = try coercePlainDate(self, arg(args, 0), .constrain);
-    const opts = try readRoundingOptions(self, arg(args, 1));
+    const opts = try readPlainRoundingOptions(self, arg(args, 1));
     const d = pd.since(other, opts) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .duration = d });
 }
@@ -976,15 +1045,15 @@ fn ptWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     const self = interp(ctx);
     const pt = try ptSelf(self, this_value);
     const fields = arg(args, 0);
-    if (Interpreter.isPrimitiveTag(fields)) return self.throwError(.type_error, "with() requires an object", .{});
+    if (fields != .object and fields != .proxy) return self.throwError(.type_error, "with() requires an object", .{});
     try rejectWithCalendarOrTimeZone(self, fields);
-    const hour = try optionalI32(self, fields, "hour");
-    const microsecond = try optionalI32(self, fields, "microsecond");
-    const millisecond = try optionalI32(self, fields, "millisecond");
-    const minute = try optionalI32(self, fields, "minute");
-    const nanosecond = try optionalI32(self, fields, "nanosecond");
-    const second = try optionalI32(self, fields, "second");
-    const overflow = try readOverflow(self, arg(args, 1));
+    const hour = try plainOptionalI32(self, fields, "hour");
+    const microsecond = try plainOptionalI32(self, fields, "microsecond");
+    const millisecond = try plainOptionalI32(self, fields, "millisecond");
+    const minute = try plainOptionalI32(self, fields, "minute");
+    const nanosecond = try plainOptionalI32(self, fields, "nanosecond");
+    const second = try plainOptionalI32(self, fields, "second");
+    const overflow = try readPlainOverflow(self, arg(args, 1));
     const result = pt.with(.{
         .hour = hour,
         .minute = minute,
@@ -1018,7 +1087,7 @@ fn ptRound(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     _ = allocator;
     const self = interp(ctx);
     const pt = try ptSelf(self, this_value);
-    const opts = try readRoundOptions(self, arg(args, 0));
+    const opts = try readPlainRoundOptions(self, arg(args, 0));
     const result = pt.round(opts) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_time = result });
 }
@@ -1028,7 +1097,7 @@ fn ptUntil(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const self = interp(ctx);
     const pt = try ptSelf(self, this_value);
     const other = try coercePlainTime(self, arg(args, 0), .constrain);
-    const opts = try readRoundingOptions(self, arg(args, 1));
+    const opts = try readPlainRoundingOptions(self, arg(args, 1));
     const d = pt.until(other, opts) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .duration = d });
 }
@@ -1038,7 +1107,7 @@ fn ptSince(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const self = interp(ctx);
     const pt = try ptSelf(self, this_value);
     const other = try coercePlainTime(self, arg(args, 0), .constrain);
-    const opts = try readRoundingOptions(self, arg(args, 1));
+    const opts = try readPlainRoundingOptions(self, arg(args, 1));
     const d = pt.since(other, opts) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .duration = d });
 }
@@ -1263,20 +1332,20 @@ fn pdtWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const self = interp(ctx);
     const pdt = try pdtSelf(self, this_value);
     const fields = arg(args, 0);
-    if (Interpreter.isPrimitiveTag(fields)) return self.throwError(.type_error, "with() requires an object", .{});
+    if (fields != .object and fields != .proxy) return self.throwError(.type_error, "with() requires an object", .{});
     try rejectWithCalendarOrTimeZone(self, fields);
-    const day = try optionalI32(self, fields, "day");
-    const hour = try optionalI32(self, fields, "hour");
-    const microsecond = try optionalI32(self, fields, "microsecond");
-    const millisecond = try optionalI32(self, fields, "millisecond");
-    const minute = try optionalI32(self, fields, "minute");
-    const month = try optionalI32(self, fields, "month");
-    const month_code = try optionalTemporalString(self, fields, "monthCode");
+    const day = try plainOptionalI32(self, fields, "day");
+    const hour = try plainOptionalI32(self, fields, "hour");
+    const microsecond = try plainOptionalI32(self, fields, "microsecond");
+    const millisecond = try plainOptionalI32(self, fields, "millisecond");
+    const minute = try plainOptionalI32(self, fields, "minute");
+    const month = try plainOptionalI32(self, fields, "month");
+    const month_code = try plainOptionalString(self, fields, "monthCode");
     defer if (month_code) |value| self.gc_allocator.free(value);
-    const nanosecond = try optionalI32(self, fields, "nanosecond");
-    const second = try optionalI32(self, fields, "second");
-    const year = try optionalI32(self, fields, "year");
-    const overflow = try readOverflow(self, arg(args, 1));
+    const nanosecond = try plainOptionalI32(self, fields, "nanosecond");
+    const second = try plainOptionalI32(self, fields, "second");
+    const year = try plainOptionalI32(self, fields, "year");
+    const overflow = try readPlainOverflow(self, arg(args, 1));
     const result = pdt.with(.{
         .year = year,
         .month = month,
@@ -1299,7 +1368,7 @@ fn pdtAdd(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     const self = interp(ctx);
     const pdt = try pdtSelf(self, this_value);
     const d = try coerceDuration(self, arg(args, 0));
-    const overflow = try readOverflow(self, arg(args, 1));
+    const overflow = try readPlainOverflow(self, arg(args, 1));
     const result = pdt.add(d, overflow) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_date_time = result });
 }
@@ -1309,7 +1378,7 @@ fn pdtSubtract(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     const self = interp(ctx);
     const pdt = try pdtSelf(self, this_value);
     const d = try coerceDuration(self, arg(args, 0));
-    const overflow = try readOverflow(self, arg(args, 1));
+    const overflow = try readPlainOverflow(self, arg(args, 1));
     const result = pdt.subtract(d, overflow) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_date_time = result });
 }
@@ -1318,7 +1387,7 @@ fn pdtRound(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
     _ = allocator;
     const self = interp(ctx);
     const pdt = try pdtSelf(self, this_value);
-    const opts = try readRoundOptions(self, arg(args, 0));
+    const opts = try readPlainRoundOptions(self, arg(args, 0));
     const result = pdt.round(opts) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_date_time = result });
 }
@@ -1328,7 +1397,7 @@ fn pdtUntil(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
     const self = interp(ctx);
     const pdt = try pdtSelf(self, this_value);
     const other = try coercePlainDateTime(self, arg(args, 0), .constrain);
-    const opts = try readRoundingOptions(self, arg(args, 1));
+    const opts = try readPlainRoundingOptions(self, arg(args, 1));
     const d = pdt.until(other, opts) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .duration = d });
 }
@@ -1338,7 +1407,7 @@ fn pdtSince(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
     const self = interp(ctx);
     const pdt = try pdtSelf(self, this_value);
     const other = try coercePlainDateTime(self, arg(args, 0), .constrain);
-    const opts = try readRoundingOptions(self, arg(args, 1));
+    const opts = try readPlainRoundingOptions(self, arg(args, 1));
     const d = pdt.since(other, opts) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .duration = d });
 }
@@ -1968,13 +2037,13 @@ fn pymWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const self = interp(ctx);
     const pym = try pymSelf(self, this_value);
     const fields = arg(args, 0);
-    if (Interpreter.isPrimitiveTag(fields)) return self.throwError(.type_error, "with() requires an object", .{});
+    if (fields != .object and fields != .proxy) return self.throwError(.type_error, "with() requires an object", .{});
     try rejectWithCalendarOrTimeZone(self, fields);
-    const month = try optionalI32(self, fields, "month");
-    const month_code = try optionalTemporalString(self, fields, "monthCode");
+    const month = try plainOptionalI32(self, fields, "month");
+    const month_code = try plainOptionalString(self, fields, "monthCode");
     defer if (month_code) |value| self.gc_allocator.free(value);
-    const year = try optionalI32(self, fields, "year");
-    const overflow = try readOverflow(self, arg(args, 1));
+    const year = try plainOptionalI32(self, fields, "year");
+    const overflow = try readPlainOverflow(self, arg(args, 1));
     const result = pym.with(.{
         .year = year,
         .month = month,
@@ -1990,7 +2059,7 @@ fn pymAdd(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     const self = interp(ctx);
     const pym = try pymSelf(self, this_value);
     const d = try coerceDuration(self, arg(args, 0));
-    const overflow = try readOverflow(self, arg(args, 1));
+    const overflow = try readPlainOverflow(self, arg(args, 1));
     const result = pym.add(d, overflow) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_year_month = result });
 }
@@ -2000,7 +2069,7 @@ fn pymSubtract(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     const self = interp(ctx);
     const pym = try pymSelf(self, this_value);
     const d = try coerceDuration(self, arg(args, 0));
-    const overflow = try readOverflow(self, arg(args, 1));
+    const overflow = try readPlainOverflow(self, arg(args, 1));
     const result = pym.subtract(d, overflow) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_year_month = result });
 }
@@ -2010,7 +2079,7 @@ fn pymUntil(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
     const self = interp(ctx);
     const pym = try pymSelf(self, this_value);
     const other = try coercePlainYearMonth(self, arg(args, 0), .constrain);
-    const opts = try readRoundingOptions(self, arg(args, 1));
+    const opts = try readPlainRoundingOptions(self, arg(args, 1));
     const d = pym.until(other, opts) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .duration = d });
 }
@@ -2020,7 +2089,7 @@ fn pymSince(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
     const self = interp(ctx);
     const pym = try pymSelf(self, this_value);
     const other = try coercePlainYearMonth(self, arg(args, 0), .constrain);
-    const opts = try readRoundingOptions(self, arg(args, 1));
+    const opts = try readPlainRoundingOptions(self, arg(args, 1));
     const d = pym.since(other, opts) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .duration = d });
 }
@@ -2189,14 +2258,14 @@ fn pmdWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const self = interp(ctx);
     const pmd = try pmdSelf(self, this_value);
     const fields = arg(args, 0);
-    if (Interpreter.isPrimitiveTag(fields)) return self.throwError(.type_error, "with() requires an object", .{});
+    if (fields != .object and fields != .proxy) return self.throwError(.type_error, "with() requires an object", .{});
     try rejectWithCalendarOrTimeZone(self, fields);
-    const day = try optionalI32(self, fields, "day");
-    const month = try optionalI32(self, fields, "month");
-    const month_code = try optionalTemporalString(self, fields, "monthCode");
+    const day = try plainOptionalI32(self, fields, "day");
+    const month = try plainOptionalI32(self, fields, "month");
+    const month_code = try plainOptionalString(self, fields, "monthCode");
     defer if (month_code) |value| self.gc_allocator.free(value);
-    const year = try optionalI32(self, fields, "year");
-    const overflow = try readOverflow(self, arg(args, 1));
+    const year = try plainOptionalI32(self, fields, "year");
+    const overflow = try readPlainOverflow(self, arg(args, 1));
     const result = pmd.with(.{
         .month = month,
         .day = day,

@@ -61,3 +61,25 @@ test "PlainYearMonth with reads fields before overflow" {
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("calendar,timeZone,month,monthCode,year,overflow", actual);
 }
+
+test "Duration round retains pre-Phase-A option access order" {
+    const actual = try observedOptions(
+        "let log = []; let options = { smallestUnit: \"minute\" };" ++
+            "for (let pair of [[\"largestUnit\", \"hour\"], [\"roundingIncrement\", 1], [\"roundingMode\", \"halfExpand\"]])" ++
+            " Object.defineProperty(options, pair[0], { get() { log.push(pair[0]); return pair[1]; } });" ++
+            "new Temporal.Duration(0, 0, 0, 0, 1).round(options); log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("", actual);
+}
+
+test "Instant round retains pre-Phase-A option access order" {
+    const actual = try observedOptions(
+        "let log = []; let options = { smallestUnit: \"second\" };" ++
+            "for (let pair of [[\"largestUnit\", \"minute\"], [\"roundingIncrement\", 1], [\"roundingMode\", \"halfExpand\"]])" ++
+            " Object.defineProperty(options, pair[0], { get() { log.push(pair[0]); return pair[1]; } });" ++
+            "new Temporal.Instant(0n).round(options); log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("", actual);
+}
