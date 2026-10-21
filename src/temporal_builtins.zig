@@ -519,7 +519,6 @@ fn coercePlainDate(self: *Interpreter, v: JSValue, overflow: Overflow) anyerror!
     if (v == .proxy) return plainDateFromObservedBag(self, v, JSValue.UNDEFINED);
     if (v != .object) return self.throwError(.type_error, "Temporal.PlainDate.from requires a string or an object", .{});
     const month_code = try optionalBagMonthCode(self, v);
-    defer if (month_code) |value| self.gc_allocator.free(value);
     const year = (try optionalI32(self, v, "year")) orelse return self.throwError(.type_error, "year is required", .{});
     const month = try optionalI32(self, v, "month");
     if (month == null and month_code == null) return self.throwError(.type_error, "month or monthCode is required", .{});
@@ -580,7 +579,6 @@ fn coercePlainDateTime(self: *Interpreter, v: JSValue, overflow: Overflow) anyer
     if (v == .proxy) return plainDateTimeFromObservedBag(self, v, JSValue.UNDEFINED);
     if (v != .object) return self.throwError(.type_error, "Temporal.PlainDateTime.from requires a string or an object", .{});
     const month_code = try optionalBagMonthCode(self, v);
-    defer if (month_code) |value| self.gc_allocator.free(value);
     const year = (try optionalI32(self, v, "year")) orelse return self.throwError(.type_error, "year is required", .{});
     const month = try optionalI32(self, v, "month");
     if (month == null and month_code == null) return self.throwError(.type_error, "month or monthCode is required", .{});
@@ -637,7 +635,6 @@ fn coercePlainYearMonth(self: *Interpreter, v: JSValue, overflow: Overflow) anye
     if (v == .proxy) return plainYearMonthFromObservedBag(self, v, JSValue.UNDEFINED);
     if (v != .object) return self.throwError(.type_error, "Temporal.PlainYearMonth.from requires a string or an object", .{});
     const month_code = try optionalBagMonthCode(self, v);
-    defer if (month_code) |value| self.gc_allocator.free(value);
     const year = (try optionalI32(self, v, "year")) orelse return self.throwError(.type_error, "year is required", .{});
     const month = try optionalI32(self, v, "month");
     if (month == null and month_code == null) return self.throwError(.type_error, "month or monthCode is required", .{});

@@ -83,3 +83,15 @@ test "Instant round retains pre-Phase-A option access order" {
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("", actual);
 }
+
+test "PlainDate direct property bags retain monthCode through from and arithmetic" {
+    const actual = try observedOptions(
+        "let date = Temporal.PlainDate.from({ year: 2021, monthCode: 'M07', day: 16 });" ++
+            "date = date.add({ days: 1 }).subtract({ days: 1 }).with({ monthCode: 'M02' });" ++
+            "let invalid; try { Temporal.PlainDate.from({ year: 2000, monthCode: 'M13', day: 1 }); } catch (e) { invalid = e.name; }" ++
+            "let comparison = Temporal.PlainDate.compare({ year: 2021, monthCode: 'M02', day: 16, calendar: 'ISO8601' }, date);" ++
+            "date.toString() + ',' + invalid + ',' + comparison;",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("2021-02-16,RangeError,0", actual);
+}
