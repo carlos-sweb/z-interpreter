@@ -239,3 +239,41 @@ test "Duration from rejects primitive duration-like values" {
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("TypeError", actual);
 }
+
+test "ZonedDateTime from reads proxy fields before validation and options" {
+    const actual = try observedOptions(
+        "let log = []; let values = { calendar: 'iso8601', day: 2, hour: 6, microsecond: 654, millisecond: 987, minute: 54, month: 5, monthCode: 'M05', nanosecond: 321, offset: '+00:00', second: 32, timeZone: 'UTC', year: 2001 };" ++
+            "let item = new Proxy(values, { get(target, key) { log.push(key); return target[key]; } });" ++
+            "let options = new Proxy({ disambiguation: 'compatible', offset: 'reject', overflow: 'constrain' }, { get(target, key) { log.push(key); return target[key]; } });" ++
+            "Temporal.ZonedDateTime.from(item, options); log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("calendar,day,hour,microsecond,millisecond,minute,month,monthCode,nanosecond,offset,second,timeZone,year,disambiguation,offset,overflow", actual);
+}
+
+test "ZonedDateTime from propagates proxy getter errors after earlier fields" {
+    const actual = try observedOptions(
+        "let item = new Proxy({ calendar: 'iso8601' }, { get(target, key) { if (key === 'day') throw new Error('sentinel'); return target[key]; } });" ++
+            "try { Temporal.ZonedDateTime.from(item); } catch (e) { e.name + ',' + e.message; }",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("Error,sentinel", actual);
+}
+
+test "ZonedDateTime with accepts a proxy partial bag" {
+    const actual = try observedOptions(
+        "new Temporal.ZonedDateTime(0n, 'UTC').with(new Proxy({ year: 2001 }, {})).year + '';",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("2001", actual);
+}
+
+test "ZonedDateTime until and since accept proxy arguments" {
+    const actual = try observedOptions(
+        "let base = new Temporal.ZonedDateTime(0n, 'UTC');" ++
+            "let other = new Proxy({ year: 1970, month: 1, day: 1, hour: 1, timeZone: 'UTC' }, {});" ++
+            "base.until(other).hours + ',' + base.since(other).hours;",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("1,-1", actual);
+}
