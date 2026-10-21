@@ -1,0 +1,63 @@
+const std = @import("std");
+const testing = std.testing;
+const zinterpreter = @import("zinterpreter");
+
+fn observedOptions(entries: []const u8) ![]const u8 {
+    var output = std.Io.Writer.Allocating.init(testing.allocator);
+    defer output.deinit();
+    var interpreter = try zinterpreter.Interpreter.init(testing.allocator, &output.writer);
+    defer interpreter.deinit();
+
+    const result = try interpreter.run(entries);
+    defer result.deinit();
+    try testing.expect(result == .string);
+    return try testing.allocator.dupe(u8, result.string.value.data);
+}
+
+test "PlainDate since reads all difference settings before validation" {
+    const actual = try observedOptions(
+        "let log = []; let options = {};" ++
+            "for (let pair of [[\"largestUnit\", \"hour\"], [\"roundingIncrement\", 1], [\"roundingMode\", \"halfFloor\"], [\"smallestUnit\", \"nanosecond\"]])" ++
+            " Object.defineProperty(options, pair[0], { get() { log.push(pair[0]); return pair[1]; } });" ++
+            "try { new Temporal.PlainDate(2025, 8, 14).since(new Temporal.PlainDate(2025, 3, 14), options); } catch (e) {} log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("largestUnit,roundingIncrement,roundingMode,smallestUnit", actual);
+}
+
+test "PlainDateTime round reads all settings before validation" {
+    const actual = try observedOptions(
+        "let log = []; let options = {};" ++
+            "for (let pair of [[\"roundingIncrement\", 25], [\"roundingMode\", \"expand\"], [\"smallestUnit\", \"hour\"]])" ++
+            " Object.defineProperty(options, pair[0], { get() { log.push(pair[0]); return pair[1]; } });" ++
+            "try { new Temporal.PlainDateTime(2025, 8, 14, 12).round(options); } catch (e) {} log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("roundingIncrement,roundingMode,smallestUnit", actual);
+}
+
+test "PlainTime until reads difference settings in canonical order" {
+    const actual = try observedOptions(
+        "let log = []; let options = {};" ++
+            "for (let pair of [[\"largestUnit\", \"hour\"], [\"roundingIncrement\", 1], [\"roundingMode\", \"trunc\"], [\"smallestUnit\", \"nanosecond\"]])" ++
+            " Object.defineProperty(options, pair[0], { get() { log.push(pair[0]); return pair[1]; } });" ++
+            "new Temporal.PlainTime(12).until(new Temporal.PlainTime(13), options); log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("largestUnit,roundingIncrement,roundingMode,smallestUnit", actual);
+}
+
+test "PlainYearMonth with reads fields before overflow" {
+    const actual = try observedOptions(
+        "let log = []; let fields = {}; let options = {};" ++
+            "Object.defineProperty(fields, 'calendar', { get() { log.push('calendar'); } });" ++
+            "Object.defineProperty(fields, 'timeZone', { get() { log.push('timeZone'); } });" ++
+            "Object.defineProperty(fields, 'month', { get() { log.push('month'); return 6; } });" ++
+            "Object.defineProperty(fields, 'monthCode', { get() { log.push('monthCode'); return 'M06'; } });" ++
+            "Object.defineProperty(fields, 'year', { get() { log.push('year'); return 2001; } });" ++
+            "Object.defineProperty(options, 'overflow', { get() { log.push('overflow'); return 'constrain'; } });" ++
+            "new Temporal.PlainYearMonth(2000, 5).with(fields, options); log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("calendar,timeZone,month,monthCode,year,overflow", actual);
+}

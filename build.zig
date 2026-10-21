@@ -156,6 +156,7 @@ pub fn build(b: *std.Build) void {
         "tests/typed_array_test.zig",
         "tests/typed_array_methods_test.zig",
         "tests/temporal_test.zig",
+        "tests/temporal_order_test.zig",
         "tests/gc_variant_coverage_test.zig",
         "tests/toprimitive_test.zig",
         "tests/bytecode_vm_test.zig",
