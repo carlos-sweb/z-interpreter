@@ -213,3 +213,29 @@ test "Duration with rejects primitive field bags" {
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("TypeError,TypeError", actual);
 }
+
+test "Duration from reads proxy fields in alphabetical order" {
+    const actual = try observedOptions(
+        "let log = []; let values = { days: 1, hours: 1, microseconds: 1, milliseconds: 1, minutes: 1, months: 1, nanoseconds: 1, seconds: 1, weeks: 1, years: 1 };" ++
+            "let item = new Proxy(values, { get(target, key) { log.push(key); return target[key]; } });" ++
+            "Temporal.Duration.from(item); log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("days,hours,microseconds,milliseconds,minutes,months,nanoseconds,seconds,weeks,years", actual);
+}
+
+test "Duration from propagates field getter errors" {
+    const actual = try observedOptions(
+        "let item = { get days() { throw new Error('sentinel'); } }; try { Temporal.Duration.from(item); } catch (e) { e.name + ',' + e.message; }",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("Error,sentinel", actual);
+}
+
+test "Duration from rejects primitive duration-like values" {
+    const actual = try observedOptions(
+        "try { Temporal.Duration.from(1); 'no error'; } catch (e) { e.name; }",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("TypeError", actual);
+}

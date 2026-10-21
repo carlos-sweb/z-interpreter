@@ -1648,11 +1648,67 @@ fn durationConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
     return constructedTemporal(self, .{ .duration = d });
 }
 
+const DurationFromRaw = struct {
+    days: ?f64,
+    hours: ?f64,
+    microseconds: ?f64,
+    milliseconds: ?f64,
+    minutes: ?f64,
+    months: ?f64,
+    nanoseconds: ?f64,
+    seconds: ?f64,
+    weeks: ?f64,
+    years: ?f64,
+};
+
+fn readDurationFromField(self: *Interpreter, item: JSValue, key: []const u8) anyerror!?f64 {
+    const value = try self.getProperty(item, key);
+    defer value.deinit();
+    if (value == .undefined) return null;
+    if (value == .bigint) return self.throwError(.type_error, "{s} must be a number", .{key});
+    return try self.toNumberJS(value);
+}
+
+fn validateDurationFromField(self: *Interpreter, value: ?f64, key: []const u8) anyerror!?f64 {
+    if (value) |number| return try requireDurationNumber(self, JSValue.fromNumber(number), key);
+    return null;
+}
+
+/// Duration.from converts property bags through ToTemporalPartialDurationRecord.
+/// Keep it here because other duration-like callers retain their current paths.
+fn durationFromObservedBag(self: *Interpreter, item: JSValue) anyerror!ztemporal.Duration {
+    const raw: DurationFromRaw = .{
+        .days = try readDurationFromField(self, item, "days"),
+        .hours = try readDurationFromField(self, item, "hours"),
+        .microseconds = try readDurationFromField(self, item, "microseconds"),
+        .milliseconds = try readDurationFromField(self, item, "milliseconds"),
+        .minutes = try readDurationFromField(self, item, "minutes"),
+        .months = try readDurationFromField(self, item, "months"),
+        .nanoseconds = try readDurationFromField(self, item, "nanoseconds"),
+        .seconds = try readDurationFromField(self, item, "seconds"),
+        .weeks = try readDurationFromField(self, item, "weeks"),
+        .years = try readDurationFromField(self, item, "years"),
+    };
+    return ztemporal.Duration.from(.{ .fields = .{
+        .days = try validateDurationFromField(self, raw.days, "days"),
+        .hours = try validateDurationFromField(self, raw.hours, "hours"),
+        .microseconds = try validateDurationFromField(self, raw.microseconds, "microseconds"),
+        .milliseconds = try validateDurationFromField(self, raw.milliseconds, "milliseconds"),
+        .minutes = try validateDurationFromField(self, raw.minutes, "minutes"),
+        .months = try validateDurationFromField(self, raw.months, "months"),
+        .nanoseconds = try validateDurationFromField(self, raw.nanoseconds, "nanoseconds"),
+        .seconds = try validateDurationFromField(self, raw.seconds, "seconds"),
+        .weeks = try validateDurationFromField(self, raw.weeks, "weeks"),
+        .years = try validateDurationFromField(self, raw.years, "years"),
+    } }) catch |e| temporalErr(self, e);
+}
+
 fn durationFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
-    const d = try coerceDuration(self, arg(args, 0));
+    const item = arg(args, 0);
+    const d = if (item == .object or item == .proxy) try durationFromObservedBag(self, item) else try coerceDuration(self, item);
     return self.gcNewTemporal(.{ .duration = d });
 }
 
