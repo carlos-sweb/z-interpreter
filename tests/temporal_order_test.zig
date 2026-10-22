@@ -305,3 +305,38 @@ test "ZonedDateTime from reads overflow before field conversion errors" {
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("disambiguation,offset,overflow", actual);
 }
+
+test "Instant from converts a proxy through ToString" {
+    const actual = try observedOptions(
+        "let log = []; let item = new Proxy({ toString() { log.push('call toString'); return '1970-01-01T00:00Z'; } }, { get(target, key) { if (key === 'toString') log.push('get toString'); return target[key]; } });" ++
+            "Temporal.Instant.from(item).epochNanoseconds + ',' + log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("0,get toString,call toString", actual);
+}
+
+test "Instant from propagates a proxy ToString getter error" {
+    const actual = try observedOptions(
+        "let item = new Proxy({}, { get(target, key) { if (key === 'toString') throw new Error('sentinel'); return target[key]; } });" ++
+            "try { Temporal.Instant.from(item); } catch (e) { e.name + ',' + e.message; }",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("Error,sentinel", actual);
+}
+
+test "Instant from rejects an invalid ISO string after ToString" {
+    const actual = try observedOptions(
+        "try { Temporal.Instant.from(new Proxy({ toString() { return 'not an instant'; } }, {})); } catch (e) { e.name; }",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError", actual);
+}
+
+test "Instant since and until convert proxy arguments through ToString" {
+    const actual = try observedOptions(
+        "let base = new Temporal.Instant(0n); let other = new Proxy({ toString() { return '1970-01-01T00:00:01Z'; } }, {});" ++
+            "base.until(other).seconds + ',' + base.since(other).seconds;",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("1,-1", actual);
+}

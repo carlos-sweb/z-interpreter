@@ -614,7 +614,9 @@ fn coercePlainDateTime(self: *Interpreter, v: JSValue, overflow: Overflow) anyer
 fn coerceInstant(self: *Interpreter, allocator: Allocator, v: JSValue) anyerror!ztemporal.Instant {
     if (v == .temporal and v.temporal.value == .instant) return v.temporal.value.instant;
     if (v == .temporal and v.temporal.value == .zoned_date_time) return v.temporal.value.zoned_date_time.toInstant();
-    if (v == .object) {
+    // ToTemporalInstant applies ToString to every remaining Object value.
+    // This includes Proxy and callable objects, not just ordinary objects.
+    if (!Interpreter.isPrimitiveTag(v)) {
         const s = try self.toDisplayStringJS(allocator, v);
         defer allocator.free(s);
         return ztemporal.Instant.from(.{ .string = s }) catch |e| temporalErr(self, e);
