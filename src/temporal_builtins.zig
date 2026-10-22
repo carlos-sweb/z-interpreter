@@ -2399,11 +2399,15 @@ fn plainMonthDayFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     const value = arg(args, 0);
     const options = arg(args, 1);
     const parsed_string: ?ztemporal.PlainMonthDay = if (value == .string) try coercePlainMonthDay(self, value, .constrain) else null;
-    const pmd = if (value == .object or value == .proxy)
+    // PrepareTemporalFields accepts every ECMAScript Object. Keep Temporal
+    // instances on their existing conversion path, but let Proxy, callable,
+    // and other object-shaped bags use the observable field reader.
+    const pmd = if (!Interpreter.isPrimitiveTag(value) and value != .temporal)
         try plainMonthDayFromObservedBag(self, value, options)
     else blk: {
-        const overflow = try observableFromOverflow(self, options);
-        break :blk parsed_string orelse try coercePlainMonthDay(self, value, overflow);
+        const result = parsed_string orelse try coercePlainMonthDay(self, value, .constrain);
+        _ = try observableFromOverflow(self, options);
+        break :blk result;
     };
     return self.gcNewTemporal(.{ .plain_month_day = pmd });
 }

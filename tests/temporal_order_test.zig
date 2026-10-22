@@ -340,3 +340,56 @@ test "Instant since and until convert proxy arguments through ToString" {
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("1,-1", actual);
 }
+
+test "PlainMonthDay from reads proxy fields in PrepareTemporalFields order" {
+    const actual = try observedOptions(
+        "let log = []; let values = { calendar: 'iso8601', day: 1, month: 1, monthCode: 'M01', year: 2000 };" ++
+            "let item = new Proxy(values, { get(target, key) { log.push(key); return target[key]; } });" ++
+            "Temporal.PlainMonthDay.from(item); log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("calendar,day,month,monthCode,year", actual);
+}
+
+test "PlainMonthDay from propagates proxy field getter errors" {
+    const actual = try observedOptions(
+        "let item = new Proxy({ calendar: 'iso8601' }, { get(target, key) { if (key === 'month') throw new Error('sentinel'); return target[key]; } });" ++
+            "try { Temporal.PlainMonthDay.from(item); } catch (e) { e.name + ',' + e.message; }",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("Error,sentinel", actual);
+}
+
+test "PlainMonthDay from reports invalid monthCode after field reads" {
+    const actual = try observedOptions(
+        "try { Temporal.PlainMonthDay.from(new Proxy({ day: 1, monthCode: 'M99' }, {})); } catch (e) { e.name; }",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError", actual);
+}
+
+test "PlainMonthDay from validates malformed monthCode before year conversion" {
+    const actual = try observedOptions(
+        "let item = new Proxy({ day: 1, monthCode: 'L99M', get year() { throw new Error('sentinel'); } }, {});" ++
+            "try { Temporal.PlainMonthDay.from(item); } catch (e) { e.name; }",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError", actual);
+}
+
+test "PlainMonthDay from rejects primitive items before reading overflow" {
+    const actual = try observedOptions(
+        "let log = []; let options = new Proxy({ overflow: 'reject' }, { get(target, key) { log.push(key); return target[key]; } });" ++
+            "try { Temporal.PlainMonthDay.from(7, options); } catch (e) {} log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("", actual);
+}
+
+test "PlainMonthDay from accepts callable property bags" {
+    const actual = try observedOptions(
+        "function item() {} item.day = 1; item.monthCode = 'M01'; Temporal.PlainMonthDay.from(item).monthCode;",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("M01", actual);
+}
