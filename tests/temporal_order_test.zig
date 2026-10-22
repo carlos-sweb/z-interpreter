@@ -277,3 +277,31 @@ test "ZonedDateTime until and since accept proxy arguments" {
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("1,-1", actual);
 }
+
+test "ZonedDateTime from preserves monthCode type and syntax priority" {
+    const actual = try observedOptions(
+        "let wrong, syntax;" ++
+            "try { Temporal.ZonedDateTime.from({ year: 2021, monthCode: 5, day: 1, timeZone: 'UTC' }); } catch (e) { wrong = e.name; }" ++
+            "try { Temporal.ZonedDateTime.from({ year: Symbol(), monthCode: 'L99M', day: 1, timeZone: 'UTC' }); } catch (e) { syntax = e.name; }" ++
+            "wrong + ',' + syntax;",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("TypeError,RangeError", actual);
+}
+
+test "ZonedDateTime from validates calendar before a missing timeZone" {
+    const actual = try observedOptions(
+        "try { Temporal.ZonedDateTime.from({ year: 1976, monthCode: 'M11', day: 18, calendar: '' }); } catch (e) { e.name; }",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError", actual);
+}
+
+test "ZonedDateTime from reads overflow before field conversion errors" {
+    const actual = try observedOptions(
+        "let log = []; let options = new Proxy({ disambiguation: 'compatible', offset: 'reject', overflow: 'constrain' }, { get(target, key) { log.push(key); return target[key]; } });" ++
+            "try { Temporal.ZonedDateTime.from({ year: Symbol(), monthCode: 'M11', day: 1, timeZone: 'UTC' }, options); } catch (e) {} log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("disambiguation,offset,overflow", actual);
+}

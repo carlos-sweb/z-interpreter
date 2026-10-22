@@ -2590,6 +2590,21 @@ fn zonedDateTimeIntegerFromValue(self: *Interpreter, value: JSValue, key: []cons
     return @intFromFloat(integer);
 }
 
+fn zonedDateTimeMonthCodeFromValue(self: *Interpreter, value: JSValue) anyerror!?[]const u8 {
+    if (value == .undefined) return null;
+    if (value != .string) return self.throwError(.type_error, "monthCode must be a string", .{});
+    const code = value.string.value.data;
+    // Month-code syntax is checked before later field conversions. Its
+    // calendar suitability remains z-temporal validation after all fields.
+    if ((code.len != 3 and code.len != 4) or code[0] != 'M' or
+        !std.ascii.isDigit(code[1]) or !std.ascii.isDigit(code[2]) or
+        (code.len == 4 and code[3] != 'L'))
+    {
+        return self.throwError(.range_error, "Invalid monthCode syntax", .{});
+    }
+    return code;
+}
+
 fn zonedDateTimeOptionFromValue(self: *Interpreter, value: JSValue, key: []const u8, comptime T: type, fallback: T) anyerror!T {
     if (value == .undefined) return fallback;
     const text = try self.toDisplayStringJS(self.gc_allocator, value);
@@ -2620,14 +2635,16 @@ fn readZonedDateTimeFromOptions(self: *Interpreter, options: JSValue) anyerror!Z
 
 fn zonedDateTimeFromRawBag(self: *Interpreter, allocator: Allocator, raw: *const ZonedDateTimeBagRaw, options: ZonedDateTimeFromOptions) anyerror!ztemporal.ZonedDateTime {
     const calendar = try calendarFromValue(self, raw.calendar);
+    // Preserve the established calendar error priority over a missing
+    // timeZone, after all observable field reads have completed.
+    if (calendar) |id| _ = ztemporal.PlainDate.init(1970, 1, 1, id) catch |e| return temporalErr(self, e);
     const day = try zonedDateTimeIntegerFromValue(self, raw.day, "day");
     const hour = try zonedDateTimeIntegerFromValue(self, raw.hour, "hour");
     const microsecond = try zonedDateTimeIntegerFromValue(self, raw.microsecond, "microsecond");
     const millisecond = try zonedDateTimeIntegerFromValue(self, raw.millisecond, "millisecond");
     const minute = try zonedDateTimeIntegerFromValue(self, raw.minute, "minute");
     const month = try zonedDateTimeIntegerFromValue(self, raw.month, "month");
-    const month_code = if (raw.month_code == .undefined) null else try self.toDisplayStringJS(self.gc_allocator, raw.month_code);
-    defer if (month_code) |code| self.gc_allocator.free(code);
+    const month_code = try zonedDateTimeMonthCodeFromValue(self, raw.month_code);
     const nanosecond = try zonedDateTimeIntegerFromValue(self, raw.nanosecond, "nanosecond");
     const offset = if (raw.offset == .undefined) null else try self.toDisplayStringJS(self.gc_allocator, raw.offset);
     defer if (offset) |text| self.gc_allocator.free(text);
@@ -2676,7 +2693,18 @@ fn zonedDateTimeFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     const self = interp(ctx);
     const item = arg(args, 0);
     const option_value = arg(args, 1);
-    const zdt = if (!Interpreter.isPrimitiveTag(item) and !(item == .temporal and item.temporal.value == .zoned_date_time)) blk: {
+    const zdt = if (item == .string) blk: {
+        // ISO parsing precedes option access. Use `ignore` only for this
+        // syntax preflight: user-supplied offset policy still governs the
+        // actual conversion below.
+        _ = ztemporal.ZonedDateTime.from(allocator, ioHandle(), .{ .string = item.string.value.data }, .{
+            .overflow = .constrain,
+            .offset = .ignore,
+            .disambiguation = .compatible,
+        }) catch |e| return temporalErr(self, e);
+        const options = try readZonedDateTimeFromOptions(self, option_value);
+        break :blk try coerceZonedDateTime(self, allocator, item, options.overflow, options.disambiguation, options.offset);
+    } else if (!Interpreter.isPrimitiveTag(item) and !(item == .temporal and item.temporal.value == .zoned_date_time)) blk: {
         var raw = try readZonedDateTimeBagRaw(self, item);
         defer raw.deinit();
         const options = try readZonedDateTimeFromOptions(self, option_value);
