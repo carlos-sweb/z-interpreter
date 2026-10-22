@@ -756,13 +756,13 @@ fn plainDateFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     const self = interp(ctx);
     const value = arg(args, 0);
     const options = arg(args, 1);
-    const parsed_string: ?ztemporal.PlainDate = if (value == .string) try coercePlainDate(self, value, .constrain) else null;
+    if (Interpreter.isPrimitiveTag(value) and value != .string)
+        return self.throwError(.type_error, "Temporal.PlainDate.from requires a string or an object", .{});
     const pd = if (value == .proxy)
         try plainDateFromObservedBag(self, value, options)
     else blk: {
-        const result = parsed_string orelse try coercePlainDate(self, value, .constrain);
-        _ = try observableFromOverflow(self, options);
-        break :blk result;
+        const overflow = try observableFromOverflow(self, options);
+        break :blk try coercePlainDate(self, value, overflow);
     };
     return self.gcNewTemporal(.{ .plain_date = pd });
 }

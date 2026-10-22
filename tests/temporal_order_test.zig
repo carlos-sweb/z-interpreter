@@ -397,19 +397,19 @@ test "PlainMonthDay from accepts callable property bags" {
 test "PlainDate from rejects primitive items before reading overflow" {
     const actual = try observedOptions(
         "let log = []; let options = new Proxy({ overflow: 'reject' }, { get(target, key) { log.push(key); return target[key]; } });" ++
-            "try { Temporal.PlainDate.from(7, options); } catch (e) {} log.join(',');",
+            "let error; try { Temporal.PlainDate.from(7, options); } catch (e) { error = e.name; } error + ',' + log.join(',');",
     );
     defer testing.allocator.free(actual);
-    try testing.expectEqualStrings("", actual);
+    try testing.expectEqualStrings("TypeError,", actual);
 }
 
-test "PlainDate from reads overflow after parsing a string" {
+test "PlainDate from applies overflow after reading it for strings" {
     const actual = try observedOptions(
         "let log = []; let options = new Proxy({ overflow: 'reject' }, { get(target, key) { log.push(key); return target[key]; } });" ++
-            "Temporal.PlainDate.from('2021-05-17', options); log.join(',');",
+            "let error; try { Temporal.PlainDate.from('2021-02-29', options); } catch (e) { error = e.name; } error + ',' + log.join(',');",
     );
     defer testing.allocator.free(actual);
-    try testing.expectEqualStrings("overflow", actual);
+    try testing.expectEqualStrings("RangeError,overflow", actual);
 }
 
 test "PlainDate compare retains property-bag coercion" {
