@@ -760,8 +760,9 @@ fn plainDateFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     const pd = if (value == .proxy)
         try plainDateFromObservedBag(self, value, options)
     else blk: {
-        const overflow = try observableFromOverflow(self, options);
-        break :blk parsed_string orelse try coercePlainDate(self, value, overflow);
+        const result = parsed_string orelse try coercePlainDate(self, value, .constrain);
+        _ = try observableFromOverflow(self, options);
+        break :blk result;
     };
     return self.gcNewTemporal(.{ .plain_date = pd });
 }

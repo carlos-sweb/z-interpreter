@@ -393,3 +393,29 @@ test "PlainMonthDay from accepts callable property bags" {
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("M01", actual);
 }
+
+test "PlainDate from rejects primitive items before reading overflow" {
+    const actual = try observedOptions(
+        "let log = []; let options = new Proxy({ overflow: 'reject' }, { get(target, key) { log.push(key); return target[key]; } });" ++
+            "try { Temporal.PlainDate.from(7, options); } catch (e) {} log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("", actual);
+}
+
+test "PlainDate from reads overflow after parsing a string" {
+    const actual = try observedOptions(
+        "let log = []; let options = new Proxy({ overflow: 'reject' }, { get(target, key) { log.push(key); return target[key]; } });" ++
+            "Temporal.PlainDate.from('2021-05-17', options); log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("overflow", actual);
+}
+
+test "PlainDate compare retains property-bag coercion" {
+    const actual = try observedOptions(
+        "Temporal.PlainDate.compare({ year: 2021, month: 5, day: 17 }, { year: 2021, month: 5, day: 18 }) + '';",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("-1", actual);
+}
