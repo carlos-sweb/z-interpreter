@@ -3739,11 +3739,43 @@ fn surfaceZdtDifference(comptime since: bool) NativeFn {
     }.call;
 }
 
+/// ZonedDateTime.round has no zone-specific options, but its required
+/// smallestUnit and observable read order differ from surfaceRounding's
+/// difference-method callers.
+fn readZonedDateTimeRoundOptions(self: *Interpreter, options: JSValue) anyerror!RoundOptions {
+    if (options == .undefined)
+        return self.throwError(.type_error, "round requires options", .{});
+    if (options == .string) {
+        return .{ .smallestUnit = try unitFromString(self, options.string.value.data, "smallestUnit") };
+    }
+    try surfaceOptions(self, options);
+
+    const rounding_increment = try readRoundingOptionNumber(self, options, "roundingIncrement");
+    const rounding_mode = try readRoundingOptionString(self, options, "roundingMode");
+    defer if (rounding_mode) |value| self.gc_allocator.free(value);
+    const smallest_unit = try readRoundingOptionString(self, options, "smallestUnit");
+    defer if (smallest_unit) |value| self.gc_allocator.free(value);
+
+    var out: RoundOptions = .{};
+    if (rounding_increment) |number| {
+        if (!std.math.isFinite(number)) return self.throwError(.range_error, "Invalid roundingIncrement", .{});
+        const integer = @trunc(number);
+        if (integer < 1 or integer > 1_000_000_000)
+            return self.throwError(.range_error, "Invalid roundingIncrement", .{});
+        out.roundingIncrement = @intFromFloat(integer);
+    }
+    if (rounding_mode) |text| out.roundingMode = try roundingModeFromString(self, text);
+    out.smallestUnit = if (smallest_unit) |text|
+        try unitFromString(self, text, "smallestUnit")
+    else
+        return self.throwError(.range_error, "round() requires smallestUnit", .{});
+    return out;
+}
+
 fn surfaceZdtRound(ctx: *anyopaque, allocator: Allocator, receiver: JSValue, args: []const JSValue) anyerror!JSValue {
     const self = interp(ctx);
     const dt = try zdtSelf(self, receiver);
-    if (arg(args, 0) == .undefined) return self.throwError(.type_error, "round requires options", .{});
-    const options = try surfaceRounding(self, arg(args, 0), RoundOptions, .halfExpand, true);
+    const options = try readZonedDateTimeRoundOptions(self, arg(args, 0));
     return self.gcNewTemporal(.{ .zoned_date_time = dt.round(allocator, ioHandle(), options) catch |e| return temporalErr(self, e) });
 }
 

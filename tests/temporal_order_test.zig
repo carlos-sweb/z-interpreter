@@ -537,3 +537,22 @@ test "PlainDateTime round requires an options object and smallestUnit" {
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("TypeError,RangeError", actual);
 }
+
+test "ZonedDateTime round reads proxy options before validation" {
+    const actual = try observedOptions(
+        "let log = []; let values = { roundingIncrement: 25, roundingMode: 'expand', smallestUnit: 'hour' };" ++
+            "let options = new Proxy(values, { get(target, key) { log.push(key); return target[key]; } });" ++
+            "let error; try { new Temporal.ZonedDateTime(0n, 'UTC').round(options); } catch (e) { error = e.name; } error + ',' + log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError,roundingIncrement,roundingMode,smallestUnit", actual);
+}
+
+test "ZonedDateTime round requires an options object and smallestUnit" {
+    const actual = try observedOptions(
+        "let result = []; let dateTime = new Temporal.ZonedDateTime(0n, 'UTC');" ++
+            "for (let options of [undefined, {}]) { try { dateTime.round(options); } catch (e) { result.push(e.name); } } result.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("TypeError,RangeError", actual);
+}
