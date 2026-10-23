@@ -73,7 +73,7 @@ test "Duration round reads B2 options before validation" {
     try testing.expectEqualStrings("largestUnit,roundingIncrement,roundingMode", actual);
 }
 
-test "Instant round retains pre-Phase-A option access order" {
+test "Instant round uses its local option access order" {
     const actual = try observedOptions(
         "let log = []; let options = { smallestUnit: \"second\" };" ++
             "for (let pair of [[\"largestUnit\", \"minute\"], [\"roundingIncrement\", 1], [\"roundingMode\", \"halfExpand\"]])" ++
@@ -81,7 +81,7 @@ test "Instant round retains pre-Phase-A option access order" {
             "new Temporal.Instant(0n).round(options); log.join(',');",
     );
     defer testing.allocator.free(actual);
-    try testing.expectEqualStrings("", actual);
+    try testing.expectEqualStrings("roundingIncrement,roundingMode", actual);
 }
 
 test "PlainDate direct property bags retain monthCode through from and arithmetic" {
@@ -460,4 +460,34 @@ test "PlainDateTime and PlainYearMonth reject primitive items before overflow" {
     );
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("TypeError,,TypeError,", actual);
+}
+
+test "Instant round reads proxy options alphabetically" {
+    const actual = try observedOptions(
+        "let log = []; let values = { roundingIncrement: 1, roundingMode: 'expand', smallestUnit: 'second' };" ++
+            "let options = new Proxy(values, { get(target, key) { log.push(key); return target[key]; } });" ++
+            "new Temporal.Instant(0n).round(options); log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("roundingIncrement,roundingMode,smallestUnit", actual);
+}
+
+test "Instant round validates smallestUnit after reading all proxy options" {
+    const actual = try observedOptions(
+        "let log = []; let values = { roundingIncrement: 1, roundingMode: 'expand', smallestUnit: 'fortnight' };" ++
+            "let options = new Proxy(values, { get(target, key) { log.push(key); return target[key]; } });" ++
+            "let error; try { new Temporal.Instant(0n).round(options); } catch (e) { error = e.name; } error + ',' + log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError,roundingIncrement,roundingMode,smallestUnit", actual);
+}
+
+test "Instant round validates truncated noninteger increment after all reads" {
+    const actual = try observedOptions(
+        "let log = []; let values = { roundingIncrement: 0.5, roundingMode: 'expand', smallestUnit: 'second' };" ++
+            "let options = new Proxy(values, { get(target, key) { log.push(key); return target[key]; } });" ++
+            "let error; try { new Temporal.Instant(0n).round(options); } catch (e) { error = e.name; } error + ',' + log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError,roundingIncrement,roundingMode,smallestUnit", actual);
 }

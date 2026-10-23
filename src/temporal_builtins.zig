@@ -1574,11 +1574,44 @@ fn instSince(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     return self.gcNewTemporal(.{ .duration = d });
 }
 
+/// Instant.round has its own options algorithm. Keep it separate from the
+/// shared reader: its properties are read in alphabetical order and all
+/// algorithmic validation happens after those observable conversions.
+fn readInstantRoundOptions(self: *Interpreter, options: JSValue) anyerror!RoundOptions {
+    if (options == .undefined)
+        return self.throwError(.type_error, "round() requires an options object", .{});
+    if (options == .string) {
+        return .{ .smallestUnit = try unitFromString(self, options.string.value.data, "smallestUnit") };
+    }
+    try surfaceOptions(self, options);
+
+    const rounding_increment = try readRoundingOptionNumber(self, options, "roundingIncrement");
+    const rounding_mode = try readRoundingOptionString(self, options, "roundingMode");
+    defer if (rounding_mode) |value| self.gc_allocator.free(value);
+    const smallest_unit = try readRoundingOptionString(self, options, "smallestUnit");
+    defer if (smallest_unit) |value| self.gc_allocator.free(value);
+
+    var out: RoundOptions = .{};
+    if (rounding_increment) |number| {
+        if (!std.math.isFinite(number)) return self.throwError(.range_error, "Invalid roundingIncrement", .{});
+        const integer = @trunc(number);
+        if (integer < 1 or integer > 1_000_000_000)
+            return self.throwError(.range_error, "Invalid roundingIncrement", .{});
+        out.roundingIncrement = @intFromFloat(integer);
+    }
+    if (rounding_mode) |text| out.roundingMode = try roundingModeFromString(self, text);
+    out.smallestUnit = if (smallest_unit) |text|
+        try unitFromString(self, text, "smallestUnit")
+    else
+        return self.throwError(.type_error, "round() requires smallestUnit", .{});
+    return out;
+}
+
 fn instRound(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const self = interp(ctx);
     const inst = try instSelf(self, this_value);
-    const opts = try readRoundOptions(self, arg(args, 0));
+    const opts = try readInstantRoundOptions(self, arg(args, 0));
     const result = inst.round(opts) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .instant = result });
 }
