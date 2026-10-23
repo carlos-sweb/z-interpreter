@@ -758,6 +758,8 @@ fn plainDateFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     const options = arg(args, 1);
     if (Interpreter.isPrimitiveTag(value) and value != .string)
         return self.throwError(.type_error, "Temporal.PlainDate.from requires a string or an object", .{});
+    if (value == .string)
+        _ = ztemporal.iso_string.parsePlainDate(value.string.value.data) catch |e| return temporalErr(self, e);
     const pd = if (value == .proxy)
         try plainDateFromObservedBag(self, value, options)
     else blk: {

@@ -403,13 +403,22 @@ test "PlainDate from rejects primitive items before reading overflow" {
     try testing.expectEqualStrings("TypeError,", actual);
 }
 
-test "PlainDate from applies overflow after reading it for strings" {
+test "PlainDate from reads overflow after parsing valid ISO strings" {
     const actual = try observedOptions(
         "let log = []; let options = new Proxy({ overflow: 'reject' }, { get(target, key) { log.push(key); return target[key]; } });" ++
-            "let error; try { Temporal.PlainDate.from('2021-02-29', options); } catch (e) { error = e.name; } error + ',' + log.join(',');",
+            "Temporal.PlainDate.from('2020-01-01', options); log.join(',');",
     );
     defer testing.allocator.free(actual);
-    try testing.expectEqualStrings("RangeError,overflow", actual);
+    try testing.expectEqualStrings("overflow", actual);
+}
+
+test "PlainDate from rejects ISO-invalid strings before reading overflow" {
+    const actual = try observedOptions(
+        "let log = []; let options = new Proxy({ overflow: 'constrain' }, { get(target, key) { log.push(key); return target[key]; } });" ++
+            "let error; try { Temporal.PlainDate.from('2020-13-34', options); } catch (e) { error = e.name; } error + ',' + log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError,", actual);
 }
 
 test "PlainDate compare retains property-bag coercion" {
