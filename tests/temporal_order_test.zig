@@ -428,3 +428,36 @@ test "PlainDate compare retains property-bag coercion" {
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("-1", actual);
 }
+
+test "PlainDateTime from orders invalid and valid strings around overflow" {
+    const actual = try observedOptions(
+        "let invalidLog = []; let invalidOptions = new Proxy({ overflow: 'constrain' }, { get(target, key) { invalidLog.push(key); return target[key]; } });" ++
+            "let validLog = []; let validOptions = new Proxy({ overflow: 'reject' }, { get(target, key) { validLog.push(key); return target[key]; } });" ++
+            "let error; try { Temporal.PlainDateTime.from('2020-13-34T25:60:60', invalidOptions); } catch (e) { error = e.name; }" ++
+            "Temporal.PlainDateTime.from('2020-01-01T00:00', validOptions); error + ',' + invalidLog.join(',') + ',' + validLog.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError,,overflow", actual);
+}
+
+test "PlainYearMonth from orders invalid and valid strings around overflow" {
+    const actual = try observedOptions(
+        "let invalidLog = []; let invalidOptions = new Proxy({ overflow: 'constrain' }, { get(target, key) { invalidLog.push(key); return target[key]; } });" ++
+            "let validLog = []; let validOptions = new Proxy({ overflow: 'reject' }, { get(target, key) { validLog.push(key); return target[key]; } });" ++
+            "let error; try { Temporal.PlainYearMonth.from('2020-13', invalidOptions); } catch (e) { error = e.name; }" ++
+            "Temporal.PlainYearMonth.from('2020-01', validOptions); error + ',' + invalidLog.join(',') + ',' + validLog.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError,,overflow", actual);
+}
+
+test "PlainDateTime and PlainYearMonth reject primitive items before overflow" {
+    const actual = try observedOptions(
+        "let a = []; let b = []; let ao = new Proxy({ overflow: 'reject' }, { get(target, key) { a.push(key); return target[key]; } });" ++
+            "let bo = new Proxy({ overflow: 'reject' }, { get(target, key) { b.push(key); return target[key]; } });" ++
+            "let ae; let be; try { Temporal.PlainDateTime.from(7, ao); } catch (e) { ae = e.name; } try { Temporal.PlainYearMonth.from(7, bo); } catch (e) { be = e.name; }" ++
+            "ae + ',' + a.join(',') + ',' + be + ',' + b.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("TypeError,,TypeError,", actual);
+}

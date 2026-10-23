@@ -1222,12 +1222,15 @@ fn plainDateTimeFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     const self = interp(ctx);
     const value = arg(args, 0);
     const options = arg(args, 1);
-    const parsed_string: ?ztemporal.PlainDateTime = if (value == .string) try coercePlainDateTime(self, value, .constrain) else null;
+    if (Interpreter.isPrimitiveTag(value) and value != .string)
+        return self.throwError(.type_error, "Temporal.PlainDateTime.from requires a string or an object", .{});
+    if (value == .string)
+        _ = ztemporal.iso_string.parsePlainDateTime(value.string.value.data) catch |e| return temporalErr(self, e);
     const pdt = if (value == .object or value == .proxy)
         try plainDateTimeFromObservedBag(self, value, options)
     else blk: {
         const overflow = try observableFromOverflow(self, options);
-        break :blk parsed_string orelse try coercePlainDateTime(self, value, overflow);
+        break :blk try coercePlainDateTime(self, value, overflow);
     };
     return self.gcNewTemporal(.{ .plain_date_time = pdt });
 }
@@ -2146,12 +2149,15 @@ fn plainYearMonthFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     const self = interp(ctx);
     const value = arg(args, 0);
     const options = arg(args, 1);
-    const parsed_string: ?ztemporal.PlainYearMonth = if (value == .string) try coercePlainYearMonth(self, value, .constrain) else null;
+    if (Interpreter.isPrimitiveTag(value) and value != .string)
+        return self.throwError(.type_error, "Temporal.PlainYearMonth.from requires a string or an object", .{});
+    if (value == .string)
+        _ = ztemporal.iso_string.parsePlainYearMonth(value.string.value.data) catch |e| return temporalErr(self, e);
     const pym = if (value == .object or value == .proxy)
         try plainYearMonthFromObservedBag(self, value, options)
     else blk: {
         const overflow = try observableFromOverflow(self, options);
-        break :blk parsed_string orelse try coercePlainYearMonth(self, value, overflow);
+        break :blk try coercePlainYearMonth(self, value, overflow);
     };
     return self.gcNewTemporal(.{ .plain_year_month = pym });
 }
