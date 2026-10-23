@@ -499,3 +499,41 @@ test "Instant round requires smallestUnit with RangeError" {
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("RangeError", actual);
 }
+
+test "PlainTime round reads proxy options before validation" {
+    const actual = try observedOptions(
+        "let log = []; let values = { roundingIncrement: 25, roundingMode: 'expand', smallestUnit: 'hour' };" ++
+            "let options = new Proxy(values, { get(target, key) { log.push(key); return target[key]; } });" ++
+            "let error; try { new Temporal.PlainTime(12).round(options); } catch (e) { error = e.name; } error + ',' + log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError,roundingIncrement,roundingMode,smallestUnit", actual);
+}
+
+test "PlainTime round requires an options object and smallestUnit" {
+    const actual = try observedOptions(
+        "let result = []; let time = new Temporal.PlainTime(12);" ++
+            "for (let options of [undefined, {}]) { try { time.round(options); } catch (e) { result.push(e.name); } } result.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("TypeError,RangeError", actual);
+}
+
+test "PlainDateTime round reads proxy options before validation" {
+    const actual = try observedOptions(
+        "let log = []; let values = { roundingIncrement: 25, roundingMode: 'expand', smallestUnit: 'hour' };" ++
+            "let options = new Proxy(values, { get(target, key) { log.push(key); return target[key]; } });" ++
+            "let error; try { new Temporal.PlainDateTime(2025, 8, 14, 12).round(options); } catch (e) { error = e.name; } error + ',' + log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError,roundingIncrement,roundingMode,smallestUnit", actual);
+}
+
+test "PlainDateTime round requires an options object and smallestUnit" {
+    const actual = try observedOptions(
+        "let result = []; let dateTime = new Temporal.PlainDateTime(2025, 8, 14, 12);" ++
+            "for (let options of [undefined, {}]) { try { dateTime.round(options); } catch (e) { result.push(e.name); } } result.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("TypeError,RangeError", actual);
+}
