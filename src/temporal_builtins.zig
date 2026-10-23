@@ -1603,7 +1603,7 @@ fn readInstantRoundOptions(self: *Interpreter, options: JSValue) anyerror!RoundO
     out.smallestUnit = if (smallest_unit) |text|
         try unitFromString(self, text, "smallestUnit")
     else
-        return self.throwError(.type_error, "round() requires smallestUnit", .{});
+        return self.throwError(.range_error, "round() requires smallestUnit", .{});
     return out;
 }
 

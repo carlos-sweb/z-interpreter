@@ -491,3 +491,11 @@ test "Instant round validates truncated noninteger increment after all reads" {
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("RangeError,roundingIncrement,roundingMode,smallestUnit", actual);
 }
+
+test "Instant round requires smallestUnit with RangeError" {
+    const actual = try observedOptions(
+        "let error; try { new Temporal.Instant(0n).round({ roundingIncrement: 1, roundingMode: 'ceil' }); } catch (e) { error = e.name; } error;",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError", actual);
+}
