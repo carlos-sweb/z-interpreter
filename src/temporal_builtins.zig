@@ -577,7 +577,7 @@ fn coercePlainDateTime(self: *Interpreter, v: JSValue, overflow: Overflow) anyer
         else => {},
     };
     if (v == .string) return ztemporal.PlainDateTime.from(.{ .string = v.string.value.data }, .{}) catch |e| temporalErr(self, e);
-    if (v == .proxy) return plainDateTimeFromObservedBag(self, v, JSValue.UNDEFINED);
+    if (v == .proxy) return plainDateTimeFromObservedBag(self, v, JSValue.UNDEFINED, false);
     if (v != .object) return self.throwError(.type_error, "Temporal.PlainDateTime.from requires a string or an object", .{});
     const month_code = try optionalBagMonthCode(self, v);
     const year = (try optionalI32(self, v, "year")) orelse return self.throwError(.type_error, "year is required", .{});
@@ -1182,7 +1182,7 @@ fn plainDateTimeConstructor(ctx: *anyopaque, allocator: Allocator, this_value: J
     return constructedTemporal(self, .{ .plain_date_time = pdt });
 }
 
-fn plainDateTimeFromObservedBag(self: *Interpreter, fields: JSValue, options: JSValue) anyerror!ztemporal.PlainDateTime {
+fn plainDateTimeFromObservedBag(self: *Interpreter, fields: JSValue, options: JSValue, strict_month_code: bool) anyerror!ztemporal.PlainDateTime {
     const calendar_value = try self.getProperty(fields, "calendar");
     defer calendar_value.deinit();
     const calendar = try calendarFromValue(self, calendar_value);
@@ -1194,8 +1194,16 @@ fn plainDateTimeFromObservedBag(self: *Interpreter, fields: JSValue, options: JS
     const month = try observedTemporalIntegerField(self, fields, "month");
     const month_code_value = try self.getProperty(fields, "monthCode");
     defer month_code_value.deinit();
-    const month_code = if (month_code_value == .undefined) null else try self.toDisplayStringJS(self.gc_allocator, month_code_value);
-    defer if (month_code) |code| self.gc_allocator.free(code);
+    var owned_month_code: ?[]u8 = null;
+    defer if (owned_month_code) |code| self.gc_allocator.free(code);
+    const month_code: ?[]const u8 = if (month_code_value == .undefined) null else if (strict_month_code) blk: {
+        if (month_code_value != .string) return self.throwError(.type_error, "monthCode must be a string", .{});
+        break :blk month_code_value.string.value.data;
+    } else blk: {
+        const code = try self.toDisplayStringJS(self.gc_allocator, month_code_value);
+        owned_month_code = code;
+        break :blk code;
+    };
     const nanosecond = try observedTemporalIntegerField(self, fields, "nanosecond");
     const second = try observedTemporalIntegerField(self, fields, "second");
     const year = try observedTemporalIntegerField(self, fields, "year");
@@ -1226,7 +1234,7 @@ fn plainDateTimeFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     if (value == .string)
         _ = ztemporal.iso_string.parsePlainDateTime(value.string.value.data) catch |e| return temporalErr(self, e);
     const pdt = if (value == .object or value == .proxy)
-        try plainDateTimeFromObservedBag(self, value, options)
+        try plainDateTimeFromObservedBag(self, value, options, true)
     else blk: {
         const overflow = try observableFromOverflow(self, options);
         break :blk try coercePlainDateTime(self, value, overflow);
@@ -1818,7 +1826,7 @@ fn readDurationCompareOptions(self: *Interpreter, options: JSValue) anyerror!?zt
         const time_zone = try self.getProperty(v, "timeZone");
         defer time_zone.deinit();
         if (time_zone != .undefined) return .{ .zonedDateTime = try relativeToZonedDateTimeFromObservedBag(self, v) };
-        return .{ .plainDateTime = try plainDateTimeFromObservedBag(self, v, JSValue.UNDEFINED) };
+        return .{ .plainDateTime = try plainDateTimeFromObservedBag(self, v, JSValue.UNDEFINED, false) };
     }
     return .{ .plainDateTime = try coercePlainDateTime(self, v, .constrain) };
 }
@@ -1969,7 +1977,7 @@ fn readRelativeTo(self: *Interpreter, options: JSValue) anyerror!?ztemporal.Dura
         const time_zone = try self.getProperty(v, "timeZone");
         defer time_zone.deinit();
         if (time_zone != .undefined) return .{ .zonedDateTime = try relativeToZonedDateTimeFromObservedBag(self, v) };
-        return .{ .plainDateTime = try plainDateTimeFromObservedBag(self, v, JSValue.UNDEFINED) };
+        return .{ .plainDateTime = try plainDateTimeFromObservedBag(self, v, JSValue.UNDEFINED, false) };
     }
     // temporal-argument-coercion.md: `relativeTo` accepts a string or
     // property-bag too (real spec's ToRelativeTemporalObject), not
