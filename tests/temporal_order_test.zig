@@ -556,3 +556,31 @@ test "ZonedDateTime round requires an options object and smallestUnit" {
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("TypeError,RangeError", actual);
 }
+
+test "Instant since reads proxy difference options before validation" {
+    const actual = try observedOptions(
+        "let log = []; let values = { largestUnit: 'week', roundingIncrement: 1, roundingMode: 'halfFloor', smallestUnit: 'nanosecond' };" ++
+            "let options = new Proxy(values, { get(target, key) { log.push(key); return target[key]; } });" ++
+            "let error; try { new Temporal.Instant(0n).since(new Temporal.Instant(1000n), options); } catch (e) { error = e.name; } error + ',' + log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError,largestUnit,roundingIncrement,roundingMode,smallestUnit", actual);
+}
+
+test "Instant until reads proxy difference options before validation" {
+    const actual = try observedOptions(
+        "let log = []; let values = { largestUnit: 'week', roundingIncrement: 1, roundingMode: 'halfFloor', smallestUnit: 'nanosecond' };" ++
+            "let options = new Proxy(values, { get(target, key) { log.push(key); return target[key]; } });" ++
+            "let error; try { new Temporal.Instant(0n).until(new Temporal.Instant(1000n), options); } catch (e) { error = e.name; } error + ',' + log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError,largestUnit,roundingIncrement,roundingMode,smallestUnit", actual);
+}
+
+test "Instant since requires its other argument" {
+    const actual = try observedOptions(
+        "let error; try { new Temporal.Instant(0n).since(); } catch (e) { error = e.name; } error;",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("TypeError", actual);
+}

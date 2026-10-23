@@ -341,46 +341,6 @@ fn roundingModeFromString(self: *Interpreter, s: []const u8) anyerror!RoundingMo
     return self.throwError(.range_error, "Invalid roundingMode: {s}", .{s});
 }
 
-fn readRoundingOptionsGeneric(self: *Interpreter, comptime T: type, options: JSValue, default_mode: RoundingMode) anyerror!T {
-    var out: T = .{ .roundingMode = default_mode };
-    if (options == .string) {
-        // A bare unit string is shorthand for { smallestUnit: options }.
-        out.smallestUnit = try unitFromString(self, options.string.value.data, "smallestUnit");
-        return out;
-    }
-    if (options != .object) return out;
-    const o = options.object.value;
-    if (o.get("smallestUnit")) |v| if (v != .undefined) {
-        const text = try self.toDisplayStringJS(self.gc_allocator, v);
-        defer self.gc_allocator.free(text);
-        out.smallestUnit = try unitFromString(self, text, "smallestUnit");
-    };
-    if (o.get("largestUnit")) |v| if (v != .undefined) {
-        const text = try self.toDisplayStringJS(self.gc_allocator, v);
-        defer self.gc_allocator.free(text);
-        out.largestUnit = try unitFromString(self, text, "largestUnit");
-    };
-    if (o.get("roundingIncrement")) |v| if (v != .undefined) {
-        if (v == .bigint) return self.throwError(.type_error, "roundingIncrement must be a number", .{});
-        out.roundingIncrement = try requireU32(self, JSValue.fromNumber(try self.toNumberJS(v)), "roundingIncrement");
-    };
-    if (o.get("roundingMode")) |v| if (v != .undefined) {
-        const text = try self.toDisplayStringJS(self.gc_allocator, v);
-        defer self.gc_allocator.free(text);
-        out.roundingMode = try roundingModeFromString(self, text);
-    };
-    return out;
-}
-
-fn readRoundingOptions(self: *Interpreter, options: JSValue) anyerror!RoundingOptions {
-    try surfaceOptions(self, options);
-    return readRoundingOptionsGeneric(self, RoundingOptions, options, .trunc);
-}
-
-fn readRoundOptions(self: *Interpreter, options: JSValue) anyerror!RoundOptions {
-    return readRoundingOptionsGeneric(self, RoundOptions, options, .halfExpand);
-}
-
 const RoundingOptionValues = struct {
     largest_unit: ?[]u8 = null,
     rounding_increment: ?f64 = null,
@@ -1597,11 +1557,40 @@ fn instSubtract(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     return self.gcNewTemporal(.{ .instant = result });
 }
 
+/// Instant.since/until use GetDifferenceSettings. It has a distinct
+/// observable order and accepts Proxy/function option objects, so it must not
+/// share the historical round-option reader.
+fn readInstantDifferenceOptions(self: *Interpreter, options: JSValue) anyerror!RoundingOptions {
+    try surfaceOptions(self, options);
+    if (options == .undefined) return .{};
+
+    const largest_unit = try readRoundingOptionString(self, options, "largestUnit");
+    defer if (largest_unit) |value| self.gc_allocator.free(value);
+    const rounding_increment = try readRoundingOptionNumber(self, options, "roundingIncrement");
+    const rounding_mode = try readRoundingOptionString(self, options, "roundingMode");
+    defer if (rounding_mode) |value| self.gc_allocator.free(value);
+    const smallest_unit = try readRoundingOptionString(self, options, "smallestUnit");
+    defer if (smallest_unit) |value| self.gc_allocator.free(value);
+
+    var out: RoundingOptions = .{};
+    if (largest_unit) |text| {
+        if (!std.mem.eql(u8, text, "auto")) out.largestUnit = try unitFromString(self, text, "largestUnit");
+    }
+    if (rounding_increment) |number| {
+        if (!std.math.isFinite(number) or number != @trunc(number) or number < 1 or number > 1_000_000_000)
+            return self.throwError(.range_error, "Invalid roundingIncrement", .{});
+        out.roundingIncrement = @intFromFloat(number);
+    }
+    if (rounding_mode) |text| out.roundingMode = try roundingModeFromString(self, text);
+    if (smallest_unit) |text| out.smallestUnit = try unitFromString(self, text, "smallestUnit");
+    return out;
+}
+
 fn instUntil(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const self = interp(ctx);
     const inst = try instSelf(self, this_value);
     const other = try coerceInstant(self, allocator, arg(args, 0));
-    const opts = try readRoundingOptions(self, arg(args, 1));
+    const opts = try readInstantDifferenceOptions(self, arg(args, 1));
     const d = inst.until(other, opts) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .duration = d });
 }
@@ -1610,7 +1599,7 @@ fn instSince(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     const self = interp(ctx);
     const inst = try instSelf(self, this_value);
     const other = try coerceInstant(self, allocator, arg(args, 0));
-    const opts = try readRoundingOptions(self, arg(args, 1));
+    const opts = try readInstantDifferenceOptions(self, arg(args, 1));
     const d = inst.since(other, opts) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .duration = d });
 }
