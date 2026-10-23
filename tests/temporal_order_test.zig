@@ -584,3 +584,15 @@ test "Instant since requires its other argument" {
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("TypeError", actual);
 }
+
+test "PlainDateTime bags coerce monthCode before Duration relativeTo validation" {
+    const actual = try observedOptions(
+        "let log = []; let monthCode = { toString() { log.push('monthCode.toString'); return 'M01'; } };" ++
+            "let fields = { year: 2020, monthCode, day: 1 }; let first = 'ok'; let second = 'ok';" ++
+            "try { Temporal.PlainDateTime.from(fields); } catch (e) { first = e.name; }" ++
+            "try { new Temporal.Duration(0, 0, 0, 1).round({ smallestUnit: 'day', relativeTo: fields }); } catch (e) { second = e.name; }" ++
+            "first + ',' + second + ',' + log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("ok,ok,monthCode.toString,monthCode.toString", actual);
+}

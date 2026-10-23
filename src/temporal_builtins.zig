@@ -1194,10 +1194,8 @@ fn plainDateTimeFromObservedBag(self: *Interpreter, fields: JSValue, options: JS
     const month = try observedTemporalIntegerField(self, fields, "month");
     const month_code_value = try self.getProperty(fields, "monthCode");
     defer month_code_value.deinit();
-    const month_code: ?[]const u8 = if (month_code_value == .undefined) null else blk: {
-        if (month_code_value != .string) return self.throwError(.type_error, "monthCode must be a string", .{});
-        break :blk month_code_value.string.value.data;
-    };
+    const month_code = if (month_code_value == .undefined) null else try self.toDisplayStringJS(self.gc_allocator, month_code_value);
+    defer if (month_code) |code| self.gc_allocator.free(code);
     const nanosecond = try observedTemporalIntegerField(self, fields, "nanosecond");
     const second = try observedTemporalIntegerField(self, fields, "second");
     const year = try observedTemporalIntegerField(self, fields, "year");
