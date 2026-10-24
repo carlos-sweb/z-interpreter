@@ -2812,7 +2812,12 @@ fn zonedDateTimeFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     const self = interp(ctx);
     const item = arg(args, 0);
     const option_value = arg(args, 1);
-    const zdt = if (item == .string) blk: {
+    const zdt = if (item == .temporal and item.temporal.value == .zoned_date_time) blk: {
+        // ZonedDateTime.from(instance, options) returns an equivalent fresh
+        // Temporal value, but still performs all three option conversions.
+        _ = try readZonedDateTimeFromOptions(self, option_value);
+        break :blk item.temporal.value.zoned_date_time;
+    } else if (item == .string) blk: {
         // ISO parsing precedes option access. Use `ignore` only for this
         // syntax preflight: user-supplied offset policy still governs the
         // actual conversion below.

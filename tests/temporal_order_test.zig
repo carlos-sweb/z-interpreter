@@ -694,3 +694,26 @@ test "ZonedDateTime difference rejects BigInt roundingIncrement with TypeError" 
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("TypeError,TypeError", actual);
 }
+
+test "ZonedDateTime from validates options while cloning an instance" {
+    const actual = try observedOptions(
+        "let value = new Temporal.ZonedDateTime(0n, 'UTC'); let one, two, three;" ++
+            "try { Temporal.ZonedDateTime.from(value, { disambiguation: Symbol() }); } catch (e) { one = e.name; }" ++
+            "try { Temporal.ZonedDateTime.from(value, { offset: 123 }); } catch (e) { two = e.name; }" ++
+            "try { Temporal.ZonedDateTime.from(value, { overflow: 'invalid' }); } catch (e) { three = e.name; } one + ',' + two + ',' + three;",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("TypeError,RangeError,RangeError", actual);
+}
+
+test "ZonedDateTime from keeps string and primitive option timing" {
+    const actual = try observedOptions(
+        "let valid, overflow, reads = '';" ++
+            "try { Temporal.ZonedDateTime.from('2020-01-01T00:00[UTC]', { disambiguation: Symbol() }); } catch (e) { valid = e.name; }" ++
+            "try { Temporal.ZonedDateTime.from({ year: 2020, month: 1, day: 1, timeZone: 'UTC' }, { overflow: 'invalid' }); } catch (e) { overflow = e.name; }" ++
+            "let options = new Proxy({}, { get(target, key) { reads += key; return target[key]; } });" ++
+            "try { Temporal.ZonedDateTime.from(7, options); } catch (e) {} valid + ',' + overflow + ',' + reads;",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("TypeError,RangeError,", actual);
+}
