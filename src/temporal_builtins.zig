@@ -88,8 +88,13 @@ fn requireI32(self: *Interpreter, v: JSValue, what: []const u8) anyerror!i32 {
 }
 
 fn coerceConstructorI32(self: *Interpreter, v: JSValue, what: []const u8) anyerror!i32 {
+    if (v == .bigint) return self.throwError(.type_error, "{s} must be a number", .{what});
     const n = try self.toNumberJS(v);
-    return requireI32(self, JSValue.fromNumber(n), what);
+    if (!std.math.isFinite(n)) return self.throwError(.range_error, "{s} must be an integer", .{what});
+    const integer = @trunc(n);
+    if (integer < std.math.minInt(i32) or integer > std.math.maxInt(i32))
+        return self.throwError(.range_error, "{s} out of range", .{what});
+    return @intFromFloat(integer);
 }
 
 /// Bounds-checked BEFORE `@intFromFloat` (which panics -- not a catchable
@@ -195,6 +200,12 @@ fn optionalConstructorCalendar(self: *Interpreter, value: JSValue) anyerror!?[]c
     if (value == .undefined) return null;
     if (value != .string) return self.throwError(.type_error, "calendar must be a string", .{});
     return value.string.value.data;
+}
+
+fn validateConstructorCalendar(self: *Interpreter, calendar: ?[]const u8) anyerror!void {
+    if (calendar) |identifier| {
+        _ = ztemporal.PlainDate.init(1970, 1, 1, identifier) catch |e| return temporalErr(self, e);
+    }
 }
 
 /// Duration stores integral JavaScript Numbers, including values outside i64.
@@ -698,9 +709,9 @@ fn plainDateConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     _ = this_value;
     const self = interp(ctx);
     if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor Temporal.PlainDate requires 'new'", .{});
-    const year = try requireI32(self, arg(args, 0), "year");
-    const month = try requireI32(self, arg(args, 1), "month");
-    const day = try requireI32(self, arg(args, 2), "day");
+    const year = try coerceConstructorI32(self, arg(args, 0), "year");
+    const month = try coerceConstructorI32(self, arg(args, 1), "month");
+    const day = try coerceConstructorI32(self, arg(args, 2), "day");
     const pd = ztemporal.PlainDate.init(year, month, day, try optionalConstructorCalendar(self, arg(args, 3))) catch |e| return temporalErr(self, e);
     return constructedTemporal(self, .{ .plain_date = pd });
 }
@@ -967,12 +978,12 @@ fn plainTimeConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     _ = this_value;
     const self = interp(ctx);
     if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor Temporal.PlainTime requires 'new'", .{});
-    const hour = if (arg(args, 0) != .undefined) try requireI32(self, arg(args, 0), "hour") else 0;
-    const minute = if (arg(args, 1) != .undefined) try requireI32(self, arg(args, 1), "minute") else 0;
-    const second = if (arg(args, 2) != .undefined) try requireI32(self, arg(args, 2), "second") else 0;
-    const ms = if (arg(args, 3) != .undefined) try requireI32(self, arg(args, 3), "millisecond") else 0;
-    const us = if (arg(args, 4) != .undefined) try requireI32(self, arg(args, 4), "microsecond") else 0;
-    const ns = if (arg(args, 5) != .undefined) try requireI32(self, arg(args, 5), "nanosecond") else 0;
+    const hour = if (arg(args, 0) != .undefined) try coerceConstructorI32(self, arg(args, 0), "hour") else 0;
+    const minute = if (arg(args, 1) != .undefined) try coerceConstructorI32(self, arg(args, 1), "minute") else 0;
+    const second = if (arg(args, 2) != .undefined) try coerceConstructorI32(self, arg(args, 2), "second") else 0;
+    const ms = if (arg(args, 3) != .undefined) try coerceConstructorI32(self, arg(args, 3), "millisecond") else 0;
+    const us = if (arg(args, 4) != .undefined) try coerceConstructorI32(self, arg(args, 4), "microsecond") else 0;
+    const ns = if (arg(args, 5) != .undefined) try coerceConstructorI32(self, arg(args, 5), "nanosecond") else 0;
     const pt = ztemporal.PlainTime.init(hour, minute, second, ms, us, ns) catch |e| return temporalErr(self, e);
     return constructedTemporal(self, .{ .plain_time = pt });
 }
@@ -2186,8 +2197,10 @@ fn plainYearMonthConstructor(ctx: *anyopaque, allocator: Allocator, this_value: 
     if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor Temporal.PlainYearMonth requires 'new'", .{});
     const year = try coerceConstructorI32(self, arg(args, 0), "year");
     const month = try coerceConstructorI32(self, arg(args, 1), "month");
+    const calendar = try optionalConstructorCalendar(self, arg(args, 2));
+    try validateConstructorCalendar(self, calendar);
     const reference_day: ?i32 = if (arg(args, 3) == .undefined) null else try coerceConstructorI32(self, arg(args, 3), "referenceISODay");
-    const pym = ztemporal.PlainYearMonth.init(year, month, try optionalConstructorCalendar(self, arg(args, 2)), reference_day) catch |e| return temporalErr(self, e);
+    const pym = ztemporal.PlainYearMonth.init(year, month, calendar, reference_day) catch |e| return temporalErr(self, e);
     return constructedTemporal(self, .{ .plain_year_month = pym });
 }
 
@@ -2424,8 +2437,8 @@ fn plainMonthDayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: J
     if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor Temporal.PlainMonthDay requires 'new'", .{});
     const month = try coerceConstructorI32(self, arg(args, 0), "month");
     const day = try coerceConstructorI32(self, arg(args, 1), "day");
-    const calendar_arg = arg(args, 2);
-    const calendar: ?[]const u8 = if (calendar_arg == .undefined) null else if (calendar_arg == .string) calendar_arg.string.value.data else return self.throwError(.type_error, "calendar must be a string", .{});
+    const calendar = try optionalConstructorCalendar(self, arg(args, 2));
+    try validateConstructorCalendar(self, calendar);
     const reference_year: ?i32 = if (arg(args, 3) == .undefined) null else try coerceConstructorI32(self, arg(args, 3), "referenceISOYear");
     const pmd = ztemporal.PlainMonthDay.init(month, day, calendar, reference_year) catch |e| return temporalErr(self, e);
     return constructedTemporal(self, .{ .plain_month_day = pmd });

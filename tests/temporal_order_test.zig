@@ -717,3 +717,36 @@ test "ZonedDateTime from keeps string and primitive option timing" {
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("TypeError,RangeError,", actual);
 }
+
+test "Plain constructors convert positional arguments in specification order" {
+    const actual = try observedOptions(
+        "let log = []; function n(name, value) { return new Proxy({ valueOf() { log.push(name); return value; } }, {}); }" ++
+            "let date = new Temporal.PlainDate(n('date.year', 2020.6), n('date.month', 2.7), n('date.day', 3.8));" ++
+            "let dateTime = new Temporal.PlainDateTime(n('dateTime.year', 2020.6), n('dateTime.month', 2.7), n('dateTime.day', 3.8));" ++
+            "let time = new Temporal.PlainTime(n('time.hour', 1.9), n('time.minute', 2.9), n('time.second', 3.9), n('time.ms', 4.9), n('time.us', 5.9), n('time.ns', 6.9));" ++
+            "let yearMonth = new Temporal.PlainYearMonth(n('yearMonth.year', 2020.6), n('yearMonth.month', 2.7));" ++
+            "let monthDay = new Temporal.PlainMonthDay(n('monthDay.month', 2.7), n('monthDay.day', 3.8));" ++
+            "log.join(',') + '|' + date.year + ',' + dateTime.day + ',' + time.nanosecond + ',' + yearMonth.month + ',' + monthDay.day;",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("date.year,date.month,date.day,dateTime.year,dateTime.month,dateTime.day,time.hour,time.minute,time.second,time.ms,time.us,time.ns,yearMonth.year,yearMonth.month,monthDay.month,monthDay.day|2020,3,6,2,3", actual);
+}
+
+test "Plain constructors propagate abrupt positional conversion" {
+    const actual = try observedOptions(
+        "let value = new Proxy({ valueOf() { throw new Error('sentinel'); } }, {}); try { new Temporal.PlainDate(value, 1, 1); } catch (e) { e.name + ',' + e.message; }",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("Error,sentinel", actual);
+}
+
+test "PlainMonthDay and PlainYearMonth validate calendar before reference arguments" {
+    const actual = try observedOptions(
+        "let log = []; function n(name, value) { return new Proxy({ valueOf() { log.push(name); return value; } }, {}); } let one, two;" ++
+            "try { new Temporal.PlainMonthDay(n('pmd.month', 2), n('pmd.day', 1), 'local', n('pmd.reference', 2000)); } catch (e) { one = e.name; }" ++
+            "try { new Temporal.PlainYearMonth(n('pym.year', 2000), n('pym.month', 2), 'local', n('pym.reference', 1)); } catch (e) { two = e.name; }" ++
+            "one + ',' + two + ',' + log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError,RangeError,pmd.month,pmd.day,pym.year,pym.month", actual);
+}
