@@ -647,3 +647,16 @@ test "ZonedDateTime compare and equals coerce observed monthCode" {
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("ok,ok,monthCode.toString,monthCode.toString,monthCode.toString", actual);
 }
+
+test "Temporal calendar carriers work in withCalendar and difference bags" {
+    const actual = try observedOptions(
+        "let calendar = new Temporal.PlainDate(2000, 1, 1); let first = 'ok'; let second = 'ok'; let third = 'ok';" ++
+            "let date = new Temporal.PlainDate(2020, 1, 1); let dateTime = new Temporal.PlainDateTime(2020, 1, 1); let zoned = new Temporal.ZonedDateTime(0n, 'UTC');" ++
+            "try { date.withCalendar(calendar); } catch (e) { first = e.name; }" ++
+            "try { dateTime.since({ year: 2021, month: 1, day: 1, calendar }); } catch (e) { second = e.name; }" ++
+            "try { zoned.until({ year: 2021, month: 1, day: 1, timeZone: 'UTC', calendar }); } catch (e) { third = e.name; }" ++
+            "first + ',' + second + ',' + third + ',' + date.withCalendar('iso8601').calendarId;",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("ok,ok,ok,iso8601", actual);
+}

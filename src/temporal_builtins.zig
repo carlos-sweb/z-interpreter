@@ -3321,7 +3321,11 @@ fn surfaceString(self: *Interpreter, object: JSValue, key: []const u8) anyerror!
     const value = try self.getProperty(object, key);
     defer value.deinit();
     if (value == .undefined) return null;
-    if ((std.mem.eql(u8, key, "calendar") or std.mem.eql(u8, key, "offset")) and value != .string) return self.throwError(.type_error, "Temporal {s} must be a string", .{key});
+    if (std.mem.eql(u8, key, "calendar")) {
+        const identifier = try calendarFromValue(self, value) orelse return null;
+        return try self.gc_allocator.dupe(u8, identifier);
+    }
+    if (std.mem.eql(u8, key, "offset") and value != .string) return self.throwError(.type_error, "Temporal offset must be a string", .{});
     if (std.mem.eql(u8, key, "timeZone")) return try surfaceZoneArgument(self, value);
     return try self.toDisplayStringJS(self.gc_allocator, value);
 }
@@ -3547,13 +3551,12 @@ fn surfaceZoneArgument(self: *Interpreter, value: JSValue) anyerror![]const u8 {
 fn surfaceWithCalendar(comptime tag: std.meta.Tag(TemporalValue)) NativeFn {
     return struct {
         fn call(ctx: *anyopaque, allocator: Allocator, receiver: JSValue, args: []const JSValue) anyerror!JSValue {
+            _ = allocator;
             const self = interp(ctx);
             const value = try requireTemporal(self, receiver, tag, "Temporal.withCalendar");
             const calendar = arg(args, 0);
-            if (calendar != .string) return self.throwError(.type_error, "Calendar must be a string", .{});
-            const text = try self.toDisplayStringJS(allocator, calendar);
-            defer allocator.free(text);
-            const identifier = try surfaceCalendar(self, text);
+            const identifier = try calendarFromValue(self, calendar) orelse
+                return self.throwError(.type_error, "Calendar must be a string or Temporal calendar carrier", .{});
             const result = value.withCalendar(identifier) catch |e| return temporalErr(self, e);
             return self.gcNewTemporal(@unionInit(TemporalValue, @tagName(tag), result));
         }
