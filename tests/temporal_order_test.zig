@@ -660,3 +660,37 @@ test "Temporal calendar carriers work in withCalendar and difference bags" {
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("ok,ok,ok,iso8601", actual);
 }
+
+test "ZonedDateTime offset bags distinguish syntax from primitive types" {
+    const actual = try observedOptions(
+        "let from, compare, equals, reads = ''; let zdt = new Temporal.ZonedDateTime(0n, 'UTC');" ++
+            "try { Temporal.ZonedDateTime.from({ year: 2021, month: 10, day: 28, timeZone: 'UTC', offset: {} }); } catch (e) { from = e.name; }" ++
+            "try { Temporal.ZonedDateTime.compare({ year: 2021, month: 10, day: 28, timeZone: 'UTC', offset: 0 }, zdt); } catch (e) { compare = e.name; }" ++
+            "try { zdt.equals({ year: 2021, month: 10, day: 28, timeZone: 'UTC', offset: '00:00' }); } catch (e) { equals = e.name; }" ++
+            "let options = new Proxy({}, { get(target, key) { reads += key; return target[key]; } });" ++
+            "try { Temporal.ZonedDateTime.from(7, options); } catch (e) {} from + ',' + compare + ',' + equals + ',' + reads;",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError,TypeError,RangeError,", actual);
+}
+
+test "ZonedDateTime transition direction uses ToString and requires direction" {
+    const actual = try observedOptions(
+        "let zdt = new Temporal.ZonedDateTime(0n, 'UTC'); let numeric, symbol, missing;" ++
+            "try { zdt.getTimeZoneTransition({ direction: 123 }); } catch (e) { numeric = e.name; }" ++
+            "try { zdt.getTimeZoneTransition({ direction: Symbol() }); } catch (e) { symbol = e.name; }" ++
+            "try { zdt.getTimeZoneTransition({}); } catch (e) { missing = e.name; } numeric + ',' + symbol + ',' + missing;",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError,TypeError,RangeError", actual);
+}
+
+test "ZonedDateTime difference rejects BigInt roundingIncrement with TypeError" {
+    const actual = try observedOptions(
+        "let earlier = new Temporal.ZonedDateTime(0n, 'UTC'); let later = new Temporal.ZonedDateTime(1n, 'UTC'); let since, until;" ++
+            "try { later.since(earlier, { roundingIncrement: 1n }); } catch (e) { since = e.name; }" ++
+            "try { earlier.until(later, { roundingIncrement: 1n }); } catch (e) { until = e.name; } since + ',' + until;",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("TypeError,TypeError", actual);
+}

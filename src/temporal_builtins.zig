@@ -2698,6 +2698,30 @@ fn zonedDateTimeMonthCodeFromValue(self: *Interpreter, value: JSValue, strict_mo
     return code;
 }
 
+/// Offset fields in a direct ZonedDateTime.from() property bag use ToString
+/// for objects, but reject primitive values other than strings.  The generic
+/// ToTemporalZonedDateTime paths used by compare()/equals() require a string
+/// outright.  Keep that distinction at this local coercion boundary.
+fn zonedDateTimeOffsetFromValue(self: *Interpreter, value: JSValue, coerce_objects: bool) anyerror!?[]u8 {
+    if (value == .undefined) return null;
+    if (value == .string) return try self.gc_allocator.dupe(u8, value.string.value.data);
+    if (coerce_objects and !Interpreter.isPrimitiveTag(value))
+        return try self.toDisplayStringJS(self.gc_allocator, value);
+    return self.throwError(.type_error, "Temporal offset must be a string", .{});
+}
+
+/// Validate offset grammar before later field conversions.  The typed
+/// ZonedDateTime constructor validates this only after creating its
+/// PlainDateTime, whereas Temporal requires malformed offset syntax to win
+/// over a later field type error.
+fn validateZonedDateTimeOffsetSyntax(self: *Interpreter, offset: []const u8) anyerror!void {
+    if (offset.len == 0 or offset[0] == 'Z' or offset[0] == 'z')
+        return self.throwError(.range_error, "Invalid UTC offset", .{});
+    const source = try std.fmt.allocPrint(self.gc_allocator, "1970-01-01T00:00{s}", .{offset});
+    defer self.gc_allocator.free(source);
+    _ = ztemporal.iso_string.parseInstant(source) catch |e| return temporalErr(self, e);
+}
+
 fn zonedDateTimeOptionFromValue(self: *Interpreter, value: JSValue, key: []const u8, comptime T: type, fallback: T) anyerror!T {
     if (value == .undefined) return fallback;
     const text = try self.toDisplayStringJS(self.gc_allocator, value);
@@ -2726,7 +2750,7 @@ fn readZonedDateTimeFromOptions(self: *Interpreter, options: JSValue) anyerror!Z
     };
 }
 
-fn zonedDateTimeFromRawBag(self: *Interpreter, allocator: Allocator, raw: *const ZonedDateTimeBagRaw, options: ZonedDateTimeFromOptions, strict_month_code: bool) anyerror!ztemporal.ZonedDateTime {
+fn zonedDateTimeFromRawBag(self: *Interpreter, allocator: Allocator, raw: *const ZonedDateTimeBagRaw, options: ZonedDateTimeFromOptions, strict_month_code: bool, coerce_offset_objects: bool) anyerror!ztemporal.ZonedDateTime {
     const calendar = try calendarFromValue(self, raw.calendar);
     // Preserve the established calendar error priority over a missing
     // timeZone, after all observable field reads have completed.
@@ -2740,8 +2764,9 @@ fn zonedDateTimeFromRawBag(self: *Interpreter, allocator: Allocator, raw: *const
     const month_code = try zonedDateTimeMonthCodeFromValue(self, raw.month_code, strict_month_code);
     defer if (month_code) |code| self.gc_allocator.free(code);
     const nanosecond = try zonedDateTimeIntegerFromValue(self, raw.nanosecond, "nanosecond");
-    const offset = if (raw.offset == .undefined) null else try self.toDisplayStringJS(self.gc_allocator, raw.offset);
+    const offset = try zonedDateTimeOffsetFromValue(self, raw.offset, coerce_offset_objects);
     defer if (offset) |text| self.gc_allocator.free(text);
+    if (offset) |text| try validateZonedDateTimeOffsetSyntax(self, text);
     const second = try zonedDateTimeIntegerFromValue(self, raw.second, "second");
     if (raw.time_zone == .undefined) return self.throwError(.type_error, "timeZone is required", .{});
     const time_zone = try surfaceZone(self, raw.time_zone);
@@ -2779,7 +2804,7 @@ fn coerceZonedDateTime(self: *Interpreter, allocator: Allocator, v: JSValue, ove
     if (Interpreter.isPrimitiveTag(v)) return self.throwError(.type_error, "Temporal.ZonedDateTime.from requires a string or an object", .{});
     var raw = try readZonedDateTimeBagRaw(self, v);
     defer raw.deinit();
-    return zonedDateTimeFromRawBag(self, allocator, &raw, .{ .overflow = overflow, .disambiguation = disambiguation, .offset = offset_option }, false);
+    return zonedDateTimeFromRawBag(self, allocator, &raw, .{ .overflow = overflow, .disambiguation = disambiguation, .offset = offset_option }, false, false);
 }
 
 fn zonedDateTimeFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -2802,10 +2827,10 @@ fn zonedDateTimeFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
         var raw = try readZonedDateTimeBagRaw(self, item);
         defer raw.deinit();
         const options = try readZonedDateTimeFromOptions(self, option_value);
-        break :blk try zonedDateTimeFromRawBag(self, allocator, &raw, options, true);
+        break :blk try zonedDateTimeFromRawBag(self, allocator, &raw, options, true, true);
     } else blk: {
-        const options = try readZonedDateTimeFromOptions(self, option_value);
-        break :blk try coerceZonedDateTime(self, allocator, item, options.overflow, options.disambiguation, options.offset);
+        // Primitive non-strings fail before options are observable.
+        break :blk try coerceZonedDateTime(self, allocator, item, .constrain, .compatible, .reject);
     };
     return self.gcNewTemporal(.{ .zoned_date_time = zdt });
 }
@@ -3043,8 +3068,16 @@ fn zdtGetTimeZoneTransition(ctx: *anyopaque, allocator: Allocator, this_value: J
     const self = interp(ctx);
     const zdt = try zdtSelf(self, this_value);
     const dir_arg = arg(args, 0);
-    if (dir_arg != .string) return self.throwError(.type_error, "direction must be a string", .{});
-    const direction = try transitionDirectionFromString(self, dir_arg.string.value.data);
+    const direction_value = if (dir_arg == .string) dir_arg.retain() else blk: {
+        try surfaceObject(self, dir_arg);
+        break :blk try self.getProperty(dir_arg, "direction");
+    };
+    defer direction_value.deinit();
+    if (direction_value == .undefined)
+        return self.throwError(.range_error, "direction is required", .{});
+    const direction_text = try self.toDisplayStringJS(self.gc_allocator, direction_value);
+    defer self.gc_allocator.free(direction_text);
+    const direction = try transitionDirectionFromString(self, direction_text);
     const result = zdt.getTimeZoneTransition(allocator, ioHandle(), direction) catch |e| return temporalErr(self, e);
     const found = result orelse return JSValue.NULL;
     return self.gcNewTemporal(.{ .zoned_date_time = found });
@@ -3696,6 +3729,38 @@ fn surfaceZoned(self: *Interpreter, allocator: Allocator, item: JSValue) anyerro
     return ztemporal.ZonedDateTime.from(allocator, ioHandle(), .{ .fields = fields }, .{}) catch |e| temporalErr(self, e);
 }
 
+/// ZonedDateTime.since/until use a local reader so their ToNumber boundary
+/// stays explicit: ToNumber(BigInt) throws TypeError rather than converting
+/// it through the host numeric helper.
+fn readZonedDateTimeDifferenceOptions(self: *Interpreter, options: JSValue) anyerror!RoundingOptions {
+    var result: RoundingOptions = .{ .roundingMode = .trunc };
+    try surfaceOptions(self, options);
+    if (options == .undefined) return result;
+
+    const largest = try surfaceString(self, options, "largestUnit");
+    defer if (largest) |text| self.gc_allocator.free(text);
+    if (largest) |text| {
+        if (!std.mem.eql(u8, text, "auto"))
+            result.largestUnit = try unitFromString(self, text, "largestUnit");
+    }
+
+    const increment = try self.getProperty(options, "roundingIncrement");
+    defer increment.deinit();
+    if (increment != .undefined) {
+        if (increment == .bigint)
+            return self.throwError(.type_error, "roundingIncrement must be a number", .{});
+        const number = try self.toNumberJS(increment);
+        if (!std.math.isFinite(number) or @trunc(number) < 1 or @trunc(number) > 1_000_000_000)
+            return self.throwError(.range_error, "Invalid roundingIncrement", .{});
+        result.roundingIncrement = @intFromFloat(@trunc(number));
+    }
+    result.roundingMode = try surfaceEnum(self, options, "roundingMode", RoundingMode, .trunc);
+    const smallest = try surfaceString(self, options, "smallestUnit");
+    defer if (smallest) |text| self.gc_allocator.free(text);
+    if (smallest) |text| result.smallestUnit = try unitFromString(self, text, "smallestUnit");
+    return result;
+}
+
 fn surfaceRounding(self: *Interpreter, options: JSValue, comptime T: type, default_mode: RoundingMode, shorthand: bool) anyerror!T {
     var result: T = .{ .roundingMode = default_mode };
     if (shorthand and options == .string) {
@@ -3732,7 +3797,7 @@ fn surfaceZdtDifference(comptime since: bool) NativeFn {
             const self = interp(ctx);
             const dt = try zdtSelf(self, receiver);
             const other = try surfaceZoned(self, allocator, arg(args, 0));
-            var options = try surfaceRounding(self, arg(args, 1), RoundingOptions, .trunc, false);
+            var options = try readZonedDateTimeDifferenceOptions(self, arg(args, 1));
             // Resolve the JS ZonedDateTime default before the native time-unit
             // path delegates to Instant, whose own default is seconds.
             if (options.largestUnit == null) {
