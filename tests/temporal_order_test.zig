@@ -606,3 +606,44 @@ test "PlainDateTime from rejects non-string monthCode values" {
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("TypeError,TypeError", actual);
 }
+
+test "PlainYearMonth from requires a string monthCode" {
+    const actual = try observedOptions(
+        "let error; try { Temporal.PlainYearMonth.from({ year: 2020, month: 1, monthCode: 1 }); } catch (e) { error = e.name; } error;",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("TypeError", actual);
+}
+
+test "PlainYearMonth since and until coerce observed monthCode" {
+    const actual = try observedOptions(
+        "let log = []; let monthCode = { toString() { log.push('monthCode.toString'); return 'M01'; } };" ++
+            "let other = new Proxy({ year: 2021, monthCode }, { get(target, key) { return target[key]; } });" ++
+            "let numeric = new Proxy({ year: 2021, monthCode: 1 }, { get(target, key) { return target[key]; } });" ++
+            "let value = new Temporal.PlainYearMonth(2020, 1); let first = 'ok'; let second = 'ok'; let numericError = 'ok';" ++
+            "try { value.since(other); } catch (e) { first = e.name; } try { value.until(other); } catch (e) { second = e.name; }" ++
+            "try { value.since(numeric); } catch (e) { numericError = e.name; } first + ',' + second + ',' + numericError + ',' + log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("ok,ok,RangeError,monthCode.toString,monthCode.toString", actual);
+}
+
+test "ZonedDateTime from requires a string monthCode" {
+    const actual = try observedOptions(
+        "let error; try { Temporal.ZonedDateTime.from({ year: 2020, month: 1, monthCode: Symbol(), day: 1, timeZone: 'UTC' }); } catch (e) { error = e.name; } error;",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("TypeError", actual);
+}
+
+test "ZonedDateTime compare and equals coerce observed monthCode" {
+    const actual = try observedOptions(
+        "let log = []; let monthCode = { toString() { log.push('monthCode.toString'); return 'M01'; } };" ++
+            "let bag = new Proxy({ year: 2020, monthCode, day: 1, timeZone: 'UTC' }, { get(target, key) { return target[key]; } });" ++
+            "let value = new Temporal.ZonedDateTime(0n, 'UTC'); let first = 'ok'; let second = 'ok';" ++
+            "try { Temporal.ZonedDateTime.compare(bag, bag); } catch (e) { first = e.name; } try { value.equals(bag); } catch (e) { second = e.name; }" ++
+            "first + ',' + second + ',' + log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("ok,ok,monthCode.toString,monthCode.toString,monthCode.toString", actual);
+}

@@ -635,7 +635,7 @@ fn coercePlainYearMonth(self: *Interpreter, v: JSValue, overflow: Overflow) anye
         else => {},
     };
     if (v == .string) return ztemporal.PlainYearMonth.from(.{ .string = v.string.value.data }, .{}) catch |e| temporalErr(self, e);
-    if (v == .proxy) return plainYearMonthFromObservedBag(self, v, JSValue.UNDEFINED);
+    if (v == .proxy) return plainYearMonthFromObservedBag(self, v, JSValue.UNDEFINED, false);
     if (v != .object) return self.throwError(.type_error, "Temporal.PlainYearMonth.from requires a string or an object", .{});
     const month_code = try optionalBagMonthCode(self, v);
     const year = (try optionalI32(self, v, "year")) orelse return self.throwError(.type_error, "year is required", .{});
@@ -2191,17 +2191,23 @@ fn plainYearMonthConstructor(ctx: *anyopaque, allocator: Allocator, this_value: 
     return constructedTemporal(self, .{ .plain_year_month = pym });
 }
 
-fn plainYearMonthFromObservedBag(self: *Interpreter, fields: JSValue, options: JSValue) anyerror!ztemporal.PlainYearMonth {
+fn plainYearMonthFromObservedBag(self: *Interpreter, fields: JSValue, options: JSValue, strict_month_code: bool) anyerror!ztemporal.PlainYearMonth {
     const calendar_value = try self.getProperty(fields, "calendar");
     defer calendar_value.deinit();
     const calendar = try calendarFromValue(self, calendar_value);
     const month = try observedTemporalIntegerField(self, fields, "month");
     const month_code_value = try self.getProperty(fields, "monthCode");
     defer month_code_value.deinit();
-    if (month_code_value != .undefined and month_code_value != .string)
-        return self.throwError(.type_error, "monthCode must be a string", .{});
-    const month_code = if (month_code_value == .undefined) null else try self.toDisplayStringJS(self.gc_allocator, month_code_value);
-    defer if (month_code) |code| self.gc_allocator.free(code);
+    var owned_month_code: ?[]u8 = null;
+    defer if (owned_month_code) |code| self.gc_allocator.free(code);
+    const month_code: ?[]const u8 = if (month_code_value == .undefined) null else if (strict_month_code) blk: {
+        if (month_code_value != .string) return self.throwError(.type_error, "monthCode must be a string", .{});
+        break :blk month_code_value.string.value.data;
+    } else blk: {
+        const code = try self.toDisplayStringJS(self.gc_allocator, month_code_value);
+        owned_month_code = code;
+        break :blk code;
+    };
     const year = try observedTemporalIntegerField(self, fields, "year");
     const overflow = try observableFromOverflow(self, options);
     return ztemporal.PlainYearMonth.from(.{ .fields = .{
@@ -2223,7 +2229,7 @@ fn plainYearMonthFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     if (value == .string)
         _ = ztemporal.iso_string.parsePlainYearMonth(value.string.value.data) catch |e| return temporalErr(self, e);
     const pym = if (value == .object or value == .proxy)
-        try plainYearMonthFromObservedBag(self, value, options)
+        try plainYearMonthFromObservedBag(self, value, options, true)
     else blk: {
         const overflow = try observableFromOverflow(self, options);
         break :blk try coercePlainYearMonth(self, value, overflow);
@@ -2674,10 +2680,13 @@ fn zonedDateTimeIntegerFromValue(self: *Interpreter, value: JSValue, key: []cons
     return @intFromFloat(integer);
 }
 
-fn zonedDateTimeMonthCodeFromValue(self: *Interpreter, value: JSValue) anyerror!?[]const u8 {
+fn zonedDateTimeMonthCodeFromValue(self: *Interpreter, value: JSValue, strict_month_code: bool) anyerror!?[]u8 {
     if (value == .undefined) return null;
-    if (value != .string) return self.throwError(.type_error, "monthCode must be a string", .{});
-    const code = value.string.value.data;
+    const code = if (strict_month_code) blk: {
+        if (value != .string) return self.throwError(.type_error, "monthCode must be a string", .{});
+        break :blk try self.gc_allocator.dupe(u8, value.string.value.data);
+    } else try self.toDisplayStringJS(self.gc_allocator, value);
+    errdefer self.gc_allocator.free(code);
     // Month-code syntax is checked before later field conversions. Its
     // calendar suitability remains z-temporal validation after all fields.
     if ((code.len != 3 and code.len != 4) or code[0] != 'M' or
@@ -2717,7 +2726,7 @@ fn readZonedDateTimeFromOptions(self: *Interpreter, options: JSValue) anyerror!Z
     };
 }
 
-fn zonedDateTimeFromRawBag(self: *Interpreter, allocator: Allocator, raw: *const ZonedDateTimeBagRaw, options: ZonedDateTimeFromOptions) anyerror!ztemporal.ZonedDateTime {
+fn zonedDateTimeFromRawBag(self: *Interpreter, allocator: Allocator, raw: *const ZonedDateTimeBagRaw, options: ZonedDateTimeFromOptions, strict_month_code: bool) anyerror!ztemporal.ZonedDateTime {
     const calendar = try calendarFromValue(self, raw.calendar);
     // Preserve the established calendar error priority over a missing
     // timeZone, after all observable field reads have completed.
@@ -2728,7 +2737,8 @@ fn zonedDateTimeFromRawBag(self: *Interpreter, allocator: Allocator, raw: *const
     const millisecond = try zonedDateTimeIntegerFromValue(self, raw.millisecond, "millisecond");
     const minute = try zonedDateTimeIntegerFromValue(self, raw.minute, "minute");
     const month = try zonedDateTimeIntegerFromValue(self, raw.month, "month");
-    const month_code = try zonedDateTimeMonthCodeFromValue(self, raw.month_code);
+    const month_code = try zonedDateTimeMonthCodeFromValue(self, raw.month_code, strict_month_code);
+    defer if (month_code) |code| self.gc_allocator.free(code);
     const nanosecond = try zonedDateTimeIntegerFromValue(self, raw.nanosecond, "nanosecond");
     const offset = if (raw.offset == .undefined) null else try self.toDisplayStringJS(self.gc_allocator, raw.offset);
     defer if (offset) |text| self.gc_allocator.free(text);
@@ -2769,7 +2779,7 @@ fn coerceZonedDateTime(self: *Interpreter, allocator: Allocator, v: JSValue, ove
     if (Interpreter.isPrimitiveTag(v)) return self.throwError(.type_error, "Temporal.ZonedDateTime.from requires a string or an object", .{});
     var raw = try readZonedDateTimeBagRaw(self, v);
     defer raw.deinit();
-    return zonedDateTimeFromRawBag(self, allocator, &raw, .{ .overflow = overflow, .disambiguation = disambiguation, .offset = offset_option });
+    return zonedDateTimeFromRawBag(self, allocator, &raw, .{ .overflow = overflow, .disambiguation = disambiguation, .offset = offset_option }, false);
 }
 
 fn zonedDateTimeFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -2792,7 +2802,7 @@ fn zonedDateTimeFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
         var raw = try readZonedDateTimeBagRaw(self, item);
         defer raw.deinit();
         const options = try readZonedDateTimeFromOptions(self, option_value);
-        break :blk try zonedDateTimeFromRawBag(self, allocator, &raw, options);
+        break :blk try zonedDateTimeFromRawBag(self, allocator, &raw, options, true);
     } else blk: {
         const options = try readZonedDateTimeFromOptions(self, option_value);
         break :blk try coerceZonedDateTime(self, allocator, item, options.overflow, options.disambiguation, options.offset);
