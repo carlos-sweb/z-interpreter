@@ -491,9 +491,16 @@ fn coerceDuration(self: *Interpreter, v: JSValue) anyerror!ztemporal.Duration {
         const weeks = try observableDurationNumber(self, v, "weeks");
         const years = try observableDurationNumber(self, v, "years");
         return ztemporal.Duration.from(.{ .fields = .{
-            .years = years, .months = months, .weeks = weeks, .days = days,
-            .hours = hours, .minutes = minutes, .seconds = seconds,
-            .milliseconds = milliseconds, .microseconds = microseconds, .nanoseconds = nanoseconds,
+            .years = years,
+            .months = months,
+            .weeks = weeks,
+            .days = days,
+            .hours = hours,
+            .minutes = minutes,
+            .seconds = seconds,
+            .milliseconds = milliseconds,
+            .microseconds = microseconds,
+            .nanoseconds = nanoseconds,
         } }) catch |e| temporalErr(self, e);
     }
     if (v != .object) return self.throwError(.type_error, "Duration-like value required", .{});
@@ -867,6 +874,7 @@ fn pdWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     const month_code = try plainOptionalString(self, fields, "monthCode");
     defer if (month_code) |value| self.gc_allocator.free(value);
     const year = try plainOptionalI32(self, fields, "year");
+    _ = pd.with(.{ .year = year, .month = month, .monthCode = month_code, .day = day }, .{}) catch |e| return temporalErr(self, e);
     const overflow = try readPlainOverflow(self, arg(args, 1));
     const result = pd.with(.{
         .year = year,
@@ -1004,8 +1012,12 @@ fn plainTimeFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
         const second = try observedTemporalIntegerField(self, value, "second");
         const overflow = try observableFromOverflow(self, options);
         break :blk ztemporal.PlainTime.from(.{ .fields = .{
-            .hour = hour, .minute = minute, .second = second,
-            .millisecond = millisecond, .microsecond = microsecond, .nanosecond = nanosecond,
+            .hour = hour,
+            .minute = minute,
+            .second = second,
+            .millisecond = millisecond,
+            .microsecond = microsecond,
+            .nanosecond = nanosecond,
         } }, .{ .overflow = overflow }) catch |e| return temporalErr(self, e);
     } else blk: {
         const overflow = try observableFromOverflow(self, options);
@@ -1368,6 +1380,7 @@ fn pdtWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const nanosecond = try plainOptionalI32(self, fields, "nanosecond");
     const second = try plainOptionalI32(self, fields, "second");
     const year = try plainOptionalI32(self, fields, "year");
+    _ = pdt.with(.{ .year = year, .month = month, .monthCode = month_code, .day = day, .hour = hour, .minute = minute, .second = second, .millisecond = millisecond, .microsecond = microsecond, .nanosecond = nanosecond }, .{}) catch |e| return temporalErr(self, e);
     const overflow = try readPlainOverflow(self, arg(args, 1));
     const result = pdt.with(.{
         .year = year,
@@ -2324,6 +2337,7 @@ fn pymWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const month_code = try plainOptionalString(self, fields, "monthCode");
     defer if (month_code) |value| self.gc_allocator.free(value);
     const year = try plainOptionalI32(self, fields, "year");
+    _ = pym.with(.{ .year = year, .month = month, .monthCode = month_code }, .{}) catch |e| return temporalErr(self, e);
     const overflow = try readPlainOverflow(self, arg(args, 1));
     const result = pym.with(.{
         .year = year,
@@ -2550,6 +2564,7 @@ fn pmdWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const month_code = try plainOptionalString(self, fields, "monthCode");
     defer if (month_code) |value| self.gc_allocator.free(value);
     const year = try plainOptionalI32(self, fields, "year");
+    _ = pmd.with(.{ .month = month, .day = day, .monthCode = month_code, .year = year }, .{}) catch |e| return temporalErr(self, e);
     const overflow = try readPlainOverflow(self, arg(args, 1));
     const result = pmd.with(.{
         .month = month,
@@ -3706,6 +3721,7 @@ fn surfaceZdtWith(ctx: *anyopaque, allocator: Allocator, receiver: JSValue, args
     if (zone != .undefined) return self.throwError(.type_error, "with forbids timeZone", .{});
     const fields = try surfaceFieldsMode(self, item, ztemporal.ZonedDateTime.Fields, true);
     defer freeSurfaceFields(self, fields);
+    _ = dt.with(allocator, ioHandle(), fields, .{}) catch |e| return temporalErr(self, e);
     const options = arg(args, 1);
     const disambiguation = try surfaceEnum(self, options, "disambiguation", ztemporal.Disambiguation, .compatible);
     const offset = try surfaceEnum(self, options, "offset", ztemporal.OffsetOption, .prefer);

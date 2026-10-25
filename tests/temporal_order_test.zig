@@ -750,3 +750,43 @@ test "PlainMonthDay and PlainYearMonth validate calendar before reference argume
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("RangeError,RangeError,pmd.month,pmd.day,pym.year,pym.month", actual);
 }
+
+test "PlainDate with validates an invalid partial before primitive options" {
+    const actual = try observedOptions(
+        "let result=[]; for (let option of [null, true, 'x', Symbol(), 1, 2n]) { try { new Temporal.PlainDate(2000, 5, 2).with({ day: -1 }, option); } catch (e) { result.push(e.name); } } result.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError,RangeError,RangeError,RangeError,RangeError,RangeError", actual);
+}
+
+test "PlainDateTime with validates an invalid partial before primitive options" {
+    const actual = try observedOptions(
+        "let result=[]; for (let option of [null, true, 'x', Symbol(), 1, 2n]) { try { new Temporal.PlainDateTime(2000, 5, 2).with({ day: -1 }, option); } catch (e) { result.push(e.name); } } result.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError,RangeError,RangeError,RangeError,RangeError,RangeError", actual);
+}
+
+test "PlainMonthDay with validates an invalid partial before primitive options" {
+    const actual = try observedOptions(
+        "let result=[]; for (let option of [null, true, 'x', Symbol(), 1, 2n]) { try { new Temporal.PlainMonthDay(5, 2).with({ day: -1 }, option); } catch (e) { result.push(e.name); } } result.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError,RangeError,RangeError,RangeError,RangeError,RangeError", actual);
+}
+
+test "PlainYearMonth with validates an invalid partial before primitive options" {
+    const actual = try observedOptions(
+        "let result=[]; for (let option of [null, true, 'x', Symbol(), 1, 2n]) { try { new Temporal.PlainYearMonth(2019, 10).with({ month: -1 }, option); } catch (e) { result.push(e.name); } } result.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError,RangeError,RangeError,RangeError,RangeError,RangeError", actual);
+}
+
+test "ZonedDateTime with validates an invalid partial before primitive options" {
+    const actual = try observedOptions(
+        "let result=[]; for (let option of [null, true, 'x', Symbol(), 1, 2n]) { try { new Temporal.ZonedDateTime(0n, 'UTC').with({ day: -1 }, option); } catch (e) { result.push(e.name); } } result.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError,RangeError,RangeError,RangeError,RangeError,RangeError", actual);
+}
