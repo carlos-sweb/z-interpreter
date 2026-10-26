@@ -145,7 +145,8 @@ fn plainOptionalI32(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!
     const value = try self.getProperty(obj, key);
     defer value.deinit();
     if (value == .undefined) return null;
-    return try requireI32(self, value, key);
+    // PrepareTemporalFields uses ToNumber with truncation for Plain `with()` fields.
+    return try coerceConstructorI32(self, value, key);
 }
 
 fn plainOptionalString(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!?[]u8 {

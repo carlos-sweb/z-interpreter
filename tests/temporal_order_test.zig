@@ -822,3 +822,43 @@ test "PlainYearMonth with reads object options before validating an invalid part
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("overflow", actual);
 }
+
+test "PlainDate with truncates fields in specification order" {
+    const actual = try observedOptions(
+        "let log=[]; function n(k){return new Proxy({valueOf(){log.push('call fields.'+k+'.valueOf');return 1.7;}},{get(t,p){if(p==='valueOf')log.push('get fields.'+k+'.valueOf');return t[p];}})} function s(k){return new Proxy({toString(){log.push('call fields.'+k+'.toString');return 'M01';}},{get(t,p){if(p==='toString')log.push('get fields.'+k+'.toString');return t[p];}})} let fields=new Proxy({year:n('year'),month:n('month'),monthCode:s('monthCode'),day:n('day')},{get(t,p){log.push('get fields.'+p);return t[p];}}); let options=new Proxy({overflow:new Proxy({toString(){log.push('call options.overflow.toString');return 'constrain';}},{get(t,p){if(p==='toString')log.push('get options.overflow.toString');return t[p];}})},{get(t,p){log.push('get options.'+p);return t[p];}}); new Temporal.PlainDate(2000,5,2).with(fields,options);log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("get fields.calendar,get fields.timeZone,get fields.day,get fields.day.valueOf,call fields.day.valueOf,get fields.month,get fields.month.valueOf,call fields.month.valueOf,get fields.monthCode,get fields.monthCode.toString,call fields.monthCode.toString,get fields.year,get fields.year.valueOf,call fields.year.valueOf,get options.overflow,get options.overflow.toString,call options.overflow.toString", actual);
+}
+
+test "PlainTime with truncates fields in specification order" {
+    const actual = try observedOptions(
+        "let log=[]; function n(k){return new Proxy({valueOf(){log.push('call fields.'+k+'.valueOf');return 1.7;}},{get(t,p){if(p==='valueOf')log.push('get fields.'+k+'.valueOf');return t[p];}})} let fields=new Proxy({hour:n('hour'),minute:n('minute'),second:n('second'),millisecond:n('millisecond'),microsecond:n('microsecond'),nanosecond:n('nanosecond')},{get(t,p){log.push('get fields.'+p);return t[p];}}); let options=new Proxy({overflow:new Proxy({toString(){log.push('call options.overflow.toString');return 'constrain';}},{get(t,p){if(p==='toString')log.push('get options.overflow.toString');return t[p];}})},{get(t,p){log.push('get options.'+p);return t[p];}}); new Temporal.PlainTime(12).with(fields,options);log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("get fields.calendar,get fields.timeZone,get fields.hour,get fields.hour.valueOf,call fields.hour.valueOf,get fields.microsecond,get fields.microsecond.valueOf,call fields.microsecond.valueOf,get fields.millisecond,get fields.millisecond.valueOf,call fields.millisecond.valueOf,get fields.minute,get fields.minute.valueOf,call fields.minute.valueOf,get fields.nanosecond,get fields.nanosecond.valueOf,call fields.nanosecond.valueOf,get fields.second,get fields.second.valueOf,call fields.second.valueOf,get options.overflow,get options.overflow.toString,call options.overflow.toString", actual);
+}
+
+test "PlainDateTime with truncates fields in specification order" {
+    const actual = try observedOptions(
+        "let log=[]; function n(k){return new Proxy({valueOf(){log.push('call fields.'+k+'.valueOf');return 1.7;}},{get(t,p){if(p==='valueOf')log.push('get fields.'+k+'.valueOf');return t[p];}})} function s(k){return new Proxy({toString(){log.push('call fields.'+k+'.toString');return 'M01';}},{get(t,p){if(p==='toString')log.push('get fields.'+k+'.toString');return t[p];}})} let fields=new Proxy({year:n('year'),month:n('month'),monthCode:s('monthCode'),day:n('day'),hour:n('hour'),minute:n('minute'),second:n('second'),millisecond:n('millisecond'),microsecond:n('microsecond'),nanosecond:n('nanosecond')},{get(t,p){log.push('get fields.'+p);return t[p];}}); let options=new Proxy({overflow:new Proxy({toString(){log.push('call options.overflow.toString');return 'constrain';}},{get(t,p){if(p==='toString')log.push('get options.overflow.toString');return t[p];}})},{get(t,p){log.push('get options.'+p);return t[p];}}); new Temporal.PlainDateTime(2000,5,2,12).with(fields,options);log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("get fields.calendar,get fields.timeZone,get fields.day,get fields.day.valueOf,call fields.day.valueOf,get fields.hour,get fields.hour.valueOf,call fields.hour.valueOf,get fields.microsecond,get fields.microsecond.valueOf,call fields.microsecond.valueOf,get fields.millisecond,get fields.millisecond.valueOf,call fields.millisecond.valueOf,get fields.minute,get fields.minute.valueOf,call fields.minute.valueOf,get fields.month,get fields.month.valueOf,call fields.month.valueOf,get fields.monthCode,get fields.monthCode.toString,call fields.monthCode.toString,get fields.nanosecond,get fields.nanosecond.valueOf,call fields.nanosecond.valueOf,get fields.second,get fields.second.valueOf,call fields.second.valueOf,get fields.year,get fields.year.valueOf,call fields.year.valueOf,get options.overflow,get options.overflow.toString,call options.overflow.toString", actual);
+}
+
+test "PlainMonthDay with truncates fields in specification order" {
+    const actual = try observedOptions(
+        "let log=[]; function n(k){return new Proxy({valueOf(){log.push('call fields.'+k+'.valueOf');return 1.7;}},{get(t,p){if(p==='valueOf')log.push('get fields.'+k+'.valueOf');return t[p];}})} function s(k){return new Proxy({toString(){log.push('call fields.'+k+'.toString');return 'M01';}},{get(t,p){if(p==='toString')log.push('get fields.'+k+'.toString');return t[p];}})} let fields=new Proxy({year:n('year'),month:n('month'),monthCode:s('monthCode'),day:n('day')},{get(t,p){log.push('get fields.'+p);return t[p];}}); let options=new Proxy({overflow:new Proxy({toString(){log.push('call options.overflow.toString');return 'constrain';}},{get(t,p){if(p==='toString')log.push('get options.overflow.toString');return t[p];}})},{get(t,p){log.push('get options.'+p);return t[p];}}); new Temporal.PlainMonthDay(5,2).with(fields,options);log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("get fields.calendar,get fields.timeZone,get fields.day,get fields.day.valueOf,call fields.day.valueOf,get fields.month,get fields.month.valueOf,call fields.month.valueOf,get fields.monthCode,get fields.monthCode.toString,call fields.monthCode.toString,get fields.year,get fields.year.valueOf,call fields.year.valueOf,get options.overflow,get options.overflow.toString,call options.overflow.toString", actual);
+}
+
+test "PlainYearMonth with truncates fields in specification order" {
+    const actual = try observedOptions(
+        "let log=[]; function n(k){return new Proxy({valueOf(){log.push('call fields.'+k+'.valueOf');return 1.7;}},{get(t,p){if(p==='valueOf')log.push('get fields.'+k+'.valueOf');return t[p];}})} function s(k){return new Proxy({toString(){log.push('call fields.'+k+'.toString');return 'M01';}},{get(t,p){if(p==='toString')log.push('get fields.'+k+'.toString');return t[p];}})} let fields=new Proxy({year:n('year'),month:n('month'),monthCode:s('monthCode')},{get(t,p){log.push('get fields.'+p);return t[p];}}); let options=new Proxy({overflow:new Proxy({toString(){log.push('call options.overflow.toString');return 'constrain';}},{get(t,p){if(p==='toString')log.push('get options.overflow.toString');return t[p];}})},{get(t,p){log.push('get options.'+p);return t[p];}}); new Temporal.PlainYearMonth(2000,5).with(fields,options);log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("get fields.calendar,get fields.timeZone,get fields.month,get fields.month.valueOf,call fields.month.valueOf,get fields.monthCode,get fields.monthCode.toString,call fields.monthCode.toString,get fields.year,get fields.year.valueOf,call fields.year.valueOf,get options.overflow,get options.overflow.toString,call options.overflow.toString", actual);
+}
