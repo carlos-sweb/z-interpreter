@@ -862,3 +862,19 @@ test "PlainYearMonth with truncates fields in specification order" {
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("get fields.calendar,get fields.timeZone,get fields.month,get fields.month.valueOf,call fields.month.valueOf,get fields.monthCode,get fields.monthCode.toString,call fields.monthCode.toString,get fields.year,get fields.year.valueOf,call fields.year.valueOf,get options.overflow,get options.overflow.toString,call options.overflow.toString", actual);
 }
+
+test "PlainMonthDay toPlainDate reads and truncates only year" {
+    const actual = try observedOptions(
+        "let log=[]; let year=new Proxy({valueOf(){log.push('call fields.year.valueOf');return 1.7;}},{get(t,p){if(p==='valueOf')log.push('get fields.year.valueOf');return t[p];}}); let fields=new Proxy({year,month:1.7,monthCode:'M01',day:1.7,calendar:'iso8601'},{get(t,p){log.push('get fields.'+p);return t[p];}}); let r=new Temporal.PlainMonthDay(5,2).toPlainDate(fields);log.join(',')+'|'+r.year+','+r.month+','+r.day;",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("get fields.year,get fields.year.valueOf,call fields.year.valueOf|1,5,2", actual);
+}
+
+test "PlainYearMonth toPlainDate reads and truncates only day" {
+    const actual = try observedOptions(
+        "let log=[]; let day=new Proxy({valueOf(){log.push('call fields.day.valueOf');return 1.7;}},{get(t,p){if(p==='valueOf')log.push('get fields.day.valueOf');return t[p];}}); let fields=new Proxy({year:1.7,month:1.7,monthCode:'M01',day,calendar:'iso8601'},{get(t,p){log.push('get fields.'+p);return t[p];}}); let r=new Temporal.PlainYearMonth(2005,2).toPlainDate(fields);log.join(',')+'|'+r.year+','+r.month+','+r.day;",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("get fields.day,get fields.day.valueOf,call fields.day.valueOf|2005,2,1", actual);
+}

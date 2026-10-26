@@ -2326,7 +2326,7 @@ fn pymToPlainDate(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     const self = interp(ctx);
     const pym = try pymSelf(self, this_value);
     const fields = arg(args, 0);
-    const day = (try optionalI32(self, fields, "day")) orelse return self.throwError(.type_error, "day is required", .{});
+    const day = (try plainOptionalI32(self, fields, "day")) orelse return self.throwError(.type_error, "day is required", .{});
     const pd = pym.toPlainDate(day) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_date = pd });
 }
@@ -2554,7 +2554,7 @@ fn pmdToPlainDate(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     const self = interp(ctx);
     const pmd = try pmdSelf(self, this_value);
     const fields = arg(args, 0);
-    const year = (try optionalI32(self, fields, "year")) orelse return self.throwError(.type_error, "year is required", .{});
+    const year = (try plainOptionalI32(self, fields, "year")) orelse return self.throwError(.type_error, "year is required", .{});
     const pd = pmd.toPlainDate(year) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .plain_date = pd });
 }
