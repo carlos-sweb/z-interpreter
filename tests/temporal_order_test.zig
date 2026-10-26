@@ -790,3 +790,35 @@ test "ZonedDateTime with validates an invalid partial before primitive options" 
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("RangeError,RangeError,RangeError,RangeError,RangeError,RangeError", actual);
 }
+
+test "PlainDate with reads object options before validating an invalid partial" {
+    const actual = try observedOptions(
+        "let log=[]; let options=new Proxy({}, { get(_, key) { log.push(key); return 'constrain'; } }); try { new Temporal.PlainDate(2025, 7, 31).with({ monthCode: 'M08L' }, options); } catch (e) {} log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("overflow", actual);
+}
+
+test "PlainDateTime with reads object options before validating an invalid partial" {
+    const actual = try observedOptions(
+        "let log=[]; let options=new Proxy({}, { get(_, key) { log.push(key); return 'constrain'; } }); try { new Temporal.PlainDateTime(2025, 7, 31, 12).with({ monthCode: 'M08L' }, options); } catch (e) {} log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("overflow", actual);
+}
+
+test "PlainMonthDay with reads object options before validating an invalid partial" {
+    const actual = try observedOptions(
+        "let log=[]; let options=new Proxy({}, { get(_, key) { log.push(key); return 'constrain'; } }); try { new Temporal.PlainMonthDay(7, 31).with({ monthCode: 'M08L' }, options); } catch (e) {} log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("overflow", actual);
+}
+
+test "PlainYearMonth with reads object options before validating an invalid partial" {
+    const actual = try observedOptions(
+        "let log=[]; let options=new Proxy({}, { get(_, key) { log.push(key); return 'constrain'; } }); try { new Temporal.PlainYearMonth(2025, 7).with({ monthCode: 'M08L' }, options); } catch (e) {} log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("overflow", actual);
+}

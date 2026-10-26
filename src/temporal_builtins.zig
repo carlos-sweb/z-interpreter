@@ -874,8 +874,10 @@ fn pdWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     const month_code = try plainOptionalString(self, fields, "monthCode");
     defer if (month_code) |value| self.gc_allocator.free(value);
     const year = try plainOptionalI32(self, fields, "year");
-    _ = pd.with(.{ .year = year, .month = month, .monthCode = month_code, .day = day }, .{}) catch |e| return temporalErr(self, e);
-    const overflow = try readPlainOverflow(self, arg(args, 1));
+    const options = arg(args, 1);
+    if (options != .undefined and Interpreter.isPrimitiveTag(options))
+        _ = pd.with(.{ .year = year, .month = month, .monthCode = month_code, .day = day }, .{}) catch |e| return temporalErr(self, e);
+    const overflow = try readPlainOverflow(self, options);
     const result = pd.with(.{
         .year = year,
         .month = month,
@@ -1380,8 +1382,10 @@ fn pdtWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const nanosecond = try plainOptionalI32(self, fields, "nanosecond");
     const second = try plainOptionalI32(self, fields, "second");
     const year = try plainOptionalI32(self, fields, "year");
-    _ = pdt.with(.{ .year = year, .month = month, .monthCode = month_code, .day = day, .hour = hour, .minute = minute, .second = second, .millisecond = millisecond, .microsecond = microsecond, .nanosecond = nanosecond }, .{}) catch |e| return temporalErr(self, e);
-    const overflow = try readPlainOverflow(self, arg(args, 1));
+    const options = arg(args, 1);
+    if (options != .undefined and Interpreter.isPrimitiveTag(options))
+        _ = pdt.with(.{ .year = year, .month = month, .monthCode = month_code, .day = day, .hour = hour, .minute = minute, .second = second, .millisecond = millisecond, .microsecond = microsecond, .nanosecond = nanosecond }, .{}) catch |e| return temporalErr(self, e);
+    const overflow = try readPlainOverflow(self, options);
     const result = pdt.with(.{
         .year = year,
         .month = month,
@@ -2337,8 +2341,10 @@ fn pymWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const month_code = try plainOptionalString(self, fields, "monthCode");
     defer if (month_code) |value| self.gc_allocator.free(value);
     const year = try plainOptionalI32(self, fields, "year");
-    _ = pym.with(.{ .year = year, .month = month, .monthCode = month_code }, .{}) catch |e| return temporalErr(self, e);
-    const overflow = try readPlainOverflow(self, arg(args, 1));
+    const options = arg(args, 1);
+    if (options != .undefined and Interpreter.isPrimitiveTag(options))
+        _ = pym.with(.{ .year = year, .month = month, .monthCode = month_code }, .{}) catch |e| return temporalErr(self, e);
+    const overflow = try readPlainOverflow(self, options);
     const result = pym.with(.{
         .year = year,
         .month = month,
@@ -2564,8 +2570,10 @@ fn pmdWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const month_code = try plainOptionalString(self, fields, "monthCode");
     defer if (month_code) |value| self.gc_allocator.free(value);
     const year = try plainOptionalI32(self, fields, "year");
-    _ = pmd.with(.{ .month = month, .day = day, .monthCode = month_code, .year = year }, .{}) catch |e| return temporalErr(self, e);
-    const overflow = try readPlainOverflow(self, arg(args, 1));
+    const options = arg(args, 1);
+    if (options != .undefined and Interpreter.isPrimitiveTag(options))
+        _ = pmd.with(.{ .month = month, .day = day, .monthCode = month_code, .year = year }, .{}) catch |e| return temporalErr(self, e);
+    const overflow = try readPlainOverflow(self, options);
     const result = pmd.with(.{
         .month = month,
         .day = day,
