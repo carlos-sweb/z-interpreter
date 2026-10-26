@@ -1532,7 +1532,12 @@ fn instantFromEpochMilliseconds(ctx: *anyopaque, allocator: Allocator, this_valu
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
-    const ms = try requireI64(self, arg(args, 0), "epochMilliseconds");
+    const number = try self.toNumberJS(arg(args, 0));
+    const maxf: f64 = @floatFromInt(std.math.maxInt(i64));
+    const minf: f64 = @floatFromInt(std.math.minInt(i64));
+    if (!std.math.isFinite(number) or number != @trunc(number) or number < minf or number > maxf)
+        return self.throwError(.range_error, "epochMilliseconds must be an integer", .{});
+    const ms: i64 = @intFromFloat(number);
     const inst = ztemporal.Instant.fromEpochMilliseconds(ms) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .instant = inst });
 }

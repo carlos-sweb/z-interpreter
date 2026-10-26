@@ -878,3 +878,11 @@ test "PlainYearMonth toPlainDate reads and truncates only day" {
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("get fields.day,get fields.day.valueOf,call fields.day.valueOf|2005,2,1", actual);
 }
+
+test "Instant fromEpochMilliseconds rejects non-integral numeric conversion with RangeError" {
+    const actual = try observedOptions(
+        "let values=[undefined,Infinity,-Infinity,NaN,1.3,-0.5]; let out=[]; for(let value of values){try{Temporal.Instant.fromEpochMilliseconds(value);out.push('ok')}catch(e){out.push(e.name)}}out.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError,RangeError,RangeError,RangeError,RangeError,RangeError", actual);
+}
