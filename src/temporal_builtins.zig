@@ -1532,7 +1532,10 @@ fn instantFromEpochMilliseconds(ctx: *anyopaque, allocator: Allocator, this_valu
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
-    const number = try self.toNumberJS(arg(args, 0));
+    const epoch_milliseconds = arg(args, 0);
+    if (epoch_milliseconds == .bigint or epoch_milliseconds == .symbol)
+        return self.throwError(.type_error, "Cannot convert epochMilliseconds to a number", .{});
+    const number = try self.toNumberJS(epoch_milliseconds);
     const maxf: f64 = @floatFromInt(std.math.maxInt(i64));
     const minf: f64 = @floatFromInt(std.math.minInt(i64));
     if (!std.math.isFinite(number) or number != @trunc(number) or number < minf or number > maxf)

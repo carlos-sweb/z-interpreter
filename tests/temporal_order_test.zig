@@ -886,3 +886,11 @@ test "Instant fromEpochMilliseconds rejects non-integral numeric conversion with
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("RangeError,RangeError,RangeError,RangeError,RangeError,RangeError", actual);
 }
+
+test "Instant fromEpochMilliseconds rejects BigInt and Symbol with TypeError" {
+    const actual = try observedOptions(
+        "let out=[];for(let value of [42n,Symbol()]){try{Temporal.Instant.fromEpochMilliseconds(value);out.push('ok')}catch(e){out.push(e.name)}}out.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("TypeError,TypeError", actual);
+}
