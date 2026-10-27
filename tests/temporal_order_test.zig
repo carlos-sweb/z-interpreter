@@ -577,6 +577,30 @@ test "Instant until reads proxy difference options before validation" {
     try testing.expectEqualStrings("RangeError,largestUnit,roundingIncrement,roundingMode,smallestUnit", actual);
 }
 
+test "Duration round truncates a fractional roundingIncrement" {
+    const actual = try observedOptions(
+        "new Temporal.Duration(0, 0, 0, 1).round({ smallestUnit: 'days', roundingMode: 'expand', relativeTo: new Temporal.PlainDate(2000, 1, 1), roundingIncrement: 2.5 }).days.toString();",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("2", actual);
+}
+
+test "Instant since truncates a fractional roundingIncrement" {
+    const actual = try observedOptions(
+        "let earlier = new Temporal.Instant(1000000000000000000n); let later = new Temporal.Instant(1000000000000000005n); later.since(earlier, { roundingIncrement: 2.5, roundingMode: 'trunc' }).nanoseconds.toString();",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("4", actual);
+}
+
+test "Instant until truncates a fractional roundingIncrement" {
+    const actual = try observedOptions(
+        "let earlier = new Temporal.Instant(1000000000000000000n); let later = new Temporal.Instant(1000000000000000005n); earlier.until(later, { roundingIncrement: 2.5, roundingMode: 'trunc' }).nanoseconds.toString();",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("4", actual);
+}
+
 test "Instant since requires its other argument" {
     const actual = try observedOptions(
         "let error; try { new Temporal.Instant(0n).since(); } catch (e) { error = e.name; } error;",

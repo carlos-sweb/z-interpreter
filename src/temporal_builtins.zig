@@ -1620,9 +1620,10 @@ fn readInstantDifferenceOptions(self: *Interpreter, options: JSValue) anyerror!R
         if (!std.mem.eql(u8, text, "auto")) out.largestUnit = try unitFromString(self, text, "largestUnit");
     }
     if (rounding_increment) |number| {
-        if (!std.math.isFinite(number) or number != @trunc(number) or number < 1 or number > 1_000_000_000)
+        const integer = @trunc(number);
+        if (!std.math.isFinite(number) or integer < 1 or integer > 1_000_000_000)
             return self.throwError(.range_error, "Invalid roundingIncrement", .{});
-        out.roundingIncrement = @intFromFloat(number);
+        out.roundingIncrement = @intFromFloat(integer);
     }
     if (rounding_mode) |text| out.roundingMode = try roundingModeFromString(self, text);
     if (smallest_unit) |text| out.smallestUnit = try unitFromString(self, text, "smallestUnit");
@@ -2122,9 +2123,10 @@ fn readDurationRoundOptions(self: *Interpreter, options: JSValue, allocator: All
         if (!std.mem.eql(u8, text, "auto")) out.largestUnit = try unitFromString(self, text, "largestUnit");
     }
     if (raw.rounding_increment) |number| {
-        if (!std.math.isFinite(number) or number != @trunc(number) or number < 1 or number > 1_000_000_000)
+        const integer = @trunc(number);
+        if (!std.math.isFinite(number) or integer < 1 or integer > 1_000_000_000)
             return self.throwError(.range_error, "Invalid roundingIncrement", .{});
-        out.roundingIncrement = @intFromFloat(number);
+        out.roundingIncrement = @intFromFloat(integer);
     }
     if (raw.rounding_mode) |text| out.roundingMode = try roundingModeFromString(self, text);
     if (raw.smallest_unit) |text| out.smallestUnit = try unitFromString(self, text, "smallestUnit");
