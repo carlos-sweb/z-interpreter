@@ -630,7 +630,7 @@ test "Instant since requires its other argument" {
     try testing.expectEqualStrings("TypeError", actual);
 }
 
-test "PlainDateTime direct bags require monthCode strings but Duration relativeTo coerces" {
+test "PlainDateTime direct bags and Duration relativeTo coerce observable monthCode" {
     const actual = try observedOptions(
         "let log = []; let monthCode = { toString() { log.push('monthCode.toString'); return 'M01'; } };" ++
             "let fields = { year: 2020, monthCode, day: 1 }; let first = 'ok'; let second = 'ok';" ++
@@ -639,7 +639,7 @@ test "PlainDateTime direct bags require monthCode strings but Duration relativeT
             "first + ',' + second + ',' + log.join(',');",
     );
     defer testing.allocator.free(actual);
-    try testing.expectEqualStrings("TypeError,ok,monthCode.toString", actual);
+    try testing.expectEqualStrings("ok,ok,monthCode.toString,monthCode.toString", actual);
 }
 
 test "PlainDateTime from rejects non-string monthCode values" {
@@ -954,4 +954,20 @@ test "PlainYearMonth from follows test262's literal field and options order" {
     );
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("get fields.calendar,get fields.month,get fields.month.valueOf,call fields.month.valueOf,get fields.monthCode,get fields.monthCode.toString,call fields.monthCode.toString,get fields.year,get fields.year.valueOf,call fields.year.valueOf,get options.overflow,get options.overflow.toString,call options.overflow.toString", actual);
+}
+
+test "PlainDateTime from validates monthCode syntax before converting year" {
+    const actual = try observedOptions(
+        "let out=[];for(let monthCode of ['L99M','M99L']){try{Temporal.PlainDateTime.from({day:1,monthCode,year:Symbol()});out.push('ok')}catch(e){out.push(e.name)}}out.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError,TypeError", actual);
+}
+
+test "PlainDateTime from follows test262's literal field and options order" {
+    const actual = try observedOptions(
+        "let log=[];function n(k){return new Proxy({valueOf(){log.push('call fields.'+k+'.valueOf');return 1.7;}},{get(t,p){if(p==='valueOf')log.push('get fields.'+k+'.valueOf');return t[p];}})}function s(k,value){return new Proxy({toString(){log.push('call '+k+'.toString');return value;}},{get(t,p){if(p==='toString')log.push('get '+k+'.toString');return t[p];}})}let fields=new Proxy({year:n('year'),month:n('month'),monthCode:s('fields.monthCode','M01'),day:n('day'),hour:n('hour'),minute:n('minute'),second:n('second'),millisecond:n('millisecond'),microsecond:n('microsecond'),nanosecond:n('nanosecond'),calendar:'iso8601'},{get(t,p){log.push('get fields.'+p);return t[p];}});let options=new Proxy({overflow:s('options.overflow','constrain')},{get(t,p){log.push('get options.'+p);return t[p];}});Temporal.PlainDateTime.from(fields,options);log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("get fields.calendar,get fields.day,get fields.day.valueOf,call fields.day.valueOf,get fields.hour,get fields.hour.valueOf,call fields.hour.valueOf,get fields.microsecond,get fields.microsecond.valueOf,call fields.microsecond.valueOf,get fields.millisecond,get fields.millisecond.valueOf,call fields.millisecond.valueOf,get fields.minute,get fields.minute.valueOf,call fields.minute.valueOf,get fields.month,get fields.month.valueOf,call fields.month.valueOf,get fields.monthCode,get fields.monthCode.toString,call fields.monthCode.toString,get fields.nanosecond,get fields.nanosecond.valueOf,call fields.nanosecond.valueOf,get fields.second,get fields.second.valueOf,call fields.second.valueOf,get fields.year,get fields.year.valueOf,call fields.year.valueOf,get options.overflow,get options.overflow.toString,call options.overflow.toString", actual);
 }

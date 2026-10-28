@@ -1223,8 +1223,19 @@ fn plainDateTimeFromObservedBag(self: *Interpreter, fields: JSValue, options: JS
     var owned_month_code: ?[]u8 = null;
     defer if (owned_month_code) |code| self.gc_allocator.free(code);
     const month_code: ?[]const u8 = if (month_code_value == .undefined) null else if (strict_month_code) blk: {
-        if (month_code_value != .string) return self.throwError(.type_error, "monthCode must be a string", .{});
-        break :blk month_code_value.string.value.data;
+        const primitive = try self.toPrimitive(month_code_value, .string);
+        defer primitive.deinit();
+        if (primitive != .string) return self.throwError(.type_error, "monthCode must be a string", .{});
+        const code = try self.gc_allocator.dupe(u8, primitive.string.value.data);
+        owned_month_code = code;
+        // Syntax precedes year coercion; suitability remains native validation.
+        if ((code.len != 3 and code.len != 4) or code[0] != 'M' or
+            !std.ascii.isDigit(code[1]) or !std.ascii.isDigit(code[2]) or
+            (code.len == 4 and code[3] != 'L'))
+        {
+            return self.throwError(.range_error, "Invalid monthCode syntax", .{});
+        }
+        break :blk code;
     } else blk: {
         const code = try self.toDisplayStringJS(self.gc_allocator, month_code_value);
         owned_month_code = code;
