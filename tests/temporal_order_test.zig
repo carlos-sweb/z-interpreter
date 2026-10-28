@@ -289,6 +289,15 @@ test "ZonedDateTime from preserves monthCode type and syntax priority" {
     try testing.expectEqualStrings("TypeError,RangeError", actual);
 }
 
+test "ZonedDateTime from coerces observable monthCode objects to strings" {
+    const actual = try observedOptions(
+        "let log = []; let fields = { year: 2001, month: 5, day: 2, timeZone: 'UTC', monthCode: { toString() { log.push('monthCode.toString'); return 'M05'; } } };" ++
+            "let value = Temporal.ZonedDateTime.from(fields); let wrong; try { Temporal.ZonedDateTime.from({ year: 2001, day: 2, timeZone: 'UTC', monthCode: { toString() { return 5; } } }); } catch (e) { wrong = e.name; } value.toPlainDateTime().month + ',' + log.join(',') + ',' + wrong;",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("5,monthCode.toString,TypeError", actual);
+}
+
 test "ZonedDateTime from validates calendar before a missing timeZone" {
     const actual = try observedOptions(
         "try { Temporal.ZonedDateTime.from({ year: 1976, monthCode: 'M11', day: 18, calendar: '' }); } catch (e) { e.name; }",
