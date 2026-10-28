@@ -939,3 +939,19 @@ test "Instant fromEpochMilliseconds rejects BigInt and Symbol with TypeError" {
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("TypeError,TypeError", actual);
 }
+
+test "PlainYearMonth from validates monthCode syntax before converting year" {
+    const actual = try observedOptions(
+        "let out=[];for(let monthCode of ['L99M','M99L']){try{Temporal.PlainYearMonth.from({monthCode,year:Symbol()});out.push('ok')}catch(e){out.push(e.name)}}out.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("RangeError,TypeError", actual);
+}
+
+test "PlainYearMonth from follows test262's literal field and options order" {
+    const actual = try observedOptions(
+        "let log=[];function n(k){return new Proxy({valueOf(){log.push('call fields.'+k+'.valueOf');return 1.7;}},{get(t,p){if(p==='valueOf')log.push('get fields.'+k+'.valueOf');return t[p];}})}function s(k,value){return new Proxy({toString(){log.push('call '+k+'.toString');return value;}},{get(t,p){if(p==='toString')log.push('get '+k+'.toString');return t[p];}})}let fields=new Proxy({year:n('year'),month:n('month'),monthCode:s('fields.monthCode','M01'),calendar:'iso8601'},{get(t,p){log.push('get fields.'+p);return t[p];}});let options=new Proxy({overflow:s('options.overflow','constrain')},{get(t,p){log.push('get options.'+p);return t[p];}});Temporal.PlainYearMonth.from(fields,options);log.join(',');",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("get fields.calendar,get fields.month,get fields.month.valueOf,call fields.month.valueOf,get fields.monthCode,get fields.monthCode.toString,call fields.monthCode.toString,get fields.year,get fields.year.valueOf,call fields.year.valueOf,get options.overflow,get options.overflow.toString,call options.overflow.toString", actual);
+}
