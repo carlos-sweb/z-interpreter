@@ -306,6 +306,27 @@ test "ZonedDateTime from reads overflow before field conversion errors" {
     try testing.expectEqualStrings("disambiguation,offset,overflow", actual);
 }
 
+test "ZonedDateTime from converts each option before reading the next" {
+    const actual = try observedOptions(
+        "let log = []; let values = { disambiguation: 'compatible', offset: 'ignore', overflow: 'reject' };" ++
+            "let options = new Proxy(values, { get(target, key) { log.push('get ' + key); let value = target[key]; return { toString() { log.push('toString ' + key); return value; } }; } });" ++
+            "Temporal.ZonedDateTime.from('2001-09-09T01:46:40+00:00[UTC]', options);" ++
+            "let error; try { Temporal.ZonedDateTime.from(7, options); } catch (e) { error = e.name; } log.join(',') + '|' + error;",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("get disambiguation,toString disambiguation,get offset,toString offset,get overflow,toString overflow|TypeError", actual);
+}
+
+test "ZonedDateTime from converts options before monthCode validation" {
+    const actual = try observedOptions(
+        "let log = []; let values = { disambiguation: 'compatible', offset: 'prefer', overflow: 'constrain' };" ++
+            "let options = new Proxy(values, { get(target, key) { log.push('get ' + key); let value = target[key]; return { toString() { log.push('toString ' + key); return value; } }; } });" ++
+            "let error; try { Temporal.ZonedDateTime.from({ year: 2025, monthCode: 'M08L', day: 14, timeZone: 'UTC' }, options); } catch (e) { error = e.name; } log.join(',') + '|' + error;",
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("get disambiguation,toString disambiguation,get offset,toString offset,get overflow,toString overflow|RangeError", actual);
+}
+
 test "Instant from converts a proxy through ToString" {
     const actual = try observedOptions(
         "let log = []; let item = new Proxy({ toString() { log.push('call toString'); return '1970-01-01T00:00Z'; } }, { get(target, key) { if (key === 'toString') log.push('get toString'); return target[key]; } });" ++

@@ -2786,13 +2786,15 @@ fn readZonedDateTimeFromOptions(self: *Interpreter, options: JSValue) anyerror!Z
     if (options == .undefined) return .{ .overflow = .constrain, .disambiguation = .compatible, .offset = .reject };
     const disambiguation = try self.getProperty(options, "disambiguation");
     defer disambiguation.deinit();
+    const parsed_disambiguation = try zonedDateTimeOptionFromValue(self, disambiguation, "disambiguation", ztemporal.Disambiguation, .compatible);
     const offset = try self.getProperty(options, "offset");
     defer offset.deinit();
+    const parsed_offset = try zonedDateTimeOptionFromValue(self, offset, "offset", ztemporal.OffsetOption, .reject);
     const overflow = try self.getProperty(options, "overflow");
     defer overflow.deinit();
     return .{
-        .disambiguation = try zonedDateTimeOptionFromValue(self, disambiguation, "disambiguation", ztemporal.Disambiguation, .compatible),
-        .offset = try zonedDateTimeOptionFromValue(self, offset, "offset", ztemporal.OffsetOption, .reject),
+        .disambiguation = parsed_disambiguation,
+        .offset = parsed_offset,
         .overflow = try zonedDateTimeOptionFromValue(self, overflow, "overflow", Overflow, .constrain),
     };
 }
