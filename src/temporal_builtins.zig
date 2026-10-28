@@ -2730,12 +2730,8 @@ fn zonedDateTimeIntegerFromValue(self: *Interpreter, value: JSValue, key: []cons
 fn zonedDateTimeMonthCodeFromValue(self: *Interpreter, value: JSValue, strict_month_code: bool) anyerror!?[]u8 {
     if (value == .undefined) return null;
     const code = if (strict_month_code) blk: {
-        if (value == .string) break :blk try self.gc_allocator.dupe(u8, value.string.value.data);
-        if (Interpreter.isPrimitiveTag(value)) return self.throwError(.type_error, "monthCode must be a string", .{});
-        const primitive = try self.toPrimitive(value, .string);
-        defer primitive.deinit();
-        if (primitive != .string) return self.throwError(.type_error, "monthCode must be a string", .{});
-        break :blk try self.gc_allocator.dupe(u8, primitive.string.value.data);
+        if (value != .string) return self.throwError(.type_error, "monthCode must be a string", .{});
+        break :blk try self.gc_allocator.dupe(u8, value.string.value.data);
     } else try self.toDisplayStringJS(self.gc_allocator, value);
     errdefer self.gc_allocator.free(code);
     // Month-code syntax is checked before later field conversions. Its
