@@ -2,6 +2,248 @@ const std = @import("std");
 const testing = std.testing;
 const zinterpreter = @import("zinterpreter");
 
+// Minimal Test262 error/assertion harness; wrong exception types remain visible
+// in the Zig assertion instead of being accepted as any abrupt completion.
+const newTargetLiteralHarness =
+    \\class Test262Error extends Error {}
+    \\var outcome = "assert.throws was not called";
+    \\var assert = { throws(expected, callback) {
+    \\  try { callback(); outcome = "no exception"; }
+    \\  catch (error) { outcome = error.constructor === expected ? "pass" : error.name; }
+    \\}};
+;
+
+test "newTarget Duration get-prototype-from-constructor-throws literal" {
+    // test/built-ins/Temporal/Duration/get-prototype-from-constructor-throws.js
+    const actual = try observedOptions(newTargetLiteralHarness ++
+        \\var newTarget = Object.defineProperty(function(){}.bind(), "prototype", {
+        \\  get() {
+        \\    throw new Test262Error();
+        \\  }
+        \\});
+        \\assert.throws(Test262Error, function() {
+        \\  Reflect.construct(Temporal.Duration, [], newTarget)
+        \\});
+        \\outcome;
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("pass", actual);
+}
+
+test "newTarget Instant get-prototype-from-constructor-throws literal" {
+    // test/built-ins/Temporal/Instant/get-prototype-from-constructor-throws.js
+    const actual = try observedOptions(newTargetLiteralHarness ++
+        \\var newTarget = Object.defineProperty(function(){}.bind(), "prototype", {
+        \\  get() {
+        \\    throw new Test262Error();
+        \\  }
+        \\});
+        \\assert.throws(Test262Error, function() {
+        \\  Reflect.construct(Temporal.Instant, [0n], newTarget)
+        \\});
+        \\outcome;
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("pass", actual);
+}
+
+test "newTarget PlainDate get-prototype-from-constructor-throws literal" {
+    // test/built-ins/Temporal/PlainDate/get-prototype-from-constructor-throws.js
+    const actual = try observedOptions(newTargetLiteralHarness ++
+        \\var newTarget = Object.defineProperty(function(){}.bind(), "prototype", {
+        \\  get() {
+        \\    throw new Test262Error();
+        \\  }
+        \\});
+        \\assert.throws(Test262Error, function() {
+        \\  Reflect.construct(Temporal.PlainDate, [1970, 1, 1], newTarget)
+        \\});
+        \\outcome;
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("pass", actual);
+}
+
+test "newTarget PlainDateTime get-prototype-from-constructor-throws literal" {
+    // test/built-ins/Temporal/PlainDateTime/get-prototype-from-constructor-throws.js
+    const actual = try observedOptions(newTargetLiteralHarness ++
+        \\var newTarget = Object.defineProperty(function(){}.bind(), "prototype", {
+        \\  get() {
+        \\    throw new Test262Error();
+        \\  }
+        \\});
+        \\assert.throws(Test262Error, function() {
+        \\  Reflect.construct(Temporal.PlainDateTime, [1970, 1, 1], newTarget)
+        \\});
+        \\outcome;
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("pass", actual);
+}
+
+test "newTarget PlainMonthDay get-prototype-from-constructor-throws literal" {
+    // test/built-ins/Temporal/PlainMonthDay/get-prototype-from-constructor-throws.js
+    const actual = try observedOptions(newTargetLiteralHarness ++
+        \\var newTarget = Object.defineProperty(function(){}.bind(), "prototype", {
+        \\  get() {
+        \\    throw new Test262Error();
+        \\  }
+        \\});
+        \\assert.throws(Test262Error, function() {
+        \\  Reflect.construct(Temporal.PlainMonthDay, [1, 1], newTarget)
+        \\});
+        \\outcome;
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("pass", actual);
+}
+
+test "newTarget PlainTime get-prototype-from-constructor-throws literal" {
+    // test/built-ins/Temporal/PlainTime/get-prototype-from-constructor-throws.js
+    const actual = try observedOptions(newTargetLiteralHarness ++
+        \\var newTarget = Object.defineProperty(function(){}.bind(), "prototype", {
+        \\  get() {
+        \\    throw new Test262Error();
+        \\  }
+        \\});
+        \\assert.throws(Test262Error, function() {
+        \\  Reflect.construct(Temporal.PlainTime, [], newTarget)
+        \\});
+        \\outcome;
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("pass", actual);
+}
+
+test "newTarget PlainYearMonth get-prototype-from-constructor-throws literal" {
+    // test/built-ins/Temporal/PlainYearMonth/get-prototype-from-constructor-throws.js
+    const actual = try observedOptions(newTargetLiteralHarness ++
+        \\var newTarget = Object.defineProperty(function(){}.bind(), "prototype", {
+        \\  get() {
+        \\    throw new Test262Error();
+        \\  }
+        \\});
+        \\assert.throws(Test262Error, function() {
+        \\  Reflect.construct(Temporal.PlainYearMonth, [1, 1], newTarget)
+        \\});
+        \\outcome;
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("pass", actual);
+}
+
+test "newTarget ZonedDateTime get-prototype-from-constructor-throws literal" {
+    // test/built-ins/Temporal/ZonedDateTime/get-prototype-from-constructor-throws.js
+    const actual = try observedOptions(newTargetLiteralHarness ++
+        \\var newTarget = Object.defineProperty(function(){}.bind(), "prototype", {
+        \\  get() {
+        \\    throw new Test262Error();
+        \\  }
+        \\});
+        \\assert.throws(Test262Error, function() {
+        \\  Reflect.construct(Temporal.ZonedDateTime, [0n, "UTC"], newTarget)
+        \\});
+        \\outcome;
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("pass", actual);
+}
+
+test "newTarget getter preserves sentinel identity and is read once" {
+    const actual = try observedOptions(
+        \\let diagnostic; try {
+        \\let sentinel = {}; let reads = 0;
+        \\let nt = Object.defineProperty(function(){}.bind(), "prototype", {get() { reads++; throw sentinel; }});
+        \\let caught; try { Reflect.construct(Temporal.Duration, [], nt); } catch(e) { caught = e; }
+        \\diagnostic = (caught === sentinel && reads === 1) ? "pass" : "wrong exception or getter count";
+        \\} catch(e) { diagnostic = e.name; }
+        \\diagnostic;
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("pass", actual);
+}
+
+test "newTarget bound constructibility follows its target" {
+    const actual = try observedOptions(
+        \\let diagnostic; try {
+        \\function C() { this.answer = 42; }
+        \\let Bound = C.bind(null); let arrow = (() => 1).bind(null);
+        \\let instance = new Bound(); let rejected = false;
+        \\try { Reflect.construct(function(){}, [], arrow); } catch(e) { rejected = e instanceof TypeError; }
+        \\diagnostic = (instance.answer === 42 && rejected) ? "pass" : "wrong constructibility";
+        \\} catch(e) { diagnostic = e.name; }
+        \\diagnostic;
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("pass", actual);
+}
+
+test "newTarget bound construction prepends arguments and ignores bound this" {
+    const actual = try observedOptions(
+        \\let diagnostic; try {
+        \\let boundThis = { touched: false };
+        \\function C(a, b) { this.touched = true; this.sum = a + b; }
+        \\let Bound = C.bind(boundThis, 20); let instance = new Bound(22);
+        \\diagnostic = (instance.sum === 42 && instance.touched && !boundThis.touched && Object.getPrototypeOf(instance) === C.prototype) ? "pass" : "wrong arguments or this";
+        \\} catch(e) { diagnostic = e.name; }
+        \\diagnostic;
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("pass", actual);
+}
+
+test "newTarget nested bound construction preserves a distinct newTarget" {
+    const actual = try observedOptions(
+        \\let diagnostic; try {
+        \\function C(a,b,c) { this.values = [a,b,c].join(','); }
+        \\function Other() {}
+        \\let B = C.bind(null, 1); let D = B.bind(null, 2);
+        \\let instance = Reflect.construct(D, [3], Other);
+        \\diagnostic = (instance.values === "1,2,3" && Object.getPrototypeOf(instance) === Other.prototype) ? "pass" : "wrong nested construction";
+        \\} catch(e) { diagnostic = e.name; }
+        \\diagnostic;
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("pass", actual);
+}
+
+test "newTarget bound throwing constructor cleans arguments and restores construction" {
+    const actual = try observedOptions(
+        \\let diagnostic; try {
+        \\let sentinel = {}; let seen = [];
+        \\function C(a,b) { seen.push(a+b); throw sentinel; }
+        \\let Bound = C.bind(null, 20); let correct = true;
+        \\for(let i=0;i<3;i++) { try { new Bound(22); correct = false; } catch(e) { if(e !== sentinel) correct = false; } }
+        \\function Good(a,b) { this.sum = a+b; }
+        \\let GoodBound = Good.bind(null, 20); let result = new GoodBound(22);
+        \\diagnostic = (correct && seen.join(',') === "42,42,42" && result.sum === 42) ? "pass" : "wrong cleanup or exception";
+        \\} catch(e) { diagnostic = e.name; }
+        \\diagnostic;
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("pass", actual);
+}
+
+test "newTarget nested throwing prototype getter restores outer construction context" {
+    const actual = try observedOptions(
+        \\let diagnostic; try {
+        \\let sentinel = {}; let reads = 0;
+        \\let nt = Object.defineProperty(function(){}.bind(), "prototype", {get() {
+        \\  reads++; new Temporal.PlainDate(2000, 1, 1); throw sentinel;
+        \\}});
+        \\function Outer() {
+        \\  let caught; try { Reflect.construct(Temporal.Duration, [], nt); } catch(e) { caught = e; }
+        \\  this.correct = caught === sentinel;
+        \\}
+        \\let instance = new Outer(); let later = new Temporal.Duration();
+        \\diagnostic = (instance.correct && reads === 1 && Object.getPrototypeOf(instance) === Outer.prototype && Object.getPrototypeOf(later) === Temporal.Duration.prototype) ? "pass" : "wrong context restoration";
+        \\} catch(e) { diagnostic = e.name; }
+        \\diagnostic;
+    );
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings("pass", actual);
+}
+
 fn observedOptions(entries: []const u8) ![]const u8 {
     var output = std.Io.Writer.Allocating.init(testing.allocator);
     defer output.deinit();
