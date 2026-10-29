@@ -491,7 +491,12 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
             return self.throwError(.type_error, "Class extends value {s} is not a constructor or null", .{shown});
         }
         super_ctor = sc;
-        super_proto = try self.functionPrototype(sc);
+        const parent_proto = try self.getProperty(sc, "prototype");
+        defer parent_proto.deinit();
+        if (parent_proto != .object) {
+            return self.throwError(.type_error, "Class extends value does not have a valid prototype property", .{});
+        }
+        super_proto = parent_proto;
     }
 
     // Named classes can self-reference inside method bodies (same
