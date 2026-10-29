@@ -1872,10 +1872,7 @@ fn readDurationCompareOptions(self: *Interpreter, options: JSValue) anyerror!?zt
         return .{ .plainDateTime = try coercePlainDateTime(self, v, .constrain) };
     }
     if (v == .object or v == .proxy) {
-        const time_zone = try self.getProperty(v, "timeZone");
-        defer time_zone.deinit();
-        if (time_zone != .undefined) return .{ .zonedDateTime = try relativeToZonedDateTimeFromObservedBag(self, v) };
-        return .{ .plainDateTime = try plainDateTimeFromObservedBag(self, v, JSValue.UNDEFINED, false) };
+        return try relativeToZonedDateTimeFromObservedBag(self, v);
     }
     return .{ .plainDateTime = try coercePlainDateTime(self, v, .constrain) };
 }
@@ -2020,13 +2017,10 @@ fn readRelativeTo(self: *Interpreter, options: JSValue) anyerror!?ztemporal.Dura
             return .{ .zonedDateTime = try coerceZonedDateTime(self, self.gc_allocator, v, .constrain, .compatible, .reject) };
         return .{ .plainDateTime = try coercePlainDateTime(self, v, .constrain) };
     }
-    // A property bag with timeZone denotes a ZonedDateTime. Route it through
-    // the shared coercer so the timeZone type and identifier are validated.
+    // The shared selector observes a property bag incrementally, then chooses
+    // PlainDateTime or ZonedDateTime only after reading timeZone and year.
     if (v == .object) {
-        const time_zone = try self.getProperty(v, "timeZone");
-        defer time_zone.deinit();
-        if (time_zone != .undefined) return .{ .zonedDateTime = try relativeToZonedDateTimeFromObservedBag(self, v) };
-        return .{ .plainDateTime = try plainDateTimeFromObservedBag(self, v, JSValue.UNDEFINED, false) };
+        return try relativeToZonedDateTimeFromObservedBag(self, v);
     }
     // temporal-argument-coercion.md: `relativeTo` accepts a string or
     // property-bag too (real spec's ToRelativeTemporalObject), not
@@ -2045,7 +2039,7 @@ fn relativeToHasTimeZoneAnnotation(text: []const u8) bool {
     return std.mem.indexOfScalar(u8, text[open + 1 .. close], '=') == null;
 }
 
-fn relativeToZonedDateTimeFromObservedBag(self: *Interpreter, fields: JSValue) anyerror!ztemporal.ZonedDateTime {
+fn relativeToZonedDateTimeFromObservedBag(self: *Interpreter, fields: JSValue) anyerror!ztemporal.Duration.RelativeTo {
     const calendar_value = try self.getProperty(fields, "calendar");
     defer calendar_value.deinit();
     const calendar = try calendarFromValue(self, calendar_value);
@@ -2067,10 +2061,26 @@ fn relativeToZonedDateTimeFromObservedBag(self: *Interpreter, fields: JSValue) a
     const second = try observedTemporalIntegerField(self, fields, "second");
     const time_zone_value = try self.getProperty(fields, "timeZone");
     defer time_zone_value.deinit();
+    const year = try observedTemporalIntegerField(self, fields, "year");
+    if (time_zone_value == .undefined) {
+        const plain_date_time = ztemporal.PlainDateTime.from(.{ .fields = .{
+            .year = year orelse return self.throwError(.type_error, "year is required", .{}),
+            .month = month,
+            .monthCode = month_code,
+            .day = day orelse return self.throwError(.type_error, "day is required", .{}),
+            .calendar = calendar,
+            .hour = hour orelse 0,
+            .minute = minute orelse 0,
+            .second = second orelse 0,
+            .millisecond = millisecond orelse 0,
+            .microsecond = microsecond orelse 0,
+            .nanosecond = nanosecond orelse 0,
+        } }, .{ .overflow = .constrain }) catch |e| return temporalErr(self, e);
+        return .{ .plainDateTime = plain_date_time };
+    }
     const time_zone = try surfaceZoneArgument(self, time_zone_value);
     defer self.gc_allocator.free(time_zone);
-    const year = try observedTemporalIntegerField(self, fields, "year");
-    return ztemporal.ZonedDateTime.from(self.gc_allocator, ioHandle(), .{ .fields = .{
+    const zoned_date_time = ztemporal.ZonedDateTime.from(self.gc_allocator, ioHandle(), .{ .fields = .{
         .year = year,
         .month = month,
         .monthCode = month_code,
@@ -2085,6 +2095,7 @@ fn relativeToZonedDateTimeFromObservedBag(self: *Interpreter, fields: JSValue) a
         .timeZone = time_zone,
         .offset = offset,
     } }, .{ .overflow = .constrain, .offset = .reject, .disambiguation = .compatible }) catch |e| temporalErr(self, e);
+    return .{ .zonedDateTime = try zoned_date_time };
 }
 
 const DurationRoundRaw = struct {
