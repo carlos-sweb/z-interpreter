@@ -3788,8 +3788,34 @@ fn surfaceZdtArithmetic(comptime subtract: bool) NativeFn {
 fn surfaceZoned(self: *Interpreter, allocator: Allocator, item: JSValue) anyerror!ztemporal.ZonedDateTime {
     if (item == .temporal and item.temporal.value == .zoned_date_time) return item.temporal.value.zoned_date_time;
     if (item == .string) return ztemporal.ZonedDateTime.from(allocator, ioHandle(), .{ .string = item.string.value.data }, .{}) catch |e| temporalErr(self, e);
-    var fields = try surfaceFields(self, item, ztemporal.ZonedDateTime.Fields);
+    try surfaceObject(self, item);
+    var fields: ztemporal.ZonedDateTime.Fields = .{};
     defer freeSurfaceFields(self, fields);
+    fields.calendar = try surfaceString(self, item, "calendar");
+    fields.day = try surfaceI32(self, item, "day");
+    fields.hour = try surfaceI32(self, item, "hour");
+    fields.microsecond = try surfaceI32(self, item, "microsecond");
+    fields.millisecond = try surfaceI32(self, item, "millisecond");
+    fields.minute = try surfaceI32(self, item, "minute");
+    fields.month = try surfaceI32(self, item, "month");
+    fields.monthCode = try surfaceString(self, item, "monthCode");
+    fields.nanosecond = try surfaceI32(self, item, "nanosecond");
+    const offset_value = try self.getProperty(item, "offset");
+    defer offset_value.deinit();
+    fields.offset = switch (offset_value) {
+        .undefined => null,
+        .string => try self.gc_allocator.dupe(u8, offset_value.string.value.data),
+        .object, .proxy => blk: {
+            const primitive = try self.toPrimitive(offset_value, .string);
+            defer primitive.deinit();
+            if (primitive != .string) return self.throwError(.type_error, "Temporal offset must be a string", .{});
+            break :blk try self.gc_allocator.dupe(u8, primitive.string.value.data);
+        },
+        else => return self.throwError(.type_error, "Temporal offset must be a string", .{}),
+    };
+    fields.second = try surfaceI32(self, item, "second");
+    fields.timeZone = try surfaceString(self, item, "timeZone");
+    fields.year = try surfaceI32(self, item, "year");
     if (fields.calendar) |text| {
         const identifier = try surfaceCalendar(self, text);
         _ = ztemporal.PlainDate.init(1970, 1, 1, identifier) catch |e| return temporalErr(self, e);
