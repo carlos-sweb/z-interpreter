@@ -77,8 +77,17 @@ fn boundCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     return bc.target.function.value.call(bc.target.function.value.ctx, allocator, bc.bound_this, total);
 }
 
-/// Narrowed [[Bind]]: the bound function is NOT constructable (real
-/// bound functions are; `new (f.bind(x))()` is a documented gap).
+/// Internal bound-function identity used by [[Construct]] dispatch. This is
+/// deliberately not a JS-visible marker: only our own `boundCall` callback
+/// may expose a `BoundCtx` through this helper.
+pub fn boundContext(value: JSValue) ?*BoundCtx {
+    if (value == .function and value.function.value.call == boundCall) {
+        return @ptrCast(@alignCast(value.function.value.ctx));
+    }
+    return null;
+}
+
+/// [[Bind]] preserves [[Construct]] exactly when the target has it.
 fn fnBind(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const target = try requireFunction(ctx, this_value, "bind");
     const bc = try allocator.create(BoundCtx);
@@ -109,6 +118,7 @@ fn fnBind(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
         .name = name,
         .arity = bound_arity,
         .call = boundCall,
+        .constructable = interp(ctx).isConstructor(target),
     });
 }
 

@@ -138,7 +138,15 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             // hasOwnProperty(fn, "prototype") flip to true right after
             // the first plain read, since that check ORs in
             // `prototype != null`.
+            // An own, user-defined `prototype` (including an accessor) must
+            // take precedence over Callable.prototype. This keeps
+            // GetPrototypeFromConstructor observable.
             if (std.mem.eql(u8, key, "prototype")) {
+                if (box.value.statics) |bag| {
+                    if (bag.object.value.has(key)) {
+                        if (try self.getFromProto(obj, bag, key)) |v| break :blk v;
+                    }
+                }
                 if (box.value.prototype) |p| break :blk p.retain();
                 if (!box.value.constructable) break :blk JSValue.UNDEFINED;
                 break :blk (try self.functionPrototype(obj)).retain();

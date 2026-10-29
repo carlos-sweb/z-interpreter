@@ -25,6 +25,7 @@ const zstring = @import("zstring");
 
 const coercion = @import("coercion.zig");
 const builtins = @import("builtins.zig");
+const function_builtins = @import("function_builtins.zig");
 
 const interpreter_mod = @import("interpreter.zig");
 const Interpreter = interpreter_mod.Interpreter;
@@ -1032,6 +1033,18 @@ pub fn constructValueWithNewTarget(self: *Interpreter, target: JSValue, args: []
     }
     if (target != .function or !target.function.value.constructable) {
         return self.throwError(.type_error, "{s} is not a constructor", .{callee_name});
+    }
+
+    // BoundFunctionCreate forwards [[Construct]] to its target before
+    // GetPrototypeFromConstructor observes newTarget.prototype. The bound
+    // this value is deliberately ignored for construction.
+    if (function_builtins.boundContext(target)) |bound| {
+        const combined = try self.gc_allocator.alloc(JSValue, bound.pre_args.len + args.len);
+        defer self.gc_allocator.free(combined);
+        @memcpy(combined[0..bound.pre_args.len], bound.pre_args);
+        @memcpy(combined[bound.pre_args.len..], args);
+        const effective_new_target = if (zvalue.equality.strictEquals(target, new_target)) bound.target else new_target;
+        return self.constructValueWithNewTarget(bound.target, combined, effective_new_target, callee_name);
     }
 
     // GetPrototypeFromConstructor observes newTarget.prototype exactly once.
