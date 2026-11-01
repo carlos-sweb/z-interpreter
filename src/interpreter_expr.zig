@@ -218,7 +218,7 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
             const take_right = switch (l.op) {
                 .and_op => coercion.isTruthy(left),
                 .or_op => !coercion.isTruthy(left),
-                .nullish => left == .@"undefined" or left == .@"null",
+                .nullish => left == .undefined or left == .null,
             };
             if (!take_right) return left;
             left.deinit();
@@ -267,7 +267,7 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
             // Owned (evalExpression's); getProperty/privateGet only borrow
             // it and hand back an owned result.
             defer obj.deinit();
-            if (m.optional and (obj == .@"undefined" or obj == .@"null")) return JSValue.UNDEFINED;
+            if (m.optional and (obj == .undefined or obj == .null)) return JSValue.UNDEFINED;
             if (privateMemberName(m)) |pn| return self.privateGet(env, obj, pn);
             const pk = try self.memberKeyString(env, m);
             defer pk.free(self.gc_allocator);
@@ -400,7 +400,6 @@ pub fn propertyKeyString(self: *Interpreter, env: *Environment, computed: bool, 
     };
 }
 
-
 /// ECMA-262 13.10.2 InstanceofOperator, narrowed (no
 /// Symbol.hasInstance): walk the LHS object's prototype chain looking
 /// for the RHS function's prototype object, by pointer identity.
@@ -487,7 +486,7 @@ pub fn evalIn(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
         // `key` is the raw `\x00S<ptr>` encoding when `l` is a symbol --
         // display the real "Symbol(desc)" form in the message instead
         // of leaking that internal encoding to user-visible text.
-        .@"undefined", .@"null", .boolean, .number, .string => if (l == .symbol)
+        .undefined, .null, .boolean, .number, .string => if (l == .symbol)
             self.throwError(.type_error, "Cannot use 'in' operator to search for 'Symbol({s})'", .{l.symbol.value.description orelse ""})
         else
             self.throwError(.type_error, "Cannot use 'in' operator to search for '{s}'", .{key}),
@@ -515,7 +514,6 @@ pub fn evalIn(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
         .function, .symbol, .map, .set, .@"error", .date, .promise, .array_buffer, .data_view, .typed_array => self.throwError(.type_error, "The 'in' operator on a {s} is not supported yet", .{@tagName(r)}),
     };
 }
-
 
 pub fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSValue {
     switch (u.op) {
@@ -665,7 +663,7 @@ pub fn evalAssignment(self: *Interpreter, env: *Environment, a: anytype) anyerro
             const should_assign = switch (a.op) {
                 .logical_and => coercion.isTruthy(current),
                 .logical_or => !coercion.isTruthy(current),
-                .nullish => current == .@"undefined" or current == .@"null",
+                .nullish => current == .undefined or current == .null,
                 else => unreachable,
             };
             if (!should_assign) return current;
@@ -703,6 +701,8 @@ fn numericBinaryFastPath(op: zparser.BinaryOp, left: JSValue, right: JSValue) ?J
         .gt => JSValue.fromBool(l > r),
         .le => JSValue.fromBool(l <= r),
         .ge => JSValue.fromBool(l >= r),
+        .eq, .eqeqeq => JSValue.fromBool(l == r),
+        .ne, .noteqeq => JSValue.fromBool(l != r),
         else => null,
     };
 }
@@ -864,7 +864,7 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
     if (c.callee.data == .member) {
         const m = c.callee.data.member;
         const obj = try self.evalExpression(env, m.object);
-        if (m.optional and (obj == .@"undefined" or obj == .@"null")) {
+        if (m.optional and (obj == .undefined or obj == .null)) {
             obj.deinit();
             return JSValue.UNDEFINED;
         }
@@ -882,7 +882,7 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
         callee_val = try self.evalExpression(env, c.callee);
     }
     defer callee_val.deinit();
-    if (c.optional and (callee_val == .@"undefined" or callee_val == .@"null")) return JSValue.UNDEFINED;
+    if (c.optional and (callee_val == .undefined or callee_val == .null)) return JSValue.UNDEFINED;
     // Best-effort callee name for the "is not a function" message --
     // no expression printer, just the two cheap cases. Needed both
     // for the immediate check below AND (a no-trap proxy chain whose
@@ -1106,4 +1106,3 @@ fn compoundToBinary(op: zparser.AssignOp) zparser.BinaryOp {
         .assign, .logical_and, .logical_or, .nullish => unreachable, // handled separately by evalAssignment
     };
 }
-
