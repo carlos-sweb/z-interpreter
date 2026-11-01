@@ -231,6 +231,55 @@ fn statementUsesArguments(statement: *const zstatements.Statement) bool {
     };
 }
 
+fn functionMayEscape(fnode: *const zfunctions.FunctionNode) bool {
+    if (fnode.is_generator or fnode.is_async) return true;
+    if (fnode.params.rest != null) return true;
+    for (fnode.params.items) |param| {
+        if (param.default != null) return true;
+        if (param.pattern.* != .identifier) return true;
+    }
+    return switch (fnode.body) {
+        .block => |body| statementMayEscape(body),
+        .expression => |body| nodeMayEscape(body),
+    };
+}
+
+fn nodeMayEscape(node: *const zparser.Node) bool {
+    return switch (node.data) {
+        .function_like, .class_like, .yield_expr, .await_expr => true,
+        .identifier => |name| std.mem.eql(u8, name, "eval") or std.mem.eql(u8, name, "arguments"),
+        .unary => |u| nodeMayEscape(u.operand),
+        .binary => |b| nodeMayEscape(b.left) or nodeMayEscape(b.right),
+        .logical => |l| nodeMayEscape(l.left) or nodeMayEscape(l.right),
+        .assignment => |a| nodeMayEscape(a.target) or nodeMayEscape(a.value),
+        .conditional => |c| nodeMayEscape(c.test_expr) or nodeMayEscape(c.consequent) or nodeMayEscape(c.alternate),
+        .paren, .spread => |op| nodeMayEscape(op),
+        .call => |c| blk: {
+            if (nodeMayEscape(c.callee)) break :blk true;
+            for (c.args) |arg| if (nodeMayEscape(arg)) break :blk true;
+            break :blk false;
+        },
+        .member => |m| nodeMayEscape(m.object) or (m.computed and nodeMayEscape(m.property)),
+        else => false,
+    };
+}
+
+fn statementMayEscape(stmt: *const zstatements.Statement) bool {
+    return switch (stmt.data) {
+        .function_declaration, .class_declaration => true,
+        .expr_stmt, .throw_stmt => |e| nodeMayEscape(e),
+        .return_stmt => |v| if (v) |e| nodeMayEscape(e) else false,
+        .block => |stmts| blk: {
+            for (stmts) |s| if (statementMayEscape(s)) break :blk true;
+            break :blk false;
+        },
+        .if_stmt => |s| nodeMayEscape(s.test_expr) or statementMayEscape(s.consequent) or (s.alternate != null and statementMayEscape(s.alternate.?)),
+        .while_stmt => |s| nodeMayEscape(s.test_expr) or statementMayEscape(s.body),
+        .do_while => |s| statementMayEscape(s.body) or nodeMayEscape(s.test_expr),
+        else => true,
+    };
+}
+
 pub fn makeClosure(self: *Interpreter, env: *Environment, fnode: *zfunctions.FunctionNode) anyerror!JSValue {
     const arena = self.gc_allocator;
     // A named function expression's own name is visible inside its own
@@ -242,6 +291,8 @@ pub fn makeClosure(self: *Interpreter, env: *Environment, fnode: *zfunctions.Fun
         else => null,
     };
     const closure_env = if (self_name != null) try self.gcChildEnv(env) else env;
+    closure_env.escaping = true;
+    try self.gcTrackEnvironment(closure_env);
 
     const ctx = try arena.create(ClosureCtx);
     ctx.* = .{ .interp = self, .function_node = fnode, .closure_env = closure_env };
@@ -710,7 +761,15 @@ pub fn invokeFunctionNode(
             if (vm_result) |value| return value;
         }
     }
-    const call_env = try self.gcChildEnv(closure_env);
+    const escaping = functionMayEscape(fnode);
+    const call_env = if (escaping)
+        try self.gcChildEnv(closure_env)
+    else
+        try closure_env.child(self.gc_allocator);
+    call_env.escaping = escaping;
+    defer if (!call_env.escaping) {
+        call_env.destroy(self.gc_allocator);
+    };
     // Etapa 2 de uniform-ownership-contract.md: estos 4 campos son
     // JSValue planos sin mecanismo de liberación propio (viven hasta
     // que el Environment entero se destruye en el teardown del

@@ -68,6 +68,23 @@ pub const Environment = struct {
     /// class identity. `this.#x` resolves the private name against it.
     /// Chain-walked like `this`/super, so arrows in methods inherit it.
     private_ctx: ?*anyopaque = null,
+    escaping: bool = false,
+
+    pub fn destroy(self: *Environment, allocator: Allocator) void {
+        for (self.bindings.items) |binding| binding.value.deinit();
+        self.bindings.deinit(allocator);
+        if (self.lazy_arguments) |args| {
+            for (args) |arg| arg.deinit();
+            allocator.free(args);
+        }
+        if (self.this_value) |v| v.deinit();
+        if (self.super_proto) |v| v.deinit();
+        if (self.super_ctor) |v| v.deinit();
+        if (self.home_object) |v| v.deinit();
+        self.tdz.deinit(allocator);
+        self.consts.deinit(allocator);
+        allocator.destroy(self);
+    }
 
     pub fn child(self: *Environment, arena: Allocator) !*Environment {
         const env = try arena.create(Environment);

@@ -158,16 +158,15 @@ test "concat retains each element once per occurrence in the merged result" {
 // initializer's result on top of the binding's own reference.
 
 test "call arguments are released after a JS function call" {
-    // What remains is the callee's own: each parameter binding and each
-    // `arguments` element holds one reference, and call environments are
-    // not freed yet (a separate, known gap) -- f(probe, probe) keeps 2 + 2,
-    // f(probe) keeps 1 + 1. The caller's own references (3 here) are gone.
+    // call environments are freed on return for non-escaping functions; each
+    // parameter and lazy arguments element contributes a temporary ref released
+    // at return. Baseline 2 (binding + completion).
     try expectObjectRefcount(
         \\let probe = {};
         \\function f(a, b) { return 0; }
         \\f(probe, probe); f(probe);
         \\probe;
-    , 8);
+    , 2);
 }
 
 test "call arguments are released after a native call and a constructor" {
@@ -180,9 +179,9 @@ test "call arguments are released after a native call and a constructor" {
 }
 
 test "a returned argument is a new reference, the argument itself is released" {
-    // count(probe, probe) keeps 2 parameters + 2 `arguments` elements and
-    // keep(probe) 1 + 1 (call environments are not freed yet); `back`
-    // holds the returned reference: 2 + 4 + 2 + 1.
+    // call environments are freed on return for non-escaping functions; each
+    // parameter and lazy arguments element contributes a temporary ref released
+    // at return; `back` holds the returned reference: baseline 2 + 1 (back) = 3.
     try expectObjectRefcount(
         \\let probe = {};
         \\function count(a, b) { return 0; }
@@ -190,7 +189,7 @@ test "a returned argument is a new reference, the argument itself is released" {
         \\count(probe, probe);
         \\const back = keep(probe);
         \\probe;
-    , 9);
+    , 3);
 }
 
 test "spread arguments are released after the call" {

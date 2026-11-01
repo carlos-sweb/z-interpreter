@@ -49,7 +49,13 @@ test "lazy arguments avoid per-callback snapshots under array iteration pressure
     );
     defer result.deinit();
     try std.testing.expect(result == .object);
-    try std.testing.expectEqual(@as(usize, 16), result.object.refCount());
+    // call environments are freed on return for non-escaping functions. The callback
+    // uses `arguments` in its body, so functionMayEscape treats the environment as
+    // escaping and keeps it live (documented gap, to be refined in a later optimization
+    // phase). `arguments` remains lazy — no per-callback snapshots — so the retained
+    // references are only one per invocation on the `value` slot. Total: probe (1) +
+    // array[0] (1) + array[100000] (1) + completion (1) + 4 callback envs (4) = 8.
+    try std.testing.expectEqual(@as(usize, 8), result.object.refCount());
 
     var arrays: usize = 0;
     var nodes = interpreter.gc_registry.iterator();
