@@ -896,8 +896,9 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
         return self.throwError(.type_error, "{s} is not a function", .{callee_name});
     }
 
-    const args = try self.evalArgs(env, c.args);
-    defer freeArgs(self, args);
+    var call_args = try self.evalArgsInline(env, c.args);
+    defer call_args.deinit(self.gc_allocator);
+    const args = call_args.slice();
     // Direct eval: a call written literally as `eval(...)` where `eval`
     // still refers to the intrinsic runs its string argument in the
     // CURRENT scope (always-strict -> a child of it). Any other reference
@@ -938,6 +939,44 @@ pub fn callValue(self: *Interpreter, callee: JSValue, this_value: JSValue, args:
     }
     if (callee != .function) return self.throwError(.type_error, "{s} is not a function", .{callee_name});
     return try callee.function.value.call(callee.function.value.ctx, self.gc_allocator, this_value, args);
+}
+
+pub const CallArgs = struct {
+    inline_buf: [4]JSValue = undefined,
+    heap_slice: ?[]const JSValue = null,
+    len: usize = 0,
+
+    pub fn slice(self: *const CallArgs) []const JSValue {
+        if (self.heap_slice) |hs| return hs;
+        return self.inline_buf[0..self.len];
+    }
+
+    pub fn deinit(self: *CallArgs, allocator: Allocator) void {
+        for (self.slice()) |a| a.deinit();
+        if (self.heap_slice) |hs| allocator.free(hs);
+    }
+};
+
+pub fn evalArgsInline(self: *Interpreter, env: *Environment, arg_nodes: []const *zparser.Node) anyerror!CallArgs {
+    var has_spread = false;
+    for (arg_nodes) |arg_node| {
+        if (arg_node.data == .spread) {
+            has_spread = true;
+            break;
+        }
+    }
+    if (!has_spread and arg_nodes.len <= 4) {
+        var res = CallArgs{ .len = arg_nodes.len };
+        var idx: usize = 0;
+        errdefer for (res.inline_buf[0..idx]) |v| v.deinit();
+        for (arg_nodes) |arg_node| {
+            res.inline_buf[idx] = try self.evalExpression(env, arg_node);
+            idx += 1;
+        }
+        return res;
+    }
+    const heap_slice = try self.evalArgs(env, arg_nodes);
+    return CallArgs{ .heap_slice = heap_slice };
 }
 
 pub fn evalArgs(self: *Interpreter, env: *Environment, arg_nodes: []const *zparser.Node) anyerror![]const JSValue {

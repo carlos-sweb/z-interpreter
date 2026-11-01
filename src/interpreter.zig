@@ -1073,6 +1073,7 @@ pub const Interpreter = struct {
     pub const evalCall = interpreter_expr.evalCall;
     pub const callValue = interpreter_expr.callValue;
     pub const evalArgs = interpreter_expr.evalArgs;
+    pub const evalArgsInline = interpreter_expr.evalArgsInline;
     pub const evalNew = interpreter_expr.evalNew;
     pub const isConstructor = interpreter_expr.isConstructor;
     pub const constructValue = interpreter_expr.constructValue;
