@@ -175,3 +175,25 @@ test "bytecode VM objects, arrays, and property access" {
     // Getter fallback preserves AST evaluation
     try testing.expectEqual(@as(f64, 99), try runNumber("let o = { get val() { return 99; } }; o.val", true));
 }
+
+test "bytecode VM closures" {
+    const source = "let counter = 0; function inc() { counter++; return counter; } inc(); inc();";
+    try testing.expectEqual(@as(f64, 2), try runNumber(source, true));
+}
+
+test "bytecode VM for of iteration" {
+    const source = "let sum = 0; for (const x of [1, 2, 3]) sum += x; sum;";
+    try testing.expectEqual(@as(f64, 6), try runNumber(source, true));
+}
+
+test "bytecode VM try catch throw" {
+    var output = std.Io.Writer.Allocating.init(testing.allocator);
+    defer output.deinit();
+    var interpreter = try zinterpreter.Interpreter.init(testing.allocator, &output.writer);
+    defer interpreter.deinit();
+    interpreter.compile_options.use_bytecode_vm = true;
+    const res = try interpreter.run("let r; try { throw 'err'; } catch(e) { r = e; } r;");
+    defer res.deinit();
+    try testing.expect(res == .string);
+    try testing.expectEqualStrings("err", res.string.value.data);
+}

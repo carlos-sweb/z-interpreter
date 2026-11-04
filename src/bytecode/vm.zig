@@ -13,6 +13,12 @@ const ClosureCtx = interpreter_mod.ClosureCtx;
 pub const MAX_FRAMES = 1024;
 pub const MAX_REGISTERS = 8192;
 
+pub const CatchHandler = struct {
+    target_pc: usize,
+    error_reg: u8,
+    reg_top: usize,
+};
+
 pub const CallFrame = struct {
     block: *const codeblock.CodeBlock,
     pc: usize,
@@ -20,11 +26,15 @@ pub const CallFrame = struct {
     this_value: JSValue,
     closure_env: ?*Environment,
     return_reg: u8,
+    interp: ?*interpreter_mod.Interpreter = null,
+    catch_stack: [8]CatchHandler = undefined,
+    catch_count: usize = 0,
 };
 
 const BytecodeTarget = struct {
     block: *const codeblock.CodeBlock,
     closure_env: ?*Environment,
+    interp: ?*interpreter_mod.Interpreter = null,
 };
 
 fn getBytecodeTarget(callee: JSValue) ?BytecodeTarget {
@@ -37,6 +47,7 @@ fn getBytecodeTarget(callee: JSValue) ?BytecodeTarget {
     return .{
         .block = &cb.block,
         .closure_env = cc.closure_env,
+        .interp = cc.interp,
     };
 }
 
@@ -199,7 +210,7 @@ fn setElem(allocator: Allocator, obj: JSValue, key_val: JSValue, val: JSValue) !
 /// Executes a CodeBlock without consulting the AST. The caller owns the
 /// returned value. Every register owns its value for the duration of the
 /// call, including values copied from arguments and locals.
-pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_env: ?*Environment, args: []const JSValue) !JSValue {
+pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_env: ?*Environment, args: []const JSValue, interp: ?*interpreter_mod.Interpreter) !JSValue {
     var frames: [MAX_FRAMES]CallFrame = undefined;
     var frame_count: usize = 0;
     var registers: [MAX_REGISTERS]JSValue = @splat(JSValue.UNDEFINED);
@@ -223,6 +234,8 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
         .this_value = JSValue.UNDEFINED,
         .closure_env = closure_env,
         .return_reg = 0,
+        .interp = interp,
+        .catch_count = 0,
     };
     frame_count = 1;
 
@@ -267,6 +280,10 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
             .move, .load_local => try setRegister(frame_regs, op.a, (try getRegister(frame_regs, op.b)).retain()),
             .store_local => try setRegister(frame_regs, op.a, (try getRegister(frame_regs, op.b)).retain()),
             .load_global => try setRegister(frame_regs, op.a, try loadGlobal(frame.block, frame.closure_env, op.b)),
+            .store_global => {
+                const val = try getRegister(frame_regs, op.b);
+                try storeGlobal(allocator, frame.block, frame.closure_env, op.a, val);
+            },
             .add => try addOp(frame_regs, allocator, op),
             .add_num => try arithmetic(frame_regs, op, .add),
             .sub_num => try arithmetic(frame_regs, op, .sub),
@@ -323,6 +340,8 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                         .this_value = JSValue.UNDEFINED,
                         .closure_env = target.closure_env,
                         .return_reg = op.a,
+                        .interp = target.interp,
+                        .catch_count = 0,
                     };
                     frame_count += 1;
                     reg_top = new_reg_top;
@@ -353,6 +372,92 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                 const caller_frame = &frames[frame_count - 1];
                 const caller_regs = registers[caller_frame.reg_base .. caller_frame.reg_base + caller_frame.block.register_count];
                 try setRegister(caller_regs, frame.return_reg, JSValue.UNDEFINED);
+            },
+            .make_closure => {
+                const vm_interp = frame.interp orelse return error.UnsupportedOpcode;
+                const env = frame.closure_env orelse return error.UnsupportedOpcode;
+                if (op.b >= frame.block.constants.len) return error.InvalidConstant;
+                const fnode = switch (frame.block.constants[op.b]) {
+                    .function_node => |fn_node| fn_node,
+                    else => return error.InvalidConstant,
+                };
+                const closure = try interpreter_class.makeClosure(vm_interp, env, fnode);
+                try setRegister(frame_regs, op.a, closure);
+            },
+            .iter_init => {
+                const iterable = try getRegister(frame_regs, op.b);
+                if (iterable != .array and iterable != .string) return error.UnsupportedOpcode;
+                const it = try JSValue.newArray(allocator);
+                _ = try it.array.value.push(iterable.retain());
+                _ = try it.array.value.push(JSValue.fromNumber(0));
+                try setRegister(frame_regs, op.a, it);
+            },
+            .iter_next => {
+                const it = try getRegister(frame_regs, op.c);
+                if (it != .array or it.array.value.length() < 2) return error.UnsupportedOpcode;
+                const target = it.array.value.get(0);
+                const idx_val = it.array.value.get(1);
+                if (idx_val != .number) return error.UnsupportedOpcode;
+                const idx: usize = @intFromFloat(idx_val.number);
+                if (target == .array) {
+                    if (idx < target.array.value.length()) {
+                        const val = target.array.value.get(idx).retain();
+                        it.array.value.toSliceMut()[1] = JSValue.fromNumber(@floatFromInt(idx + 1));
+                        try setRegister(frame_regs, op.a, val);
+                        try setRegister(frame_regs, op.b, JSValue.fromBool(false));
+                    } else {
+                        try setRegister(frame_regs, op.a, JSValue.UNDEFINED);
+                        try setRegister(frame_regs, op.b, JSValue.fromBool(true));
+                    }
+                } else if (target == .string) {
+                    if (idx < target.string.value.data.len) {
+                        const ch = try JSValue.newString(allocator, target.string.value.data[idx .. idx + 1]);
+                        it.array.value.toSliceMut()[1] = JSValue.fromNumber(@floatFromInt(idx + 1));
+                        try setRegister(frame_regs, op.a, ch);
+                        try setRegister(frame_regs, op.b, JSValue.fromBool(false));
+                    } else {
+                        try setRegister(frame_regs, op.a, JSValue.UNDEFINED);
+                        try setRegister(frame_regs, op.b, JSValue.fromBool(true));
+                    }
+                } else return error.UnsupportedOpcode;
+            },
+            .iter_end => {},
+            .setup_catch => {
+                if (frame.catch_count >= frame.catch_stack.len) return error.UnsupportedOpcode;
+                frame.catch_stack[frame.catch_count] = .{
+                    .target_pc = try jumpTarget(frame.block, op),
+                    .error_reg = op.a,
+                    .reg_top = reg_top,
+                };
+                frame.catch_count += 1;
+            },
+            .end_catch => {
+                if (frame.catch_count > 0) frame.catch_count -= 1;
+            },
+            .throw_value => {
+                const thrown = (try getRegister(frame_regs, op.a)).retain();
+                var handled = false;
+                while (frame_count > 0) {
+                    const cur_frame = &frames[frame_count - 1];
+                    if (cur_frame.catch_count > 0) {
+                        cur_frame.catch_count -= 1;
+                        const handler = cur_frame.catch_stack[cur_frame.catch_count];
+                        for (registers[handler.reg_top..reg_top]) |*r| deinitSlot(r);
+                        reg_top = handler.reg_top;
+                        cur_frame.pc = handler.target_pc;
+                        const hregs = registers[cur_frame.reg_base .. cur_frame.reg_base + cur_frame.block.register_count];
+                        try setRegister(hregs, handler.error_reg, thrown);
+                        handled = true;
+                        break;
+                    }
+                    for (registers[cur_frame.reg_base..reg_top]) |*r| deinitSlot(r);
+                    reg_top = cur_frame.reg_base;
+                    frame_count -= 1;
+                }
+                if (!handled) {
+                    thrown.deinit();
+                    return error.UnsupportedOpcode;
+                }
             },
             else => return error.UnsupportedOpcode,
         }
@@ -482,6 +587,32 @@ fn loadGlobal(block: *const codeblock.CodeBlock, closure_env: ?*Environment, ind
     return val.retain();
 }
 
+fn storeGlobal(allocator: Allocator, block: *const codeblock.CodeBlock, closure_env: ?*Environment, index: u8, val: JSValue) !void {
+    const env = closure_env orelse return error.UnsupportedOpcode;
+    if (index >= block.constants.len) return error.InvalidConstant;
+    const name = switch (block.constants[index]) {
+        .string, .property_key => |text| text,
+        else => return error.InvalidConstant,
+    };
+    for (&global_cache) |*slot| {
+        if (slot.*) |entry| {
+            if (entry.name.ptr == name.ptr or std.mem.eql(u8, entry.name, name)) {
+                slot.* = null;
+            }
+        }
+    }
+    const retained = val.retain();
+    env.assign(name, retained) catch |err| switch (err) {
+        error.ReferenceError => {
+            try env.define(allocator, name, retained);
+        },
+        else => {
+            retained.deinit();
+            return error.UnsupportedOpcode;
+        },
+    };
+}
+
 fn jumpTarget(block: *const codeblock.CodeBlock, op: codeblock.Op) !usize {
     const target = (@as(usize, op.b) << 8) | op.c;
     if (target > block.ops.len) return error.InvalidJump;
@@ -523,7 +654,7 @@ test "vm executes arithmetic and retains its result" {
         .register_count = 5,
         .param_count = 2,
     };
-    const value = try vmCall(std.testing.allocator, &block, null, &.{ JSValue.fromNumber(2), JSValue.fromNumber(3) });
+    const value = try vmCall(std.testing.allocator, &block, null, &.{ JSValue.fromNumber(2), JSValue.fromNumber(3) }, null);
     defer value.deinit();
     try std.testing.expect(value == .number);
     try std.testing.expectEqual(@as(f64, 5), value.number);

@@ -51,6 +51,11 @@ pub const Opcode = enum(u8) {
     new_array,
     get_elem,
     set_elem,
+    iter_init,
+    iter_next,
+    iter_end,
+    setup_catch,
+    end_catch,
 };
 
 pub const Op = packed struct(u32) {
@@ -66,6 +71,7 @@ pub const Constant = union(enum) {
     boolean: bool,
     bigint: []const u8,
     property_key: []const u8,
+    function_node: *zfunctions.FunctionNode,
 };
 
 pub const Flags = packed struct(u8) {

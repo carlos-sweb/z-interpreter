@@ -140,16 +140,32 @@ pub const BytecodeEmitter = struct {
             .if_stmt => |item| try self.emitIf(item),
             .while_stmt => |item| try self.emitWhile(item),
             .for_stmt => |item| try self.emitFor(item.head, item.body),
+            .function_declaration => |ptr| try self.emitFunctionDeclaration(ptr),
+            .try_stmt => |item| try self.emitTry(item),
+            .throw_stmt => |arg| try self.emitThrow(arg),
             else => return error.UnsupportedSyntax,
         }
     }
 
+    fn emitStore(self: *BytecodeEmitter, name: []const u8, reg: u8) !void {
+        if (self.scope.localSlot(name)) |slot| {
+            if (!self.scope.capturesLocal(name)) {
+                return self.emitOp(.{ .opcode = .store_local, .a = try small(slot), .b = reg });
+            }
+        }
+        const constant = try self.addConstant(.{ .property_key = name });
+        return self.emitOp(.{ .opcode = .store_global, .a = constant, .b = reg });
+    }
+
     fn emitVariable(self: *BytecodeEmitter, variable: anytype) !void {
         for (variable.declarators) |declarator| {
-            if (declarator.pattern.* != .identifier or declarator.init == null) return error.UnsupportedSyntax;
-            const slot = self.scope.localSlot(declarator.pattern.identifier.name) orelse return error.UnknownLocal;
-            const value = try self.emitExpression(declarator.init.?);
-            try self.emitOp(.{ .opcode = .store_local, .a = try small(slot), .b = value });
+            if (declarator.pattern.* != .identifier) return error.UnsupportedSyntax;
+            const name = declarator.pattern.identifier.name;
+            const val_reg = if (declarator.init) |init|
+                try self.emitExpression(init)
+            else
+                try self.emitSimple(.load_undefined);
+            try self.emitStore(name, val_reg);
         }
     }
 
@@ -176,25 +192,92 @@ pub const BytecodeEmitter = struct {
     }
 
     fn emitFor(self: *BytecodeEmitter, head: zstatements.ForHead, body: *const zstatements.Statement) anyerror!void {
-        const c_style = switch (head) {
-            .c_style => |item| item,
+        switch (head) {
+            .c_style => |c_style| {
+                if (c_style.init) |init| switch (init) {
+                    .decl => |variable| try self.emitVariable(variable),
+                    .expr => |expression| _ = try self.emitExpression(expression),
+                };
+                const start = self.ops.items.len;
+                var end_jump: ?usize = null;
+                if (c_style.test_expr) |test_expr| {
+                    const condition = try self.emitExpression(test_expr);
+                    end_jump = try self.emitJump(.jump_if_false, condition);
+                }
+                try self.emitStatement(body);
+                if (c_style.update) |update| _ = try self.emitExpression(update);
+                const back = try self.emitJump(.jump, 0);
+                try self.patchJump(back, start);
+                if (end_jump) |jump| try self.patchJump(jump, self.ops.items.len);
+            },
+            .for_of => |item| try self.emitForOf(item, body),
+            else => return error.UnsupportedSyntax,
+        }
+    }
+
+    fn emitForOf(self: *BytecodeEmitter, item: anytype, body: *const zstatements.Statement) anyerror!void {
+        if (item.is_await) return error.UnsupportedSyntax;
+        const name: []const u8 = switch (item.binding) {
+            .declared => |d| if (d.pattern.* == .identifier) d.pattern.identifier.name else return error.UnsupportedSyntax,
+            .existing => |n| n,
             else => return error.UnsupportedSyntax,
         };
-        if (c_style.init) |init| switch (init) {
-            .decl => |variable| try self.emitVariable(variable),
-            .expr => |expression| _ = try self.emitExpression(expression),
-        };
-        const start = self.ops.items.len;
-        var end_jump: ?usize = null;
-        if (c_style.test_expr) |test_expr| {
-            const condition = try self.emitExpression(test_expr);
-            end_jump = try self.emitJump(.jump_if_false, condition);
-        }
+        const iter_obj_reg = try self.emitExpression(item.iterable);
+        const iter_reg = try self.allocRegister();
+        try self.emitOp(.{ .opcode = .iter_init, .a = iter_reg, .b = iter_obj_reg });
+        const loop_start = self.ops.items.len;
+        const val_reg = try self.allocRegister();
+        const done_reg = try self.allocRegister();
+        try self.emitOp(.{ .opcode = .iter_next, .a = val_reg, .b = done_reg, .c = iter_reg });
+        const exit_jump = try self.emitJump(.jump_if_true, done_reg);
+        try self.emitStore(name, val_reg);
         try self.emitStatement(body);
-        if (c_style.update) |update| _ = try self.emitExpression(update);
-        const back = try self.emitJump(.jump, 0);
-        try self.patchJump(back, start);
-        if (end_jump) |jump| try self.patchJump(jump, self.ops.items.len);
+        const back_jump = try self.emitJump(.jump, 0);
+        try self.patchJump(back_jump, loop_start);
+        try self.patchJump(exit_jump, self.ops.items.len);
+        try self.emitOp(.{ .opcode = .iter_end, .a = iter_reg });
+    }
+
+    fn emitFunctionDeclaration(self: *BytecodeEmitter, ptr: anytype) anyerror!void {
+        const function = zfunctions.asFunctionNode(ptr);
+        const name = switch (function.kind) {
+            .function_decl => |d| d.name,
+            else => return error.UnsupportedSyntax,
+        };
+        const const_idx = try self.addConstant(.{ .function_node = function });
+        const fn_reg = try self.allocRegister();
+        try self.emitOp(.{ .opcode = .make_closure, .a = fn_reg, .b = const_idx });
+        try self.emitStore(name, fn_reg);
+    }
+
+    fn emitFunctionLike(self: *BytecodeEmitter, ptr: anytype) anyerror!u8 {
+        const function = zfunctions.asFunctionNode(ptr);
+        const const_idx = try self.addConstant(.{ .function_node = function });
+        const fn_reg = try self.allocRegister();
+        try self.emitOp(.{ .opcode = .make_closure, .a = fn_reg, .b = const_idx });
+        return fn_reg;
+    }
+
+    fn emitTry(self: *BytecodeEmitter, item: anytype) anyerror!void {
+        if (item.finalizer != null) return error.UnsupportedSyntax;
+        const handler = item.handler orelse return error.UnsupportedSyntax;
+        const err_reg = try self.allocRegister();
+        const setup_jump = try self.emitJump(.setup_catch, err_reg);
+        try self.emitStatement(item.block);
+        try self.emitOp(.{ .opcode = .end_catch });
+        const end_jump = try self.emitJump(.jump, 0);
+        try self.patchJump(setup_jump, self.ops.items.len);
+        if (handler.param) |param| {
+            if (param.* != .identifier) return error.UnsupportedSyntax;
+            try self.emitStore(param.identifier.name, err_reg);
+        }
+        try self.emitStatement(handler.body);
+        try self.patchJump(end_jump, self.ops.items.len);
+    }
+
+    fn emitThrow(self: *BytecodeEmitter, arg: *const zparser.Node) anyerror!void {
+        const val = try self.emitExpression(arg);
+        try self.emitOp(.{ .opcode = .throw_value, .a = val });
     }
 
     fn emitExpression(self: *BytecodeEmitter, expression: *const zparser.Node) anyerror!u8 {
@@ -208,37 +291,49 @@ pub const BytecodeEmitter = struct {
             .unary => |unary| return self.emitUnary(unary),
             .binary => |binary| return self.emitBinary(binary),
             .assignment => |assignment| {
-                if (assignment.op != .assign) return error.UnsupportedSyntax;
-                if (assignment.target.data == .identifier) {
-                    const slot = self.scope.localSlot(assignment.target.data.identifier) orelse return error.UnknownLocal;
-                    const value = try self.emitExpression(assignment.value);
-                    try self.emitOp(.{ .opcode = .store_local, .a = try small(slot), .b = value });
-                    return value;
-                } else if (assignment.target.data == .member) {
-                    const m = assignment.target.data.member;
-                    if (m.optional) return error.UnsupportedSyntax;
-                    const obj_reg = try self.emitExpression(m.object);
-                    if (!m.computed) {
-                        if (m.property.data != .identifier) return error.UnsupportedSyntax;
-                        const key_const = try self.addConstant(.{ .property_key = m.property.data.identifier });
-                        const val_reg = try self.emitExpression(assignment.value);
-                        try self.emitOp(.{ .opcode = .set_prop, .a = obj_reg, .b = key_const, .c = val_reg });
-                        return val_reg;
+                if (assignment.op == .assign) {
+                    if (assignment.target.data == .identifier) {
+                        const name = assignment.target.data.identifier;
+                        const value = try self.emitExpression(assignment.value);
+                        try self.emitStore(name, value);
+                        return value;
+                    } else if (assignment.target.data == .member) {
+                        const m = assignment.target.data.member;
+                        if (m.optional) return error.UnsupportedSyntax;
+                        const obj_reg = try self.emitExpression(m.object);
+                        if (!m.computed) {
+                            if (m.property.data != .identifier) return error.UnsupportedSyntax;
+                            const key_const = try self.addConstant(.{ .property_key = m.property.data.identifier });
+                            const val_reg = try self.emitExpression(assignment.value);
+                            try self.emitOp(.{ .opcode = .set_prop, .a = obj_reg, .b = key_const, .c = val_reg });
+                            return val_reg;
+                        } else {
+                            const key_reg = try self.emitExpression(m.property);
+                            const val_reg = try self.emitExpression(assignment.value);
+                            try self.emitOp(.{ .opcode = .set_elem, .a = obj_reg, .b = key_reg, .c = val_reg });
+                            return val_reg;
+                        }
                     } else {
-                        const key_reg = try self.emitExpression(m.property);
-                        const val_reg = try self.emitExpression(assignment.value);
-                        try self.emitOp(.{ .opcode = .set_elem, .a = obj_reg, .b = key_reg, .c = val_reg });
-                        return val_reg;
+                        return error.UnsupportedSyntax;
                     }
-                } else {
-                    return error.UnsupportedSyntax;
-                }
+                } else if (assignment.op == .add_assign) {
+                    if (assignment.target.data == .identifier) {
+                        const name = assignment.target.data.identifier;
+                        const old_val = try self.emitIdentifier(name);
+                        const add_val = try self.emitExpression(assignment.value);
+                        const res_reg = try self.allocRegister();
+                        try self.emitOp(.{ .opcode = .add, .a = res_reg, .b = old_val, .c = add_val });
+                        try self.emitStore(name, res_reg);
+                        return res_reg;
+                    } else return error.UnsupportedSyntax;
+                } else return error.UnsupportedSyntax;
             },
             .conditional => |conditional| return self.emitConditional(conditional),
             .call => |call| return self.emitCall(call),
             .object_literal => |items| return self.emitObjectLiteral(items),
             .array_literal => |items| return self.emitArrayLiteral(items),
             .member => |member| return self.emitMember(member),
+            .function_like => |ptr| return self.emitFunctionLike(ptr),
             else => return error.UnsupportedSyntax,
         }
     }
@@ -246,7 +341,12 @@ pub const BytecodeEmitter = struct {
     fn emitIdentifier(self: *BytecodeEmitter, name: []const u8) !u8 {
         const destination = try self.allocRegister();
         if (self.scope.localSlot(name)) |slot| {
-            try self.emitOp(.{ .opcode = .load_local, .a = destination, .b = try small(slot) });
+            if (self.scope.capturesLocal(name)) {
+                const constant = try self.addConstant(.{ .property_key = name });
+                try self.emitOp(.{ .opcode = .load_global, .a = destination, .b = constant });
+            } else {
+                try self.emitOp(.{ .opcode = .load_local, .a = destination, .b = try small(slot) });
+            }
         } else {
             const constant = try self.addConstant(.{ .property_key = name });
             try self.emitOp(.{ .opcode = .load_global, .a = destination, .b = constant });
@@ -255,14 +355,32 @@ pub const BytecodeEmitter = struct {
     }
 
     fn emitUnary(self: *BytecodeEmitter, unary: anytype) anyerror!u8 {
-        const operand = try self.emitExpression(unary.operand);
-        const destination = try self.allocRegister();
         switch (unary.op) {
-            .minus => try self.emitOp(.{ .opcode = .neg, .a = destination, .b = operand }),
-            .not => try self.emitOp(.{ .opcode = .not, .a = destination, .b = operand }),
+            .minus => {
+                const operand = try self.emitExpression(unary.operand);
+                const destination = try self.allocRegister();
+                try self.emitOp(.{ .opcode = .neg, .a = destination, .b = operand });
+                return destination;
+            },
+            .not => {
+                const operand = try self.emitExpression(unary.operand);
+                const destination = try self.allocRegister();
+                try self.emitOp(.{ .opcode = .not, .a = destination, .b = operand });
+                return destination;
+            },
+            .post_inc, .post_dec, .pre_inc, .pre_dec => {
+                if (unary.operand.data != .identifier) return error.UnsupportedSyntax;
+                const name = unary.operand.data.identifier;
+                const old_reg = try self.emitIdentifier(name);
+                const one_reg = try self.emitConstant(.{ .number = 1.0 });
+                const new_reg = try self.allocRegister();
+                const opcode: codeblock.Opcode = if (unary.op == .post_inc or unary.op == .pre_inc) .add_num else .sub_num;
+                try self.emitOp(.{ .opcode = opcode, .a = new_reg, .b = old_reg, .c = one_reg });
+                try self.emitStore(name, new_reg);
+                return if (unary.op == .post_inc or unary.op == .post_dec) old_reg else new_reg;
+            },
             else => return error.UnsupportedSyntax,
         }
-        return destination;
     }
 
     fn emitBinary(self: *BytecodeEmitter, binary: anytype) anyerror!u8 {
@@ -329,6 +447,9 @@ pub const BytecodeEmitter = struct {
             .new_array,
             .get_prop,
             .get_elem,
+            .make_closure,
+            .iter_init,
+            .iter_next,
             => true,
             else => false,
         };
@@ -467,8 +588,8 @@ pub fn disassemble(allocator: Allocator, block: *const codeblock.CodeBlock) ![]u
         try output.print(allocator, "{d:0>4} {s}", .{ index, @tagName(op.opcode) });
         switch (op.opcode) {
             .load_const => try output.print(allocator, " r{d}, #{d}", .{ op.a, op.b }),
-            .load_local, .load_global => try output.print(allocator, " r{d}, @{d}", .{ op.a, op.b }),
-            .store_local => try output.print(allocator, " @{d}, r{d}", .{ op.a, op.b }),
+            .load_local, .load_global, .load_capture => try output.print(allocator, " r{d}, @{d}", .{ op.a, op.b }),
+            .store_local, .store_global, .store_capture => try output.print(allocator, " @{d}, r{d}", .{ op.a, op.b }),
             .neg, .not => try output.print(allocator, " r{d}, r{d}", .{ op.a, op.b }),
             .add, .sub_num, .mul_num, .div_num, .mod_num, .lt_num, .gt_num, .le_num, .ge_num, .eq, .ne => try output.print(allocator, " r{d}, r{d}, r{d}", .{ op.a, op.b, op.c }),
             .jump => try output.print(allocator, " {d}", .{jumpTarget(op)}),
@@ -481,6 +602,13 @@ pub fn disassemble(allocator: Allocator, block: *const codeblock.CodeBlock) ![]u
             .set_prop => try output.print(allocator, " r{d}, #{d}, r{d}", .{ op.a, op.b, op.c }),
             .get_elem => try output.print(allocator, " r{d}, r{d}, r{d}", .{ op.a, op.b, op.c }),
             .set_elem => try output.print(allocator, " r{d}, r{d}, r{d}", .{ op.a, op.b, op.c }),
+            .make_closure => try output.print(allocator, " r{d}, #{d}", .{ op.a, op.b }),
+            .iter_init => try output.print(allocator, " r{d}, r{d}", .{ op.a, op.b }),
+            .iter_next => try output.print(allocator, " r{d}, r{d}, r{d}", .{ op.a, op.b, op.c }),
+            .iter_end => try output.print(allocator, " r{d}", .{op.a}),
+            .setup_catch => try output.print(allocator, " r{d}, {d}", .{ op.a, jumpTarget(op) }),
+            .end_catch => {},
+            .throw_value => try output.print(allocator, " r{d}", .{op.a}),
             .return_value => try output.print(allocator, " r{d}", .{op.a}),
             else => {},
         }
