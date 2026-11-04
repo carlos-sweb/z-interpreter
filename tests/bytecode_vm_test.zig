@@ -65,3 +65,90 @@ test "bytecode VM executes if else and while" {
     try testing.expectEqual(@as(f64, 7), ast);
     try testing.expectEqual(ast, vm);
 }
+
+test "bytecode VM top-level arithmetic, unaries, comparisons, and strings" {
+    // 1 + 2 -> 3
+    {
+        var output = std.Io.Writer.Allocating.init(testing.allocator);
+        defer output.deinit();
+        var interpreter = try zinterpreter.Interpreter.init(testing.allocator, &output.writer);
+        defer interpreter.deinit();
+        interpreter.compile_options.use_bytecode_vm = true;
+        const res = try interpreter.run("1 + 2");
+        defer res.deinit();
+        try testing.expect(res == .number);
+        try testing.expectEqual(@as(f64, 3), res.number);
+    }
+    // 10 * 5 - 3 -> 47
+    {
+        var output = std.Io.Writer.Allocating.init(testing.allocator);
+        defer output.deinit();
+        var interpreter = try zinterpreter.Interpreter.init(testing.allocator, &output.writer);
+        defer interpreter.deinit();
+        interpreter.compile_options.use_bytecode_vm = true;
+        const res = try interpreter.run("10 * 5 - 3");
+        defer res.deinit();
+        try testing.expect(res == .number);
+        try testing.expectEqual(@as(f64, 47), res.number);
+    }
+    // "hello" + " " + "world" -> "hello world"
+    {
+        var output = std.Io.Writer.Allocating.init(testing.allocator);
+        defer output.deinit();
+        var interpreter = try zinterpreter.Interpreter.init(testing.allocator, &output.writer);
+        defer interpreter.deinit();
+        interpreter.compile_options.use_bytecode_vm = true;
+        const res = try interpreter.run("\"hello\" + \" \" + \"world\"");
+        defer res.deinit();
+        try testing.expect(res == .string);
+        try testing.expectEqualStrings("hello world", res.string.value.data);
+    }
+    // 1 < 2 -> true
+    {
+        var output = std.Io.Writer.Allocating.init(testing.allocator);
+        defer output.deinit();
+        var interpreter = try zinterpreter.Interpreter.init(testing.allocator, &output.writer);
+        defer interpreter.deinit();
+        interpreter.compile_options.use_bytecode_vm = true;
+        const res = try interpreter.run("1 < 2");
+        defer res.deinit();
+        try testing.expect(res == .boolean);
+        try testing.expectEqual(true, res.boolean);
+    }
+    // -5 + 3 -> -2
+    {
+        var output = std.Io.Writer.Allocating.init(testing.allocator);
+        defer output.deinit();
+        var interpreter = try zinterpreter.Interpreter.init(testing.allocator, &output.writer);
+        defer interpreter.deinit();
+        interpreter.compile_options.use_bytecode_vm = true;
+        const res = try interpreter.run("-5 + 3");
+        defer res.deinit();
+        try testing.expect(res == .number);
+        try testing.expectEqual(@as(f64, -2), res.number);
+    }
+    // !true -> false
+    {
+        var output = std.Io.Writer.Allocating.init(testing.allocator);
+        defer output.deinit();
+        var interpreter = try zinterpreter.Interpreter.init(testing.allocator, &output.writer);
+        defer interpreter.deinit();
+        interpreter.compile_options.use_bytecode_vm = true;
+        const res = try interpreter.run("!true");
+        defer res.deinit();
+        try testing.expect(res == .boolean);
+        try testing.expectEqual(false, res.boolean);
+    }
+    // !false -> true
+    {
+        var output = std.Io.Writer.Allocating.init(testing.allocator);
+        defer output.deinit();
+        var interpreter = try zinterpreter.Interpreter.init(testing.allocator, &output.writer);
+        defer interpreter.deinit();
+        interpreter.compile_options.use_bytecode_vm = true;
+        const res = try interpreter.run("!false");
+        defer res.deinit();
+        try testing.expect(res == .boolean);
+        try testing.expectEqual(true, res.boolean);
+    }
+}

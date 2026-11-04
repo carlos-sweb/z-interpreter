@@ -28,6 +28,8 @@ const zstatements = @import("zstatements");
 const zfunctions = @import("zfunctions");
 const zvalue = @import("zvalue");
 const JSValue = zvalue.JSValue;
+const bytecode_emitter = @import("bytecode/emitter.zig");
+const bytecode_vm = @import("bytecode/vm.zig");
 const fiber_mod = @import("fiber.zig");
 
 const interpreter_mod = @import("interpreter.zig");
@@ -199,6 +201,33 @@ pub fn run(self: *Interpreter, source: []const u8) anyerror!JSValue {
     const parser = try zfunctions.Parser.init(ast_arena, source);
     parser.setStackLimit(self.stack_limit);
     const program = try parser.parseProgram();
+    if (self.compile_options.use_bytecode_vm) {
+        var compiled = bytecode_emitter.BytecodeEmitter.emitScript(self.gc_allocator, program) catch |err| switch (err) {
+            error.UnsupportedSyntax, error.UnknownLocal => blk: {
+                _ = self.console_error_writer.writeAll("warning: bytecode compilation fallback to tree-walker (unsupported syntax)\n") catch {};
+                break :blk null;
+            },
+            else => return err,
+        };
+        if (compiled) |*block| {
+            defer block.deinit(self.gc_allocator);
+            if (self.compile_options.disasm) {
+                const text = bytecode_emitter.disassemble(self.gc_allocator, &block.block) catch null;
+                if (text) |t| {
+                    defer self.gc_allocator.free(t);
+                    _ = self.console_error_writer.writeAll(t) catch {};
+                }
+            }
+            const vm_result = bytecode_vm.vmCall(self.gc_allocator, &block.block, self.script_env, &.{}) catch |err| switch (err) {
+                error.UnsupportedOpcode => null,
+                else => return err,
+            };
+            if (vm_result) |value| {
+                try self.runEventLoop();
+                return value;
+            }
+        }
+    }
     const c = self.evalBody(self.script_env.?, program) catch |err0| {
         const err = self.throwIfGap(err0);
         if (err != error.JsThrow) return err;

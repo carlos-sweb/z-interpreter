@@ -57,6 +57,52 @@ pub const BytecodeEmitter = struct {
         } };
     }
 
+    pub fn emitScript(allocator: Allocator, statements: anytype) !CompiledCodeBlock {
+        const scope = try codeblock.ScopeAnalyzer.analyzeStatements(allocator, statements);
+        var self = BytecodeEmitter{
+            .allocator = allocator,
+            .scope = scope,
+            .next_register = scope.local_count,
+            .max_register = scope.local_count,
+        };
+        defer self.scope.deinit(allocator);
+        errdefer self.ops.deinit(allocator);
+        errdefer self.constants.deinit(allocator);
+
+        var last_register: ?u8 = null;
+        for (statements) |statement| {
+            switch (statement.data) {
+                .expr_stmt => |expr| {
+                    last_register = try self.emitExpression(expr);
+                },
+                else => {
+                    try self.emitStatement(statement);
+                    last_register = null;
+                },
+            }
+        }
+        if (last_register) |reg| {
+            try self.emitOp(.{ .opcode = .return_value, .a = reg });
+        } else {
+            try self.emitOp(.{ .opcode = .return_undefined });
+        }
+
+        const ops = try self.ops.toOwnedSlice(allocator);
+        errdefer allocator.free(ops);
+        const constants = try self.constants.toOwnedSlice(allocator);
+        errdefer allocator.free(constants);
+        return .{ .block = .{
+            .ops = ops,
+            .constants = constants,
+            .local_count = scope.local_count,
+            .register_count = self.max_register,
+            .param_count = 0,
+            .capture_count = @intCast(scope.captured_locals.len),
+            .flags = scope.flags,
+            .name = null,
+        } };
+    }
+
     fn functionName(function: *const zfunctions.FunctionNode) ?[]const u8 {
         return switch (function.kind) {
             .function_decl => |kind| kind.name,
@@ -159,6 +205,7 @@ pub const BytecodeEmitter = struct {
             .null_literal => return self.emitSimple(.load_null),
             .identifier => |name| return self.emitIdentifier(name),
             .paren => |inner| return self.emitExpression(inner),
+            .unary => |unary| return self.emitUnary(unary),
             .binary => |binary| return self.emitBinary(binary),
             .assignment => |assignment| {
                 if (assignment.op != .assign or assignment.target.data != .identifier) return error.UnsupportedSyntax;
@@ -180,6 +227,17 @@ pub const BytecodeEmitter = struct {
         } else {
             const constant = try self.addConstant(.{ .property_key = name });
             try self.emitOp(.{ .opcode = .load_global, .a = destination, .b = constant });
+        }
+        return destination;
+    }
+
+    fn emitUnary(self: *BytecodeEmitter, unary: anytype) anyerror!u8 {
+        const operand = try self.emitExpression(unary.operand);
+        const destination = try self.allocRegister();
+        switch (unary.op) {
+            .minus => try self.emitOp(.{ .opcode = .neg, .a = destination, .b = operand }),
+            .not => try self.emitOp(.{ .opcode = .not, .a = destination, .b = operand }),
+            else => return error.UnsupportedSyntax,
         }
         return destination;
     }
@@ -296,6 +354,7 @@ pub fn disassemble(allocator: Allocator, block: *const codeblock.CodeBlock) ![]u
             .load_const => try output.print(allocator, " r{d}, #{d}", .{ op.a, op.b }),
             .load_local, .load_global => try output.print(allocator, " r{d}, @{d}", .{ op.a, op.b }),
             .store_local => try output.print(allocator, " @{d}, r{d}", .{ op.a, op.b }),
+            .neg, .not => try output.print(allocator, " r{d}, r{d}", .{ op.a, op.b }),
             .add, .sub_num, .mul_num, .div_num, .mod_num, .lt_num, .gt_num, .le_num, .ge_num, .eq, .ne => try output.print(allocator, " r{d}, r{d}, r{d}", .{ op.a, op.b, op.c }),
             .jump => try output.print(allocator, " {d}", .{jumpTarget(op)}),
             .jump_if_true, .jump_if_false => try output.print(allocator, " r{d}, {d}", .{ op.a, jumpTarget(op) }),

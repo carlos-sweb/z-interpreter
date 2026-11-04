@@ -33,6 +33,8 @@ pub const Opcode = enum(u8) {
     eq,
     ne,
     add,
+    neg,
+    not,
     jump,
     jump_if_true,
     jump_if_false,
@@ -182,6 +184,36 @@ pub const ScopeAnalyzer = struct {
                 .is_async = function.is_async,
                 .lexical_this = function.kind == .arrow,
             },
+        };
+    }
+
+    pub fn analyzeStatements(allocator: Allocator, statements: anytype) anyerror!ScopeAnalysis {
+        var self = ScopeAnalyzer{ .allocator = allocator };
+        defer self.local_names.deinit(allocator);
+        defer self.captured_names.deinit(allocator);
+        defer self.free_names.deinit(allocator);
+        errdefer self.locals.deinit(allocator);
+        errdefer self.captured.deinit(allocator);
+        errdefer self.free.deinit(allocator);
+
+        for (statements) |statement| try self.collectStatement(statement);
+        for (statements) |statement| try self.scanStatement(statement);
+
+        const locals = try self.locals.toOwnedSlice(allocator);
+        errdefer allocator.free(locals);
+        const captured = try self.captured.toOwnedSlice(allocator);
+        errdefer allocator.free(captured);
+        const free = try self.free.toOwnedSlice(allocator);
+        errdefer allocator.free(free);
+        const count: u16 = @intCast(locals.len);
+        return .{
+            .locals = locals,
+            .captured_locals = captured,
+            .free_names = free,
+            .local_count = count,
+            .register_count = count,
+            .param_count = 0,
+            .flags = .{},
         };
     }
 

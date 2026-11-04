@@ -627,6 +627,7 @@ const interpreter_expr = @import("interpreter_expr.zig");
 pub const CompileOptions = struct {
     /// Disabled by default while bytecode coverage is deliberately narrow.
     use_bytecode_vm: bool = false,
+    disasm: bool = false,
 };
 
 pub const Interpreter = struct {

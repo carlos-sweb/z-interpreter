@@ -34,7 +34,8 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
             .move, .load_local => try setRegister(registers, op.a, (try getRegister(registers, op.b)).retain()),
             .store_local => try setRegister(registers, op.a, (try getRegister(registers, op.b)).retain()),
             .load_global => try setRegister(registers, op.a, try loadGlobal(block, closure_env, op.b)),
-            .add, .add_num => try arithmetic(registers, op, .add),
+            .add => try addOp(registers, allocator, op),
+            .add_num => try arithmetic(registers, op, .add),
             .sub_num => try arithmetic(registers, op, .sub),
             .mul_num => try arithmetic(registers, op, .mul),
             .div_num => try arithmetic(registers, op, .div),
@@ -45,6 +46,15 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
             .ge_num => try comparison(registers, op, .ge),
             .eq => try comparison(registers, op, .eq),
             .ne => try comparison(registers, op, .ne),
+            .neg => {
+                const src = try getRegister(registers, op.b);
+                if (src != .number) return error.UnsupportedOpcode;
+                try setRegister(registers, op.a, JSValue.fromNumber(-src.number));
+            },
+            .not => {
+                const truthy = try isTruthy(registers, op.b);
+                try setRegister(registers, op.a, JSValue.fromBool(!truthy));
+            },
             .jump => pc = try jumpTarget(block, op),
             .jump_if_true => {
                 if (try isTruthy(registers, op.a)) pc = try jumpTarget(block, op);
@@ -81,16 +91,57 @@ fn arithmetic(registers: []JSValue, op: codeblock.Op, kind: Arithmetic) !void {
 fn comparison(registers: []JSValue, op: codeblock.Op, kind: Comparison) !void {
     const left = try getRegister(registers, op.b);
     const right = try getRegister(registers, op.c);
-    if (left != .number or right != .number) return error.UnsupportedOpcode;
-    const result = switch (kind) {
-        .lt => left.number < right.number,
-        .gt => left.number > right.number,
-        .le => left.number <= right.number,
-        .ge => left.number >= right.number,
-        .eq => left.number == right.number,
-        .ne => left.number != right.number,
+    if (left == .number and right == .number) {
+        const result = switch (kind) {
+            .lt => left.number < right.number,
+            .gt => left.number > right.number,
+            .le => left.number <= right.number,
+            .ge => left.number >= right.number,
+            .eq => left.number == right.number,
+            .ne => left.number != right.number,
+        };
+        try setRegister(registers, op.a, JSValue.fromBool(result));
+    } else if (left == .string and right == .string) {
+        const eq = std.mem.eql(u8, left.string.value.data, right.string.value.data);
+        const result = switch (kind) {
+            .eq => eq,
+            .ne => !eq,
+            else => return error.UnsupportedOpcode,
+        };
+        try setRegister(registers, op.a, JSValue.fromBool(result));
+    } else return error.UnsupportedOpcode;
+}
+
+fn addOp(registers: []JSValue, allocator: Allocator, op: codeblock.Op) !void {
+    const left = try getRegister(registers, op.b);
+    const right = try getRegister(registers, op.c);
+    if (left == .number and right == .number) {
+        try setRegister(registers, op.a, JSValue.fromNumber(left.number + right.number));
+        return;
+    }
+    if (left == .string or right == .string) {
+        var buf_l: [32]u8 = undefined;
+        var buf_r: [32]u8 = undefined;
+        const sl = stringSlice(left, &buf_l) orelse return error.UnsupportedOpcode;
+        const sr = stringSlice(right, &buf_r) orelse return error.UnsupportedOpcode;
+        const combined = try std.fmt.allocPrint(allocator, "{s}{s}", .{ sl, sr });
+        defer allocator.free(combined);
+        const result = try JSValue.newString(allocator, combined);
+        try setRegister(registers, op.a, result);
+        return;
+    }
+    return error.UnsupportedOpcode;
+}
+
+fn stringSlice(v: JSValue, buf: *[32]u8) ?[]const u8 {
+    return switch (v) {
+        .string => |s| s.value.data,
+        .number => |n| std.fmt.bufPrint(buf, "{d}", .{n}) catch null,
+        .boolean => |b| if (b) "true" else "false",
+        .null => "null",
+        .undefined => "undefined",
+        else => null,
     };
-    try setRegister(registers, op.a, JSValue.fromBool(result));
 }
 
 fn isTruthy(registers: []const JSValue, index: u8) !bool {
@@ -99,6 +150,7 @@ fn isTruthy(registers: []const JSValue, index: u8) !bool {
         .undefined, .null => false,
         .boolean => value.boolean,
         .number => value.number != 0 and !std.math.isNan(value.number),
+        .string => |s| s.value.data.len > 0,
         else => return error.UnsupportedOpcode,
     };
 }

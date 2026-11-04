@@ -752,6 +752,13 @@ pub fn invokeFunctionNode(
         };
         if (compiled) |*block| {
             defer block.deinit(self.gc_allocator);
+            if (self.compile_options.disasm) {
+                const text = bytecode_emitter.disassemble(self.gc_allocator, &block.block) catch null;
+                if (text) |t| {
+                    defer self.gc_allocator.free(t);
+                    _ = self.console_error_writer.writeAll(t) catch {};
+                }
+            }
             const vm_result = bytecode_vm.vmCall(self.gc_allocator, &block.block, closure_env, args) catch |err| switch (err) {
                 // An older/emitted block may contain an opcode not implemented
                 // by this VM revision. Preserve the AST path in that case.
