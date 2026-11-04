@@ -11,11 +11,16 @@ const codeblock = @import("codeblock.zig");
 /// returned value. Every register owns its value for the duration of the
 /// call, including values copied from arguments and locals.
 pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_env: ?*Environment, args: []const JSValue) !JSValue {
-    var registers = try allocator.alloc(JSValue, block.register_count);
+    var inline_regs: [32]JSValue = undefined;
+    const is_heap = block.register_count > inline_regs.len;
+    var registers = if (is_heap)
+        try allocator.alloc(JSValue, block.register_count)
+    else
+        inline_regs[0..block.register_count];
     for (registers) |*register| register.* = JSValue.UNDEFINED;
     defer {
         for (registers) |register| register.deinit();
-        allocator.free(registers);
+        if (is_heap) allocator.free(registers);
     }
 
     const parameter_count = @min(args.len, block.param_count);
@@ -161,14 +166,33 @@ fn call(registers: []JSValue, allocator: Allocator, op: codeblock.Op) !void {
     const start: usize = @as(usize, op.b) + 1;
     const end = start + op.c;
     if (end > registers.len) return error.InvalidRegister;
-    const call_args = try allocator.alloc(JSValue, op.c);
+    var inline_args: [4]JSValue = undefined;
+    const is_heap = op.c > inline_args.len;
+    const call_args = if (is_heap)
+        try allocator.alloc(JSValue, op.c)
+    else
+        inline_args[0..op.c];
     defer {
         for (call_args) |arg| arg.deinit();
-        allocator.free(call_args);
+        if (is_heap) allocator.free(call_args);
     }
     for (call_args, registers[start..end]) |*destination, source| destination.* = source.retain();
     const result = try callee.function.value.call(callee.function.value.ctx, allocator, JSValue.UNDEFINED, call_args);
     try setRegister(registers, op.a, result);
+}
+
+const GlobalCacheEntry = struct {
+    name: []const u8,
+    env: *const Environment,
+    value: JSValue,
+};
+
+var global_cache: [16]?GlobalCacheEntry = @splat(null);
+var global_cache_next: usize = 0;
+
+pub fn clearGlobalCache() void {
+    for (&global_cache) |*slot| slot.* = null;
+    global_cache_next = 0;
 }
 
 fn loadGlobal(block: *const codeblock.CodeBlock, closure_env: ?*Environment, index: u8) !JSValue {
@@ -178,7 +202,21 @@ fn loadGlobal(block: *const codeblock.CodeBlock, closure_env: ?*Environment, ind
         .string, .property_key => |text| text,
         else => return error.InvalidConstant,
     };
-    return (env.get(name) orelse return error.UnsupportedOpcode).retain();
+    for (&global_cache) |*slot| {
+        if (slot.*) |entry| {
+            if (entry.env == env and (entry.name.ptr == name.ptr or std.mem.eql(u8, entry.name, name))) {
+                return entry.value.retain();
+            }
+        }
+    }
+    const val = env.get(name) orelse return error.UnsupportedOpcode;
+    global_cache[global_cache_next] = .{
+        .name = name,
+        .env = env,
+        .value = val,
+    };
+    global_cache_next = (global_cache_next + 1) % global_cache.len;
+    return val.retain();
 }
 
 fn jumpTarget(block: *const codeblock.CodeBlock, op: codeblock.Op) !usize {
