@@ -66,6 +66,136 @@ fn callFallback(allocator: Allocator, callee: JSValue, args_slice: []const JSVal
     return try callee.function.value.call(callee.function.value.ctx, allocator, JSValue.UNDEFINED, call_args);
 }
 
+fn constantKey(block: *const codeblock.CodeBlock, index: u8) ![]const u8 {
+    if (index >= block.constants.len) return error.InvalidConstant;
+    return switch (block.constants[index]) {
+        .string, .property_key => |s| s,
+        else => return error.InvalidConstant,
+    };
+}
+
+fn keyToString(allocator: Allocator, key_val: JSValue, buf: *[32]u8) ![]const u8 {
+    _ = allocator;
+    return switch (key_val) {
+        .string => |s| s.value.data,
+        .number => |n| blk: {
+            if (std.math.isNan(n) or std.math.isInf(n)) return error.UnsupportedOpcode;
+            const idx: i64 = @intFromFloat(n);
+            if (@as(f64, @floatFromInt(idx)) == n) {
+                break :blk std.fmt.bufPrint(buf, "{d}", .{idx}) catch return error.UnsupportedOpcode;
+            } else {
+                break :blk std.fmt.bufPrint(buf, "{d}", .{n}) catch return error.UnsupportedOpcode;
+            }
+        },
+        else => return error.UnsupportedOpcode,
+    };
+}
+
+fn getProp(allocator: Allocator, obj: JSValue, key: []const u8) !JSValue {
+    switch (obj) {
+        .object => |box| {
+            if (box.value.getOwnRecord(key)) |rec| {
+                if (rec.isAccessor()) return error.UnsupportedOpcode;
+                return rec.value.retain();
+            }
+            var current = box.value.getPrototype();
+            while (current) |p| : (current = p.getPrototype()) {
+                if (p.getOwnRecord(key)) |rec| {
+                    if (rec.isAccessor()) return error.UnsupportedOpcode;
+                    return rec.value.retain();
+                }
+            }
+            return JSValue.UNDEFINED;
+        },
+        .array => |box| {
+            if (std.mem.eql(u8, key, "length")) {
+                return JSValue.fromNumber(@floatFromInt(box.value.length()));
+            }
+            const idx = std.fmt.parseInt(usize, key, 10) catch return JSValue.UNDEFINED;
+            if (idx >= box.value.length()) return JSValue.UNDEFINED;
+            return box.value.get(idx).retain();
+        },
+        .string => |box| {
+            if (std.mem.eql(u8, key, "length")) {
+                return JSValue.fromNumber(@floatFromInt(box.value.data.len));
+            }
+            const idx = std.fmt.parseInt(usize, key, 10) catch return JSValue.UNDEFINED;
+            if (idx >= box.value.data.len) return JSValue.UNDEFINED;
+            return try JSValue.newString(allocator, box.value.data[idx .. idx + 1]);
+        },
+        else => return error.UnsupportedOpcode,
+    }
+}
+
+fn setProp(allocator: Allocator, obj: JSValue, key: []const u8, val: JSValue) !void {
+    _ = allocator;
+    switch (obj) {
+        .object => |box| {
+            if (box.value.getOwnRecord(key)) |rec| {
+                if (rec.isAccessor()) return error.UnsupportedOpcode;
+            }
+            const old = box.value.getOwn(key);
+            try box.value.set(key, val.retain());
+            if (old) |o| o.deinit();
+        },
+        .array => |box| {
+            const idx = std.fmt.parseInt(usize, key, 10) catch return error.UnsupportedOpcode;
+            const cur = box.value.length();
+            if (idx < cur) {
+                box.value.toSliceMut()[idx].deinit();
+                box.value.toSliceMut()[idx] = val.retain();
+            } else {
+                while (box.value.length() < idx) {
+                    _ = try box.value.push(JSValue.UNDEFINED);
+                }
+                _ = try box.value.push(val.retain());
+            }
+        },
+        else => return error.UnsupportedOpcode,
+    }
+}
+
+fn getElem(allocator: Allocator, obj: JSValue, key_val: JSValue) !JSValue {
+    if (obj == .array and key_val == .number) {
+        const n = key_val.number;
+        if (n >= 0 and !std.math.isNan(n) and !std.math.isInf(n)) {
+            const idx: usize = @intFromFloat(n);
+            if (@as(f64, @floatFromInt(idx)) == n) {
+                if (idx < obj.array.value.length()) return obj.array.value.get(idx).retain();
+                return JSValue.UNDEFINED;
+            }
+        }
+    }
+    var buf: [32]u8 = undefined;
+    const key = try keyToString(allocator, key_val, &buf);
+    return try getProp(allocator, obj, key);
+}
+
+fn setElem(allocator: Allocator, obj: JSValue, key_val: JSValue, val: JSValue) !void {
+    if (obj == .array and key_val == .number) {
+        const n = key_val.number;
+        if (n >= 0 and !std.math.isNan(n) and !std.math.isInf(n)) {
+            const idx: usize = @intFromFloat(n);
+            if (@as(f64, @floatFromInt(idx)) == n) {
+                const cur = obj.array.value.length();
+                if (idx < cur) {
+                    obj.array.value.toSliceMut()[idx].deinit();
+                    obj.array.value.toSliceMut()[idx] = val.retain();
+                } else {
+                    while (obj.array.value.length() < idx) {
+                        _ = try obj.array.value.push(JSValue.UNDEFINED);
+                    }
+                    _ = try obj.array.value.push(val.retain());
+                }
+                return;
+            }
+        }
+    }
+    var buf: [32]u8 = undefined;
+    const key = try keyToString(allocator, key_val, &buf);
+    return try setProp(allocator, obj, key, val);
+}
+
 /// Executes a CodeBlock without consulting the AST. The caller owns the
 /// returned value. Every register owns its value for the duration of the
 /// call, including values copied from arguments and locals.
@@ -105,6 +235,32 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
         switch (op.opcode) {
             .load_const => try setRegister(frame_regs, op.a, try constantValue(allocator, frame.block, op.b)),
             .load_undefined => try setRegister(frame_regs, op.a, JSValue.UNDEFINED),
+            .new_object => try setRegister(frame_regs, op.a, try JSValue.newObject(allocator)),
+            .new_array => try setRegister(frame_regs, op.a, try JSValue.newArray(allocator)),
+            .get_prop => {
+                const obj = try getRegister(frame_regs, op.b);
+                const key = try constantKey(frame.block, op.c);
+                const result = try getProp(allocator, obj, key);
+                try setRegister(frame_regs, op.a, result);
+            },
+            .set_prop => {
+                const obj = try getRegister(frame_regs, op.a);
+                const key = try constantKey(frame.block, op.b);
+                const val = try getRegister(frame_regs, op.c);
+                try setProp(allocator, obj, key, val);
+            },
+            .get_elem => {
+                const obj = try getRegister(frame_regs, op.b);
+                const key_val = try getRegister(frame_regs, op.c);
+                const result = try getElem(allocator, obj, key_val);
+                try setRegister(frame_regs, op.a, result);
+            },
+            .set_elem => {
+                const obj = try getRegister(frame_regs, op.a);
+                const key_val = try getRegister(frame_regs, op.b);
+                const val = try getRegister(frame_regs, op.c);
+                try setElem(allocator, obj, key_val, val);
+            },
             .load_null => try setRegister(frame_regs, op.a, JSValue.NULL),
             .load_true => try setRegister(frame_regs, op.a, JSValue.fromBool(true)),
             .load_false => try setRegister(frame_regs, op.a, JSValue.fromBool(false)),

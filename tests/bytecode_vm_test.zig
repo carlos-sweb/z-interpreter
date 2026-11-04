@@ -152,3 +152,26 @@ test "bytecode VM top-level arithmetic, unaries, comparisons, and strings" {
         try testing.expectEqual(true, res.boolean);
     }
 }
+
+test "bytecode VM objects, arrays, and property access" {
+    // ({a: 1, b: 2}).a -> 1
+    try testing.expectEqual(@as(f64, 1), try runNumber("({a: 1, b: 2}).a", true));
+    try testing.expectEqual(@as(f64, 2), try runNumber("({a: 1, b: 2}).b", true));
+
+    // [1, 2, 3][1] -> 2
+    try testing.expectEqual(@as(f64, 2), try runNumber("[1, 2, 3][1]", true));
+    try testing.expectEqual(@as(f64, 1), try runNumber("[1, 2, 3][0]", true));
+    try testing.expectEqual(@as(f64, 3), try runNumber("[1, 2, 3].length", true));
+
+    // let o = {}; o.x = 5; o.x -> 5
+    try testing.expectEqual(@as(f64, 5), try runNumber("let o = {}; o.x = 5; o.x", true));
+
+    // let a = []; a[0] = 10; a[0] -> 10
+    try testing.expectEqual(@as(f64, 10), try runNumber("let a = []; a[0] = 10; a[0]", true));
+
+    // ({nested: {v: 42}}).nested.v -> 42
+    try testing.expectEqual(@as(f64, 42), try runNumber("({nested: {v: 42}}).nested.v", true));
+
+    // Getter fallback preserves AST evaluation
+    try testing.expectEqual(@as(f64, 99), try runNumber("let o = { get val() { return 99; } }; o.val", true));
+}

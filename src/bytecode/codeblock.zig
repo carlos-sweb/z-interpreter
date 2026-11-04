@@ -47,6 +47,10 @@ pub const Opcode = enum(u8) {
     return_value,
     return_undefined,
     throw_value,
+    new_object,
+    new_array,
+    get_elem,
+    set_elem,
 };
 
 pub const Op = packed struct(u32) {
