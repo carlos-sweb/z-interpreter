@@ -746,20 +746,31 @@ pub fn invokeFunctionNode(
     if (self.compile_options.use_bytecode_vm) {
         // Unsupported AST shapes have no CodeBlock and stay on the existing
         // walker. The VM is selected only after a CodeBlock was emitted.
-        var compiled = bytecode_emitter.BytecodeEmitter.emit(self.gc_allocator, fnode) catch |err| switch (err) {
-            error.UnsupportedSyntax, error.UnknownLocal => null,
-            else => return err,
-        };
-        if (compiled) |*block| {
-            defer block.deinit(self.gc_allocator);
+        const maybe_cb: ?*bytecode_emitter.CompiledCodeBlock = if (self.compiled_bytecode.get(fnode)) |cached|
+            cached
+        else blk: {
+            const compiled = bytecode_emitter.BytecodeEmitter.emit(self.gc_allocator, fnode) catch |err| switch (err) {
+                error.UnsupportedSyntax, error.UnknownLocal => {
+                    self.compiled_bytecode.put(self.gc_allocator, fnode, null) catch {};
+                    break :blk null;
+                },
+                else => return err,
+            };
+            const cb = self.gc_allocator.create(bytecode_emitter.CompiledCodeBlock) catch break :blk null;
+            cb.* = compiled;
             if (self.compile_options.disasm) {
-                const text = bytecode_emitter.disassemble(self.gc_allocator, &block.block) catch null;
+                const text = bytecode_emitter.disassemble(self.gc_allocator, &cb.block) catch null;
                 if (text) |t| {
                     defer self.gc_allocator.free(t);
                     _ = self.console_error_writer.writeAll(t) catch {};
                 }
             }
-            const vm_result = bytecode_vm.vmCall(self.gc_allocator, &block.block, closure_env, args) catch |err| switch (err) {
+            self.compiled_bytecode.put(self.gc_allocator, fnode, cb) catch {};
+            break :blk cb;
+        };
+
+        if (maybe_cb) |cb| {
+            const vm_result = bytecode_vm.vmCall(self.gc_allocator, &cb.block, closure_env, args) catch |err| switch (err) {
                 // An older/emitted block may contain an opcode not implemented
                 // by this VM revision. Preserve the AST path in that case.
                 error.UnsupportedOpcode => null,

@@ -27,6 +27,7 @@ const zstring = @import("zstring");
 const zdate = @import("zdate");
 const zbigint = @import("zbigint");
 const zbuffer = @import("zbuffer");
+const bytecode_emitter = @import("bytecode/emitter.zig");
 
 /// The materialized builtin prototype objects (see `Interpreter.protos`).
 /// Each is a real `.object` JSValue; `.undefined` until setupGlobals runs.
@@ -850,6 +851,8 @@ pub const Interpreter = struct {
     /// Per-FunctionNode conservative `arguments` usage analysis. AST nodes
     /// outlive the interpreter, so their addresses are stable cache keys.
     function_needs_arguments: std.AutoHashMapUnmanaged(usize, bool) = .empty,
+    /// Cached compiled bytecode per FunctionNode to avoid recompilation across calls.
+    compiled_bytecode: std.AutoHashMapUnmanaged(*const zfunctions.FunctionNode, ?*bytecode_emitter.CompiledCodeBlock) = .empty,
     /// The boxed primitive inside a `new String()`/`new Number()`/
     /// `new Boolean()` wrapper object -- these constructors return an
     /// ordinary object (no internal-slot concept exists on JSValue's
