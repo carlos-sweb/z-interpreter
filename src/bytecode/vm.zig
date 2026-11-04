@@ -40,6 +40,16 @@ fn getBytecodeTarget(callee: JSValue) ?BytecodeTarget {
     };
 }
 
+fn deinitSlot(v: *JSValue) void {
+    switch (v.*) {
+        .undefined, .null, .boolean, .number => {},
+        else => {
+            v.deinit();
+            v.* = JSValue.UNDEFINED;
+        },
+    }
+}
+
 fn callFallback(allocator: Allocator, callee: JSValue, args_slice: []const JSValue) !JSValue {
     if (callee != .function) return error.UnsupportedOpcode;
     var inline_args: [4]JSValue = undefined;
@@ -62,16 +72,15 @@ fn callFallback(allocator: Allocator, callee: JSValue, args_slice: []const JSVal
 pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_env: ?*Environment, args: []const JSValue) !JSValue {
     var frames: [MAX_FRAMES]CallFrame = undefined;
     var frame_count: usize = 0;
-    var registers: [MAX_REGISTERS]JSValue = undefined;
+    var registers: [MAX_REGISTERS]JSValue = @splat(JSValue.UNDEFINED);
     var reg_top: usize = 0;
 
     defer {
-        for (registers[0..reg_top]) |register| register.deinit();
+        for (registers[0..reg_top]) |*register| deinitSlot(register);
     }
 
     if (block.register_count > MAX_REGISTERS) return error.OutOfMemory;
 
-    for (registers[0..block.register_count]) |*register| register.* = JSValue.UNDEFINED;
     reg_top = block.register_count;
 
     const parameter_count = @min(args.len, block.param_count);
@@ -143,10 +152,12 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                     const new_reg_top = callee_reg_base + callee_block.register_count;
                     if (new_reg_top > MAX_REGISTERS) return error.OutOfMemory;
 
-                    for (registers[callee_reg_base..new_reg_top]) |*r| r.* = JSValue.UNDEFINED;
                     const param_count = @min(op.c, callee_block.param_count);
                     for (0..param_count) |i| {
                         registers[callee_reg_base + i] = frame_regs[start + i].retain();
+                    }
+                    for (param_count..callee_block.param_count) |i| {
+                        registers[callee_reg_base + i] = JSValue.UNDEFINED;
                     }
 
                     frames[frame_count] = CallFrame{
@@ -166,7 +177,7 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
             },
             .return_value => {
                 const val = (try getRegister(frame_regs, op.a)).retain();
-                for (registers[frame.reg_base..reg_top]) |r| r.deinit();
+                for (registers[frame.reg_base..reg_top]) |*r| deinitSlot(r);
                 reg_top = frame.reg_base;
                 frame_count -= 1;
                 if (frame_count == 0) {
@@ -177,7 +188,7 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                 try setRegister(caller_regs, frame.return_reg, val);
             },
             .return_undefined => {
-                for (registers[frame.reg_base..reg_top]) |r| r.deinit();
+                for (registers[frame.reg_base..reg_top]) |*r| deinitSlot(r);
                 reg_top = frame.reg_base;
                 frame_count -= 1;
                 if (frame_count == 0) {
@@ -340,7 +351,7 @@ fn setRegister(registers: []JSValue, index: u8, value: JSValue) !void {
         value.deinit();
         return error.InvalidRegister;
     }
-    registers[index].deinit();
+    deinitSlot(&registers[index]);
     registers[index] = value;
 }
 

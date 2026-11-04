@@ -278,6 +278,35 @@ pub const BytecodeEmitter = struct {
         return destination;
     }
 
+    fn isRegisterDefOpcode(opcode: codeblock.Opcode) bool {
+        return switch (opcode) {
+            .load_const,
+            .load_local,
+            .load_global,
+            .load_undefined,
+            .load_null,
+            .load_true,
+            .load_false,
+            .move,
+            .neg,
+            .not,
+            .add,
+            .sub_num,
+            .mul_num,
+            .div_num,
+            .mod_num,
+            .lt_num,
+            .gt_num,
+            .le_num,
+            .ge_num,
+            .eq,
+            .ne,
+            .call,
+            => true,
+            else => false,
+        };
+    }
+
     fn emitCall(self: *BytecodeEmitter, call: anytype) anyerror!u8 {
         if (call.optional) return error.UnsupportedSyntax;
         const callee = try self.emitExpression(call.callee);
@@ -289,8 +318,15 @@ pub const BytecodeEmitter = struct {
         self.max_register = @max(self.max_register, self.next_register);
         for (call.args, 0..) |argument, index| {
             if (argument.data == .spread) return error.UnsupportedSyntax;
+            const target_slot = try small(arg_base + @as(u16, @intCast(index)));
             const value = try self.emitExpression(argument);
-            try self.emitOp(.{ .opcode = .move, .a = try small(arg_base + @as(u16, @intCast(index))), .b = value });
+            if (value == target_slot) {
+                // Already in target slot
+            } else if (self.ops.items.len > 0 and self.ops.items[self.ops.items.len - 1].a == value and isRegisterDefOpcode(self.ops.items[self.ops.items.len - 1].opcode)) {
+                self.ops.items[self.ops.items.len - 1].a = target_slot;
+            } else {
+                try self.emitOp(.{ .opcode = .move, .a = target_slot, .b = value });
+            }
         }
         const destination = try self.allocRegister();
         try self.emitOp(.{ .opcode = .call, .a = destination, .b = callee, .c = arg_count });
@@ -359,6 +395,7 @@ pub fn disassemble(allocator: Allocator, block: *const codeblock.CodeBlock) ![]u
             .jump => try output.print(allocator, " {d}", .{jumpTarget(op)}),
             .jump_if_true, .jump_if_false => try output.print(allocator, " r{d}, {d}", .{ op.a, jumpTarget(op) }),
             .call => try output.print(allocator, " r{d}, r{d}, {d}", .{ op.a, op.b, op.c }),
+            .move => try output.print(allocator, " r{d}, r{d}", .{ op.a, op.b }),
             .return_value => try output.print(allocator, " r{d}", .{op.a}),
             else => {},
         }
