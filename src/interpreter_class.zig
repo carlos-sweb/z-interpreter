@@ -723,6 +723,30 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
     return class_fn;
 }
 
+pub fn getOrCompileBytecode(self: *Interpreter, fnode: *const zfunctions.FunctionNode) ?*bytecode_emitter.CompiledCodeBlock {
+    if (self.compiled_bytecode.get(fnode)) |cached| {
+        return cached;
+    }
+    const compiled = bytecode_emitter.BytecodeEmitter.emit(self.gc_allocator, fnode) catch |err| switch (err) {
+        error.UnsupportedSyntax, error.UnknownLocal => {
+            self.compiled_bytecode.put(self.gc_allocator, fnode, null) catch {};
+            return null;
+        },
+        else => return null,
+    };
+    const cb = self.gc_allocator.create(bytecode_emitter.CompiledCodeBlock) catch return null;
+    cb.* = compiled;
+    if (self.compile_options.disasm) {
+        const text = bytecode_emitter.disassemble(self.gc_allocator, &cb.block) catch null;
+        if (text) |t| {
+            defer self.gc_allocator.free(t);
+            _ = self.console_error_writer.writeAll(t) catch {};
+        }
+    }
+    self.compiled_bytecode.put(self.gc_allocator, fnode, cb) catch {};
+    return cb;
+}
+
 /// The shared body of every user-code invocation: fresh call env off the
 /// closure env, this/super bindings, parameter binding (defaults, rest,
 /// destructuring via bindPattern), then the body. `this_value` null =
@@ -746,30 +770,7 @@ pub fn invokeFunctionNode(
     if (self.compile_options.use_bytecode_vm) {
         // Unsupported AST shapes have no CodeBlock and stay on the existing
         // walker. The VM is selected only after a CodeBlock was emitted.
-        const maybe_cb: ?*bytecode_emitter.CompiledCodeBlock = if (self.compiled_bytecode.get(fnode)) |cached|
-            cached
-        else blk: {
-            const compiled = bytecode_emitter.BytecodeEmitter.emit(self.gc_allocator, fnode) catch |err| switch (err) {
-                error.UnsupportedSyntax, error.UnknownLocal => {
-                    self.compiled_bytecode.put(self.gc_allocator, fnode, null) catch {};
-                    break :blk null;
-                },
-                else => return err,
-            };
-            const cb = self.gc_allocator.create(bytecode_emitter.CompiledCodeBlock) catch break :blk null;
-            cb.* = compiled;
-            if (self.compile_options.disasm) {
-                const text = bytecode_emitter.disassemble(self.gc_allocator, &cb.block) catch null;
-                if (text) |t| {
-                    defer self.gc_allocator.free(t);
-                    _ = self.console_error_writer.writeAll(t) catch {};
-                }
-            }
-            self.compiled_bytecode.put(self.gc_allocator, fnode, cb) catch {};
-            break :blk cb;
-        };
-
-        if (maybe_cb) |cb| {
+        if (getOrCompileBytecode(self, fnode)) |cb| {
             const vm_result = bytecode_vm.vmCall(self.gc_allocator, &cb.block, closure_env, args) catch |err| switch (err) {
                 // An older/emitted block may contain an opcode not implemented
                 // by this VM revision. Preserve the AST path in that case.
@@ -861,7 +862,7 @@ pub fn invokeFunctionNode(
     }
 }
 
-fn closureCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+pub fn closureCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const closure_ctx: *ClosureCtx = @ptrCast(@alignCast(ctx));
     const fnode = closure_ctx.function_node;
     // Arrows have no own `this` binding -- passing null makes

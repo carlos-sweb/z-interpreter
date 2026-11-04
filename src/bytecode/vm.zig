@@ -6,70 +6,187 @@ const zvalue = @import("zvalue");
 const JSValue = zvalue.JSValue;
 const Environment = @import("../environment.zig").Environment;
 const codeblock = @import("codeblock.zig");
+const interpreter_class = @import("../interpreter_class.zig");
+const interpreter_mod = @import("../interpreter.zig");
+const ClosureCtx = interpreter_mod.ClosureCtx;
+
+pub const MAX_FRAMES = 1024;
+pub const MAX_REGISTERS = 8192;
+
+pub const CallFrame = struct {
+    block: *const codeblock.CodeBlock,
+    pc: usize,
+    reg_base: usize,
+    this_value: JSValue,
+    closure_env: ?*Environment,
+    return_reg: u8,
+};
+
+const BytecodeTarget = struct {
+    block: *const codeblock.CodeBlock,
+    closure_env: ?*Environment,
+};
+
+fn getBytecodeTarget(callee: JSValue) ?BytecodeTarget {
+    if (callee != .function) return null;
+    if (callee.function.value.call != interpreter_class.closureCall) return null;
+    const cc: *ClosureCtx = @ptrCast(@alignCast(callee.function.value.ctx));
+    if (cc.function_node.is_generator or cc.function_node.is_async) return null;
+    if (!cc.interp.compile_options.use_bytecode_vm) return null;
+    const cb = interpreter_class.getOrCompileBytecode(cc.interp, cc.function_node) orelse return null;
+    return .{
+        .block = &cb.block,
+        .closure_env = cc.closure_env,
+    };
+}
+
+fn callFallback(allocator: Allocator, callee: JSValue, args_slice: []const JSValue) !JSValue {
+    if (callee != .function) return error.UnsupportedOpcode;
+    var inline_args: [4]JSValue = undefined;
+    const is_heap = args_slice.len > inline_args.len;
+    const call_args = if (is_heap)
+        try allocator.alloc(JSValue, args_slice.len)
+    else
+        inline_args[0..args_slice.len];
+    defer {
+        for (call_args) |arg| arg.deinit();
+        if (is_heap) allocator.free(call_args);
+    }
+    for (call_args, args_slice) |*dest, src| dest.* = src.retain();
+    return try callee.function.value.call(callee.function.value.ctx, allocator, JSValue.UNDEFINED, call_args);
+}
 
 /// Executes a CodeBlock without consulting the AST. The caller owns the
 /// returned value. Every register owns its value for the duration of the
 /// call, including values copied from arguments and locals.
 pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_env: ?*Environment, args: []const JSValue) !JSValue {
-    var inline_regs: [32]JSValue = undefined;
-    const is_heap = block.register_count > inline_regs.len;
-    var registers = if (is_heap)
-        try allocator.alloc(JSValue, block.register_count)
-    else
-        inline_regs[0..block.register_count];
-    for (registers) |*register| register.* = JSValue.UNDEFINED;
+    var frames: [MAX_FRAMES]CallFrame = undefined;
+    var frame_count: usize = 0;
+    var registers: [MAX_REGISTERS]JSValue = undefined;
+    var reg_top: usize = 0;
+
     defer {
-        for (registers) |register| register.deinit();
-        if (is_heap) allocator.free(registers);
+        for (registers[0..reg_top]) |register| register.deinit();
     }
+
+    if (block.register_count > MAX_REGISTERS) return error.OutOfMemory;
+
+    for (registers[0..block.register_count]) |*register| register.* = JSValue.UNDEFINED;
+    reg_top = block.register_count;
 
     const parameter_count = @min(args.len, block.param_count);
     for (0..parameter_count) |index| registers[index] = args[index].retain();
 
-    var pc: usize = 0;
-    while (pc < block.ops.len) {
-        const op = block.ops[pc];
-        pc += 1;
+    frames[0] = CallFrame{
+        .block = block,
+        .pc = 0,
+        .reg_base = 0,
+        .this_value = JSValue.UNDEFINED,
+        .closure_env = closure_env,
+        .return_reg = 0,
+    };
+    frame_count = 1;
+
+    while (frame_count > 0) {
+        const frame = &frames[frame_count - 1];
+        if (frame.pc >= frame.block.ops.len) return error.MissingReturn;
+        const op = frame.block.ops[frame.pc];
+        frame.pc += 1;
+        const frame_regs = registers[frame.reg_base .. frame.reg_base + frame.block.register_count];
         switch (op.opcode) {
-            .load_const => try setRegister(registers, op.a, try constantValue(allocator, block, op.b)),
-            .load_undefined => try setRegister(registers, op.a, JSValue.UNDEFINED),
-            .load_null => try setRegister(registers, op.a, JSValue.NULL),
-            .load_true => try setRegister(registers, op.a, JSValue.fromBool(true)),
-            .load_false => try setRegister(registers, op.a, JSValue.fromBool(false)),
-            .move, .load_local => try setRegister(registers, op.a, (try getRegister(registers, op.b)).retain()),
-            .store_local => try setRegister(registers, op.a, (try getRegister(registers, op.b)).retain()),
-            .load_global => try setRegister(registers, op.a, try loadGlobal(block, closure_env, op.b)),
-            .add => try addOp(registers, allocator, op),
-            .add_num => try arithmetic(registers, op, .add),
-            .sub_num => try arithmetic(registers, op, .sub),
-            .mul_num => try arithmetic(registers, op, .mul),
-            .div_num => try arithmetic(registers, op, .div),
-            .mod_num => try arithmetic(registers, op, .mod),
-            .lt_num => try comparison(registers, op, .lt),
-            .gt_num => try comparison(registers, op, .gt),
-            .le_num => try comparison(registers, op, .le),
-            .ge_num => try comparison(registers, op, .ge),
-            .eq => try comparison(registers, op, .eq),
-            .ne => try comparison(registers, op, .ne),
+            .load_const => try setRegister(frame_regs, op.a, try constantValue(allocator, frame.block, op.b)),
+            .load_undefined => try setRegister(frame_regs, op.a, JSValue.UNDEFINED),
+            .load_null => try setRegister(frame_regs, op.a, JSValue.NULL),
+            .load_true => try setRegister(frame_regs, op.a, JSValue.fromBool(true)),
+            .load_false => try setRegister(frame_regs, op.a, JSValue.fromBool(false)),
+            .move, .load_local => try setRegister(frame_regs, op.a, (try getRegister(frame_regs, op.b)).retain()),
+            .store_local => try setRegister(frame_regs, op.a, (try getRegister(frame_regs, op.b)).retain()),
+            .load_global => try setRegister(frame_regs, op.a, try loadGlobal(frame.block, frame.closure_env, op.b)),
+            .add => try addOp(frame_regs, allocator, op),
+            .add_num => try arithmetic(frame_regs, op, .add),
+            .sub_num => try arithmetic(frame_regs, op, .sub),
+            .mul_num => try arithmetic(frame_regs, op, .mul),
+            .div_num => try arithmetic(frame_regs, op, .div),
+            .mod_num => try arithmetic(frame_regs, op, .mod),
+            .lt_num => try comparison(frame_regs, op, .lt),
+            .gt_num => try comparison(frame_regs, op, .gt),
+            .le_num => try comparison(frame_regs, op, .le),
+            .ge_num => try comparison(frame_regs, op, .ge),
+            .eq => try comparison(frame_regs, op, .eq),
+            .ne => try comparison(frame_regs, op, .ne),
             .neg => {
-                const src = try getRegister(registers, op.b);
+                const src = try getRegister(frame_regs, op.b);
                 if (src != .number) return error.UnsupportedOpcode;
-                try setRegister(registers, op.a, JSValue.fromNumber(-src.number));
+                try setRegister(frame_regs, op.a, JSValue.fromNumber(-src.number));
             },
             .not => {
-                const truthy = try isTruthy(registers, op.b);
-                try setRegister(registers, op.a, JSValue.fromBool(!truthy));
+                const truthy = try isTruthy(frame_regs, op.b);
+                try setRegister(frame_regs, op.a, JSValue.fromBool(!truthy));
             },
-            .jump => pc = try jumpTarget(block, op),
+            .jump => frame.pc = try jumpTarget(frame.block, op),
             .jump_if_true => {
-                if (try isTruthy(registers, op.a)) pc = try jumpTarget(block, op);
+                if (try isTruthy(frame_regs, op.a)) frame.pc = try jumpTarget(frame.block, op);
             },
             .jump_if_false => {
-                if (!try isTruthy(registers, op.a)) pc = try jumpTarget(block, op);
+                if (!try isTruthy(frame_regs, op.a)) frame.pc = try jumpTarget(frame.block, op);
             },
-            .call => try call(registers, allocator, op),
-            .return_value => return (try getRegister(registers, op.a)).retain(),
-            .return_undefined => return JSValue.UNDEFINED,
+            .call => {
+                const callee = try getRegister(frame_regs, op.b);
+                const start = @as(usize, op.b) + 1;
+                const end = start + op.c;
+                if (end > frame_regs.len) return error.InvalidRegister;
+
+                if (getBytecodeTarget(callee)) |target| {
+                    if (frame_count >= MAX_FRAMES) return error.StackOverflow;
+                    const callee_block = target.block;
+                    const callee_reg_base = reg_top;
+                    const new_reg_top = callee_reg_base + callee_block.register_count;
+                    if (new_reg_top > MAX_REGISTERS) return error.OutOfMemory;
+
+                    for (registers[callee_reg_base..new_reg_top]) |*r| r.* = JSValue.UNDEFINED;
+                    const param_count = @min(op.c, callee_block.param_count);
+                    for (0..param_count) |i| {
+                        registers[callee_reg_base + i] = frame_regs[start + i].retain();
+                    }
+
+                    frames[frame_count] = CallFrame{
+                        .block = callee_block,
+                        .pc = 0,
+                        .reg_base = callee_reg_base,
+                        .this_value = JSValue.UNDEFINED,
+                        .closure_env = target.closure_env,
+                        .return_reg = op.a,
+                    };
+                    frame_count += 1;
+                    reg_top = new_reg_top;
+                } else {
+                    const result = try callFallback(allocator, callee, frame_regs[start..end]);
+                    try setRegister(frame_regs, op.a, result);
+                }
+            },
+            .return_value => {
+                const val = (try getRegister(frame_regs, op.a)).retain();
+                for (registers[frame.reg_base..reg_top]) |r| r.deinit();
+                reg_top = frame.reg_base;
+                frame_count -= 1;
+                if (frame_count == 0) {
+                    return val;
+                }
+                const caller_frame = &frames[frame_count - 1];
+                const caller_regs = registers[caller_frame.reg_base .. caller_frame.reg_base + caller_frame.block.register_count];
+                try setRegister(caller_regs, frame.return_reg, val);
+            },
+            .return_undefined => {
+                for (registers[frame.reg_base..reg_top]) |r| r.deinit();
+                reg_top = frame.reg_base;
+                frame_count -= 1;
+                if (frame_count == 0) {
+                    return JSValue.UNDEFINED;
+                }
+                const caller_frame = &frames[frame_count - 1];
+                const caller_regs = registers[caller_frame.reg_base .. caller_frame.reg_base + caller_frame.block.register_count];
+                try setRegister(caller_regs, frame.return_reg, JSValue.UNDEFINED);
+            },
             else => return error.UnsupportedOpcode,
         }
     }
@@ -158,27 +275,6 @@ fn isTruthy(registers: []const JSValue, index: u8) !bool {
         .string => |s| s.value.data.len > 0,
         else => return error.UnsupportedOpcode,
     };
-}
-
-fn call(registers: []JSValue, allocator: Allocator, op: codeblock.Op) !void {
-    const callee = try getRegister(registers, op.b);
-    if (callee != .function) return error.UnsupportedOpcode;
-    const start: usize = @as(usize, op.b) + 1;
-    const end = start + op.c;
-    if (end > registers.len) return error.InvalidRegister;
-    var inline_args: [4]JSValue = undefined;
-    const is_heap = op.c > inline_args.len;
-    const call_args = if (is_heap)
-        try allocator.alloc(JSValue, op.c)
-    else
-        inline_args[0..op.c];
-    defer {
-        for (call_args) |arg| arg.deinit();
-        if (is_heap) allocator.free(call_args);
-    }
-    for (call_args, registers[start..end]) |*destination, source| destination.* = source.retain();
-    const result = try callee.function.value.call(callee.function.value.ctx, allocator, JSValue.UNDEFINED, call_args);
-    try setRegister(registers, op.a, result);
 }
 
 const GlobalCacheEntry = struct {
