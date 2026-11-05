@@ -219,7 +219,7 @@ pub const BytecodeEmitter = struct {
         if (item.is_await) return error.UnsupportedSyntax;
         const name: []const u8 = switch (item.binding) {
             .declared => |d| if (d.pattern.* == .identifier) d.pattern.identifier.name else return error.UnsupportedSyntax,
-            .existing => |n| n,
+            .existing => |n| n.name,
             else => return error.UnsupportedSyntax,
         };
         const iter_obj_reg = try self.emitExpression(item.iterable);
@@ -316,13 +316,21 @@ pub const BytecodeEmitter = struct {
                     } else {
                         return error.UnsupportedSyntax;
                     }
-                } else if (assignment.op == .add_assign) {
+                } else if (assignment.op == .add or assignment.op == .sub or assignment.op == .mul or assignment.op == .div or assignment.op == .mod) {
                     if (assignment.target.data == .identifier) {
                         const name = assignment.target.data.identifier;
                         const old_val = try self.emitIdentifier(name);
-                        const add_val = try self.emitExpression(assignment.value);
+                        const right_val = try self.emitExpression(assignment.value);
                         const res_reg = try self.allocRegister();
-                        try self.emitOp(.{ .opcode = .add, .a = res_reg, .b = old_val, .c = add_val });
+                        const opcode: codeblock.Opcode = switch (assignment.op) {
+                            .add => .add,
+                            .sub => .sub_num,
+                            .mul => .mul_num,
+                            .div => .div_num,
+                            .mod => .mod_num,
+                            else => unreachable,
+                        };
+                        try self.emitOp(.{ .opcode = opcode, .a = res_reg, .b = old_val, .c = right_val });
                         try self.emitStore(name, res_reg);
                         return res_reg;
                     } else return error.UnsupportedSyntax;

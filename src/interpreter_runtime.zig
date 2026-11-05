@@ -218,7 +218,7 @@ pub fn run(self: *Interpreter, source: []const u8) anyerror!JSValue {
                     _ = self.console_error_writer.writeAll(t) catch {};
                 }
             }
-            const vm_result = bytecode_vm.vmCall(self.gc_allocator, &block.block, self.script_env, &.{}) catch |err| switch (err) {
+            const vm_result = bytecode_vm.vmCall(self.gc_allocator, &block.block, self.script_env, &.{}, self) catch |err| switch (err) {
                 error.UnsupportedOpcode => null,
                 else => return err,
             };

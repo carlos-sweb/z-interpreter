@@ -211,9 +211,16 @@ fn setElem(allocator: Allocator, obj: JSValue, key_val: JSValue, val: JSValue) !
 /// returned value. Every register owns its value for the duration of the
 /// call, including values copied from arguments and locals.
 pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_env: ?*Environment, args: []const JSValue, interp: ?*interpreter_mod.Interpreter) !JSValue {
-    var frames: [MAX_FRAMES]CallFrame = undefined;
+    clearGlobalCache();
+    defer clearGlobalCache();
+
+    const frames = try allocator.alloc(CallFrame, MAX_FRAMES);
+    defer allocator.free(frames);
+    const registers = try allocator.alloc(JSValue, MAX_REGISTERS);
+    defer allocator.free(registers);
+    @memset(registers, JSValue.UNDEFINED);
+
     var frame_count: usize = 0;
-    var registers: [MAX_REGISTERS]JSValue = @splat(JSValue.UNDEFINED);
     var reg_top: usize = 0;
 
     defer {
@@ -625,6 +632,7 @@ fn constantValue(allocator: Allocator, block: *const codeblock.CodeBlock, index:
         .number => |number| JSValue.fromNumber(number),
         .boolean => |boolean| JSValue.fromBool(boolean),
         .string, .property_key, .bigint => |text| try JSValue.newString(allocator, text),
+        .function_node => return error.InvalidConstant,
     };
 }
 
