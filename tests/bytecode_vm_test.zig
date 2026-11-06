@@ -197,3 +197,29 @@ test "bytecode VM try catch throw" {
     try testing.expect(res == .string);
     try testing.expectEqualStrings("err", res.string.value.data);
 }
+
+test "bytecode opt-in falls back for generator functions" {
+    var output = std.Io.Writer.Allocating.init(testing.allocator);
+    defer output.deinit();
+    var interpreter = try zinterpreter.Interpreter.init(testing.allocator, &output.writer);
+    defer interpreter.deinit();
+    interpreter.compile_options.use_bytecode_vm = true;
+
+    const source = "function* g() { yield 1; yield 2; } let it = g(); let r = [it.next().value, it.next().value]; r[0] + r[1];";
+    const result = try interpreter.run(source);
+    defer result.deinit();
+    try testing.expect(result == .number);
+    try testing.expectEqual(@as(f64, 3), result.number);
+}
+
+test "bytecode opt-in falls back for async functions" {
+    var output = std.Io.Writer.Allocating.init(testing.allocator);
+    defer output.deinit();
+    var interpreter = try zinterpreter.Interpreter.init(testing.allocator, &output.writer);
+    defer interpreter.deinit();
+    interpreter.compile_options.use_bytecode_vm = true;
+
+    const result = try interpreter.run("async function f() { return await 1; } f();");
+    defer result.deinit();
+    try testing.expect(result == .promise);
+}

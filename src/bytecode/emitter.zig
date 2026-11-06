@@ -29,6 +29,7 @@ pub const BytecodeEmitter = struct {
     max_register: u16,
 
     pub fn emit(allocator: Allocator, function: *const zfunctions.FunctionNode) !CompiledCodeBlock {
+        if (function.is_generator or function.is_async) return error.UnsupportedSyntax;
         const scope = try codeblock.ScopeAnalyzer.analyze(allocator, function);
         var self = BytecodeEmitter{
             .allocator = allocator,
@@ -240,6 +241,7 @@ pub const BytecodeEmitter = struct {
 
     fn emitFunctionDeclaration(self: *BytecodeEmitter, ptr: anytype) anyerror!void {
         const function = zfunctions.asFunctionNode(ptr);
+        if (function.is_generator or function.is_async) return error.UnsupportedSyntax;
         const name = switch (function.kind) {
             .function_decl => |d| d.name,
             else => return error.UnsupportedSyntax,
@@ -252,6 +254,7 @@ pub const BytecodeEmitter = struct {
 
     fn emitFunctionLike(self: *BytecodeEmitter, ptr: anytype) anyerror!u8 {
         const function = zfunctions.asFunctionNode(ptr);
+        if (function.is_generator or function.is_async) return error.UnsupportedSyntax;
         const const_idx = try self.addConstant(.{ .function_node = function });
         const fn_reg = try self.allocRegister();
         try self.emitOp(.{ .opcode = .make_closure, .a = fn_reg, .b = const_idx });
@@ -342,6 +345,7 @@ pub const BytecodeEmitter = struct {
             .array_literal => |items| return self.emitArrayLiteral(items),
             .member => |member| return self.emitMember(member),
             .function_like => |ptr| return self.emitFunctionLike(ptr),
+            .yield_expr, .await_expr => return error.UnsupportedSyntax,
             else => return error.UnsupportedSyntax,
         }
     }
