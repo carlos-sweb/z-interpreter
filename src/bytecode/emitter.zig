@@ -30,6 +30,11 @@ pub const BytecodeEmitter = struct {
 
     pub fn emit(allocator: Allocator, function: *const zfunctions.FunctionNode) !CompiledCodeBlock {
         if (function.is_generator or function.is_async) return error.UnsupportedSyntax;
+        if (function.params.rest != null) return error.UnsupportedSyntax;
+        for (function.params.items) |param| {
+            if (param.default != null) return error.UnsupportedSyntax;
+            if (param.pattern.* != .identifier) return error.UnsupportedSyntax;
+        }
         const scope = try codeblock.ScopeAnalyzer.analyze(allocator, function);
         var self = BytecodeEmitter{
             .allocator = allocator,
@@ -38,6 +43,9 @@ pub const BytecodeEmitter = struct {
             .max_register = scope.local_count,
         };
         defer self.scope.deinit(allocator);
+        for (function.params.items) |param| {
+            if (self.scope.capturesLocal(param.pattern.identifier.name)) return error.UnsupportedSyntax;
+        }
         errdefer self.ops.deinit(allocator);
         errdefer self.constants.deinit(allocator);
 
