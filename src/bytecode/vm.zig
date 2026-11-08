@@ -303,6 +303,13 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
             .ge_num => try comparison(frame_regs, op, .ge),
             .eq => try comparison(frame_regs, op, .eq),
             .ne => try comparison(frame_regs, op, .ne),
+            .sub_local_const => try arithmeticLocalConst(frame_regs, frame.block, op, .sub),
+            .add_local_const => try addLocalConst(frame_regs, allocator, frame.block, op),
+            .lt_local_const => try comparisonLocalConst(frame_regs, frame.block, op, .lt),
+            .gt_local_const => try comparisonLocalConst(frame_regs, frame.block, op, .gt),
+            .le_local_const => try comparisonLocalConst(frame_regs, frame.block, op, .le),
+            .ge_local_const => try comparisonLocalConst(frame_regs, frame.block, op, .ge),
+            .eq_local_const => try comparisonLocalConst(frame_regs, frame.block, op, .eq),
             .neg => {
                 const src = try getRegister(frame_regs, op.b);
                 if (src != .number) return error.UnsupportedOpcode;
@@ -520,6 +527,79 @@ fn addOp(registers: []JSValue, allocator: Allocator, op: codeblock.Op) !void {
         try setRegister(registers, op.a, JSValue.fromNumber(left.number + right.number));
         return;
     }
+    if (left == .string or right == .string) {
+        var buf_l: [32]u8 = undefined;
+        var buf_r: [32]u8 = undefined;
+        const sl = stringSlice(left, &buf_l) orelse return error.UnsupportedOpcode;
+        const sr = stringSlice(right, &buf_r) orelse return error.UnsupportedOpcode;
+        const combined = try std.fmt.allocPrint(allocator, "{s}{s}", .{ sl, sr });
+        defer allocator.free(combined);
+        const result = try JSValue.newString(allocator, combined);
+        try setRegister(registers, op.a, result);
+        return;
+    }
+    return error.UnsupportedOpcode;
+}
+
+fn arithmeticLocalConst(registers: []JSValue, block: *const codeblock.CodeBlock, op: codeblock.Op, kind: Arithmetic) !void {
+    const left = try getRegister(registers, op.b);
+    if (op.c >= block.constants.len) return error.InvalidConstant;
+    const c = block.constants[op.c];
+    if (left == .number and c == .number) {
+        const result = switch (kind) {
+            .add => left.number + c.number,
+            .sub => left.number - c.number,
+            .mul => left.number * c.number,
+            .div => left.number / c.number,
+            .mod => @mod(left.number, c.number),
+        };
+        try setRegister(registers, op.a, JSValue.fromNumber(result));
+    } else return error.UnsupportedOpcode;
+}
+
+fn comparisonLocalConst(registers: []JSValue, block: *const codeblock.CodeBlock, op: codeblock.Op, kind: Comparison) !void {
+    const left = try getRegister(registers, op.b);
+    if (op.c >= block.constants.len) return error.InvalidConstant;
+    const c = block.constants[op.c];
+    if (left == .number and c == .number) {
+        const result = switch (kind) {
+            .lt => left.number < c.number,
+            .gt => left.number > c.number,
+            .le => left.number <= c.number,
+            .ge => left.number >= c.number,
+            .eq => left.number == c.number,
+            .ne => left.number != c.number,
+        };
+        try setRegister(registers, op.a, JSValue.fromBool(result));
+    } else if (left == .string and c == .string) {
+        const eq = std.mem.eql(u8, left.string.value.data, c.string);
+        const result = switch (kind) {
+            .eq => eq,
+            .ne => !eq,
+            else => return error.UnsupportedOpcode,
+        };
+        try setRegister(registers, op.a, JSValue.fromBool(result));
+    } else if (left == .boolean and c == .boolean) {
+        const eq = (left.boolean == c.boolean);
+        const result = switch (kind) {
+            .eq => eq,
+            .ne => !eq,
+            else => return error.UnsupportedOpcode,
+        };
+        try setRegister(registers, op.a, JSValue.fromBool(result));
+    } else return error.UnsupportedOpcode;
+}
+
+fn addLocalConst(registers: []JSValue, allocator: Allocator, block: *const codeblock.CodeBlock, op: codeblock.Op) !void {
+    const left = try getRegister(registers, op.b);
+    if (op.c >= block.constants.len) return error.InvalidConstant;
+    const c = block.constants[op.c];
+    if (left == .number and c == .number) {
+        try setRegister(registers, op.a, JSValue.fromNumber(left.number + c.number));
+        return;
+    }
+    const right = try constantValue(allocator, block, op.c);
+    defer right.deinit();
     if (left == .string or right == .string) {
         var buf_l: [32]u8 = undefined;
         var buf_r: [32]u8 = undefined;

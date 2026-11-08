@@ -223,3 +223,30 @@ test "bytecode opt-in falls back for async functions" {
     defer result.deinit();
     try testing.expect(result == .promise);
 }
+
+test "bytecode VM superinstructions" {
+    // Funcional: let x = 5; let y = x - 2; return y; -> 3
+    try testing.expectEqual(@as(f64, 3), try runNumber("(function() { let x = 5; let y = x - 2; return y; })()", true));
+    // Funcional: let x = 5; if (x > 3) return 1; return 0; -> 1
+    try testing.expectEqual(@as(f64, 1), try runNumber("(function() { let x = 5; if (x > 3) return 1; return 0; })()", true));
+    // Tests for eq, inverted eq, lt, le, ge, add
+    try testing.expectEqual(@as(f64, 1), try runNumber("(function() { let x = 5; return x == 5 ? 1 : 0; })()", true));
+    try testing.expectEqual(@as(f64, 1), try runNumber("(function() { let x = 5; return 5 == x ? 1 : 0; })()", true));
+    try testing.expectEqual(@as(f64, 1), try runNumber("(function() { let x = 5; return x < 10 ? 1 : 0; })()", true));
+    try testing.expectEqual(@as(f64, 1), try runNumber("(function() { let x = 5; return x <= 5 ? 1 : 0; })()", true));
+    try testing.expectEqual(@as(f64, 1), try runNumber("(function() { let x = 5; return x >= 5 ? 1 : 0; })()", true));
+    try testing.expectEqual(@as(f64, 7), try runNumber("(function() { let x = 5; return x + 2; })()", true));
+}
+
+test "bytecode VM superinstructions disasm" {
+    var output = std.Io.Writer.Allocating.init(testing.allocator);
+    defer output.deinit();
+    var interpreter = try zinterpreter.Interpreter.init(testing.allocator, &output.writer);
+    defer interpreter.deinit();
+    interpreter.compile_options.use_bytecode_vm = true;
+    interpreter.compile_options.disasm = true;
+
+    const result = try interpreter.run("function check(x) { return x == 5; } check(5);");
+    defer result.deinit();
+    try testing.expect(std.mem.indexOf(u8, output.written(), "eq_local_const") != null);
+}

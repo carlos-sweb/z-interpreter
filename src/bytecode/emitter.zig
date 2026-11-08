@@ -403,7 +403,50 @@ pub const BytecodeEmitter = struct {
         }
     }
 
+    fn getLocalSlot(self: *BytecodeEmitter, node: *const zparser.Node) ?u8 {
+        const unwrap = unwrapParen(node);
+        if (unwrap.data == .identifier) {
+            const name = unwrap.data.identifier;
+            if (self.scope.localSlot(name)) |slot| {
+                if (!self.scope.capturesLocal(name)) {
+                    return small(slot) catch null;
+                }
+            }
+        }
+        return null;
+    }
+
     fn emitBinary(self: *BytecodeEmitter, binary: anytype) anyerror!u8 {
+        if (self.getLocalSlot(binary.left)) |local_slot| {
+            if (asConstant(binary.right)) |const_val| {
+                const super_opcode: ?codeblock.Opcode = switch (binary.op) {
+                    .add => .add_local_const,
+                    .sub => .sub_local_const,
+                    .lt => .lt_local_const,
+                    .gt => .gt_local_const,
+                    .le => .le_local_const,
+                    .ge => .ge_local_const,
+                    .eq, .eqeqeq => .eq_local_const,
+                    else => null,
+                };
+                if (super_opcode) |opc| {
+                    const const_idx = try self.addConstant(const_val);
+                    const destination = try self.allocRegister();
+                    try self.emitOp(.{ .opcode = opc, .a = destination, .b = local_slot, .c = const_idx });
+                    return destination;
+                }
+            }
+        } else if (self.getLocalSlot(binary.right)) |local_slot| {
+            if (binary.op == .eq or binary.op == .eqeqeq) {
+                if (asConstant(binary.left)) |const_val| {
+                    const const_idx = try self.addConstant(const_val);
+                    const destination = try self.allocRegister();
+                    try self.emitOp(.{ .opcode = .eq_local_const, .a = destination, .b = local_slot, .c = const_idx });
+                    return destination;
+                }
+            }
+        }
+
         const opcode: codeblock.Opcode = switch (binary.op) {
             .add => .add,
             .sub => .sub_num,
@@ -470,6 +513,13 @@ pub const BytecodeEmitter = struct {
             .make_closure,
             .iter_init,
             .iter_next,
+            .add_local_const,
+            .sub_local_const,
+            .lt_local_const,
+            .gt_local_const,
+            .le_local_const,
+            .ge_local_const,
+            .eq_local_const,
             => true,
             else => false,
         };
@@ -596,6 +646,24 @@ pub const BytecodeEmitter = struct {
     }
 };
 
+fn unwrapParen(node: *const zparser.Node) *const zparser.Node {
+    var cur = node;
+    while (cur.data == .paren) {
+        cur = cur.data.paren;
+    }
+    return cur;
+}
+
+fn asConstant(node: *const zparser.Node) ?codeblock.Constant {
+    const unwrap = unwrapParen(node);
+    return switch (unwrap.data) {
+        .number_literal => |num| .{ .number = num },
+        .string_literal => |str| .{ .string = str },
+        .boolean_literal => |b| .{ .boolean = b },
+        else => null,
+    };
+}
+
 fn small(value: u16) !u8 {
     if (value > std.math.maxInt(u8)) return error.TooManyRegisters;
     return @intCast(value);
@@ -612,6 +680,7 @@ pub fn disassemble(allocator: Allocator, block: *const codeblock.CodeBlock) ![]u
             .store_local, .store_global, .store_capture => try output.print(allocator, " @{d}, r{d}", .{ op.a, op.b }),
             .neg, .not => try output.print(allocator, " r{d}, r{d}", .{ op.a, op.b }),
             .add, .sub_num, .mul_num, .div_num, .mod_num, .lt_num, .gt_num, .le_num, .ge_num, .eq, .ne => try output.print(allocator, " r{d}, r{d}, r{d}", .{ op.a, op.b, op.c }),
+            .add_local_const, .sub_local_const, .lt_local_const, .gt_local_const, .le_local_const, .ge_local_const, .eq_local_const => try output.print(allocator, " r{d}, @{d}, #{d}", .{ op.a, op.b, op.c }),
             .jump => try output.print(allocator, " {d}", .{jumpTarget(op)}),
             .jump_if_true, .jump_if_false => try output.print(allocator, " r{d}, {d}", .{ op.a, jumpTarget(op) }),
             .call => try output.print(allocator, " r{d}, r{d}, {d}", .{ op.a, op.b, op.c }),
