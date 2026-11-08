@@ -25,6 +25,7 @@ pub const BytecodeEmitter = struct {
     scope: codeblock.ScopeAnalysis,
     ops: std.ArrayListUnmanaged(codeblock.Op) = .empty,
     constants: std.ArrayListUnmanaged(codeblock.Constant) = .empty,
+    free_registers: std.ArrayListUnmanaged(u8) = .empty,
     next_register: u16,
     max_register: u16,
 
@@ -43,6 +44,7 @@ pub const BytecodeEmitter = struct {
             .max_register = scope.local_count,
         };
         defer self.scope.deinit(allocator);
+        defer self.free_registers.deinit(allocator);
         for (function.params.items) |param| {
             if (self.scope.capturesLocal(param.pattern.identifier.name)) return error.UnsupportedSyntax;
         }
@@ -75,11 +77,13 @@ pub const BytecodeEmitter = struct {
             .max_register = scope.local_count,
         };
         defer self.scope.deinit(allocator);
+        defer self.free_registers.deinit(allocator);
         errdefer self.ops.deinit(allocator);
         errdefer self.constants.deinit(allocator);
 
         var last_register: ?u8 = null;
         for (statements) |statement| {
+            if (last_register) |prev| self.freeRegister(prev);
             switch (statement.data) {
                 .expr_stmt => |expr| {
                     last_register = try self.emitExpression(expr);
@@ -92,6 +96,7 @@ pub const BytecodeEmitter = struct {
         }
         if (last_register) |reg| {
             try self.emitOp(.{ .opcode = .return_value, .a = reg });
+            self.freeRegister(reg);
         } else {
             try self.emitOp(.{ .opcode = .return_undefined });
         }
@@ -126,6 +131,7 @@ pub const BytecodeEmitter = struct {
             .expression => |expression| {
                 const value = try self.emitExpression(expression);
                 try self.emitOp(.{ .opcode = .return_value, .a = value });
+                self.freeRegister(value);
             },
             .block => |block| {
                 for (block.data.block) |statement| try self.emitStatement(statement);
@@ -142,9 +148,13 @@ pub const BytecodeEmitter = struct {
                 if (value) |expression| {
                     const register = try self.emitExpression(expression);
                     try self.emitOp(.{ .opcode = .return_value, .a = register });
+                    self.freeRegister(register);
                 } else try self.emitOp(.{ .opcode = .return_undefined });
             },
-            .expr_stmt => |expression| _ = try self.emitExpression(expression),
+            .expr_stmt => |expression| {
+                const reg = try self.emitExpression(expression);
+                self.freeRegister(reg);
+            },
             .variable => |variable| try self.emitVariable(variable),
             .if_stmt => |item| try self.emitIf(item),
             .while_stmt => |item| try self.emitWhile(item),
@@ -175,12 +185,14 @@ pub const BytecodeEmitter = struct {
             else
                 try self.emitSimple(.load_undefined);
             try self.emitStore(name, val_reg);
+            self.freeRegister(val_reg);
         }
     }
 
     fn emitIf(self: *BytecodeEmitter, item: anytype) anyerror!void {
         const condition = try self.emitExpression(item.test_expr);
         const false_jump = try self.emitJump(.jump_if_false, condition);
+        self.freeRegister(condition);
         try self.emitStatement(item.consequent);
         if (item.alternate) |alternate| {
             const end_jump = try self.emitJump(.jump, 0);
@@ -194,6 +206,7 @@ pub const BytecodeEmitter = struct {
         const start = self.ops.items.len;
         const condition = try self.emitExpression(item.test_expr);
         const end_jump = try self.emitJump(.jump_if_false, condition);
+        self.freeRegister(condition);
         try self.emitStatement(item.body);
         const back = try self.emitJump(.jump, 0);
         try self.patchJump(back, start);
@@ -205,16 +218,23 @@ pub const BytecodeEmitter = struct {
             .c_style => |c_style| {
                 if (c_style.init) |init| switch (init) {
                     .decl => |variable| try self.emitVariable(variable),
-                    .expr => |expression| _ = try self.emitExpression(expression),
+                    .expr => |expression| {
+                        const reg = try self.emitExpression(expression);
+                        self.freeRegister(reg);
+                    },
                 };
                 const start = self.ops.items.len;
                 var end_jump: ?usize = null;
                 if (c_style.test_expr) |test_expr| {
                     const condition = try self.emitExpression(test_expr);
                     end_jump = try self.emitJump(.jump_if_false, condition);
+                    self.freeRegister(condition);
                 }
                 try self.emitStatement(body);
-                if (c_style.update) |update| _ = try self.emitExpression(update);
+                if (c_style.update) |update| {
+                    const reg = try self.emitExpression(update);
+                    self.freeRegister(reg);
+                }
                 const back = try self.emitJump(.jump, 0);
                 try self.patchJump(back, start);
                 if (end_jump) |jump| try self.patchJump(jump, self.ops.items.len);
@@ -234,6 +254,7 @@ pub const BytecodeEmitter = struct {
         const iter_obj_reg = try self.emitExpression(item.iterable);
         const iter_reg = try self.allocRegister();
         try self.emitOp(.{ .opcode = .iter_init, .a = iter_reg, .b = iter_obj_reg });
+        self.freeRegister(iter_obj_reg);
         const loop_start = self.ops.items.len;
         const val_reg = try self.allocRegister();
         const done_reg = try self.allocRegister();
@@ -245,6 +266,9 @@ pub const BytecodeEmitter = struct {
         try self.patchJump(back_jump, loop_start);
         try self.patchJump(exit_jump, self.ops.items.len);
         try self.emitOp(.{ .opcode = .iter_end, .a = iter_reg });
+        self.freeRegister(done_reg);
+        self.freeRegister(val_reg);
+        self.freeRegister(iter_reg);
     }
 
     fn emitFunctionDeclaration(self: *BytecodeEmitter, ptr: anytype) anyerror!void {
@@ -258,6 +282,7 @@ pub const BytecodeEmitter = struct {
         const fn_reg = try self.allocRegister();
         try self.emitOp(.{ .opcode = .make_closure, .a = fn_reg, .b = const_idx });
         try self.emitStore(name, fn_reg);
+        self.freeRegister(fn_reg);
     }
 
     fn emitFunctionLike(self: *BytecodeEmitter, ptr: anytype) anyerror!u8 {
@@ -282,6 +307,7 @@ pub const BytecodeEmitter = struct {
             if (param.* != .identifier) return error.UnsupportedSyntax;
             try self.emitStore(param.identifier.name, err_reg);
         }
+        self.freeRegister(err_reg);
         try self.emitStatement(handler.body);
         try self.patchJump(end_jump, self.ops.items.len);
     }
@@ -289,6 +315,7 @@ pub const BytecodeEmitter = struct {
     fn emitThrow(self: *BytecodeEmitter, arg: *const zparser.Node) anyerror!void {
         const val = try self.emitExpression(arg);
         try self.emitOp(.{ .opcode = .throw_value, .a = val });
+        self.freeRegister(val);
     }
 
     fn emitExpression(self: *BytecodeEmitter, expression: *const zparser.Node) anyerror!u8 {
@@ -317,11 +344,14 @@ pub const BytecodeEmitter = struct {
                             const key_const = try self.addConstant(.{ .property_key = m.property.data.identifier });
                             const val_reg = try self.emitExpression(assignment.value);
                             try self.emitOp(.{ .opcode = .set_prop, .a = obj_reg, .b = key_const, .c = val_reg });
+                            self.freeRegister(obj_reg);
                             return val_reg;
                         } else {
                             const key_reg = try self.emitExpression(m.property);
                             const val_reg = try self.emitExpression(assignment.value);
                             try self.emitOp(.{ .opcode = .set_elem, .a = obj_reg, .b = key_reg, .c = val_reg });
+                            self.freeRegister(key_reg);
+                            self.freeRegister(obj_reg);
                             return val_reg;
                         }
                     } else {
@@ -342,6 +372,8 @@ pub const BytecodeEmitter = struct {
                             else => unreachable,
                         };
                         try self.emitOp(.{ .opcode = opcode, .a = res_reg, .b = old_val, .c = right_val });
+                        self.freeRegister(right_val);
+                        self.freeRegister(old_val);
                         try self.emitStore(name, res_reg);
                         return res_reg;
                     } else return error.UnsupportedSyntax;
@@ -380,12 +412,14 @@ pub const BytecodeEmitter = struct {
                 const operand = try self.emitExpression(unary.operand);
                 const destination = try self.allocRegister();
                 try self.emitOp(.{ .opcode = .neg, .a = destination, .b = operand });
+                self.freeRegister(operand);
                 return destination;
             },
             .not => {
                 const operand = try self.emitExpression(unary.operand);
                 const destination = try self.allocRegister();
                 try self.emitOp(.{ .opcode = .not, .a = destination, .b = operand });
+                self.freeRegister(operand);
                 return destination;
             },
             .post_inc, .post_dec, .pre_inc, .pre_dec => {
@@ -397,7 +431,10 @@ pub const BytecodeEmitter = struct {
                 const opcode: codeblock.Opcode = if (unary.op == .post_inc or unary.op == .pre_inc) .add_num else .sub_num;
                 try self.emitOp(.{ .opcode = opcode, .a = new_reg, .b = old_reg, .c = one_reg });
                 try self.emitStore(name, new_reg);
-                return if (unary.op == .post_inc or unary.op == .post_dec) old_reg else new_reg;
+                self.freeRegister(one_reg);
+                const ret = if (unary.op == .post_inc or unary.op == .post_dec) old_reg else new_reg;
+                self.freeRegister(if (ret == old_reg) new_reg else old_reg);
+                return ret;
             },
             else => return error.UnsupportedSyntax,
         }
@@ -465,6 +502,8 @@ pub const BytecodeEmitter = struct {
         const right = try self.emitExpression(binary.right);
         const destination = try self.allocRegister();
         try self.emitOp(.{ .opcode = opcode, .a = destination, .b = left, .c = right });
+        self.freeRegister(right);
+        self.freeRegister(left);
         return destination;
     }
 
@@ -472,12 +511,15 @@ pub const BytecodeEmitter = struct {
         const destination = try self.allocRegister();
         const condition = try self.emitExpression(conditional.test_expr);
         const false_jump = try self.emitJump(.jump_if_false, condition);
+        self.freeRegister(condition);
         const consequent = try self.emitExpression(conditional.consequent);
         try self.emitOp(.{ .opcode = .move, .a = destination, .b = consequent });
+        self.freeRegister(consequent);
         const end_jump = try self.emitJump(.jump, 0);
         try self.patchJump(false_jump, self.ops.items.len);
         const alternate = try self.emitExpression(conditional.alternate);
         try self.emitOp(.{ .opcode = .move, .a = destination, .b = alternate });
+        self.freeRegister(alternate);
         try self.patchJump(end_jump, self.ops.items.len);
         return destination;
     }
@@ -542,11 +584,14 @@ pub const BytecodeEmitter = struct {
                 // Already in target slot
             } else if (self.ops.items.len > 0 and self.ops.items[self.ops.items.len - 1].a == value and isRegisterDefOpcode(self.ops.items[self.ops.items.len - 1].opcode)) {
                 self.ops.items[self.ops.items.len - 1].a = target_slot;
+                self.freeRegister(value);
             } else {
                 try self.emitOp(.{ .opcode = .move, .a = target_slot, .b = value });
+                self.freeRegister(value);
             }
         }
-        const destination = try self.allocRegister();
+        for (0..argument_slots) |i| self.freeRegister(@intCast(arg_base + argument_slots - 1 - i));
+        const destination = callee;
         try self.emitOp(.{ .opcode = .call, .a = destination, .b = callee, .c = arg_count });
         return destination;
     }
@@ -567,6 +612,7 @@ pub const BytecodeEmitter = struct {
                     const val_reg = try self.emitExpression(prop.value);
                     const key_const = try self.addConstant(.{ .property_key = key_name });
                     try self.emitOp(.{ .opcode = .set_prop, .a = dst, .b = key_const, .c = val_reg });
+                    self.freeRegister(val_reg);
                 },
             }
         }
@@ -584,6 +630,8 @@ pub const BytecodeEmitter = struct {
             const val_reg = try self.emitExpression(item);
             const idx_reg = try self.emitConstant(.{ .number = @floatFromInt(index) });
             try self.emitOp(.{ .opcode = .set_elem, .a = dst, .b = idx_reg, .c = val_reg });
+            self.freeRegister(idx_reg);
+            self.freeRegister(val_reg);
         }
         return dst;
     }
@@ -599,7 +647,9 @@ pub const BytecodeEmitter = struct {
         } else {
             const key_reg = try self.emitExpression(member.property);
             try self.emitOp(.{ .opcode = .get_elem, .a = dst, .b = obj_reg, .c = key_reg });
+            self.freeRegister(key_reg);
         }
+        self.freeRegister(obj_reg);
         return dst;
     }
 
@@ -635,10 +685,33 @@ pub const BytecodeEmitter = struct {
     }
 
     fn allocRegister(self: *BytecodeEmitter) !u8 {
+        if (self.free_registers.items.len > 0) {
+            var min_idx: usize = 0;
+            for (self.free_registers.items[1..], 1..) |reg, i| {
+                if (reg < self.free_registers.items[min_idx]) min_idx = i;
+            }
+            return self.free_registers.swapRemove(min_idx);
+        }
         const register = try small(self.next_register);
         self.next_register += 1;
         self.max_register = @max(self.max_register, self.next_register);
         return register;
+    }
+
+    fn freeRegister(self: *BytecodeEmitter, reg: u8) void {
+        if (reg < self.scope.local_count) return;
+        for (self.free_registers.items) |r| {
+            if (r == reg) return;
+        }
+        self.free_registers.append(self.allocator, reg) catch return;
+        while (self.next_register > self.scope.local_count) {
+            const top: u8 = @intCast(self.next_register - 1);
+            const idx = for (self.free_registers.items, 0..) |r, i| {
+                if (r == top) break i;
+            } else break;
+            _ = self.free_registers.swapRemove(idx);
+            self.next_register -= 1;
+        }
     }
 
     fn emitOp(self: *BytecodeEmitter, op: codeblock.Op) !void {

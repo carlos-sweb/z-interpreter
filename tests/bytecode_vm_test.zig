@@ -250,3 +250,20 @@ test "bytecode VM superinstructions disasm" {
     defer result.deinit();
     try testing.expect(std.mem.indexOf(u8, output.written(), "eq_local_const") != null);
 }
+
+test "bytecode VM register recycling in fib" {
+    var output = std.Io.Writer.Allocating.init(testing.allocator);
+    defer output.deinit();
+    var interpreter = try zinterpreter.Interpreter.init(testing.allocator, &output.writer);
+    defer interpreter.deinit();
+    interpreter.compile_options.use_bytecode_vm = true;
+    interpreter.compile_options.disasm = true;
+
+    const result = try interpreter.run("function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); } fib(10);");
+    defer result.deinit();
+    try testing.expectEqual(@as(f64, 55), result.number);
+    const disasm = output.written();
+    try testing.expect(std.mem.indexOf(u8, disasm, "r1") != null);
+    try testing.expect(std.mem.indexOf(u8, disasm, "r2") != null);
+    try testing.expect(std.mem.indexOf(u8, disasm, "r5") == null);
+}
