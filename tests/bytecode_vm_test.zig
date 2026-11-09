@@ -303,3 +303,58 @@ test "bytecode VM call site cache invalidation when callee changes" {
     try testing.expect(result == .number);
     try testing.expectEqual(@as(f64, 12), result.number);
 }
+
+test "bytecode VM property inline cache monomorphic and shape changes" {
+    // 1. let o = {x: 1}; return o.x -> 1
+    const func_source =
+        \\function f() {
+        \\    let o = {x: 1};
+        \\    return o.x;
+        \\}
+        \\f();
+    ;
+    try testing.expectEqual(@as(f64, 1), try runNumber(func_source, true));
+
+    // 2. dos shapes: let a = {x: 1}; let b = {y: 2}; a.x; b.y; -> 1, 2 (miss en segundo)
+    const shapes_source =
+        \\function get(o, k) {
+        \\    if (k == 0) return o.x;
+        \\    return o.y;
+        \\}
+        \\let a = {x: 1};
+        \\let b = {y: 2};
+        \\let r1 = get(a, 0);
+        \\let r2 = get(b, 1);
+        \\r1 * 10 + r2;
+    ;
+    try testing.expectEqual(@as(f64, 12), try runNumber(shapes_source, true));
+    try testing.expectEqual(@as(f64, 3), try runNumber("let a = {x: 1}; let b = {y: 2}; a.x + b.y", true));
+
+    // 3. shape cambia: let o = {x: 1}; o.x; o.y = 2; o.x; -> 1, 1 (miss tras set)
+    const shape_change_source =
+        \\function testShapeChange() {
+        \\    let o = {x: 1};
+        \\    let first = o.x;
+        \\    o.y = 2;
+        \\    let second = o.x;
+        \\    return first * 10 + second;
+        \\}
+        \\testShapeChange();
+    ;
+    try testing.expectEqual(@as(f64, 11), try runNumber(shape_change_source, true));
+}
+
+test "bytecode VM property inline cache disasm" {
+    var output = std.Io.Writer.Allocating.init(testing.allocator);
+    defer output.deinit();
+    var interpreter = try zinterpreter.Interpreter.init(testing.allocator, &output.writer);
+    defer interpreter.deinit();
+    interpreter.compile_options.use_bytecode_vm = true;
+    interpreter.compile_options.disasm = true;
+
+    const result = try interpreter.run("function f(o) { return o.x; } f({x: 1});");
+    defer result.deinit();
+    const disasm = output.written();
+    try testing.expect(std.mem.indexOf(u8, disasm, "get_prop") != null);
+    try testing.expect(std.mem.indexOf(u8, disasm, "cache:0") != null);
+}
