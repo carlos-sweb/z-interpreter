@@ -267,3 +267,39 @@ test "bytecode VM register recycling in fib" {
     try testing.expect(std.mem.indexOf(u8, disasm, "r2") != null);
     try testing.expect(std.mem.indexOf(u8, disasm, "r5") == null);
 }
+
+test "bytecode VM call inline cache disasm" {
+    var output = std.Io.Writer.Allocating.init(testing.allocator);
+    defer output.deinit();
+    var interpreter = try zinterpreter.Interpreter.init(testing.allocator, &output.writer);
+    defer interpreter.deinit();
+    interpreter.compile_options.use_bytecode_vm = true;
+    interpreter.compile_options.disasm = true;
+
+    const result = try interpreter.run("function f(n) { return n < 1 ? 0 : f(n - 1); } f(1);");
+    defer result.deinit();
+    const disasm = output.written();
+    try testing.expect(std.mem.indexOf(u8, disasm, "call") != null);
+    try testing.expect(std.mem.indexOf(u8, disasm, "cache:0") != null);
+}
+
+test "bytecode VM call site cache invalidation when callee changes" {
+    var output = std.Io.Writer.Allocating.init(testing.allocator);
+    defer output.deinit();
+    var interpreter = try zinterpreter.Interpreter.init(testing.allocator, &output.writer);
+    defer interpreter.deinit();
+    interpreter.compile_options.use_bytecode_vm = true;
+
+    const source =
+        \\let f = () => 1;
+        \\function invoke() { return f(); }
+        \\let first = invoke();
+        \\f = () => 2;
+        \\let second = invoke();
+        \\first * 10 + second;
+    ;
+    const result = try interpreter.run(source);
+    defer result.deinit();
+    try testing.expect(result == .number);
+    try testing.expectEqual(@as(f64, 12), result.number);
+}

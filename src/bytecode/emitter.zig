@@ -14,6 +14,13 @@ pub const CompiledCodeBlock = struct {
         allocator.free(self.block.ops);
         allocator.free(self.block.constants);
         allocator.free(self.block.exception_table);
+        for (self.block.call_target_cache) |*c| {
+            if (c.callee) |v| {
+                var val = v;
+                val.deinit();
+            }
+        }
+        allocator.free(self.block.call_target_cache);
         self.* = undefined;
     }
 };
@@ -26,6 +33,7 @@ pub const BytecodeEmitter = struct {
     ops: std.ArrayListUnmanaged(codeblock.Op) = .empty,
     constants: std.ArrayListUnmanaged(codeblock.Constant) = .empty,
     free_registers: std.ArrayListUnmanaged(u8) = .empty,
+    call_sites: std.ArrayListUnmanaged(codeblock.CallSiteCache) = .empty,
     next_register: u16,
     max_register: u16,
 
@@ -45,6 +53,7 @@ pub const BytecodeEmitter = struct {
         };
         defer self.scope.deinit(allocator);
         defer self.free_registers.deinit(allocator);
+        defer self.call_sites.deinit(allocator);
         for (function.params.items) |param| {
             if (self.scope.capturesLocal(param.pattern.identifier.name)) return error.UnsupportedSyntax;
         }
@@ -56,9 +65,12 @@ pub const BytecodeEmitter = struct {
         errdefer allocator.free(ops);
         const constants = try self.constants.toOwnedSlice(allocator);
         errdefer allocator.free(constants);
+        const call_target_cache = try self.call_sites.toOwnedSlice(allocator);
+        errdefer allocator.free(call_target_cache);
         return .{ .block = .{
             .ops = ops,
             .constants = constants,
+            .call_target_cache = call_target_cache,
             .local_count = scope.local_count,
             .register_count = self.max_register,
             .param_count = scope.param_count,
@@ -78,6 +90,7 @@ pub const BytecodeEmitter = struct {
         };
         defer self.scope.deinit(allocator);
         defer self.free_registers.deinit(allocator);
+        defer self.call_sites.deinit(allocator);
         errdefer self.ops.deinit(allocator);
         errdefer self.constants.deinit(allocator);
 
@@ -105,9 +118,12 @@ pub const BytecodeEmitter = struct {
         errdefer allocator.free(ops);
         const constants = try self.constants.toOwnedSlice(allocator);
         errdefer allocator.free(constants);
+        const call_target_cache = try self.call_sites.toOwnedSlice(allocator);
+        errdefer allocator.free(call_target_cache);
         return .{ .block = .{
             .ops = ops,
             .constants = constants,
+            .call_target_cache = call_target_cache,
             .local_count = scope.local_count,
             .register_count = self.max_register,
             .param_count = 0,
@@ -592,7 +608,9 @@ pub const BytecodeEmitter = struct {
         }
         for (0..argument_slots) |i| self.freeRegister(@intCast(arg_base + argument_slots - 1 - i));
         const destination = callee;
-        try self.emitOp(.{ .opcode = .call, .a = destination, .b = callee, .c = arg_count });
+        const slot = std.math.cast(u8, self.call_sites.items.len) orelse return error.UnsupportedSyntax;
+        try self.call_sites.append(self.allocator, .{ .arg_count = arg_count });
+        try self.emitOp(.{ .opcode = .call, .a = destination, .b = callee, .c = slot });
         return destination;
     }
 
@@ -756,7 +774,7 @@ pub fn disassemble(allocator: Allocator, block: *const codeblock.CodeBlock) ![]u
             .add_local_const, .sub_local_const, .lt_local_const, .gt_local_const, .le_local_const, .ge_local_const, .eq_local_const => try output.print(allocator, " r{d}, @{d}, #{d}", .{ op.a, op.b, op.c }),
             .jump => try output.print(allocator, " {d}", .{jumpTarget(op)}),
             .jump_if_true, .jump_if_false => try output.print(allocator, " r{d}, {d}", .{ op.a, jumpTarget(op) }),
-            .call => try output.print(allocator, " r{d}, r{d}, {d}", .{ op.a, op.b, op.c }),
+            .call => try output.print(allocator, " r{d}, r{d}, [cache:{d}]", .{ op.a, op.b, op.c }),
             .move => try output.print(allocator, " r{d}, r{d}", .{ op.a, op.b }),
             .new_object => try output.print(allocator, " r{d}", .{op.a}),
             .new_array => try output.print(allocator, " r{d}, {d}", .{ op.a, op.b }),

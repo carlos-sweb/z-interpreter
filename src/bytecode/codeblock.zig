@@ -5,6 +5,8 @@ const Allocator = std.mem.Allocator;
 const zfunctions = @import("zfunctions");
 const zparser = @import("zparser");
 const zstatements = @import("zstatements");
+const zvalue = @import("zvalue");
+const JSValue = zvalue.JSValue;
 
 pub const Opcode = enum(u8) {
     nop,
@@ -99,11 +101,20 @@ pub const ExceptionHandler = struct {
     catch_local: ?u16 = null,
 };
 
+pub const CallSiteCache = struct {
+    arg_count: u8 = 0,
+    callee: ?JSValue = null,
+    target_block: ?*const CodeBlock = null,
+    closure_env: ?*anyopaque = null,
+    interp: ?*anyopaque = null,
+};
+
 /// Immutable representation emitted by a later compiler pass.
 pub const CodeBlock = struct {
     ops: []const Op = &.{},
     constants: []const Constant = &.{},
     exception_table: []const ExceptionHandler = &.{},
+    call_target_cache: []CallSiteCache = &.{},
     local_count: u16 = 0,
     register_count: u16 = 0,
     param_count: u16 = 0,

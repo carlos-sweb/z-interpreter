@@ -287,6 +287,16 @@ pub fn init(backing_allocator: Allocator, console_writer: *std.Io.Writer) !Inter
 /// JSValue still stored in them again would be a double-free.
 pub fn deinit(self: *Interpreter) void {
     self.tearing_down = true;
+
+    var bcit = self.compiled_bytecode.valueIterator();
+    while (bcit.next()) |maybe_cb| {
+        if (maybe_cb.*) |cb| {
+            cb.deinit(self.gc_allocator);
+            self.gc_allocator.destroy(cb);
+        }
+    }
+    self.compiled_bytecode.deinit(self.gc_allocator);
+
     self.freeAllGcNodes();
     self.gc_registry.deinit(self.gc_allocator);
 
@@ -328,14 +338,6 @@ pub fn deinit(self: *Interpreter) void {
     self.temporal_props.deinit(self.gc_allocator);
     self.temporal_protos.deinit(self.gc_allocator);
     self.function_needs_arguments.deinit(self.gc_allocator);
-    var bcit = self.compiled_bytecode.valueIterator();
-    while (bcit.next()) |maybe_cb| {
-        if (maybe_cb.*) |cb| {
-            cb.deinit(self.gc_allocator);
-            self.gc_allocator.destroy(cb);
-        }
-    }
-    self.compiled_bytecode.deinit(self.gc_allocator);
     self.primitive_wrapper_data.deinit(self.gc_allocator);
     self.deleted_fn_props.deinit(self.gc_allocator);
     self.pending_jobs.deinit(self.gc_allocator);

@@ -51,6 +51,11 @@ fn getBytecodeTarget(callee: JSValue) ?BytecodeTarget {
     };
 }
 
+fn calleeMatches(cached: JSValue, current: JSValue) bool {
+    if (cached != .function or current != .function) return false;
+    return cached.function == current.function or (cached.function.value.ctx == current.function.value.ctx and cached.function.value.call == current.function.value.call);
+}
+
 fn deinitSlot(v: *JSValue) void {
     switch (v.*) {
         .undefined, .null, .boolean, .number => {},
@@ -328,18 +333,39 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
             },
             .call => {
                 const callee = try getRegister(frame_regs, op.b);
+                const cache_slice: []codeblock.CallSiteCache = @constCast(frame.block.call_target_cache);
+                if (op.c >= cache_slice.len) return error.InvalidRegister;
+                const cache = &cache_slice[op.c];
+                const arg_count = cache.arg_count;
                 const start = @as(usize, op.b) + 1;
-                const end = start + op.c;
+                const end = start + arg_count;
                 if (end > frame_regs.len) return error.InvalidRegister;
 
-                if (getBytecodeTarget(callee)) |target| {
+                const hit = if (cache.callee) |cached| calleeMatches(cached, callee) else false;
+                if (!hit) {
+                    if (cache.callee) |old| {
+                        var v = old;
+                        v.deinit();
+                    }
+                    cache.callee = callee.retain();
+                    if (getBytecodeTarget(callee)) |target| {
+                        cache.target_block = target.block;
+                        cache.closure_env = target.closure_env;
+                        cache.interp = target.interp;
+                    } else {
+                        cache.target_block = null;
+                        cache.closure_env = null;
+                        cache.interp = null;
+                    }
+                }
+
+                if (cache.target_block) |callee_block| {
                     if (frame_count >= MAX_FRAMES) return error.StackOverflow;
-                    const callee_block = target.block;
                     const callee_reg_base = reg_top;
                     const new_reg_top = callee_reg_base + callee_block.register_count;
                     if (new_reg_top > MAX_REGISTERS) return error.OutOfMemory;
 
-                    const param_count = @min(op.c, callee_block.param_count);
+                    const param_count = @min(arg_count, callee_block.param_count);
                     for (0..param_count) |i| {
                         registers[callee_reg_base + i] = frame_regs[start + i].retain();
                     }
@@ -352,9 +378,9 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                         .pc = 0,
                         .reg_base = callee_reg_base,
                         .this_value = JSValue.UNDEFINED,
-                        .closure_env = target.closure_env,
+                        .closure_env = if (cache.closure_env) |env| @ptrCast(@alignCast(env)) else null,
                         .return_reg = op.a,
-                        .interp = target.interp,
+                        .interp = if (cache.interp) |itp| @ptrCast(@alignCast(itp)) else null,
                         .catch_count = 0,
                     };
                     frame_count += 1;
