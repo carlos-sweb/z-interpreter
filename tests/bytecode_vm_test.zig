@@ -337,6 +337,9 @@ test "bytecode VM property inline cache with real shape_id and lazy cache" {
 
     // 15. Funcional: shapes distintos: let a = {x: 1}; let b = {y: 2}; a.x + b.y -> 3
     try testing.expectEqual(@as(f64, 3), try runNumber("let a = {x: 1}; let b = {y: 2}; a.x + b.y", true));
+
+    // 16. Funcional: update set_prop: let o = {x: 1}; o.x = 2; o.x -> 2
+    try testing.expectEqual(@as(f64, 2), try runNumber("let o = {x: 1}; o.x = 2; o.x", true));
 }
 
 test "bytecode VM lazy prop_cache verification in disasm" {
