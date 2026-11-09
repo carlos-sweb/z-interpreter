@@ -340,3 +340,27 @@ test "bytecode VM get_elem_const and array pre-size" {
         try testing.expect(std.mem.indexOf(u8, disasm, "get_elem_const") != null);
     }
 }
+
+test "bytecode VM primitive fast path in retain and deinit" {
+    // 16. Funcional: let a = [1,2,3]; a[0] + a[1] + a[2] -> 6
+    try testing.expectEqual(@as(f64, 6), try runNumber("let a = [1,2,3]; a[0] + a[1] + a[2];", true));
+
+    // 17. Funcional: let o = {x: 1}; o.x -> 1
+    try testing.expectEqual(@as(f64, 1), try runNumber("let o = {x: 1}; o.x;", true));
+
+    // 18. Funcional: let a = [{v:1}, {v:2}]; a[0].v + a[1].v -> 3
+    try testing.expectEqual(@as(f64, 3), try runNumber("let a = [{v:1}, {v:2}]; a[0].v + a[1].v;", true));
+
+    // 19. Funcional: let a = ["hello", "world"]; a[0] + a[1] -> "helloworld"
+    {
+        var output = std.Io.Writer.Allocating.init(testing.allocator);
+        defer output.deinit();
+        var interpreter = try zinterpreter.Interpreter.init(testing.allocator, &output.writer);
+        defer interpreter.deinit();
+        interpreter.compile_options.use_bytecode_vm = true;
+        const result = try interpreter.run("let a = [\"hello\", \"world\"]; a[0] + a[1];");
+        defer result.deinit();
+        try testing.expect(result == .string);
+        try testing.expectEqualStrings("helloworld", result.string.value.data);
+    }
+}
