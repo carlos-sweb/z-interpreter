@@ -107,11 +107,31 @@ fn keyToString(allocator: Allocator, key_val: JSValue, buf: *[32]u8) ![]const u8
     };
 }
 
-fn getProp(allocator: Allocator, obj: JSValue, key: []const u8) !JSValue {
+fn getPropCached(allocator: Allocator, obj: JSValue, key: []const u8, cache: ?*codeblock.PropCache) !JSValue {
     switch (obj) {
         .object => |box| {
+            if (cache) |c| {
+                if (c.shape_id != 0 and c.shape_id == box.value.shape_id and c.offset < box.value.properties.count()) {
+                    const keys = box.value.properties.keys();
+                    const actual_key = keys[c.offset];
+                    if (actual_key.ptr == c.key_ptr.ptr or std.mem.eql(u8, actual_key, key)) {
+                        c.key_ptr = actual_key;
+                        const values = box.value.properties.values();
+                        const prop = &values[c.offset];
+                        if (prop.isAccessor()) return error.UnsupportedOpcode;
+                        return prop.value.retain();
+                    }
+                }
+            }
             if (box.value.getOwnRecord(key)) |rec| {
                 if (rec.isAccessor()) return error.UnsupportedOpcode;
+                if (cache) |c| {
+                    if (box.value.properties.getIndex(key)) |idx| {
+                        c.shape_id = box.value.shape_id;
+                        c.offset = @intCast(idx);
+                        c.key_ptr = box.value.properties.keys()[idx];
+                    }
+                }
                 return rec.value.retain();
             }
             var current = box.value.getPrototype();
@@ -143,16 +163,44 @@ fn getProp(allocator: Allocator, obj: JSValue, key: []const u8) !JSValue {
     }
 }
 
-fn setProp(allocator: Allocator, obj: JSValue, key: []const u8, val: JSValue) !void {
+fn getProp(allocator: Allocator, obj: JSValue, key: []const u8) !JSValue {
+    return try getPropCached(allocator, obj, key, null);
+}
+
+fn setPropCached(allocator: Allocator, obj: JSValue, key: []const u8, val: JSValue, cache: ?*codeblock.PropCache) !void {
     _ = allocator;
     switch (obj) {
         .object => |box| {
+            if (cache) |c| {
+                if (c.shape_id != 0 and c.shape_id == box.value.shape_id and c.offset < box.value.properties.count()) {
+                    const keys = box.value.properties.keys();
+                    const actual_key = keys[c.offset];
+                    if (actual_key.ptr == c.key_ptr.ptr or std.mem.eql(u8, actual_key, key)) {
+                        const values = box.value.properties.values();
+                        const prop = &values[c.offset];
+                        if (!prop.isAccessor() and prop.descriptor.writable and !box.value.is_frozen) {
+                            c.key_ptr = actual_key;
+                            var old_val = prop.value;
+                            prop.value = val.retain();
+                            old_val.deinit();
+                            return;
+                        }
+                    }
+                }
+            }
             if (box.value.getOwnRecord(key)) |rec| {
                 if (rec.isAccessor()) return error.UnsupportedOpcode;
             }
             const old = box.value.getOwn(key);
             try box.value.set(key, val.retain());
             if (old) |o| o.deinit();
+            if (cache) |c| {
+                if (box.value.properties.getIndex(key)) |idx| {
+                    c.shape_id = box.value.shape_id;
+                    c.offset = @intCast(idx);
+                    c.key_ptr = box.value.properties.keys()[idx];
+                }
+            }
         },
         .array => |box| {
             const idx = std.fmt.parseInt(usize, key, 10) catch return error.UnsupportedOpcode;
@@ -169,6 +217,10 @@ fn setProp(allocator: Allocator, obj: JSValue, key: []const u8, val: JSValue) !v
         },
         else => return error.UnsupportedOpcode,
     }
+}
+
+fn setProp(allocator: Allocator, obj: JSValue, key: []const u8, val: JSValue) !void {
+    return try setPropCached(allocator, obj, key, val, null);
 }
 
 fn getElem(allocator: Allocator, obj: JSValue, key_val: JSValue) !JSValue {
@@ -264,15 +316,21 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
             .new_array => try setRegister(frame_regs, op.a, try JSValue.newArray(allocator)),
             .get_prop => {
                 const obj = try getRegister(frame_regs, op.b);
-                const key = try constantKey(frame.block, op.c);
-                const result = try getProp(allocator, obj, key);
+                const cache_slice: []codeblock.PropCache = @constCast(frame.block.prop_cache);
+                const cache = if (op.c < cache_slice.len) &cache_slice[op.c] else null;
+                const key_const = if (cache) |c| c.key_const else op.c;
+                const key = try constantKey(frame.block, key_const);
+                const result = try getPropCached(allocator, obj, key, cache);
                 try setRegister(frame_regs, op.a, result);
             },
             .set_prop => {
                 const obj = try getRegister(frame_regs, op.a);
-                const key = try constantKey(frame.block, op.b);
+                const cache_slice: []codeblock.PropCache = @constCast(frame.block.prop_cache);
+                const cache = if (op.b < cache_slice.len) &cache_slice[op.b] else null;
+                const key_const = if (cache) |c| c.key_const else op.b;
+                const key = try constantKey(frame.block, key_const);
                 const val = try getRegister(frame_regs, op.c);
-                try setProp(allocator, obj, key, val);
+                try setPropCached(allocator, obj, key, val, cache);
             },
             .get_elem => {
                 const obj = try getRegister(frame_regs, op.b);

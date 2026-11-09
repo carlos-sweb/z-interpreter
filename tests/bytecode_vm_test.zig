@@ -303,3 +303,63 @@ test "bytecode VM call site cache invalidation when callee changes" {
     try testing.expect(result == .number);
     try testing.expectEqual(@as(f64, 12), result.number);
 }
+
+test "bytecode VM property inline cache with real shape_id and lazy cache" {
+    // 13. Funcional: let o = {x: 1, y: 2}; o.x + o.y -> 3
+    try testing.expectEqual(@as(f64, 3), try runNumber("let o = {x: 1, y: 2}; o.x + o.y", true));
+
+    // 14. Funcional: creacion + lectura en loop
+    const loop_source =
+        \\function loop() {
+        \\    let t = 0;
+        \\    for (let i = 0; i < 100; i++) {
+        \\        const o = {x: i, y: i + 1};
+        \\        t += o.x + o.y;
+        \\    }
+        \\    return t;
+        \\}
+        \\loop();
+    ;
+    try testing.expectEqual(@as(f64, 10000), try runNumber(loop_source, true));
+
+    const loop_source_9900 =
+        \\function loop2() {
+        \\    let t = 0;
+        \\    for (let i = 0; i < 100; i++) {
+        \\        const o = {x: i, y: i};
+        \\        t += o.x + o.y;
+        \\    }
+        \\    return t;
+        \\}
+        \\loop2();
+    ;
+    try testing.expectEqual(@as(f64, 9900), try runNumber(loop_source_9900, true));
+
+    // 15. Funcional: shapes distintos: let a = {x: 1}; let b = {y: 2}; a.x + b.y -> 3
+    try testing.expectEqual(@as(f64, 3), try runNumber("let a = {x: 1}; let b = {y: 2}; a.x + b.y", true));
+}
+
+test "bytecode VM lazy prop_cache verification in disasm" {
+    var output = std.Io.Writer.Allocating.init(testing.allocator);
+    defer output.deinit();
+    var interpreter = try zinterpreter.Interpreter.init(testing.allocator, &output.writer);
+    defer interpreter.deinit();
+    interpreter.compile_options.use_bytecode_vm = true;
+    interpreter.compile_options.disasm = true;
+
+    // 16. Disasm: verificar que fib NO tiene prop_cache slots
+    const fib_res = try interpreter.run("function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); } fib(5);");
+    defer fib_res.deinit();
+    const fib_disasm = output.written();
+    try testing.expect(std.mem.indexOf(u8, fib_disasm, "get_prop") == null);
+    try testing.expect(std.mem.indexOf(u8, fib_disasm, "set_prop") == null);
+
+    // 17. Disasm: verificar que obj tiene slots de cache
+    output.clearRetainingCapacity();
+    const obj_res = try interpreter.run("let o = {x: 1}; o.x;");
+    defer obj_res.deinit();
+    const obj_disasm = output.written();
+    try testing.expect(std.mem.indexOf(u8, obj_disasm, "set_prop") != null);
+    try testing.expect(std.mem.indexOf(u8, obj_disasm, "get_prop") != null);
+    try testing.expect(std.mem.indexOf(u8, obj_disasm, "cache:0") != null);
+}

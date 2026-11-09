@@ -21,6 +21,9 @@ pub const CompiledCodeBlock = struct {
             }
         }
         allocator.free(self.block.call_target_cache);
+        if (self.block.prop_cache.len > 0) {
+            allocator.free(self.block.prop_cache);
+        }
         self.* = undefined;
     }
 };
@@ -34,6 +37,7 @@ pub const BytecodeEmitter = struct {
     constants: std.ArrayListUnmanaged(codeblock.Constant) = .empty,
     free_registers: std.ArrayListUnmanaged(u8) = .empty,
     call_sites: std.ArrayListUnmanaged(codeblock.CallSiteCache) = .empty,
+    prop_sites: std.ArrayListUnmanaged(codeblock.PropCache) = .empty,
     next_register: u16,
     max_register: u16,
 
@@ -54,6 +58,7 @@ pub const BytecodeEmitter = struct {
         defer self.scope.deinit(allocator);
         defer self.free_registers.deinit(allocator);
         defer self.call_sites.deinit(allocator);
+        defer self.prop_sites.deinit(allocator);
         for (function.params.items) |param| {
             if (self.scope.capturesLocal(param.pattern.identifier.name)) return error.UnsupportedSyntax;
         }
@@ -67,10 +72,25 @@ pub const BytecodeEmitter = struct {
         errdefer allocator.free(constants);
         const call_target_cache = try self.call_sites.toOwnedSlice(allocator);
         errdefer allocator.free(call_target_cache);
+
+        var has_prop_ops = false;
+        for (ops) |op| {
+            if (op.opcode == .get_prop or op.opcode == .set_prop) {
+                has_prop_ops = true;
+                break;
+            }
+        }
+        const prop_cache = if (has_prop_ops and self.prop_sites.items.len > 0)
+            try self.prop_sites.toOwnedSlice(allocator)
+        else
+            &.{};
+        errdefer if (prop_cache.len > 0) allocator.free(prop_cache);
+
         return .{ .block = .{
             .ops = ops,
             .constants = constants,
             .call_target_cache = call_target_cache,
+            .prop_cache = @constCast(prop_cache),
             .local_count = scope.local_count,
             .register_count = self.max_register,
             .param_count = scope.param_count,
@@ -91,6 +111,7 @@ pub const BytecodeEmitter = struct {
         defer self.scope.deinit(allocator);
         defer self.free_registers.deinit(allocator);
         defer self.call_sites.deinit(allocator);
+        defer self.prop_sites.deinit(allocator);
         errdefer self.ops.deinit(allocator);
         errdefer self.constants.deinit(allocator);
 
@@ -120,10 +141,25 @@ pub const BytecodeEmitter = struct {
         errdefer allocator.free(constants);
         const call_target_cache = try self.call_sites.toOwnedSlice(allocator);
         errdefer allocator.free(call_target_cache);
+
+        var has_prop_ops = false;
+        for (ops) |op| {
+            if (op.opcode == .get_prop or op.opcode == .set_prop) {
+                has_prop_ops = true;
+                break;
+            }
+        }
+        const prop_cache = if (has_prop_ops and self.prop_sites.items.len > 0)
+            try self.prop_sites.toOwnedSlice(allocator)
+        else
+            &.{};
+        errdefer if (prop_cache.len > 0) allocator.free(prop_cache);
+
         return .{ .block = .{
             .ops = ops,
             .constants = constants,
             .call_target_cache = call_target_cache,
+            .prop_cache = @constCast(prop_cache),
             .local_count = scope.local_count,
             .register_count = self.max_register,
             .param_count = 0,
@@ -358,8 +394,9 @@ pub const BytecodeEmitter = struct {
                         if (!m.computed) {
                             if (m.property.data != .identifier) return error.UnsupportedSyntax;
                             const key_const = try self.addConstant(.{ .property_key = m.property.data.identifier });
+                            const slot = try self.allocPropCache(key_const);
                             const val_reg = try self.emitExpression(assignment.value);
-                            try self.emitOp(.{ .opcode = .set_prop, .a = obj_reg, .b = key_const, .c = val_reg });
+                            try self.emitOp(.{ .opcode = .set_prop, .a = obj_reg, .b = slot, .c = val_reg });
                             self.freeRegister(obj_reg);
                             return val_reg;
                         } else {
@@ -629,7 +666,8 @@ pub const BytecodeEmitter = struct {
                     };
                     const val_reg = try self.emitExpression(prop.value);
                     const key_const = try self.addConstant(.{ .property_key = key_name });
-                    try self.emitOp(.{ .opcode = .set_prop, .a = dst, .b = key_const, .c = val_reg });
+                    const slot = try self.allocPropCache(key_const);
+                    try self.emitOp(.{ .opcode = .set_prop, .a = dst, .b = slot, .c = val_reg });
                     self.freeRegister(val_reg);
                 },
             }
@@ -661,7 +699,8 @@ pub const BytecodeEmitter = struct {
         if (!member.computed) {
             if (member.property.data != .identifier) return error.UnsupportedSyntax;
             const key_const = try self.addConstant(.{ .property_key = member.property.data.identifier });
-            try self.emitOp(.{ .opcode = .get_prop, .a = dst, .b = obj_reg, .c = key_const });
+            const slot = try self.allocPropCache(key_const);
+            try self.emitOp(.{ .opcode = .get_prop, .a = dst, .b = obj_reg, .c = slot });
         } else {
             const key_reg = try self.emitExpression(member.property);
             try self.emitOp(.{ .opcode = .get_elem, .a = dst, .b = obj_reg, .c = key_reg });
@@ -714,6 +753,12 @@ pub const BytecodeEmitter = struct {
         self.next_register += 1;
         self.max_register = @max(self.max_register, self.next_register);
         return register;
+    }
+
+    fn allocPropCache(self: *BytecodeEmitter, key_const: u8) !u8 {
+        const slot = std.math.cast(u8, self.prop_sites.items.len) orelse return error.UnsupportedSyntax;
+        try self.prop_sites.append(self.allocator, .{ .key_const = key_const });
+        return slot;
     }
 
     fn freeRegister(self: *BytecodeEmitter, reg: u8) void {
@@ -778,8 +823,8 @@ pub fn disassemble(allocator: Allocator, block: *const codeblock.CodeBlock) ![]u
             .move => try output.print(allocator, " r{d}, r{d}", .{ op.a, op.b }),
             .new_object => try output.print(allocator, " r{d}", .{op.a}),
             .new_array => try output.print(allocator, " r{d}, {d}", .{ op.a, op.b }),
-            .get_prop => try output.print(allocator, " r{d}, r{d}, #{d}", .{ op.a, op.b, op.c }),
-            .set_prop => try output.print(allocator, " r{d}, #{d}, r{d}", .{ op.a, op.b, op.c }),
+            .get_prop => try output.print(allocator, " r{d}, r{d}, [cache:{d}]", .{ op.a, op.b, op.c }),
+            .set_prop => try output.print(allocator, " r{d}, [cache:{d}], r{d}", .{ op.a, op.b, op.c }),
             .get_elem => try output.print(allocator, " r{d}, r{d}, r{d}", .{ op.a, op.b, op.c }),
             .set_elem => try output.print(allocator, " r{d}, r{d}, r{d}", .{ op.a, op.b, op.c }),
             .make_closure => try output.print(allocator, " r{d}, #{d}", .{ op.a, op.b }),
