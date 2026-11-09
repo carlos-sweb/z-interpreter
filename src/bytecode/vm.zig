@@ -56,25 +56,14 @@ fn calleeMatches(cached: JSValue, current: JSValue) bool {
     return cached.function == current.function or (cached.function.value.ctx == current.function.value.ctx and cached.function.value.call == current.function.value.call);
 }
 
-fn isPrimitiveValue(v: JSValue) bool {
-    return switch (v) {
-        .number, .boolean, .null, .undefined => true,
-        else => false,
-    };
-}
-
-fn retainValue(v: JSValue) JSValue {
-    if (isPrimitiveValue(v)) return v;
-    return v.retain();
-}
-
 fn deinitSlot(v: *JSValue) void {
-    if (isPrimitiveValue(v.*)) {
-        v.* = JSValue.UNDEFINED;
-        return;
+    switch (v.*) {
+        .undefined, .null, .boolean, .number => {},
+        else => {
+            v.deinit();
+            v.* = JSValue.UNDEFINED;
+        },
     }
-    v.deinit();
-    v.* = JSValue.UNDEFINED;
 }
 
 fn callFallback(allocator: Allocator, callee: JSValue, args_slice: []const JSValue) !JSValue {
@@ -123,13 +112,13 @@ fn getProp(allocator: Allocator, obj: JSValue, key: []const u8) !JSValue {
         .object => |box| {
             if (box.value.getOwnRecord(key)) |rec| {
                 if (rec.isAccessor()) return error.UnsupportedOpcode;
-                return retainValue(rec.value);
+                return rec.value.retain();
             }
             var current = box.value.getPrototype();
             while (current) |p| : (current = p.getPrototype()) {
                 if (p.getOwnRecord(key)) |rec| {
                     if (rec.isAccessor()) return error.UnsupportedOpcode;
-                    return retainValue(rec.value);
+                    return rec.value.retain();
                 }
             }
             return JSValue.UNDEFINED;
@@ -140,7 +129,7 @@ fn getProp(allocator: Allocator, obj: JSValue, key: []const u8) !JSValue {
             }
             const idx = std.fmt.parseInt(usize, key, 10) catch return JSValue.UNDEFINED;
             if (idx >= box.value.length()) return JSValue.UNDEFINED;
-            return retainValue(box.value.get(idx));
+            return box.value.get(idx).retain();
         },
         .string => |box| {
             if (std.mem.eql(u8, key, "length")) {
@@ -162,7 +151,7 @@ fn setProp(allocator: Allocator, obj: JSValue, key: []const u8, val: JSValue) !v
                 if (rec.isAccessor()) return error.UnsupportedOpcode;
             }
             const old = box.value.getOwn(key);
-            try box.value.set(key, retainValue(val));
+            try box.value.set(key, val.retain());
             if (old) |o| o.deinit();
         },
         .array => |box| {
@@ -170,12 +159,12 @@ fn setProp(allocator: Allocator, obj: JSValue, key: []const u8, val: JSValue) !v
             const cur = box.value.length();
             if (idx < cur) {
                 box.value.toSliceMut()[idx].deinit();
-                box.value.toSliceMut()[idx] = retainValue(val);
+                box.value.toSliceMut()[idx] = val.retain();
             } else {
                 while (box.value.length() < idx) {
                     _ = try box.value.push(JSValue.UNDEFINED);
                 }
-                _ = try box.value.push(retainValue(val));
+                _ = try box.value.push(val.retain());
             }
         },
         else => return error.UnsupportedOpcode,
@@ -188,7 +177,7 @@ fn getElem(allocator: Allocator, obj: JSValue, key_val: JSValue) !JSValue {
         if (n >= 0 and !std.math.isNan(n) and !std.math.isInf(n)) {
             const idx: usize = @intFromFloat(n);
             if (@as(f64, @floatFromInt(idx)) == n) {
-                if (idx < obj.array.value.length()) return retainValue(obj.array.value.get(idx));
+                if (idx < obj.array.value.length()) return obj.array.value.get(idx).retain();
                 return JSValue.UNDEFINED;
             }
         }
@@ -207,12 +196,12 @@ fn setElem(allocator: Allocator, obj: JSValue, key_val: JSValue, val: JSValue) !
                 const cur = obj.array.value.length();
                 if (idx < cur) {
                     obj.array.value.toSliceMut()[idx].deinit();
-                    obj.array.value.toSliceMut()[idx] = retainValue(val);
+                    obj.array.value.toSliceMut()[idx] = val.retain();
                 } else {
                     while (obj.array.value.length() < idx) {
                         _ = try obj.array.value.push(JSValue.UNDEFINED);
                     }
-                    _ = try obj.array.value.push(retainValue(val));
+                    _ = try obj.array.value.push(val.retain());
                 }
                 return;
             }
@@ -304,7 +293,7 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                     if (c == .number) {
                         const idx: usize = @intFromFloat(c.number);
                         if (idx < obj.array.value.length()) {
-                            try setRegister(frame_regs, op.a, retainValue(obj.array.value.get(idx)));
+                            try setRegister(frame_regs, op.a, obj.array.value.get(idx).retain());
                         } else {
                             try setRegister(frame_regs, op.a, JSValue.UNDEFINED);
                         }
@@ -328,8 +317,8 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
             .load_null => try setRegister(frame_regs, op.a, JSValue.NULL),
             .load_true => try setRegister(frame_regs, op.a, JSValue.fromBool(true)),
             .load_false => try setRegister(frame_regs, op.a, JSValue.fromBool(false)),
-            .move, .load_local => try setRegister(frame_regs, op.a, retainValue(try getRegister(frame_regs, op.b))),
-            .store_local => try setRegister(frame_regs, op.a, retainValue(try getRegister(frame_regs, op.b))),
+            .move, .load_local => try setRegister(frame_regs, op.a, (try getRegister(frame_regs, op.b)).retain()),
+            .store_local => try setRegister(frame_regs, op.a, (try getRegister(frame_regs, op.b)).retain()),
             .load_global => try setRegister(frame_regs, op.a, try loadGlobal(frame.block, frame.closure_env, op.b)),
             .store_global => {
                 const val = try getRegister(frame_regs, op.b);
@@ -406,7 +395,7 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
 
                     const param_count = @min(arg_count, callee_block.param_count);
                     for (0..param_count) |i| {
-                        registers[callee_reg_base + i] = retainValue(frame_regs[start + i]);
+                        registers[callee_reg_base + i] = frame_regs[start + i].retain();
                     }
                     for (param_count..callee_block.param_count) |i| {
                         registers[callee_reg_base + i] = JSValue.UNDEFINED;
@@ -430,7 +419,7 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                 }
             },
             .return_value => {
-                const val = retainValue(try getRegister(frame_regs, op.a));
+                const val = (try getRegister(frame_regs, op.a)).retain();
                 for (registers[frame.reg_base..reg_top]) |*r| deinitSlot(r);
                 reg_top = frame.reg_base;
                 frame_count -= 1;
