@@ -261,7 +261,13 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
             .load_const => try setRegister(frame_regs, op.a, try constantValue(allocator, frame.block, op.b)),
             .load_undefined => try setRegister(frame_regs, op.a, JSValue.UNDEFINED),
             .new_object => try setRegister(frame_regs, op.a, try JSValue.newObject(allocator)),
-            .new_array => try setRegister(frame_regs, op.a, try JSValue.newArray(allocator)),
+            .new_array => {
+                const arr = try JSValue.newArray(allocator);
+                if (op.b > 0) {
+                    try arr.array.value.reserve(op.b);
+                }
+                try setRegister(frame_regs, op.a, arr);
+            },
             .get_prop => {
                 const obj = try getRegister(frame_regs, op.b);
                 const key = try constantKey(frame.block, op.c);
@@ -279,6 +285,28 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                 const key_val = try getRegister(frame_regs, op.c);
                 const result = try getElem(allocator, obj, key_val);
                 try setRegister(frame_regs, op.a, result);
+            },
+            .get_elem_const => {
+                const obj = try getRegister(frame_regs, op.b);
+                if (obj == .array and op.c < frame.block.constants.len) {
+                    const c = frame.block.constants[op.c];
+                    if (c == .number) {
+                        const idx: usize = @intFromFloat(c.number);
+                        if (idx < obj.array.value.length()) {
+                            try setRegister(frame_regs, op.a, obj.array.value.get(idx).retain());
+                        } else {
+                            try setRegister(frame_regs, op.a, JSValue.UNDEFINED);
+                        }
+                    } else {
+                        const key_val = try constantValue(allocator, frame.block, op.c);
+                        defer key_val.deinit();
+                        try setRegister(frame_regs, op.a, try getElem(allocator, obj, key_val));
+                    }
+                } else {
+                    const key_val = try constantValue(allocator, frame.block, op.c);
+                    defer key_val.deinit();
+                    try setRegister(frame_regs, op.a, try getElem(allocator, obj, key_val));
+                }
             },
             .set_elem => {
                 const obj = try getRegister(frame_regs, op.a);

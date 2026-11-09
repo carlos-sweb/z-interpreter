@@ -578,6 +578,7 @@ pub const BytecodeEmitter = struct {
             .le_local_const,
             .ge_local_const,
             .eq_local_const,
+            .get_elem_const,
             => true,
             else => false,
         };
@@ -662,6 +663,15 @@ pub const BytecodeEmitter = struct {
             if (member.property.data != .identifier) return error.UnsupportedSyntax;
             const key_const = try self.addConstant(.{ .property_key = member.property.data.identifier });
             try self.emitOp(.{ .opcode = .get_prop, .a = dst, .b = obj_reg, .c = key_const });
+        } else if (asIntegerIndex(member.property)) |num| {
+            if (self.constants.items.len < std.math.maxInt(u8)) {
+                const const_idx = try self.addConstant(.{ .number = num });
+                try self.emitOp(.{ .opcode = .get_elem_const, .a = dst, .b = obj_reg, .c = const_idx });
+            } else {
+                const key_reg = try self.emitExpression(member.property);
+                try self.emitOp(.{ .opcode = .get_elem, .a = dst, .b = obj_reg, .c = key_reg });
+                self.freeRegister(key_reg);
+            }
         } else {
             const key_reg = try self.emitExpression(member.property);
             try self.emitOp(.{ .opcode = .get_elem, .a = dst, .b = obj_reg, .c = key_reg });
@@ -755,6 +765,17 @@ fn asConstant(node: *const zparser.Node) ?codeblock.Constant {
     };
 }
 
+fn asIntegerIndex(node: *const zparser.Node) ?f64 {
+    const unwrap = unwrapParen(node);
+    if (unwrap.data == .number_literal) {
+        const n = unwrap.data.number_literal;
+        if (n >= 0 and n <= 255 and @as(f64, @floatFromInt(@as(usize, @intFromFloat(n)))) == n) {
+            return n;
+        }
+    }
+    return null;
+}
+
 fn small(value: u16) !u8 {
     if (value > std.math.maxInt(u8)) return error.TooManyRegisters;
     return @intCast(value);
@@ -781,6 +802,7 @@ pub fn disassemble(allocator: Allocator, block: *const codeblock.CodeBlock) ![]u
             .get_prop => try output.print(allocator, " r{d}, r{d}, #{d}", .{ op.a, op.b, op.c }),
             .set_prop => try output.print(allocator, " r{d}, #{d}, r{d}", .{ op.a, op.b, op.c }),
             .get_elem => try output.print(allocator, " r{d}, r{d}, r{d}", .{ op.a, op.b, op.c }),
+            .get_elem_const => try output.print(allocator, " r{d}, r{d}, #{d}", .{ op.a, op.b, op.c }),
             .set_elem => try output.print(allocator, " r{d}, r{d}, r{d}", .{ op.a, op.b, op.c }),
             .make_closure => try output.print(allocator, " r{d}, #{d}", .{ op.a, op.b }),
             .iter_init => try output.print(allocator, " r{d}, r{d}", .{ op.a, op.b }),

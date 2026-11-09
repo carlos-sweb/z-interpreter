@@ -65,6 +65,7 @@ pub const Opcode = enum(u8) {
     le_local_const,
     ge_local_const,
     eq_local_const,
+    get_elem_const,
 };
 
 pub const Op = packed struct(u32) {

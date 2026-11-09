@@ -303,3 +303,40 @@ test "bytecode VM call site cache invalidation when callee changes" {
     try testing.expect(result == .number);
     try testing.expectEqual(@as(f64, 12), result.number);
 }
+
+test "bytecode VM get_elem_const and array pre-size" {
+    // 11. Funcional: [10, 20, 30][1] -> 20
+    try testing.expectEqual(@as(f64, 20), try runNumber("[10, 20, 30][1]", true));
+
+    // 12. Funcional: let a = [1,2,3]; a[0] + a[1] + a[2] -> 6
+    try testing.expectEqual(@as(f64, 6), try runNumber("let a = [1,2,3]; a[0] + a[1] + a[2];", true));
+
+    // 13. Funcional: let a = [1,2]; a[5] -> undefined (OOB, fallback)
+    {
+        var output = std.Io.Writer.Allocating.init(testing.allocator);
+        defer output.deinit();
+        var interpreter = try zinterpreter.Interpreter.init(testing.allocator, &output.writer);
+        defer interpreter.deinit();
+        interpreter.compile_options.use_bytecode_vm = true;
+        const result = try interpreter.run("let a = [1,2]; a[5];");
+        defer result.deinit();
+        try testing.expect(result == .undefined);
+    }
+
+    // 14. Funcional: let a = [1]; let i = 0; a[i] -> 1 (key no es const, fallback)
+    try testing.expectEqual(@as(f64, 1), try runNumber("let a = [1]; let i = 0; a[i];", true));
+
+    // 15. Disasm: verificar que a[0] con indice literal emite get_elem_const
+    {
+        var output = std.Io.Writer.Allocating.init(testing.allocator);
+        defer output.deinit();
+        var interpreter = try zinterpreter.Interpreter.init(testing.allocator, &output.writer);
+        defer interpreter.deinit();
+        interpreter.compile_options.use_bytecode_vm = true;
+        interpreter.compile_options.disasm = true;
+        const res = try interpreter.run("let a = [1, 2]; a[0];");
+        defer res.deinit();
+        const disasm = output.written();
+        try testing.expect(std.mem.indexOf(u8, disasm, "get_elem_const") != null);
+    }
+}
