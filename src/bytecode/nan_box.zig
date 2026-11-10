@@ -2,13 +2,18 @@ const std = @import("std");
 const zvalue = @import("zvalue");
 const JSValue = zvalue.JSValue;
 
+pub const BoxError = error{
+    OutOfMemory,
+    UnsupportedValue,
+};
+
 pub const NaNBoxedValue = struct {
     bits: u64,
 
     pub const BASE_BOX: u64 = 0xFFF8_0000_0000_0000;
     pub const CANONICAL_NAN: u64 = 0x7FF8_0000_0000_0001;
-    pub const PTR_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
-    pub const TAG_MASK: u64 = 0xFFFF_0000_0000_0000;
+    pub const PTR_MASK: u64 = 0x0000_7FFF_FFFF_FFFF;
+    pub const TAG_MASK: u64 = 0xFFFF_8000_0000_0000;
 
     // Primitives encoded in the low payload bits of BASE_BOX
     pub const TAG_UNDEFINED: u64 = BASE_BOX | 1;
@@ -28,6 +33,9 @@ pub const NaNBoxedValue = struct {
     pub const TAG_REGEX: u64 = BASE_BOX | (11 << 48); // 0xFFFB_0000_0000_0000
     pub const TAG_MAP: u64 = BASE_BOX | (12 << 48); // 0xFFFC_0000_0000_0000
 
+    // TAG_OTHER: base prefix uses slot 14 (modulo 8 = 6) with bit 47 set to disambiguate from TAG_ARRAY (slot 6).
+    pub const TAG_OTHER: u64 = (BASE_BOX | (14 << 48)) | (@as(u64, 1) << 47); // 0xFFFE_8000_0000_0000
+
     pub fn isBoxed(bits: u64) bool {
         return (bits & 0xFFF8_0000_0000_0000) == 0xFFF8_0000_0000_0000 and (bits & 0x0007_FFFF_FFFF_FFFF) != 0;
     }
@@ -41,7 +49,7 @@ pub const NaNBoxedValue = struct {
         return @bitCast(self.bits);
     }
 
-    pub fn fromJSValue(v: JSValue) NaNBoxedValue {
+    pub fn fromJSValue(v: JSValue, allocator: ?std.mem.Allocator) BoxError!NaNBoxedValue {
         switch (v) {
             .number => |n| {
                 if (std.math.isNan(n)) {
@@ -60,15 +68,20 @@ pub const NaNBoxedValue = struct {
             .symbol => |box| return fromHeapPtr(TAG_SYMBOL, box),
             .regex => |box| return fromHeapPtr(TAG_REGEX, box),
             .map => |box| return fromHeapPtr(TAG_MAP, box),
-            .set => |box| return fromHeapPtr(TAG_MAP, box),
-            .@"error" => |box| return fromHeapPtr(TAG_OBJECT, box),
-            .date => |box| return fromHeapPtr(TAG_OBJECT, box),
-            .promise => |box| return fromHeapPtr(TAG_OBJECT, box),
-            .proxy => |box| return fromHeapPtr(TAG_OBJECT, box),
-            .array_buffer => |box| return fromHeapPtr(TAG_OBJECT, box),
-            .data_view => |box| return fromHeapPtr(TAG_OBJECT, box),
-            .typed_array => |box| return fromHeapPtr(TAG_ARRAY, box),
-            .temporal => |box| return fromHeapPtr(TAG_OBJECT, box),
+            .set,
+            .@"error",
+            .date,
+            .promise,
+            .proxy,
+            .array_buffer,
+            .data_view,
+            .typed_array,
+            .temporal,
+            => {
+                const alloc = allocator orelse return error.UnsupportedValue;
+                const box = try zvalue.Rc(JSValue).create(alloc, v.retain());
+                return fromHeapPtr(TAG_OTHER, box);
+            },
         }
     }
 
@@ -111,6 +124,10 @@ pub const NaNBoxedValue = struct {
             TAG_SYMBOL => .{ .symbol = @ptrFromInt(raw_ptr) },
             TAG_REGEX => .{ .regex = @ptrFromInt(raw_ptr) },
             TAG_MAP => .{ .map = @ptrFromInt(raw_ptr) },
+            TAG_OTHER => {
+                const box: *zvalue.Rc(JSValue) = @ptrFromInt(raw_ptr);
+                return box.value;
+            },
             else => JSValue.UNDEFINED,
         };
     }
@@ -120,6 +137,11 @@ pub const NaNBoxedValue = struct {
         const tag = self.bits & TAG_MASK;
         const raw_ptr = self.bits & PTR_MASK;
         if (tag == BASE_BOX and raw_ptr <= 4) return;
+        if (tag == TAG_OTHER) {
+            const box: *zvalue.Rc(JSValue) = @ptrFromInt(raw_ptr);
+            _ = box.retain();
+            return;
+        }
         _ = self.toJSValueNoRetain().retain();
     }
 
@@ -128,6 +150,14 @@ pub const NaNBoxedValue = struct {
         const tag = self.bits & TAG_MASK;
         const raw_ptr = self.bits & PTR_MASK;
         if (tag == BASE_BOX and raw_ptr <= 4) return;
+        if (tag == TAG_OTHER) {
+            const box: *zvalue.Rc(JSValue) = @ptrFromInt(raw_ptr);
+            if (box.decref()) {
+                box.value.deinit();
+                box.destroy();
+            }
+            return;
+        }
         self.toJSValueNoRetain().deinit();
     }
 };

@@ -354,7 +354,7 @@ test "NaNBoxedValue roundtrip and helpers" {
     // 5. Roundtrip .number = 42.5
     {
         const v = JSValue.fromNumber(42.5);
-        const nb = NaNBoxedValue.fromJSValue(v);
+        const nb = try NaNBoxedValue.fromJSValue(v, null);
         try testing.expect(nb.isNumber());
         try testing.expectEqual(@as(f64, 42.5), nb.asNumber());
         const back = nb.toJSValue();
@@ -365,7 +365,7 @@ test "NaNBoxedValue roundtrip and helpers" {
     // .number = nan (positive)
     {
         const v = JSValue.fromNumber(std.math.nan(f64));
-        const nb = NaNBoxedValue.fromJSValue(v);
+        const nb = try NaNBoxedValue.fromJSValue(v, null);
         try testing.expect(nb.isNumber());
         try testing.expect(std.math.isNan(nb.asNumber()));
         try testing.expectEqual(NaNBoxedValue.CANONICAL_NAN, nb.bits);
@@ -378,7 +378,7 @@ test "NaNBoxedValue roundtrip and helpers" {
     {
         const neg_nan: f64 = @bitCast(@as(u64, 0xFFF8_0000_0000_0000));
         const v = JSValue.fromNumber(neg_nan);
-        const nb = NaNBoxedValue.fromJSValue(v);
+        const nb = try NaNBoxedValue.fromJSValue(v, null);
         try testing.expect(nb.isNumber());
         try testing.expect(std.math.isNan(nb.asNumber()));
         try testing.expectEqual(NaNBoxedValue.CANONICAL_NAN, nb.bits);
@@ -390,13 +390,13 @@ test "NaNBoxedValue roundtrip and helpers" {
     // .boolean = true / false
     {
         const v_true = JSValue.fromBool(true);
-        const nb_true = NaNBoxedValue.fromJSValue(v_true);
+        const nb_true = try NaNBoxedValue.fromJSValue(v_true, null);
         try testing.expect(!nb_true.isNumber());
         const back_true = nb_true.toJSValue();
         try testing.expect(back_true == .boolean and back_true.boolean == true);
 
         const v_false = JSValue.fromBool(false);
-        const nb_false = NaNBoxedValue.fromJSValue(v_false);
+        const nb_false = try NaNBoxedValue.fromJSValue(v_false, null);
         try testing.expect(!nb_false.isNumber());
         const back_false = nb_false.toJSValue();
         try testing.expect(back_false == .boolean and back_false.boolean == false);
@@ -405,13 +405,13 @@ test "NaNBoxedValue roundtrip and helpers" {
     // .null, .undefined
     {
         const v_null = JSValue.NULL;
-        const nb_null = NaNBoxedValue.fromJSValue(v_null);
+        const nb_null = try NaNBoxedValue.fromJSValue(v_null, null);
         try testing.expect(!nb_null.isNumber());
         const back_null = nb_null.toJSValue();
         try testing.expect(back_null == .null);
 
         const v_undef = JSValue.UNDEFINED;
-        const nb_undef = NaNBoxedValue.fromJSValue(v_undef);
+        const nb_undef = try NaNBoxedValue.fromJSValue(v_undef, null);
         try testing.expect(!nb_undef.isNumber());
         const back_undef = nb_undef.toJSValue();
         try testing.expect(back_undef == .undefined);
@@ -421,7 +421,7 @@ test "NaNBoxedValue roundtrip and helpers" {
     {
         const str = try JSValue.newString(testing.allocator, "hello");
         defer str.deinit();
-        const nb = NaNBoxedValue.fromJSValue(str);
+        const nb = try NaNBoxedValue.fromJSValue(str, null);
         try testing.expect(!nb.isNumber());
         const back = nb.toJSValueNoRetain();
         try testing.expect(back == .string);
@@ -432,7 +432,7 @@ test "NaNBoxedValue roundtrip and helpers" {
     {
         const arr = try JSValue.newArray(testing.allocator);
         defer arr.deinit();
-        const nb = NaNBoxedValue.fromJSValue(arr);
+        const nb = try NaNBoxedValue.fromJSValue(arr, null);
         try testing.expect(!nb.isNumber());
         const back = nb.toJSValueNoRetain();
         try testing.expect(back == .array);
@@ -443,10 +443,124 @@ test "NaNBoxedValue roundtrip and helpers" {
     {
         const obj = try JSValue.newObject(testing.allocator);
         defer obj.deinit();
-        const nb = NaNBoxedValue.fromJSValue(obj);
+        const nb = try NaNBoxedValue.fromJSValue(obj, null);
         try testing.expect(!nb.isNumber());
         const back = nb.toJSValueNoRetain();
         try testing.expect(back == .object);
         try testing.expectEqual(obj.object, back.object);
+    }
+
+    // TAG_OTHER variants roundtrip
+    // 1. set
+    {
+        const val = try JSValue.newSet(testing.allocator);
+        defer val.deinit();
+        const nb = try NaNBoxedValue.fromJSValue(val, testing.allocator);
+        defer nb.deinit();
+        try testing.expect(!nb.isNumber());
+        const back = nb.toJSValueNoRetain();
+        try testing.expect(back == .set);
+        try testing.expectEqual(val.set, back.set);
+
+        // toJSValue() creates an owned JSValue reference
+        const owned_back = nb.toJSValue();
+        defer owned_back.deinit();
+        try testing.expect(owned_back == .set);
+        try testing.expectEqual(val.set, owned_back.set);
+    }
+
+    // 2. @"error"
+    {
+        const val = try JSValue.newError(testing.allocator, .type_error, "test error");
+        defer val.deinit();
+        const nb = try NaNBoxedValue.fromJSValue(val, testing.allocator);
+        defer nb.deinit();
+        try testing.expect(!nb.isNumber());
+        const back = nb.toJSValueNoRetain();
+        try testing.expect(back == .@"error");
+        try testing.expectEqual(val.@"error", back.@"error");
+    }
+
+    // 3. date
+    {
+        const val = try JSValue.newDate(testing.allocator, 1700000000000);
+        defer val.deinit();
+        const nb = try NaNBoxedValue.fromJSValue(val, testing.allocator);
+        defer nb.deinit();
+        try testing.expect(!nb.isNumber());
+        const back = nb.toJSValueNoRetain();
+        try testing.expect(back == .date);
+        try testing.expectEqual(val.date, back.date);
+    }
+
+    // 4. promise
+    {
+        const val = try JSValue.newPromise(testing.allocator);
+        defer val.deinit();
+        const nb = try NaNBoxedValue.fromJSValue(val, testing.allocator);
+        defer nb.deinit();
+        try testing.expect(!nb.isNumber());
+        const back = nb.toJSValueNoRetain();
+        try testing.expect(back == .promise);
+        try testing.expectEqual(val.promise, back.promise);
+    }
+
+    // 5. proxy
+    {
+        const target = try JSValue.newObject(testing.allocator);
+        const handler = try JSValue.newObject(testing.allocator);
+        const val = try JSValue.newProxy(testing.allocator, target, handler);
+        defer val.deinit();
+        const nb = try NaNBoxedValue.fromJSValue(val, testing.allocator);
+        defer nb.deinit();
+        try testing.expect(!nb.isNumber());
+        const back = nb.toJSValueNoRetain();
+        try testing.expect(back == .proxy);
+        try testing.expectEqual(val.proxy, back.proxy);
+    }
+
+    // 6. array_buffer
+    {
+        const val = try JSValue.newArrayBuffer(testing.allocator, 32);
+        defer val.deinit();
+        const nb = try NaNBoxedValue.fromJSValue(val, testing.allocator);
+        defer nb.deinit();
+        try testing.expect(!nb.isNumber());
+        const back = nb.toJSValueNoRetain();
+        try testing.expect(back == .array_buffer);
+        try testing.expectEqual(val.array_buffer, back.array_buffer);
+    }
+
+    // 7. data_view
+    {
+        const buf = try JSValue.newArrayBuffer(testing.allocator, 32);
+        const val = try JSValue.newDataView(testing.allocator, buf, 0, null);
+        defer val.deinit();
+        const nb = try NaNBoxedValue.fromJSValue(val, testing.allocator);
+        defer nb.deinit();
+        try testing.expect(!nb.isNumber());
+        const back = nb.toJSValueNoRetain();
+        try testing.expect(back == .data_view);
+        try testing.expectEqual(val.data_view, back.data_view);
+    }
+
+    // 8. typed_array
+    {
+        const buf = try JSValue.newArrayBuffer(testing.allocator, 32);
+        const val = try JSValue.newTypedArray(testing.allocator, buf, 0, null, .u8);
+        defer val.deinit();
+        const nb = try NaNBoxedValue.fromJSValue(val, testing.allocator);
+        defer nb.deinit();
+        try testing.expect(!nb.isNumber());
+        const back = nb.toJSValueNoRetain();
+        try testing.expect(back == .typed_array);
+        try testing.expectEqual(val.typed_array, back.typed_array);
+    }
+
+    // TAG_OTHER requires allocator: error.UnsupportedValue when null
+    {
+        const val = try JSValue.newSet(testing.allocator);
+        defer val.deinit();
+        try testing.expectError(error.UnsupportedValue, NaNBoxedValue.fromJSValue(val, null));
     }
 }
