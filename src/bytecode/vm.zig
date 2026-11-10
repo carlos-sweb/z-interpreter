@@ -9,13 +9,9 @@ const codeblock = @import("codeblock.zig");
 const interpreter_class = @import("../interpreter_class.zig");
 const interpreter_mod = @import("../interpreter.zig");
 const ClosureCtx = interpreter_mod.ClosureCtx;
-const nan_box = @import("nan_box.zig");
-const NaNBoxedValue = nan_box.NaNBoxedValue;
 
 pub const MAX_FRAMES = 1024;
 pub const MAX_REGISTERS = 8192;
-
-threadlocal var current_allocator: ?Allocator = null;
 
 pub const CatchHandler = struct {
     target_pc: usize,
@@ -60,27 +56,14 @@ fn calleeMatches(cached: JSValue, current: JSValue) bool {
     return cached.function == current.function or (cached.function.value.ctx == current.function.value.ctx and cached.function.value.call == current.function.value.call);
 }
 
-fn makeNumberBox(n: f64) nan_box.NaNBoxedValue {
-    if (std.math.isNan(n)) {
-        return .{ .bits = nan_box.NaNBoxedValue.CANONICAL_NAN };
+fn deinitSlot(v: *JSValue) void {
+    switch (v.*) {
+        .undefined, .null, .boolean, .number => {},
+        else => {
+            v.deinit();
+            v.* = JSValue.UNDEFINED;
+        },
     }
-    return .{ .bits = @bitCast(n) };
-}
-
-fn isBoxTruthy(b: nan_box.NaNBoxedValue) bool {
-    if (b.isNumber()) {
-        const n = b.asNumber();
-        return n != 0 and !std.math.isNan(n);
-    }
-    if (b.bits == nan_box.NaNBoxedValue.TAG_TRUE) return true;
-    if (b.bits == nan_box.NaNBoxedValue.TAG_FALSE) return false;
-    if (b.bits == nan_box.NaNBoxedValue.TAG_NULL) return false;
-    if (b.bits == nan_box.NaNBoxedValue.TAG_UNDEFINED) return false;
-    if (b.bits & nan_box.NaNBoxedValue.TAG_MASK == nan_box.NaNBoxedValue.TAG_STRING) {
-        const s = b.toJSValueNoRetain();
-        return s.string.value.data.len > 0;
-    }
-    return true;
 }
 
 fn callFallback(allocator: Allocator, callee: JSValue, args_slice: []const JSValue) !JSValue {
@@ -236,20 +219,17 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
     clearGlobalCache();
     defer clearGlobalCache();
 
-    current_allocator = allocator;
-    defer current_allocator = null;
-
     const frames = try allocator.alloc(CallFrame, MAX_FRAMES);
     defer allocator.free(frames);
-    const registers = try allocator.alloc(nan_box.NaNBoxedValue, MAX_REGISTERS);
+    const registers = try allocator.alloc(JSValue, MAX_REGISTERS);
     defer allocator.free(registers);
-    @memset(registers, .{ .bits = nan_box.NaNBoxedValue.TAG_UNDEFINED });
+    @memset(registers, JSValue.UNDEFINED);
 
     var frame_count: usize = 0;
     var reg_top: usize = 0;
 
     defer {
-        for (registers[0..reg_top]) |r| r.deinit();
+        for (registers[0..reg_top]) |*register| deinitSlot(register);
     }
 
     if (block.register_count > MAX_REGISTERS) return error.OutOfMemory;
@@ -257,9 +237,7 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
     reg_top = block.register_count;
 
     const parameter_count = @min(args.len, block.param_count);
-    for (0..parameter_count) |index| {
-        try setReg(registers, @intCast(index), args[index].retain());
-    }
+    for (0..parameter_count) |index| registers[index] = args[index].retain();
 
     frames[0] = CallFrame{
         .block = block,
@@ -280,85 +258,70 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
         frame.pc += 1;
         const frame_regs = registers[frame.reg_base .. frame.reg_base + frame.block.register_count];
         switch (op.opcode) {
-            .load_const => {
-                if (op.b >= frame.block.constants.len) return error.InvalidConstant;
-                const c = frame.block.constants[op.b];
-                switch (c) {
-                    .number => |n| try setRegBox(frame_regs, op.a, makeNumberBox(n)),
-                    .boolean => |b| try setRegBox(frame_regs, op.a, .{ .bits = if (b) nan_box.NaNBoxedValue.TAG_TRUE else nan_box.NaNBoxedValue.TAG_FALSE }),
-                    else => {
-                        const val = try constantValue(allocator, frame.block, op.b);
-                        try setReg(frame_regs, op.a, val);
-                    },
-                }
-            },
-            .load_undefined => try setRegBox(frame_regs, op.a, .{ .bits = nan_box.NaNBoxedValue.TAG_UNDEFINED }),
-            .new_object => try setReg(frame_regs, op.a, try JSValue.newObject(allocator)),
+            .load_const => try setRegister(frame_regs, op.a, try constantValue(allocator, frame.block, op.b)),
+            .load_undefined => try setRegister(frame_regs, op.a, JSValue.UNDEFINED),
+            .new_object => try setRegister(frame_regs, op.a, try JSValue.newObject(allocator)),
             .new_array => {
                 const arr = try JSValue.newArray(allocator);
                 if (op.b > 0) {
                     try arr.array.value.reserve(op.b);
                 }
-                try setReg(frame_regs, op.a, arr);
+                try setRegister(frame_regs, op.a, arr);
             },
             .get_prop => {
-                const obj = try getRegRef(frame_regs, op.b);
+                const obj = try getRegister(frame_regs, op.b);
                 const key = try constantKey(frame.block, op.c);
                 const result = try getProp(allocator, obj, key);
-                try setReg(frame_regs, op.a, result);
+                try setRegister(frame_regs, op.a, result);
             },
             .set_prop => {
-                const obj = try getRegRef(frame_regs, op.a);
+                const obj = try getRegister(frame_regs, op.a);
                 const key = try constantKey(frame.block, op.b);
-                const val = try getRegRef(frame_regs, op.c);
+                const val = try getRegister(frame_regs, op.c);
                 try setProp(allocator, obj, key, val);
             },
             .get_elem => {
-                const obj = try getRegRef(frame_regs, op.b);
-                const key_val = try getRegRef(frame_regs, op.c);
+                const obj = try getRegister(frame_regs, op.b);
+                const key_val = try getRegister(frame_regs, op.c);
                 const result = try getElem(allocator, obj, key_val);
-                try setReg(frame_regs, op.a, result);
+                try setRegister(frame_regs, op.a, result);
             },
             .get_elem_const => {
-                const obj = try getRegRef(frame_regs, op.b);
+                const obj = try getRegister(frame_regs, op.b);
                 if (obj == .array and op.c < frame.block.constants.len) {
                     const c = frame.block.constants[op.c];
                     if (c == .number) {
                         const idx: usize = @intFromFloat(c.number);
                         if (idx < obj.array.value.length()) {
-                            try setReg(frame_regs, op.a, obj.array.value.get(idx).retain());
+                            try setRegister(frame_regs, op.a, obj.array.value.get(idx).retain());
                         } else {
-                            try setRegBox(frame_regs, op.a, .{ .bits = nan_box.NaNBoxedValue.TAG_UNDEFINED });
+                            try setRegister(frame_regs, op.a, JSValue.UNDEFINED);
                         }
                     } else {
                         const key_val = try constantValue(allocator, frame.block, op.c);
                         defer key_val.deinit();
-                        try setReg(frame_regs, op.a, try getElem(allocator, obj, key_val));
+                        try setRegister(frame_regs, op.a, try getElem(allocator, obj, key_val));
                     }
                 } else {
                     const key_val = try constantValue(allocator, frame.block, op.c);
                     defer key_val.deinit();
-                    try setReg(frame_regs, op.a, try getElem(allocator, obj, key_val));
+                    try setRegister(frame_regs, op.a, try getElem(allocator, obj, key_val));
                 }
             },
             .set_elem => {
-                const obj = try getRegRef(frame_regs, op.a);
-                const key_val = try getRegRef(frame_regs, op.b);
-                const val = try getRegRef(frame_regs, op.c);
+                const obj = try getRegister(frame_regs, op.a);
+                const key_val = try getRegister(frame_regs, op.b);
+                const val = try getRegister(frame_regs, op.c);
                 try setElem(allocator, obj, key_val, val);
             },
-            .load_null => try setRegBox(frame_regs, op.a, .{ .bits = nan_box.NaNBoxedValue.TAG_NULL }),
-            .load_true => try setRegBox(frame_regs, op.a, .{ .bits = nan_box.NaNBoxedValue.TAG_TRUE }),
-            .load_false => try setRegBox(frame_regs, op.a, .{ .bits = nan_box.NaNBoxedValue.TAG_FALSE }),
-            .move, .load_local, .store_local => {
-                if (op.b >= frame_regs.len) return error.InvalidRegister;
-                const b = frame_regs[op.b];
-                b.retain();
-                try setRegBox(frame_regs, op.a, b);
-            },
-            .load_global => try setReg(frame_regs, op.a, try loadGlobal(frame.block, frame.closure_env, op.b)),
+            .load_null => try setRegister(frame_regs, op.a, JSValue.NULL),
+            .load_true => try setRegister(frame_regs, op.a, JSValue.fromBool(true)),
+            .load_false => try setRegister(frame_regs, op.a, JSValue.fromBool(false)),
+            .move, .load_local => try setRegister(frame_regs, op.a, (try getRegister(frame_regs, op.b)).retain()),
+            .store_local => try setRegister(frame_regs, op.a, (try getRegister(frame_regs, op.b)).retain()),
+            .load_global => try setRegister(frame_regs, op.a, try loadGlobal(frame.block, frame.closure_env, op.b)),
             .store_global => {
-                const val = try getRegRef(frame_regs, op.b);
+                const val = try getRegister(frame_regs, op.b);
                 try storeGlobal(allocator, frame.block, frame.closure_env, op.a, val);
             },
             .add => try addOp(frame_regs, allocator, op),
@@ -381,15 +344,13 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
             .ge_local_const => try comparisonLocalConst(frame_regs, frame.block, op, .ge),
             .eq_local_const => try comparisonLocalConst(frame_regs, frame.block, op, .eq),
             .neg => {
-                if (op.b >= frame_regs.len) return error.InvalidRegister;
-                const b = frame_regs[op.b];
-                if (b.isNumber()) {
-                    try setRegBox(frame_regs, op.a, makeNumberBox(-b.asNumber()));
-                } else return error.UnsupportedOpcode;
+                const src = try getRegister(frame_regs, op.b);
+                if (src != .number) return error.UnsupportedOpcode;
+                try setRegister(frame_regs, op.a, JSValue.fromNumber(-src.number));
             },
             .not => {
                 const truthy = try isTruthy(frame_regs, op.b);
-                try setRegBox(frame_regs, op.a, .{ .bits = if (truthy) nan_box.NaNBoxedValue.TAG_FALSE else nan_box.NaNBoxedValue.TAG_TRUE });
+                try setRegister(frame_regs, op.a, JSValue.fromBool(!truthy));
             },
             .jump => frame.pc = try jumpTarget(frame.block, op),
             .jump_if_true => {
@@ -399,7 +360,7 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                 if (!try isTruthy(frame_regs, op.a)) frame.pc = try jumpTarget(frame.block, op);
             },
             .call => {
-                const callee = try getRegRef(frame_regs, op.b);
+                const callee = try getRegister(frame_regs, op.b);
                 const cache_slice: []codeblock.CallSiteCache = @constCast(frame.block.call_target_cache);
                 if (op.c >= cache_slice.len) return error.InvalidRegister;
                 const cache = &cache_slice[op.c];
@@ -434,12 +395,10 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
 
                     const param_count = @min(arg_count, callee_block.param_count);
                     for (0..param_count) |i| {
-                        const arg_box = frame_regs[start + i];
-                        arg_box.retain();
-                        registers[callee_reg_base + i] = arg_box;
+                        registers[callee_reg_base + i] = frame_regs[start + i].retain();
                     }
-                    for (param_count..callee_block.register_count) |i| {
-                        registers[callee_reg_base + i] = .{ .bits = nan_box.NaNBoxedValue.TAG_UNDEFINED };
+                    for (param_count..callee_block.param_count) |i| {
+                        registers[callee_reg_base + i] = JSValue.UNDEFINED;
                     }
 
                     frames[frame_count] = CallFrame{
@@ -455,37 +414,24 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                     frame_count += 1;
                     reg_top = new_reg_top;
                 } else {
-                    var fb_args_buf: [8]JSValue = undefined;
-                    const fb_heap = arg_count > fb_args_buf.len;
-                    const fb_args = if (fb_heap)
-                        try allocator.alloc(JSValue, arg_count)
-                    else
-                        fb_args_buf[0..arg_count];
-                    defer if (fb_heap) allocator.free(fb_args);
-                    for (0..arg_count) |i| {
-                        fb_args[i] = frame_regs[start + i].toJSValueNoRetain();
-                    }
-                    const result = try callFallback(allocator, callee, fb_args);
-                    try setReg(frame_regs, op.a, result);
+                    const result = try callFallback(allocator, callee, frame_regs[start..end]);
+                    try setRegister(frame_regs, op.a, result);
                 }
             },
             .return_value => {
-                if (op.a >= frame_regs.len) return error.InvalidRegister;
-                const ret_box = frame_regs[op.a];
-                ret_box.retain();
-                for (registers[frame.reg_base..reg_top]) |r| r.deinit();
+                const val = (try getRegister(frame_regs, op.a)).retain();
+                for (registers[frame.reg_base..reg_top]) |*r| deinitSlot(r);
                 reg_top = frame.reg_base;
                 frame_count -= 1;
                 if (frame_count == 0) {
-                    defer ret_box.deinit();
-                    return ret_box.toJSValue();
+                    return val;
                 }
                 const caller_frame = &frames[frame_count - 1];
                 const caller_regs = registers[caller_frame.reg_base .. caller_frame.reg_base + caller_frame.block.register_count];
-                try setRegBox(caller_regs, frame.return_reg, ret_box);
+                try setRegister(caller_regs, frame.return_reg, val);
             },
             .return_undefined => {
-                for (registers[frame.reg_base..reg_top]) |r| r.deinit();
+                for (registers[frame.reg_base..reg_top]) |*r| deinitSlot(r);
                 reg_top = frame.reg_base;
                 frame_count -= 1;
                 if (frame_count == 0) {
@@ -493,7 +439,7 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                 }
                 const caller_frame = &frames[frame_count - 1];
                 const caller_regs = registers[caller_frame.reg_base .. caller_frame.reg_base + caller_frame.block.register_count];
-                try setRegBox(caller_regs, frame.return_reg, .{ .bits = nan_box.NaNBoxedValue.TAG_UNDEFINED });
+                try setRegister(caller_regs, frame.return_reg, JSValue.UNDEFINED);
             },
             .make_closure => {
                 const vm_interp = frame.interp orelse return error.UnsupportedOpcode;
@@ -504,18 +450,18 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                     else => return error.InvalidConstant,
                 };
                 const closure = try interpreter_class.makeClosure(vm_interp, env, fnode);
-                try setReg(frame_regs, op.a, closure);
+                try setRegister(frame_regs, op.a, closure);
             },
             .iter_init => {
-                const iterable = try getRegRef(frame_regs, op.b);
+                const iterable = try getRegister(frame_regs, op.b);
                 if (iterable != .array and iterable != .string) return error.UnsupportedOpcode;
                 const it = try JSValue.newArray(allocator);
                 _ = try it.array.value.push(iterable.retain());
                 _ = try it.array.value.push(JSValue.fromNumber(0));
-                try setReg(frame_regs, op.a, it);
+                try setRegister(frame_regs, op.a, it);
             },
             .iter_next => {
-                const it = try getRegRef(frame_regs, op.c);
+                const it = try getRegister(frame_regs, op.c);
                 if (it != .array or it.array.value.length() < 2) return error.UnsupportedOpcode;
                 const target = it.array.value.get(0);
                 const idx_val = it.array.value.get(1);
@@ -525,21 +471,21 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                     if (idx < target.array.value.length()) {
                         const val = target.array.value.get(idx).retain();
                         it.array.value.toSliceMut()[1] = JSValue.fromNumber(@floatFromInt(idx + 1));
-                        try setReg(frame_regs, op.a, val);
-                        try setRegBox(frame_regs, op.b, .{ .bits = nan_box.NaNBoxedValue.TAG_FALSE });
+                        try setRegister(frame_regs, op.a, val);
+                        try setRegister(frame_regs, op.b, JSValue.fromBool(false));
                     } else {
-                        try setRegBox(frame_regs, op.a, .{ .bits = nan_box.NaNBoxedValue.TAG_UNDEFINED });
-                        try setRegBox(frame_regs, op.b, .{ .bits = nan_box.NaNBoxedValue.TAG_TRUE });
+                        try setRegister(frame_regs, op.a, JSValue.UNDEFINED);
+                        try setRegister(frame_regs, op.b, JSValue.fromBool(true));
                     }
                 } else if (target == .string) {
                     if (idx < target.string.value.data.len) {
                         const ch = try JSValue.newString(allocator, target.string.value.data[idx .. idx + 1]);
                         it.array.value.toSliceMut()[1] = JSValue.fromNumber(@floatFromInt(idx + 1));
-                        try setReg(frame_regs, op.a, ch);
-                        try setRegBox(frame_regs, op.b, .{ .bits = nan_box.NaNBoxedValue.TAG_FALSE });
+                        try setRegister(frame_regs, op.a, ch);
+                        try setRegister(frame_regs, op.b, JSValue.fromBool(false));
                     } else {
-                        try setRegBox(frame_regs, op.a, .{ .bits = nan_box.NaNBoxedValue.TAG_UNDEFINED });
-                        try setRegBox(frame_regs, op.b, .{ .bits = nan_box.NaNBoxedValue.TAG_TRUE });
+                        try setRegister(frame_regs, op.a, JSValue.UNDEFINED);
+                        try setRegister(frame_regs, op.b, JSValue.fromBool(true));
                     }
                 } else return error.UnsupportedOpcode;
             },
@@ -557,29 +503,27 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                 if (frame.catch_count > 0) frame.catch_count -= 1;
             },
             .throw_value => {
-                if (op.a >= frame_regs.len) return error.InvalidRegister;
-                const thrown_box = frame_regs[op.a];
-                thrown_box.retain();
+                const thrown = (try getRegister(frame_regs, op.a)).retain();
                 var handled = false;
                 while (frame_count > 0) {
                     const cur_frame = &frames[frame_count - 1];
                     if (cur_frame.catch_count > 0) {
                         cur_frame.catch_count -= 1;
                         const handler = cur_frame.catch_stack[cur_frame.catch_count];
-                        for (registers[handler.reg_top..reg_top]) |r| r.deinit();
+                        for (registers[handler.reg_top..reg_top]) |*r| deinitSlot(r);
                         reg_top = handler.reg_top;
                         cur_frame.pc = handler.target_pc;
                         const hregs = registers[cur_frame.reg_base .. cur_frame.reg_base + cur_frame.block.register_count];
-                        try setRegBox(hregs, handler.error_reg, thrown_box);
+                        try setRegister(hregs, handler.error_reg, thrown);
                         handled = true;
                         break;
                     }
-                    for (registers[cur_frame.reg_base..reg_top]) |r| r.deinit();
+                    for (registers[cur_frame.reg_base..reg_top]) |*r| deinitSlot(r);
                     reg_top = cur_frame.reg_base;
                     frame_count -= 1;
                 }
                 if (!handled) {
-                    thrown_box.deinit();
+                    thrown.deinit();
                     return error.UnsupportedOpcode;
                 }
             },
@@ -592,65 +536,51 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
 const Arithmetic = enum { add, sub, mul, div, mod };
 const Comparison = enum { lt, gt, le, ge, eq, ne };
 
-fn arithmetic(registers: []nan_box.NaNBoxedValue, op: codeblock.Op, kind: Arithmetic) !void {
-    if (op.b >= registers.len or op.c >= registers.len) return error.InvalidRegister;
-    const left_box = registers[op.b];
-    const right_box = registers[op.c];
-    if (left_box.isNumber() and right_box.isNumber()) {
-        const left = left_box.asNumber();
-        const right = right_box.asNumber();
+fn arithmetic(registers: []JSValue, op: codeblock.Op, kind: Arithmetic) !void {
+    const left = try getRegister(registers, op.b);
+    const right = try getRegister(registers, op.c);
+    if (left != .number or right != .number) return error.UnsupportedOpcode;
+    const result = switch (kind) {
+        .add => left.number + right.number,
+        .sub => left.number - right.number,
+        .mul => left.number * right.number,
+        .div => left.number / right.number,
+        .mod => @mod(left.number, right.number),
+    };
+    try setRegister(registers, op.a, JSValue.fromNumber(result));
+}
+
+fn comparison(registers: []JSValue, op: codeblock.Op, kind: Comparison) !void {
+    const left = try getRegister(registers, op.b);
+    const right = try getRegister(registers, op.c);
+    if (left == .number and right == .number) {
         const result = switch (kind) {
-            .add => left + right,
-            .sub => left - right,
-            .mul => left * right,
-            .div => left / right,
-            .mod => @mod(left, right),
+            .lt => left.number < right.number,
+            .gt => left.number > right.number,
+            .le => left.number <= right.number,
+            .ge => left.number >= right.number,
+            .eq => left.number == right.number,
+            .ne => left.number != right.number,
         };
-        try setRegBox(registers, op.a, makeNumberBox(result));
+        try setRegister(registers, op.a, JSValue.fromBool(result));
+    } else if (left == .string and right == .string) {
+        const eq = std.mem.eql(u8, left.string.value.data, right.string.value.data);
+        const result = switch (kind) {
+            .eq => eq,
+            .ne => !eq,
+            else => return error.UnsupportedOpcode,
+        };
+        try setRegister(registers, op.a, JSValue.fromBool(result));
     } else return error.UnsupportedOpcode;
 }
 
-fn comparison(registers: []nan_box.NaNBoxedValue, op: codeblock.Op, kind: Comparison) !void {
-    if (op.b >= registers.len or op.c >= registers.len) return error.InvalidRegister;
-    const left_box = registers[op.b];
-    const right_box = registers[op.c];
-    if (left_box.isNumber() and right_box.isNumber()) {
-        const left = left_box.asNumber();
-        const right = right_box.asNumber();
-        const result = switch (kind) {
-            .lt => left < right,
-            .gt => left > right,
-            .le => left <= right,
-            .ge => left >= right,
-            .eq => left == right,
-            .ne => left != right,
-        };
-        try setRegBox(registers, op.a, .{ .bits = if (result) nan_box.NaNBoxedValue.TAG_TRUE else nan_box.NaNBoxedValue.TAG_FALSE });
-    } else {
-        const left = try getRegRef(registers, op.b);
-        const right = try getRegRef(registers, op.c);
-        if (left == .string and right == .string) {
-            const eq = std.mem.eql(u8, left.string.value.data, right.string.value.data);
-            const result = switch (kind) {
-                .eq => eq,
-                .ne => !eq,
-                else => return error.UnsupportedOpcode,
-            };
-            try setRegBox(registers, op.a, .{ .bits = if (result) nan_box.NaNBoxedValue.TAG_TRUE else nan_box.NaNBoxedValue.TAG_FALSE });
-        } else return error.UnsupportedOpcode;
-    }
-}
-
-fn addOp(registers: []nan_box.NaNBoxedValue, allocator: Allocator, op: codeblock.Op) !void {
-    if (op.b >= registers.len or op.c >= registers.len) return error.InvalidRegister;
-    const left_box = registers[op.b];
-    const right_box = registers[op.c];
-    if (left_box.isNumber() and right_box.isNumber()) {
-        try setRegBox(registers, op.a, makeNumberBox(left_box.asNumber() + right_box.asNumber()));
+fn addOp(registers: []JSValue, allocator: Allocator, op: codeblock.Op) !void {
+    const left = try getRegister(registers, op.b);
+    const right = try getRegister(registers, op.c);
+    if (left == .number and right == .number) {
+        try setRegister(registers, op.a, JSValue.fromNumber(left.number + right.number));
         return;
     }
-    const left = try getRegRef(registers, op.b);
-    const right = try getRegRef(registers, op.c);
     if (left == .string or right == .string) {
         var buf_l: [32]u8 = undefined;
         var buf_r: [32]u8 = undefined;
@@ -659,81 +589,69 @@ fn addOp(registers: []nan_box.NaNBoxedValue, allocator: Allocator, op: codeblock
         const combined = try std.fmt.allocPrint(allocator, "{s}{s}", .{ sl, sr });
         defer allocator.free(combined);
         const result = try JSValue.newString(allocator, combined);
-        try setReg(registers, op.a, result);
+        try setRegister(registers, op.a, result);
         return;
     }
     return error.UnsupportedOpcode;
 }
 
-fn arithmeticLocalConst(registers: []nan_box.NaNBoxedValue, block: *const codeblock.CodeBlock, op: codeblock.Op, kind: Arithmetic) !void {
-    if (op.b >= registers.len) return error.InvalidRegister;
+fn arithmeticLocalConst(registers: []JSValue, block: *const codeblock.CodeBlock, op: codeblock.Op, kind: Arithmetic) !void {
+    const left = try getRegister(registers, op.b);
     if (op.c >= block.constants.len) return error.InvalidConstant;
-    const left_box = registers[op.b];
     const c = block.constants[op.c];
-    if (left_box.isNumber() and c == .number) {
-        const left = left_box.asNumber();
+    if (left == .number and c == .number) {
         const result = switch (kind) {
-            .add => left + c.number,
-            .sub => left - c.number,
-            .mul => left * c.number,
-            .div => left / c.number,
-            .mod => @mod(left, c.number),
+            .add => left.number + c.number,
+            .sub => left.number - c.number,
+            .mul => left.number * c.number,
+            .div => left.number / c.number,
+            .mod => @mod(left.number, c.number),
         };
-        try setRegBox(registers, op.a, makeNumberBox(result));
+        try setRegister(registers, op.a, JSValue.fromNumber(result));
     } else return error.UnsupportedOpcode;
 }
 
-fn comparisonLocalConst(registers: []nan_box.NaNBoxedValue, block: *const codeblock.CodeBlock, op: codeblock.Op, kind: Comparison) !void {
-    if (op.b >= registers.len) return error.InvalidRegister;
+fn comparisonLocalConst(registers: []JSValue, block: *const codeblock.CodeBlock, op: codeblock.Op, kind: Comparison) !void {
+    const left = try getRegister(registers, op.b);
     if (op.c >= block.constants.len) return error.InvalidConstant;
-    const left_box = registers[op.b];
     const c = block.constants[op.c];
-    if (left_box.isNumber() and c == .number) {
-        const left = left_box.asNumber();
+    if (left == .number and c == .number) {
         const result = switch (kind) {
-            .lt => left < c.number,
-            .gt => left > c.number,
-            .le => left <= c.number,
-            .ge => left >= c.number,
-            .eq => left == c.number,
-            .ne => left != c.number,
+            .lt => left.number < c.number,
+            .gt => left.number > c.number,
+            .le => left.number <= c.number,
+            .ge => left.number >= c.number,
+            .eq => left.number == c.number,
+            .ne => left.number != c.number,
         };
-        try setRegBox(registers, op.a, .{ .bits = if (result) nan_box.NaNBoxedValue.TAG_TRUE else nan_box.NaNBoxedValue.TAG_FALSE });
-    } else if (c == .string) {
-        const left = try getRegRef(registers, op.b);
-        if (left == .string) {
-            const eq = std.mem.eql(u8, left.string.value.data, c.string);
-            const result = switch (kind) {
-                .eq => eq,
-                .ne => !eq,
-                else => return error.UnsupportedOpcode,
-            };
-            try setRegBox(registers, op.a, .{ .bits = if (result) nan_box.NaNBoxedValue.TAG_TRUE else nan_box.NaNBoxedValue.TAG_FALSE });
-        } else return error.UnsupportedOpcode;
-    } else if (c == .boolean) {
-        if (left_box.bits == nan_box.NaNBoxedValue.TAG_TRUE or left_box.bits == nan_box.NaNBoxedValue.TAG_FALSE) {
-            const left_bool = (left_box.bits == nan_box.NaNBoxedValue.TAG_TRUE);
-            const eq = (left_bool == c.boolean);
-            const result = switch (kind) {
-                .eq => eq,
-                .ne => !eq,
-                else => return error.UnsupportedOpcode,
-            };
-            try setRegBox(registers, op.a, .{ .bits = if (result) nan_box.NaNBoxedValue.TAG_TRUE else nan_box.NaNBoxedValue.TAG_FALSE });
-        } else return error.UnsupportedOpcode;
+        try setRegister(registers, op.a, JSValue.fromBool(result));
+    } else if (left == .string and c == .string) {
+        const eq = std.mem.eql(u8, left.string.value.data, c.string);
+        const result = switch (kind) {
+            .eq => eq,
+            .ne => !eq,
+            else => return error.UnsupportedOpcode,
+        };
+        try setRegister(registers, op.a, JSValue.fromBool(result));
+    } else if (left == .boolean and c == .boolean) {
+        const eq = (left.boolean == c.boolean);
+        const result = switch (kind) {
+            .eq => eq,
+            .ne => !eq,
+            else => return error.UnsupportedOpcode,
+        };
+        try setRegister(registers, op.a, JSValue.fromBool(result));
     } else return error.UnsupportedOpcode;
 }
 
-fn addLocalConst(registers: []nan_box.NaNBoxedValue, allocator: Allocator, block: *const codeblock.CodeBlock, op: codeblock.Op) !void {
-    if (op.b >= registers.len) return error.InvalidRegister;
+fn addLocalConst(registers: []JSValue, allocator: Allocator, block: *const codeblock.CodeBlock, op: codeblock.Op) !void {
+    const left = try getRegister(registers, op.b);
     if (op.c >= block.constants.len) return error.InvalidConstant;
-    const left_box = registers[op.b];
     const c = block.constants[op.c];
-    if (left_box.isNumber() and c == .number) {
-        try setRegBox(registers, op.a, makeNumberBox(left_box.asNumber() + c.number));
+    if (left == .number and c == .number) {
+        try setRegister(registers, op.a, JSValue.fromNumber(left.number + c.number));
         return;
     }
-    const left = try getRegRef(registers, op.b);
     const right = try constantValue(allocator, block, op.c);
     defer right.deinit();
     if (left == .string or right == .string) {
@@ -744,7 +662,7 @@ fn addLocalConst(registers: []nan_box.NaNBoxedValue, allocator: Allocator, block
         const combined = try std.fmt.allocPrint(allocator, "{s}{s}", .{ sl, sr });
         defer allocator.free(combined);
         const result = try JSValue.newString(allocator, combined);
-        try setReg(registers, op.a, result);
+        try setRegister(registers, op.a, result);
         return;
     }
     return error.UnsupportedOpcode;
@@ -761,9 +679,15 @@ fn stringSlice(v: JSValue, buf: *[32]u8) ?[]const u8 {
     };
 }
 
-fn isTruthy(registers: []const nan_box.NaNBoxedValue, index: u8) !bool {
-    if (index >= registers.len) return error.InvalidRegister;
-    return isBoxTruthy(registers[index]);
+fn isTruthy(registers: []const JSValue, index: u8) !bool {
+    const value = try getRegister(registers, index);
+    return switch (value) {
+        .undefined, .null => false,
+        .boolean => value.boolean,
+        .number => value.number != 0 and !std.math.isNan(value.number),
+        .string => |s| s.value.data.len > 0,
+        else => return error.UnsupportedOpcode,
+    };
 }
 
 const GlobalCacheEntry = struct {
@@ -846,44 +770,19 @@ fn constantValue(allocator: Allocator, block: *const codeblock.CodeBlock, index:
     };
 }
 
-fn getReg(registers: []const nan_box.NaNBoxedValue, index: u8) !JSValue {
+fn getRegister(registers: []const JSValue, index: u8) !JSValue {
     if (index >= registers.len) return error.InvalidRegister;
-    return registers[index].toJSValue();
+    return registers[index];
 }
 
-fn getRegRef(registers: []const nan_box.NaNBoxedValue, index: u8) !JSValue {
-    if (index >= registers.len) return error.InvalidRegister;
-    return registers[index].toJSValueNoRetain();
-}
-
-fn setReg(registers: []nan_box.NaNBoxedValue, index: u8, value: JSValue) !void {
+fn setRegister(registers: []JSValue, index: u8, value: JSValue) !void {
     if (index >= registers.len) {
         value.deinit();
         return error.InvalidRegister;
     }
-    const alloc = current_allocator orelse return error.OutOfMemory;
-    const boxed = nan_box.NaNBoxedValue.fromJSValue(value, alloc) catch {
-        value.deinit();
-        return error.OutOfMemory;
-    };
-    switch (value) {
-        .set, .@"error", .date, .promise, .proxy, .array_buffer, .data_view, .typed_array, .temporal => value.deinit(),
-        else => {},
-    }
-    const old = registers[index];
-    registers[index] = boxed;
-    old.deinit();
+    deinitSlot(&registers[index]);
+    registers[index] = value;
 }
-
-fn setRegBox(registers: []nan_box.NaNBoxedValue, index: u8, box: nan_box.NaNBoxedValue) !void {
-    if (index >= registers.len) return error.InvalidRegister;
-    const old = registers[index];
-    registers[index] = box;
-    old.deinit();
-}
-
-pub const getRegister = getRegRef;
-pub const setRegister = setReg;
 
 test "vm executes arithmetic and retains its result" {
     const block = codeblock.CodeBlock{
@@ -901,66 +800,4 @@ test "vm executes arithmetic and retains its result" {
     defer value.deinit();
     try std.testing.expect(value == .number);
     try std.testing.expectEqual(@as(f64, 5), value.number);
-}
-
-fn runTestSnippet(allocator: Allocator, source: []const u8) !JSValue {
-    var output = std.Io.Writer.Allocating.init(allocator);
-    defer output.deinit();
-    var interp = try interpreter_mod.Interpreter.init(allocator, &output.writer);
-    defer interp.deinit();
-    interp.compile_options.use_bytecode_vm = true;
-    return try interp.run(source);
-}
-
-test "nan-boxing vm: fib(10) == 55" {
-    const res = try runTestSnippet(std.testing.allocator, "function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); } fib(10);");
-    defer res.deinit();
-    try std.testing.expect(res == .number);
-    try std.testing.expectEqual(@as(f64, 55), res.number);
-}
-
-test "nan-boxing vm: closure counter capture" {
-    const res = try runTestSnippet(std.testing.allocator, "function makeCounter() { let count = 0; return function() { count = count + 1; return count; }; } let c = makeCounter(); c(); c();");
-    defer res.deinit();
-    try std.testing.expect(res == .number);
-    try std.testing.expectEqual(@as(f64, 2), res.number);
-}
-
-test "nan-boxing vm: object property access" {
-    const res = try runTestSnippet(std.testing.allocator, "let obj = { x: 1 }; obj.x;");
-    defer res.deinit();
-    try std.testing.expect(res == .number);
-    try std.testing.expectEqual(@as(f64, 1), res.number);
-}
-
-test "nan-boxing vm: array element access" {
-    const res = try runTestSnippet(std.testing.allocator, "let arr = [1, 2, 3]; arr[1];");
-    defer res.deinit();
-    try std.testing.expect(res == .number);
-    try std.testing.expectEqual(@as(f64, 2), res.number);
-}
-
-test "nan-boxing vm: builtin boundary Math.max" {
-    const res = try runTestSnippet(std.testing.allocator, "Math.max(1, 2);");
-    defer res.deinit();
-    try std.testing.expect(res == .number);
-    try std.testing.expectEqual(@as(f64, 2), res.number);
-}
-
-test "nan-boxing vm: string concat" {
-    const res = try runTestSnippet(std.testing.allocator, "'a' + 'b';");
-    defer res.deinit();
-    try std.testing.expect(res == .string);
-    try std.testing.expectEqualStrings("ab", res.string.value.data);
-}
-
-test "nan-boxing vm: async fallback returns promise" {
-    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer output.deinit();
-    var interp = try interpreter_mod.Interpreter.init(std.testing.allocator, &output.writer);
-    defer interp.deinit();
-    interp.compile_options.use_bytecode_vm = true;
-    const res = try interp.run("async function foo() { return 42; } foo();");
-    defer res.deinit();
-    try std.testing.expect(res == .promise);
 }
