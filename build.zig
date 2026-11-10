@@ -40,6 +40,7 @@ pub fn build(b: *std.Build) void {
 
     const zobject_dep = b.dependency("zobject", .{ .target = target, .optimize = optimize });
     const zobject_module = zobject_dep.module("zobject");
+    zvalue_module.addImport("zobject", zobject_module);
 
     const zmap_dep = b.dependency("zmap", .{ .target = target, .optimize = optimize });
     const zmap_module = zmap_dep.module("zmap");
