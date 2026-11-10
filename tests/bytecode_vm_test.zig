@@ -1,6 +1,10 @@
 const std = @import("std");
 const testing = std.testing;
 const zinterpreter = @import("zinterpreter");
+const zvalue = @import("zvalue");
+const JSValue = zvalue.JSValue;
+const nan_box = @import("zinterpreter").nan_box;
+const NaNBoxedValue = nan_box.NaNBoxedValue;
 
 fn runAdd(use_bytecode_vm: bool) !void {
     var output = std.Io.Writer.Allocating.init(testing.allocator);
@@ -338,5 +342,111 @@ test "bytecode VM get_elem_const and array pre-size" {
         defer res.deinit();
         const disasm = output.written();
         try testing.expect(std.mem.indexOf(u8, disasm, "get_elem_const") != null);
+    }
+}
+
+test "NaNBoxedValue layout and size" {
+    try testing.expectEqual(@as(usize, 8), @sizeOf(NaNBoxedValue));
+    try testing.expectEqual(@as(usize, 8), @alignOf(NaNBoxedValue));
+}
+
+test "NaNBoxedValue roundtrip and helpers" {
+    // 5. Roundtrip .number = 42.5
+    {
+        const v = JSValue.fromNumber(42.5);
+        const nb = NaNBoxedValue.fromJSValue(v);
+        try testing.expect(nb.isNumber());
+        try testing.expectEqual(@as(f64, 42.5), nb.asNumber());
+        const back = nb.toJSValue();
+        try testing.expect(back == .number);
+        try testing.expectEqual(@as(f64, 42.5), back.number);
+    }
+
+    // .number = nan (positive)
+    {
+        const v = JSValue.fromNumber(std.math.nan(f64));
+        const nb = NaNBoxedValue.fromJSValue(v);
+        try testing.expect(nb.isNumber());
+        try testing.expect(std.math.isNan(nb.asNumber()));
+        try testing.expectEqual(NaNBoxedValue.CANONICAL_NAN, nb.bits);
+        const back = nb.toJSValue();
+        try testing.expect(back == .number);
+        try testing.expect(std.math.isNan(back.number));
+    }
+
+    // .number = -nan (canonicalized to positive)
+    {
+        const neg_nan: f64 = @bitCast(@as(u64, 0xFFF8_0000_0000_0000));
+        const v = JSValue.fromNumber(neg_nan);
+        const nb = NaNBoxedValue.fromJSValue(v);
+        try testing.expect(nb.isNumber());
+        try testing.expect(std.math.isNan(nb.asNumber()));
+        try testing.expectEqual(NaNBoxedValue.CANONICAL_NAN, nb.bits);
+        const back = nb.toJSValue();
+        try testing.expect(back == .number);
+        try testing.expect(std.math.isNan(back.number));
+    }
+
+    // .boolean = true / false
+    {
+        const v_true = JSValue.fromBool(true);
+        const nb_true = NaNBoxedValue.fromJSValue(v_true);
+        try testing.expect(!nb_true.isNumber());
+        const back_true = nb_true.toJSValue();
+        try testing.expect(back_true == .boolean and back_true.boolean == true);
+
+        const v_false = JSValue.fromBool(false);
+        const nb_false = NaNBoxedValue.fromJSValue(v_false);
+        try testing.expect(!nb_false.isNumber());
+        const back_false = nb_false.toJSValue();
+        try testing.expect(back_false == .boolean and back_false.boolean == false);
+    }
+
+    // .null, .undefined
+    {
+        const v_null = JSValue.NULL;
+        const nb_null = NaNBoxedValue.fromJSValue(v_null);
+        try testing.expect(!nb_null.isNumber());
+        const back_null = nb_null.toJSValue();
+        try testing.expect(back_null == .null);
+
+        const v_undef = JSValue.UNDEFINED;
+        const nb_undef = NaNBoxedValue.fromJSValue(v_undef);
+        try testing.expect(!nb_undef.isNumber());
+        const back_undef = nb_undef.toJSValue();
+        try testing.expect(back_undef == .undefined);
+    }
+
+    // .string = "hello" (pointer equality)
+    {
+        const str = try JSValue.newString(testing.allocator, "hello");
+        defer str.deinit();
+        const nb = NaNBoxedValue.fromJSValue(str);
+        try testing.expect(!nb.isNumber());
+        const back = nb.toJSValueNoRetain();
+        try testing.expect(back == .string);
+        try testing.expectEqual(str.string, back.string);
+    }
+
+    // .array = [...] (pointer equality)
+    {
+        const arr = try JSValue.newArray(testing.allocator);
+        defer arr.deinit();
+        const nb = NaNBoxedValue.fromJSValue(arr);
+        try testing.expect(!nb.isNumber());
+        const back = nb.toJSValueNoRetain();
+        try testing.expect(back == .array);
+        try testing.expectEqual(arr.array, back.array);
+    }
+
+    // .object = {...} (pointer equality)
+    {
+        const obj = try JSValue.newObject(testing.allocator);
+        defer obj.deinit();
+        const nb = NaNBoxedValue.fromJSValue(obj);
+        try testing.expect(!nb.isNumber());
+        const back = nb.toJSValueNoRetain();
+        try testing.expect(back == .object);
+        try testing.expectEqual(obj.object, back.object);
     }
 }

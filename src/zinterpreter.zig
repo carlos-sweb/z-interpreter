@@ -12,6 +12,7 @@ pub const CompileOptions = interpreter_mod.CompileOptions;
 pub const bytecode = @import("bytecode/codeblock.zig");
 pub const bytecode_emitter = @import("bytecode/emitter.zig");
 pub const bytecode_vm = @import("bytecode/vm.zig");
+pub const nan_box = @import("bytecode/nan_box.zig");
 
 pub const coercion = @import("coercion.zig");
 pub const inspect = @import("inspect.zig");
@@ -24,6 +25,7 @@ test {
     _ = @import("bytecode/codeblock.zig");
     _ = @import("bytecode/emitter.zig");
     _ = @import("bytecode/vm.zig");
+    _ = @import("bytecode/nan_box.zig");
     _ = @import("interpreter.zig");
     _ = @import("fiber.zig");
 }
