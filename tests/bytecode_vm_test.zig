@@ -564,3 +564,20 @@ test "NaNBoxedValue roundtrip and helpers" {
         try testing.expectError(error.UnsupportedValue, NaNBoxedValue.fromJSValue(val, null));
     }
 }
+
+test "bytecode VM E5 monomorphic property IC on shape_id" {
+    // 1. Monomorphic hit: let o = {x: 1}; o.x + o.x + o.x -> 3
+    try testing.expectEqual(@as(f64, 3), try runNumber("let o = {x: 1}; o.x + o.x + o.x", true));
+
+    // 2. Miss por shape distinto: let a = {x: 1}; let b = {y: 2}; a.x + b.y -> 3
+    try testing.expectEqual(@as(f64, 3), try runNumber("let a = {x: 1}; let b = {y: 2}; a.x + b.y", true));
+
+    // 3. Miss por key distinta en mismo shape: let o = {x: 1, y: 2}; o.x + o.y -> 3
+    try testing.expectEqual(@as(f64, 3), try runNumber("let o = {x: 1, y: 2}; o.x + o.y", true));
+
+    // 4. Mutacion: let o = {x: 1}; o.x = 5; o.x -> 5
+    try testing.expectEqual(@as(f64, 5), try runNumber("let o = {x: 1}; o.x = 5; o.x", true));
+
+    // 5. Delete: let o = {x: 1, y: 2}; delete o.x; o.y -> 2
+    try testing.expectEqual(@as(f64, 2), try runNumber("let o = {x: 1, y: 2}; delete o.x; o.y", true));
+}

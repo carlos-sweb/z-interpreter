@@ -110,12 +110,19 @@ pub const CallSiteCache = struct {
     interp: ?*anyopaque = null,
 };
 
+pub const PropCacheEntry = struct {
+    shape_id: u32 = 0,
+    key_const_idx: u8 = 0,
+    slot_offset: u32 = 0,
+};
+
 /// Immutable representation emitted by a later compiler pass.
 pub const CodeBlock = struct {
     ops: []const Op = &.{},
     constants: []const Constant = &.{},
     exception_table: []const ExceptionHandler = &.{},
     call_target_cache: []CallSiteCache = &.{},
+    prop_cache: []PropCacheEntry = &.{},
     local_count: u16 = 0,
     register_count: u16 = 0,
     param_count: u16 = 0,

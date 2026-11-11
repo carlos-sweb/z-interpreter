@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const zobject = @import("zobject");
 const zvalue = @import("zvalue");
 const JSValue = zvalue.JSValue;
 const Environment = @import("../environment.zig").Environment;
@@ -107,12 +108,39 @@ fn keyToString(allocator: Allocator, key_val: JSValue, buf: *[32]u8) ![]const u8
     };
 }
 
-fn getProp(allocator: Allocator, obj: JSValue, key: []const u8) !JSValue {
+inline fn transitionShape(old_shape: u32, key: []const u8) u32 {
+    if (old_shape > 1 and (old_shape & 0x8000_0000) == 0) {
+        return zobject.nextGlobalShapeId();
+    }
+    var h: u32 = old_shape ^ 0x811c9dc5;
+    for (key) |b| {
+        h ^= b;
+        h *%= 0x01000193;
+    }
+    return h | 0x8000_0000;
+}
+
+fn getPropCached(allocator: Allocator, obj: JSValue, key: []const u8, key_const_idx: u8, cache: ?*codeblock.PropCacheEntry) !JSValue {
     switch (obj) {
         .object => |box| {
-            if (box.value.getOwnRecord(key)) |rec| {
-                if (rec.isAccessor()) return error.UnsupportedOpcode;
-                return rec.value.retain();
+            if (cache) |c| {
+                if (c.shape_id != 0 and c.shape_id == box.value.shape_id and c.key_const_idx == key_const_idx and c.slot_offset < box.value.properties.count()) {
+                    const prop = &box.value.properties.values()[c.slot_offset];
+                    if (prop.isAccessor()) return error.UnsupportedOpcode;
+                    return prop.value.retain();
+                }
+            }
+            if (box.value.properties.getIndex(key)) |idx| {
+                const prop = &box.value.properties.values()[idx];
+                if (prop.isAccessor()) return error.UnsupportedOpcode;
+                if (cache) |c| {
+                    if (!box.value.is_frozen) {
+                        c.shape_id = box.value.shape_id;
+                        c.key_const_idx = key_const_idx;
+                        c.slot_offset = @intCast(idx);
+                    }
+                }
+                return prop.value.retain();
             }
             var current = box.value.getPrototype();
             while (current) |p| : (current = p.getPrototype()) {
@@ -143,16 +171,59 @@ fn getProp(allocator: Allocator, obj: JSValue, key: []const u8) !JSValue {
     }
 }
 
-fn setProp(allocator: Allocator, obj: JSValue, key: []const u8, val: JSValue) !void {
+fn getProp(allocator: Allocator, obj: JSValue, key: []const u8) !JSValue {
+    return try getPropCached(allocator, obj, key, 0, null);
+}
+
+fn setPropCached(allocator: Allocator, obj: JSValue, key: []const u8, key_const_idx: u8, val: JSValue, cache: ?*codeblock.PropCacheEntry) !void {
     _ = allocator;
     switch (obj) {
         .object => |box| {
+            if (cache) |c| {
+                if (c.shape_id != 0 and c.shape_id == box.value.shape_id and c.key_const_idx == key_const_idx and c.slot_offset < box.value.properties.count()) {
+                    const prop = &box.value.properties.values()[c.slot_offset];
+                    if (!prop.isAccessor() and prop.descriptor.writable and !box.value.is_frozen) {
+                        var old_val = prop.value;
+                        prop.value = val.retain();
+                        old_val.deinit();
+                        return;
+                    }
+                }
+            }
+            if (!box.value.is_frozen and box.value.is_extensible) {
+                const gop = try box.value.properties.getOrPut(box.value.allocator, key);
+                if (gop.found_existing) {
+                    if (gop.value_ptr.isAccessor()) return error.UnsupportedOpcode;
+                    if (!gop.value_ptr.descriptor.writable) return error.PropertyNotWritable;
+                    var old_val = gop.value_ptr.value;
+                    gop.value_ptr.value = val.retain();
+                    old_val.deinit();
+                    if (cache) |c| {
+                        c.shape_id = box.value.shape_id;
+                        c.key_const_idx = key_const_idx;
+                        c.slot_offset = @intCast(gop.index);
+                    }
+                } else {
+                    errdefer _ = box.value.properties.swapRemoveAt(gop.index);
+                    const key_copy = try box.value.allocator.dupe(u8, key);
+                    gop.key_ptr.* = key_copy;
+                    gop.value_ptr.* = .{ .value = val.retain(), .descriptor = .{} };
+                    box.value.shape_id = transitionShape(box.value.shape_id, key);
+                    if (cache) |c| {
+                        c.shape_id = box.value.shape_id;
+                        c.key_const_idx = key_const_idx;
+                        c.slot_offset = @intCast(gop.index);
+                    }
+                }
+                return;
+            }
             if (box.value.getOwnRecord(key)) |rec| {
                 if (rec.isAccessor()) return error.UnsupportedOpcode;
             }
             const old = box.value.getOwn(key);
             try box.value.set(key, val.retain());
             if (old) |o| o.deinit();
+            if (cache) |c| c.shape_id = 0;
         },
         .array => |box| {
             const idx = std.fmt.parseInt(usize, key, 10) catch return error.UnsupportedOpcode;
@@ -169,6 +240,10 @@ fn setProp(allocator: Allocator, obj: JSValue, key: []const u8, val: JSValue) !v
         },
         else => return error.UnsupportedOpcode,
     }
+}
+
+fn setProp(allocator: Allocator, obj: JSValue, key: []const u8, val: JSValue) !void {
+    return try setPropCached(allocator, obj, key, 0, val, null);
 }
 
 fn getElem(allocator: Allocator, obj: JSValue, key_val: JSValue) !JSValue {
@@ -260,7 +335,13 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
         switch (op.opcode) {
             .load_const => try setRegister(frame_regs, op.a, try constantValue(allocator, frame.block, op.b)),
             .load_undefined => try setRegister(frame_regs, op.a, JSValue.UNDEFINED),
-            .new_object => try setRegister(frame_regs, op.a, try JSValue.newObject(allocator)),
+            .new_object => {
+                const obj = try JSValue.newObject(allocator);
+                if (op.b > 0) {
+                    try obj.object.value.properties.ensureTotalCapacity(allocator, op.b);
+                }
+                try setRegister(frame_regs, op.a, obj);
+            },
             .new_array => {
                 const arr = try JSValue.newArray(allocator);
                 if (op.b > 0) {
@@ -270,15 +351,47 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
             },
             .get_prop => {
                 const obj = try getRegister(frame_regs, op.b);
-                const key = try constantKey(frame.block, op.c);
-                const result = try getProp(allocator, obj, key);
+                const cache_slice: []codeblock.PropCacheEntry = @constCast(frame.block.prop_cache);
+                const cache: ?*codeblock.PropCacheEntry = if (op.c < cache_slice.len) &cache_slice[op.c] else null;
+                if (obj == .object) {
+                    const zobj = &obj.object.value;
+                    if (cache) |c| {
+                        if (c.shape_id != 0 and c.shape_id == zobj.shape_id and c.slot_offset < zobj.properties.count()) {
+                            const prop = &zobj.properties.values()[c.slot_offset];
+                            if (!prop.isAccessor()) {
+                                try setRegister(frame_regs, op.a, prop.value.retain());
+                                continue;
+                            }
+                        }
+                    }
+                }
+                const key_const = if (cache) |c| c.key_const_idx else op.c;
+                const key = try constantKey(frame.block, key_const);
+                const result = try getPropCached(allocator, obj, key, key_const, cache);
                 try setRegister(frame_regs, op.a, result);
             },
             .set_prop => {
                 const obj = try getRegister(frame_regs, op.a);
-                const key = try constantKey(frame.block, op.b);
                 const val = try getRegister(frame_regs, op.c);
-                try setProp(allocator, obj, key, val);
+                const cache_slice: []codeblock.PropCacheEntry = @constCast(frame.block.prop_cache);
+                const cache: ?*codeblock.PropCacheEntry = if (op.b < cache_slice.len) &cache_slice[op.b] else null;
+                if (obj == .object) {
+                    const zobj = &obj.object.value;
+                    if (cache) |c| {
+                        if (c.shape_id != 0 and c.shape_id == zobj.shape_id and c.slot_offset < zobj.properties.count()) {
+                            const prop = &zobj.properties.values()[c.slot_offset];
+                            if (!prop.isAccessor() and prop.descriptor.writable and !zobj.is_frozen) {
+                                var old_val = prop.value;
+                                prop.value = val.retain();
+                                old_val.deinit();
+                                continue;
+                            }
+                        }
+                    }
+                }
+                const key_const = if (cache) |c| c.key_const_idx else op.b;
+                const key = try constantKey(frame.block, key_const);
+                try setPropCached(allocator, obj, key, key_const, val, cache);
             },
             .get_elem => {
                 const obj = try getRegister(frame_regs, op.b);
