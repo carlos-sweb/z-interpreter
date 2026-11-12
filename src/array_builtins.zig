@@ -135,8 +135,8 @@ fn arrayLikeLength(ctx: *anyopaque, this_value: JSValue) anyerror!usize {
 fn arrayLikeElem(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, i: usize) anyerror!?JSValue {
     if (this_value == .array) return liveElem(ctx, allocator, this_value, i);
     const self = interp(ctx);
-    const key = try std.fmt.allocPrint(allocator, "{d}", .{i});
-    defer allocator.free(key);
+    var buf: [32]u8 = undefined;
+    const key = std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
     return try self.getProperty(this_value, key);
 }
 
@@ -176,7 +176,7 @@ fn arrayUnshift(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 fn arrayIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArrayLike(ctx, this_value, "indexOf");
     const target = arg(args, 0);
-    if (this_value == .array) {
+    if (this_value == .array and !this_value.array.value.isHoley() and !this_value.array.value.isSparse()) {
         const idx = this_value.array.value.indexOf(target, null) orelse return JSValue.fromNumber(-1);
         return JSValue.fromNumber(@floatFromInt(idx));
     }
@@ -201,7 +201,7 @@ fn arrayIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 fn arrayIncludes(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArrayLike(ctx, this_value, "includes");
     const target = arg(args, 0);
-    if (this_value == .array) return JSValue.fromBool(this_value.array.value.includes(target, null));
+    if (this_value == .array and !this_value.array.value.isHoley() and !this_value.array.value.isSparse()) return JSValue.fromBool(this_value.array.value.includes(target, null));
     const len = try arrayLikeLength(ctx, this_value);
     // Same `fromIndex` note as arrayIndexOf above.
     var i: usize = if (arg(args, 1) == .undefined) 0 else normIndex(try interp(ctx).toNumberJS(arg(args, 1)), len);
@@ -371,7 +371,28 @@ fn arrayReverse(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     _ = allocator;
     _ = args;
     try requireArray(ctx, this_value, "reverse");
-    this_value.array.value.reverse();
+    if (!this_value.array.value.isHoley() and !this_value.array.value.isSparse()) {
+        this_value.array.value.reverse();
+        return this_value.retain();
+    }
+    const arr = &this_value.array.value;
+    const len = arr.length();
+    var lower: usize = 0;
+    while (lower < len / 2) : (lower += 1) {
+        const upper = len - lower - 1;
+        const lower_val = arr.getOpt(lower);
+        const upper_val = arr.getOpt(upper);
+        if (lower_val != null and upper_val != null) {
+            try arr.set(lower, upper_val.?);
+            try arr.set(upper, lower_val.?);
+        } else if (lower_val != null and upper_val == null) {
+            try arr.set(upper, lower_val.?);
+            arr.delete(lower);
+        } else if (lower_val == null and upper_val != null) {
+            try arr.set(lower, upper_val.?);
+            arr.delete(upper);
+        }
+    }
     return this_value.retain();
 }
 
@@ -382,11 +403,12 @@ fn arrayReverse(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 /// skip, matching the spec's per-index HasProperty check). The extra ref is
 /// reclaimed with the run's arena; callers needn't release it.
 fn liveElem(ctx: *anyopaque, allocator: Allocator, array: JSValue, i: usize) anyerror!?JSValue {
+    _ = allocator;
     if (i >= array.array.value.length()) return null;
     if (array.array.value.isHole(i)) {
         const self = interp(ctx);
-        const key = try std.fmt.allocPrint(allocator, "{d}", .{i});
-        defer allocator.free(key);
+        var buf: [32]u8 = undefined;
+        const key = std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
         if (try self.getFromProto(array, self.protos.array, key)) |v| return v;
         return null;
     }
@@ -728,7 +750,7 @@ fn arrayFlatMap(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 fn arrayLastIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArrayLike(ctx, this_value, "lastIndexOf");
     const target = arg(args, 0);
-    if (this_value == .array) {
+    if (this_value == .array and !this_value.array.value.isHoley() and !this_value.array.value.isSparse()) {
         const slice = this_value.array.value.toSlice();
         var i = slice.len;
         while (i > 0) {
