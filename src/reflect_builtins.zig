@@ -18,6 +18,7 @@ const Interpreter = interpreter_mod.Interpreter;
 const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
 const object_builtins = @import("object_builtins.zig");
+const property_desc = @import("property_desc.zig");
 
 const interp = native_helpers.interp;
 const arg = native_helpers.arg;
@@ -89,10 +90,8 @@ fn reflectDeleteProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
 /// real Node that a plain object with both string and symbol own
 /// properties returns both from Reflect.ownKeys, in that order.
 fn reflectOwnKeys(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    const target = try reflectRequireObject(ctx, "ownKeys", arg(args, 0));
+    _ = try reflectRequireObject(ctx, "ownKeys", arg(args, 0));
     const names = try objectGetOwnPropertyNames(ctx, allocator, this_value, args);
-    // Temporal's own-property bag can hold symbol keys too.
-    if (target != .object and target != .temporal) return names;
     const symbols = try objectGetOwnPropertySymbols(ctx, allocator, this_value, args);
     defer symbols.deinit();
     for (symbols.array.value.toSlice()) |s| _ = try names.array.value.push(s.retain());
@@ -111,12 +110,10 @@ fn reflectDefineProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
     const target = try reflectRequireObject(ctx, "defineProperty", arg(args, 0));
     const key = try self.encodeKey(arg(args, 1));
     defer self.gc_allocator.free(key);
-    // Narrowing: this engine's definePropertyOn throws on failure rather
-    // than returning false for every real spec failure mode -- Reflect's
-    // "return false instead of throwing" contract only actually applies
-    // to the cases that don't already throw here.
-    try definePropertyOn(self, "defineProperty", target, key, arg(args, 2));
-    return JSValue.fromBool(true);
+    var d = try property_desc.toPropertyDescriptor(self, arg(args, 2));
+    defer d.deinit();
+    const ok = try property_desc.defineOwnProperty(self, target, key, &d);
+    return JSValue.fromBool(ok);
 }
 
 fn reflectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {

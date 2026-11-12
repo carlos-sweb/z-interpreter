@@ -695,17 +695,27 @@ pub fn traceValueChildren(self: *Interpreter, v: JSValue, visitor: anytype) void
         // JSValue variant (unlike gcTrack's old bug) -- the audit here
         // (z-interpreter-refactor.md, Step 1d) is confirming *this*
         // leaf group is genuinely correct, not just present.
-        .undefined, .null, .boolean, .number, .string, .regex, .symbol, .date, .bigint, .array_buffer => {},
+        .undefined, .null, .boolean, .number, .string, .symbol, .bigint => {},
+        .regex, .date, .array_buffer => {
+            const addr = heapBoxAddress(v).?;
+            if (self.array_props.get(addr)) |bag| visitor.value(bag);
+            if (self.proto_refs.get(addr)) |p| visitor.value(p);
+        },
         .temporal => |box| {
             if (self.temporal_props.get(@intFromPtr(box))) |bag| visitor.value(bag);
             if (self.temporal_protos.get(@intFromPtr(box))) |proto| visitor.value(proto);
         },
         .array => |box| {
             for (box.value.toSliceMut()) |*child| visitor.value(child.*);
+            if (box.value.sparse) |*sp| {
+                var spit = sp.valueIterator();
+                while (spit.next()) |child| visitor.value(child.*);
+            }
             // The array's named-property bag hangs off the array, like
             // proto_refs below: a cycle through it (`r.self = r`) is still
             // collectable.
             if (self.array_props.get(@intFromPtr(box))) |bag| visitor.value(bag);
+            if (self.proto_refs.get(@intFromPtr(box))) |p| visitor.value(p);
         },
         .object => |box| {
             for (box.value.properties.values()) |prop| {
@@ -720,12 +730,23 @@ pub fn traceValueChildren(self: *Interpreter, v: JSValue, visitor: anytype) void
         .map => |box| {
             for (box.value.keys()) |*key| visitor.value(key.*);
             for (box.value.values()) |*val| visitor.value(val.*);
+            if (self.array_props.get(@intFromPtr(box))) |bag| visitor.value(bag);
+            if (self.proto_refs.get(@intFromPtr(box))) |p| visitor.value(p);
         },
-        .set => |box| for (box.value.values()) |*val| visitor.value(val.*),
-        .@"error" => |box| if (box.value.errors) |errs| for (errs) |*e| visitor.value(e.*),
+        .set => |box| {
+            for (box.value.values()) |*val| visitor.value(val.*);
+            if (self.array_props.get(@intFromPtr(box))) |bag| visitor.value(bag);
+            if (self.proto_refs.get(@intFromPtr(box))) |p| visitor.value(p);
+        },
+        .@"error" => |box| {
+            if (box.value.errors) |errs| for (errs) |*e| visitor.value(e.*);
+            if (self.array_props.get(@intFromPtr(box))) |bag| visitor.value(bag);
+            if (self.proto_refs.get(@intFromPtr(box))) |p| visitor.value(p);
+        },
         .function => |box| {
             if (box.value.prototype) |p| visitor.value(p);
             if (box.value.statics) |s| visitor.value(s);
+            if (self.proto_refs.get(@intFromPtr(box))) |p| visitor.value(p);
             visitor.context(box.value.ctx);
         },
         .promise => |box| {
@@ -735,13 +756,23 @@ pub fn traceValueChildren(self: *Interpreter, v: JSValue, visitor: anytype) void
                 if (reaction.on_rejected) |h| visitor.value(h);
                 if (reaction.derived) |d| visitor.value(d);
             }
+            if (self.array_props.get(@intFromPtr(box))) |bag| visitor.value(bag);
+            if (self.proto_refs.get(@intFromPtr(box))) |p| visitor.value(p);
         },
         .proxy => |box| {
             visitor.value(box.value.target);
             visitor.value(box.value.handler);
         },
-        .data_view => |box| visitor.value(box.value.owner),
-        .typed_array => |box| visitor.value(box.value.owner),
+        .data_view => |box| {
+            visitor.value(box.value.owner);
+            if (self.array_props.get(@intFromPtr(box))) |bag| visitor.value(bag);
+            if (self.proto_refs.get(@intFromPtr(box))) |p| visitor.value(p);
+        },
+        .typed_array => |box| {
+            visitor.value(box.value.owner);
+            if (self.array_props.get(@intFromPtr(box))) |bag| visitor.value(bag);
+            if (self.proto_refs.get(@intFromPtr(box))) |p| visitor.value(p);
+        },
     }
 }
 
@@ -831,8 +862,13 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
     switch (node) {
         .array => |box| {
             for (box.value.toSliceMut()) |*child| sweeper.value(child.*);
+            if (box.value.sparse) |*sp| {
+                var spit = sp.valueIterator();
+                while (spit.next()) |child| sweeper.value(child.*);
+            }
             // Out of the table before destroy(), as with proto_refs below.
             if (self.array_props.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
+            if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             box.value.deinit();
             box.destroy();
         },
@@ -853,16 +889,22 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
         .map => |box| {
             for (box.value.keys()) |*key| sweeper.value(key.*);
             for (box.value.values()) |*val| sweeper.value(val.*);
+            if (self.array_props.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
+            if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             box.value.deinit();
             box.destroy();
         },
         .set => |box| {
             for (box.value.values()) |*val| sweeper.value(val.*);
+            if (self.array_props.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
+            if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             box.value.deinit();
             box.destroy();
         },
         .@"error" => |box| {
             if (box.value.errors) |errs| for (errs) |*e| sweeper.value(e.*);
+            if (self.array_props.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
+            if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             box.value.deinit();
             box.destroy();
         },
@@ -876,6 +918,7 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
             // equivalent release by hand instead, garbage-aware.
             if (box.value.prototype) |p| sweeper.value(p);
             if (box.value.statics) |s| sweeper.value(s);
+            if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             _ = self.deleted_fn_props.remove(@intFromPtr(box));
             // A ClosureCtx/FiberState/ClassCtx `ctx` is its OWN
             // registry entry, torn down on its own turn in this same
@@ -889,6 +932,8 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
                 if (reaction.on_rejected) |h| sweeper.value(h);
                 if (reaction.derived) |d| sweeper.value(d);
             }
+            if (self.array_props.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
+            if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             box.value.deinit(box.allocator);
             box.destroy();
         },
@@ -897,6 +942,8 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
             box.destroy();
         },
         .regex => |box| {
+            if (self.array_props.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
+            if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             box.value.deinit();
             box.destroy();
         },
@@ -908,6 +955,8 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
             // ZDate is a pure value with no allocator of its own --
             // only the box itself needs freeing (matches
             // JSValue.deinit()'s own `.date` arm).
+            if (self.array_props.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
+            if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             box.destroy();
         },
         .temporal => |box| {
@@ -925,15 +974,21 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
             box.destroy();
         },
         .array_buffer => |box| {
+            if (self.array_props.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
+            if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             box.value.deinit();
             box.destroy();
         },
         .data_view => |box| {
             sweeper.value(box.value.owner);
+            if (self.array_props.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
+            if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             box.destroy();
         },
         .typed_array => |box| {
             sweeper.value(box.value.owner);
+            if (self.array_props.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
+            if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             box.destroy();
         },
         .environment => |e| {
@@ -1078,18 +1133,31 @@ pub fn registrySnapshot(self: *Interpreter) !std.AutoHashMapUnmanaged(usize, voi
 /// never a raw pointer to a prototype nothing retains. On a refused
 /// change (a cycle) nothing is retained or released either.
 pub fn setOwnedPrototype(self: *Interpreter, obj: JSValue, proto: JSValue) !void {
-    const p: ?*@TypeOf(obj.object.value) = if (proto == .object) @constCast(&proto.object.value) else null;
-    if (proto == .object) try self.proto_refs.ensureUnusedCapacity(self.gc_allocator, 1);
-    try obj.object.value.setPrototype(p);
-    const key = @intFromPtr(obj.object);
-    if (proto == .object) {
-        const gop = self.proto_refs.getOrPutAssumeCapacity(key);
-        const old: ?JSValue = if (gop.found_existing) gop.value_ptr.* else null;
-        gop.value_ptr.* = proto.retain();
-        if (old) |o| o.deinit();
-    } else if (self.proto_refs.fetchRemove(key)) |kv| {
-        kv.value.deinit();
+    if (obj == .object) {
+        const p: ?*@TypeOf(obj.object.value) = if (proto == .object) @constCast(&proto.object.value) else null;
+        if (proto != .null) try self.proto_refs.ensureUnusedCapacity(self.gc_allocator, 1);
+        try obj.object.value.setPrototype(p);
+        const key = @intFromPtr(obj.object);
+        if (proto != .null) {
+            const gop = self.proto_refs.getOrPutAssumeCapacity(key);
+            const old: ?JSValue = if (gop.found_existing) gop.value_ptr.* else null;
+            gop.value_ptr.* = proto.retain();
+            if (old) |o| o.deinit();
+        } else if (self.proto_refs.fetchRemove(key)) |kv| {
+            kv.value.deinit();
+        }
+        return;
     }
+    if (obj == .temporal) {
+        try self.setTemporalPrototype(obj, proto);
+        return;
+    }
+    const key = heapBoxAddress(obj) orelse return;
+    try self.proto_refs.ensureUnusedCapacity(self.gc_allocator, 1);
+    const gop = self.proto_refs.getOrPutAssumeCapacity(key);
+    const old: ?JSValue = if (gop.found_existing) gop.value_ptr.* else null;
+    gop.value_ptr.* = proto.retain();
+    if (old) |o| o.deinit();
 }
 
 pub fn freeAllGcNodes(self: *Interpreter) void {

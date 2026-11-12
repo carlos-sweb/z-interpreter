@@ -986,6 +986,8 @@ pub const Interpreter = struct {
     pub const regexPropsObject = interpreter_support.regexPropsObject;
     pub const recompileRegex = interpreter_support.recompileRegex;
     pub const regexProps = interpreter_support.regexProps;
+    pub const extraProps = interpreter_support.extraProps;
+    pub const extraPropsObject = interpreter_support.extraPropsObject;
     pub const boxPrimitiveIfConstructed = interpreter_support.boxPrimitiveIfConstructed;
     pub const unboxPrimitiveWrapper = interpreter_support.unboxPrimitiveWrapper;
 
@@ -1092,6 +1094,7 @@ pub const Interpreter = struct {
     // z-interpreter-refactor.md, Step 5 Phase C batch 5: propaccess+protos
     // cluster, split into interpreter_props.zig.
     pub const getProperty = interpreter_props.getProperty;
+    pub const getExtraPropsOrProto = interpreter_props.getExtraPropsOrProto;
 
     // z-interpreter-refactor.md, Step 5 Phase C batch 5: propaccess+protos
     // cluster, split into interpreter_props.zig.
