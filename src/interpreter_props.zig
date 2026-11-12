@@ -319,7 +319,7 @@ pub fn setArrayProperty(self: *Interpreter, obj: JSValue, key: []const u8, value
         return self.throwError(.type_error, "Cannot add property to array: length is not writable", .{});
     }
     if (self.array_props.get(@intFromPtr(obj.array))) |bag| {
-        if (bag.object.value.getOwnRecord(key)) |rec| {
+        if (bag.object.value.getOwnRecordMut(key)) |rec| {
             if (rec.isAccessor()) {
                 const s = rec.setter orelse return self.throwError(.type_error, "Cannot set property {s} of array which has only a getter", .{key});
                 _ = try s.function.value.call(s.function.value.ctx, self.gc_allocator, obj, &.{value});
@@ -328,6 +328,8 @@ pub fn setArrayProperty(self: *Interpreter, obj: JSValue, key: []const u8, value
             if (!rec.descriptor.writable) {
                 return self.throwError(.type_error, "Cannot assign to read only property '{s}' of array", .{key});
             }
+            rec.value.deinit();
+            rec.value = value.retain();
         }
     }
     const old = arr.getOpt(idx);
