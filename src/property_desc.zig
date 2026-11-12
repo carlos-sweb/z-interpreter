@@ -66,7 +66,7 @@ fn isSymbolKey(name: []const u8) bool {
     return std.mem.startsWith(u8, name, "__symbol_");
 }
 
-fn displayKey(key: []const u8) []const u8 {
+pub fn displayKey(key: []const u8) []const u8 {
     return if (isSymbolKey(key)) "Symbol()" else key;
 }
 
