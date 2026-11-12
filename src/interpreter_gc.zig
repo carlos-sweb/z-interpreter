@@ -707,7 +707,7 @@ pub fn traceValueChildren(self: *Interpreter, v: JSValue, visitor: anytype) void
         },
         .array => |box| {
             for (box.value.toSliceMut()) |*child| visitor.value(child.*);
-            if (box.value.sparse) |*sp| {
+            if (box.value.getSparse()) |sp| {
                 var spit = sp.valueIterator();
                 while (spit.next()) |child| visitor.value(child.*);
             }
@@ -862,7 +862,7 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
     switch (node) {
         .array => |box| {
             for (box.value.toSliceMut()) |*child| sweeper.value(child.*);
-            if (box.value.sparse) |*sp| {
+            if (box.value.getSparse()) |sp| {
                 var spit = sp.valueIterator();
                 while (spit.next()) |child| sweeper.value(child.*);
             }

@@ -380,7 +380,7 @@ pub fn arrayDefineOwnProperty(self: *Interpreter, obj: JSValue, key: []const u8,
     if (std.mem.eql(u8, key, "length")) return arraySetLengthDesc(self, obj, d);
     const idx = zarray.CanonicalNumericIndexString(key) orelse
         return validateAndApply(self, try self.arrayPropsObject(obj), key, d);
-    if (idx >= arr.length() and !arr.length_writable) return false;
+    if (idx >= arr.length() and !arr.isLengthWritable()) return false;
     const bag = try self.arrayPropsObject(obj);
     const zo = &bag.object.value;
     if (zo.getOwnRecord(key) == null) {
@@ -393,7 +393,7 @@ pub fn arrayDefineOwnProperty(self: *Interpreter, obj: JSValue, key: []const u8,
         }
     }
     if (!try validateAndApply(self, bag, key, d)) return false;
-    arr.has_element_descriptors = true;
+    try arr.setHasElementDescriptors(true);
     const rec = zo.getOwnRecord(key).?;
     const new_val: JSValue = if (rec.isAccessor()) JSValue.UNDEFINED else rec.value.retain();
     const old = arr.getOpt(idx);
@@ -416,12 +416,12 @@ pub fn arraySetLengthDesc(self: *Interpreter, obj: JSValue, d: *const ParsedDesc
     if (d.has_configurable and d.configurable) return false;
     if (d.has_enumerable and d.enumerable) return false;
     if (d.isAccessor()) return false;
-    if (!arr.length_writable) {
+    if (!arr.isLengthWritable()) {
         if (d.has_writable and d.writable) return false;
         return new_len == arr.length();
     }
     const ok = try arraySetLengthRaw(self, obj, new_len);
-    if (d.has_writable and !d.writable) arr.length_writable = false;
+    if (d.has_writable and !d.writable) try arr.setLengthWritable(false);
     return ok;
 }
 
@@ -429,7 +429,7 @@ pub fn arraySetLengthRaw(self: *Interpreter, obj: JSValue, new_len: u32) anyerro
     const arr = &obj.array.value;
     const cur = arr.length();
     if (new_len >= cur) {
-        if (new_len - cur <= 1024 and arr.sparse == null and arr.items.items.len == cur) {
+        if (new_len - cur <= 1024 and !arr.isSparse() and arr.items.items.len == cur) {
             var i = cur;
             while (i < new_len) : (i += 1) try arr.appendHole();
         } else try arr.setLength(new_len);
@@ -473,7 +473,7 @@ pub fn arraySetLengthRaw(self: *Interpreter, obj: JSValue, new_len: u32) anyerro
         const items = arr.items.items;
         var i = stop;
         while (i < @min(items.len, cur)) : (i += 1) items[i].deinit();
-        if (arr.sparse) |*sp| {
+        if (arr.getSparse()) |sp| {
             var it = sp.iterator();
             while (it.next()) |e| {
                 if (e.key_ptr.* >= stop) e.value_ptr.deinit();

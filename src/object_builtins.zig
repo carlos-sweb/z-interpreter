@@ -665,7 +665,7 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, thi
         },
         .array => |box| {
             if (std.mem.eql(u8, key, "length"))
-                return dataDescObj(self, JSValue.fromNumber(@floatFromInt(box.value.length())), box.value.length_writable, false, false);
+                return dataDescObj(self, JSValue.fromNumber(@floatFromInt(box.value.length())), box.value.isLengthWritable(), false, false);
             const bag_opt = self.array_props.get(@intFromPtr(box));
             if (bag_opt) |bag| {
                 if (bag.object.value.getOwnRecord(key)) |rec| return descFromRecord(self, rec);
@@ -741,7 +741,7 @@ pub fn objectGetOwnPropertyNames(ctx: *anyopaque, allocator: Allocator, this_val
             }
         },
         .array => |box| {
-            if (box.value.sparse) |*sp| {
+            if (box.value.getSparse()) |sp| {
                 var keys_list: std.ArrayList(usize) = .empty;
                 defer keys_list.deinit(allocator);
                 var it = sp.iterator();
@@ -893,7 +893,7 @@ fn objectFreeze(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     const self = interp(ctx);
     const v = arg(args, 0);
     if (v == .array) {
-        v.array.value.length_writable = false;
+        v.array.value.setLengthWritable(false) catch {};
     }
     if (try extensibilityBagForWrite(self, v)) |bag| bag.object.value.freeze();
     if (v == .regex) self.regexState(v).last_index_writable = false;
@@ -906,7 +906,7 @@ fn objectIsFrozen(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     const self = interp(ctx);
     const v = arg(args, 0);
     if (v == .array) {
-        if (v.array.value.length_writable and v.array.value.length() > 0) return JSValue.fromBool(false);
+        if (v.array.value.isLengthWritable() and v.array.value.length() > 0) return JSValue.fromBool(false);
     }
     if (extensibilityBag(self, v)) |bag| return JSValue.fromBool(bag.object.value.is_frozen);
     return JSValue.fromBool(!(v == .array or v == .function or v == .temporal));

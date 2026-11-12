@@ -306,7 +306,7 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
 pub fn setArrayProperty(self: *Interpreter, obj: JSValue, key: []const u8, value: JSValue) anyerror!void {
     const arr = &obj.array.value;
     if (std.mem.eql(u8, key, "length")) {
-        if (!arr.length_writable) return self.throwError(.type_error, "Cannot assign to read only property 'length' of array", .{});
+        if (!arr.isLengthWritable()) return self.throwError(.type_error, "Cannot assign to read only property 'length' of array", .{});
         const n = try self.toUint32JS(value);
         const num = try self.toNumberJS(value);
         if (@as(f64, @floatFromInt(n)) != num) return self.throwError(.range_error, "Invalid array length", .{});
@@ -315,7 +315,7 @@ pub fn setArrayProperty(self: *Interpreter, obj: JSValue, key: []const u8, value
     }
     const idx = zarray.CanonicalNumericIndexString(key) orelse
         return self.setObjectProperty(try self.arrayPropsObject(obj), key, value);
-    if (idx >= arr.length() and !arr.length_writable) {
+    if (idx >= arr.length() and !arr.isLengthWritable()) {
         return self.throwError(.type_error, "Cannot add property to array: length is not writable", .{});
     }
     if (self.array_props.get(@intFromPtr(obj.array))) |bag| {
