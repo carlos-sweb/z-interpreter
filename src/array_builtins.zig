@@ -28,6 +28,7 @@ const installBuiltin = builtin_helpers.installBuiltin;
 const requireTag = builtin_helpers.requireTag;
 const requireCallback = builtin_helpers.requireCallback;
 const callCallback = builtin_helpers.callCallback;
+const callCallbackWithThis = builtin_helpers.callCallbackWithThis;
 const toIntSat = builtin_helpers.toIntSat;
 const toLength = builtin_helpers.toLength;
 const hasIteratorMethod = builtin_helpers.hasIteratorMethod;
@@ -80,6 +81,10 @@ pub const array_methods = std.StaticStringMap(MethodSpec).initComptime(.{
     .{ "splice", MethodSpec{ .call = arraySplice, .arity = 2 } },
     .{ "sort", MethodSpec{ .call = arraySort, .arity = 1 } },
     .{ "toString", MethodSpec{ .call = arrayToStringMethod, .arity = 0 } },
+    .{ "toReversed", MethodSpec{ .call = arrayToReversed, .arity = 0 } },
+    .{ "toSorted", MethodSpec{ .call = arrayToSorted, .arity = 1 } },
+    .{ "toSpliced", MethodSpec{ .call = arrayToSpliced, .arity = 2 } },
+    .{ "with", MethodSpec{ .call = arrayWith, .arity = 2 } },
     .{ "keys", MethodSpec{ .call = arrayKeys, .arity = 0 } },
     .{ "values", MethodSpec{ .call = arrayValues, .arity = 0 } },
     .{ "entries", MethodSpec{ .call = arrayEntries, .arity = 0 } },
@@ -128,10 +133,11 @@ fn arrayLikeLength(ctx: *anyopaque, this_value: JSValue) anyerror!usize {
 /// a non-`.array` receiver (a missing property reads as `undefined`
 /// via `getProperty`'s own prototype-chain miss, not "absent").
 fn arrayLikeElem(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, i: usize) anyerror!?JSValue {
-    if (this_value == .array) return liveElem(this_value, i);
-    const key = try std.fmt.allocPrint(allocator, "{d}", .{i});
-    defer allocator.free(key);
-    return try interp(ctx).getProperty(this_value, key);
+    if (this_value == .array) return liveElem(ctx, allocator, this_value, i);
+    const self = interp(ctx);
+    var buf: [32]u8 = undefined;
+    const key = std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
+    return try self.getProperty(this_value, key);
 }
 
 fn arrayPush(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -170,7 +176,7 @@ fn arrayUnshift(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 fn arrayIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArrayLike(ctx, this_value, "indexOf");
     const target = arg(args, 0);
-    if (this_value == .array) {
+    if (this_value == .array and !this_value.array.value.isHoley() and !this_value.array.value.isSparse()) {
         const idx = this_value.array.value.indexOf(target, null) orelse return JSValue.fromNumber(-1);
         return JSValue.fromNumber(@floatFromInt(idx));
     }
@@ -195,7 +201,7 @@ fn arrayIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 fn arrayIncludes(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArrayLike(ctx, this_value, "includes");
     const target = arg(args, 0);
-    if (this_value == .array) return JSValue.fromBool(this_value.array.value.includes(target, null));
+    if (this_value == .array and !this_value.array.value.isHoley() and !this_value.array.value.isSparse()) return JSValue.fromBool(this_value.array.value.includes(target, null));
     const len = try arrayLikeLength(ctx, this_value);
     // Same `fromIndex` note as arrayIndexOf above.
     var i: usize = if (arg(args, 1) == .undefined) 0 else normIndex(try interp(ctx).toNumberJS(arg(args, 1)), len);
@@ -266,7 +272,14 @@ fn arraySlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
         var sliced = try this_value.array.value.slice(start, end);
         defer sliced.deinit();
         var result = try interp(ctx).gcNewArray();
-        for (sliced.toSlice()) |item| _ = try result.array.value.push(item.retain());
+        var i: usize = 0;
+        while (i < sliced.length()) : (i += 1) {
+            if (sliced.isHole(i)) {
+                try result.array.value.appendHole();
+            } else {
+                _ = try result.array.value.push(sliced.get(i).retain());
+            }
+        }
         return result;
     }
     // No ZArray to call slice() on -- same negative-index/clamping
@@ -285,8 +298,11 @@ fn arraySlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     var result = try interp(ctx).gcNewArray();
     var i = start;
     while (i < end) : (i += 1) {
-        const item = (try arrayLikeElem(ctx, allocator, this_value, i)) orelse JSValue.UNDEFINED;
-        _ = try result.array.value.push(item.retain());
+        if (try arrayLikeElem(ctx, allocator, this_value, i)) |item| {
+            _ = try result.array.value.push(item.retain());
+        } else {
+            try result.array.value.appendHole();
+        }
     }
     return result;
 }
@@ -355,7 +371,28 @@ fn arrayReverse(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     _ = allocator;
     _ = args;
     try requireArray(ctx, this_value, "reverse");
-    this_value.array.value.reverse();
+    if (!this_value.array.value.isHoley() and !this_value.array.value.isSparse()) {
+        this_value.array.value.reverse();
+        return this_value.retain();
+    }
+    const arr = &this_value.array.value;
+    const len = arr.length();
+    var lower: usize = 0;
+    while (lower < len / 2) : (lower += 1) {
+        const upper = len - lower - 1;
+        const lower_val = arr.getOpt(lower);
+        const upper_val = arr.getOpt(upper);
+        if (lower_val != null and upper_val != null) {
+            try arr.set(lower, upper_val.?);
+            try arr.set(upper, lower_val.?);
+        } else if (lower_val != null and upper_val == null) {
+            try arr.set(upper, lower_val.?);
+            arr.delete(lower);
+        } else if (lower_val == null and upper_val != null) {
+            try arr.set(lower, upper_val.?);
+            arr.delete(upper);
+        }
+    }
     return this_value.retain();
 }
 
@@ -365,33 +402,33 @@ fn arrayReverse(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 /// value"). Null when `i` is now out of bounds (removed mid-iteration ->
 /// skip, matching the spec's per-index HasProperty check). The extra ref is
 /// reclaimed with the run's arena; callers needn't release it.
-fn liveElem(array: JSValue, i: usize) ?JSValue {
+fn liveElem(ctx: *anyopaque, allocator: Allocator, array: JSValue, i: usize) anyerror!?JSValue {
+    _ = allocator;
     if (i >= array.array.value.length()) return null;
+    if (array.array.value.isHole(i)) {
+        const self = interp(ctx);
+        var buf: [32]u8 = undefined;
+        const key = std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
+        if (try self.getFromProto(array, self.protos.array, key)) |v| return v;
+        return null;
+    }
     return array.array.value.get(i).retain();
 }
 
 fn arrayMap(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArrayLike(ctx, this_value, "map");
-    const cb = try requireCallback(ctx, args);
     const len = try arrayLikeLength(ctx, this_value);
-    // ArraySpeciesCreate(O, len) -- real spec throws a RangeError here,
-    // before ever invoking the callback, when `len` exceeds 2^32-1
-    // (confirmed against Node: `Array.prototype.map.call({length:2**32},
-    // cb)` throws with cb never called). Only reachable for a real
-    // array-like now that `this` no longer has to be a genuine
-    // `.array` (a real array's own length is naturally bounded well
-    // under this by construction).
+    const cb = try requireCallback(ctx, args);
+    const this_arg = if (args.len > 1) args[1] else JSValue.UNDEFINED;
     if (len > 4294967295) return interp(ctx).throwError(.range_error, "Invalid array length", .{});
     var result = try interp(ctx).gcNewArray();
     var i: usize = 0;
     while (i < len) : (i += 1) {
-        // A removed index leaves a hole (undefined) so result.length stays
-        // the originally-observed length, like real Array.prototype.map.
         if (try arrayLikeElem(ctx, allocator, this_value, i)) |item| {
-            const v = try callCallback(cb, allocator, item, i, this_value);
-            _ = try result.array.value.push(v.retain());
+            const v = try callCallbackWithThis(cb, allocator, this_arg, item, i, this_value);
+            _ = try result.array.value.push(v);
         } else {
-            _ = try result.array.value.push(JSValue.UNDEFINED);
+            try result.array.value.appendHole();
         }
     }
     return result;
@@ -399,13 +436,14 @@ fn arrayMap(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
 
 fn arrayFilter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArrayLike(ctx, this_value, "filter");
-    const cb = try requireCallback(ctx, args);
-    var result = try interp(ctx).gcNewArray();
     const len = try arrayLikeLength(ctx, this_value);
+    const cb = try requireCallback(ctx, args);
+    const this_arg = if (args.len > 1) args[1] else JSValue.UNDEFINED;
+    var result = try interp(ctx).gcNewArray();
     var i: usize = 0;
     while (i < len) : (i += 1) {
         const item = try arrayLikeElem(ctx, allocator, this_value, i) orelse continue;
-        if (coercion.isTruthy(try callCallback(cb, allocator, item, i, this_value))) {
+        if (coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, item, i, this_value))) {
             _ = try result.array.value.push(item.retain());
         }
     }
@@ -414,23 +452,26 @@ fn arrayFilter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
 
 fn arrayForEach(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArrayLike(ctx, this_value, "forEach");
-    const cb = try requireCallback(ctx, args);
     const len = try arrayLikeLength(ctx, this_value);
+    const cb = try requireCallback(ctx, args);
+    const this_arg = if (args.len > 1) args[1] else JSValue.UNDEFINED;
     var i: usize = 0;
     while (i < len) : (i += 1) {
         const item = try arrayLikeElem(ctx, allocator, this_value, i) orelse continue;
-        _ = try callCallback(cb, allocator, item, i, this_value);
+        _ = try callCallbackWithThis(cb, allocator, this_arg, item, i, this_value);
     }
     return JSValue.UNDEFINED;
 }
 
 fn arrayReduce(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArrayLike(ctx, this_value, "reduce");
-    const cb = try requireCallback(ctx, args);
     const len = try arrayLikeLength(ctx, this_value);
+    const cb = try requireCallback(ctx, args);
     var acc: JSValue = undefined;
     var have = args.len > 1;
-    if (have) acc = args[1];
+    // Retain initial value: if the loop does 0 iterations, returning acc transfers
+    // an owned reference so caller deinit of call_args does not double-free it.
+    if (have) acc = args[1].retain();
     var i: usize = 0;
     while (i < len) : (i += 1) {
         const item = try arrayLikeElem(ctx, allocator, this_value, i) orelse continue;
@@ -449,37 +490,39 @@ fn arrayReduce(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
 
 fn arrayFind(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArrayLike(ctx, this_value, "find");
-    const cb = try requireCallback(ctx, args);
     const len = try arrayLikeLength(ctx, this_value);
+    const cb = try requireCallback(ctx, args);
+    const this_arg = if (args.len > 1) args[1] else JSValue.UNDEFINED;
     var i: usize = 0;
     while (i < len) : (i += 1) {
-        // find visits absent indices as `undefined` (unlike forEach/map).
-        const item = try arrayLikeElem(ctx, allocator, this_value, i) orelse JSValue.UNDEFINED;
-        if (coercion.isTruthy(try callCallback(cb, allocator, item, i, this_value))) return item.retain();
+        const item = (try arrayLikeElem(ctx, allocator, this_value, i)) orelse JSValue.UNDEFINED;
+        if (coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, item, i, this_value))) return item.retain();
     }
     return JSValue.UNDEFINED;
 }
 
 fn arraySome(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArrayLike(ctx, this_value, "some");
-    const cb = try requireCallback(ctx, args);
     const len = try arrayLikeLength(ctx, this_value);
+    const cb = try requireCallback(ctx, args);
+    const this_arg = if (args.len > 1) args[1] else JSValue.UNDEFINED;
     var i: usize = 0;
     while (i < len) : (i += 1) {
         const item = try arrayLikeElem(ctx, allocator, this_value, i) orelse continue;
-        if (coercion.isTruthy(try callCallback(cb, allocator, item, i, this_value))) return JSValue.fromBool(true);
+        if (coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, item, i, this_value))) return JSValue.fromBool(true);
     }
     return JSValue.fromBool(false);
 }
 
 fn arrayEvery(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArrayLike(ctx, this_value, "every");
-    const cb = try requireCallback(ctx, args);
     const len = try arrayLikeLength(ctx, this_value);
+    const cb = try requireCallback(ctx, args);
+    const this_arg = if (args.len > 1) args[1] else JSValue.UNDEFINED;
     var i: usize = 0;
     while (i < len) : (i += 1) {
         const item = try arrayLikeElem(ctx, allocator, this_value, i) orelse continue;
-        if (!coercion.isTruthy(try callCallback(cb, allocator, item, i, this_value))) return JSValue.fromBool(false);
+        if (!coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, item, i, this_value))) return JSValue.fromBool(false);
     }
     return JSValue.fromBool(true);
 }
@@ -625,47 +668,52 @@ fn arrayAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
 
 fn arrayFindIndex(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArrayLike(ctx, this_value, "findIndex");
-    const cb = try requireCallback(ctx, args);
     const len = try arrayLikeLength(ctx, this_value);
+    const cb = try requireCallback(ctx, args);
+    const this_arg = if (args.len > 1) args[1] else JSValue.UNDEFINED;
     var i: usize = 0;
     while (i < len) : (i += 1) {
-        const item = try arrayLikeElem(ctx, allocator, this_value, i) orelse JSValue.UNDEFINED;
-        if (coercion.isTruthy(try callCallback(cb, allocator, item, i, this_value))) return JSValue.fromNumber(@floatFromInt(i));
+        const item = (try arrayLikeElem(ctx, allocator, this_value, i)) orelse JSValue.UNDEFINED;
+        if (coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, item, i, this_value))) return JSValue.fromNumber(@floatFromInt(i));
     }
     return JSValue.fromNumber(-1);
 }
 
 fn arrayFindLast(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArrayLike(ctx, this_value, "findLast");
-    const cb = try requireCallback(ctx, args);
     var i = try arrayLikeLength(ctx, this_value);
+    const cb = try requireCallback(ctx, args);
+    const this_arg = if (args.len > 1) args[1] else JSValue.UNDEFINED;
     while (i > 0) {
         i -= 1;
-        const item = try arrayLikeElem(ctx, allocator, this_value, i) orelse JSValue.UNDEFINED;
-        if (coercion.isTruthy(try callCallback(cb, allocator, item, i, this_value))) return item.retain();
+        const item = (try arrayLikeElem(ctx, allocator, this_value, i)) orelse JSValue.UNDEFINED;
+        if (coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, item, i, this_value))) return item.retain();
     }
     return JSValue.UNDEFINED;
 }
 
 fn arrayFindLastIndex(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArrayLike(ctx, this_value, "findLastIndex");
-    const cb = try requireCallback(ctx, args);
     var i = try arrayLikeLength(ctx, this_value);
+    const cb = try requireCallback(ctx, args);
+    const this_arg = if (args.len > 1) args[1] else JSValue.UNDEFINED;
     while (i > 0) {
         i -= 1;
-        const item = try arrayLikeElem(ctx, allocator, this_value, i) orelse JSValue.UNDEFINED;
-        if (coercion.isTruthy(try callCallback(cb, allocator, item, i, this_value))) return JSValue.fromNumber(@floatFromInt(i));
+        const item = (try arrayLikeElem(ctx, allocator, this_value, i)) orelse JSValue.UNDEFINED;
+        if (coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, item, i, this_value))) return JSValue.fromNumber(@floatFromInt(i));
     }
     return JSValue.fromNumber(-1);
 }
 
 fn arrayReduceRight(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArrayLike(ctx, this_value, "reduceRight");
+    var i: usize = try arrayLikeLength(ctx, this_value);
     const cb = try requireCallback(ctx, args);
     var acc: JSValue = undefined;
     var have = args.len > 1;
-    if (have) acc = args[1];
-    var i: usize = try arrayLikeLength(ctx, this_value);
+    // Retain initial value: if the loop does 0 iterations, returning acc transfers
+    // an owned reference so caller deinit of call_args does not double-free it.
+    if (have) acc = args[1].retain();
     while (i > 0) {
         i -= 1;
         const item = try arrayLikeElem(ctx, allocator, this_value, i) orelse continue;
@@ -682,13 +730,14 @@ fn arrayReduceRight(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
 
 fn arrayFlatMap(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArrayLike(ctx, this_value, "flatMap");
-    const cb = try requireCallback(ctx, args);
-    var result = try interp(ctx).gcNewArray();
     const len = try arrayLikeLength(ctx, this_value);
+    const cb = try requireCallback(ctx, args);
+    const this_arg = if (args.len > 1) args[1] else JSValue.UNDEFINED;
+    var result = try interp(ctx).gcNewArray();
     var i: usize = 0;
     while (i < len) : (i += 1) {
         const item = try arrayLikeElem(ctx, allocator, this_value, i) orelse continue;
-        const v = try callCallback(cb, allocator, item, i, this_value);
+        const v = try callCallbackWithThis(cb, allocator, this_arg, item, i, this_value);
         if (v == .array) {
             for (v.array.value.toSlice()) |sub| _ = try result.array.value.push(sub.retain());
         } else {
@@ -701,7 +750,7 @@ fn arrayFlatMap(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 fn arrayLastIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireArrayLike(ctx, this_value, "lastIndexOf");
     const target = arg(args, 0);
-    if (this_value == .array) {
+    if (this_value == .array and !this_value.array.value.isHoley() and !this_value.array.value.isSparse()) {
         const slice = this_value.array.value.toSlice();
         var i = slice.len;
         while (i > 0) {
@@ -786,12 +835,18 @@ fn arrayCopyWithin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     return this_value.retain();
 }
 
-fn flattenInto(result: *JSValue, allocator: Allocator, slice: []const JSValue, depth: i64) anyerror!void {
-    for (slice) |item| {
-        if (depth > 0 and item == .array) {
-            try flattenInto(result, allocator, item.array.value.toSlice(), depth - 1);
-        } else {
-            _ = try result.array.value.push(item.retain());
+fn flattenInto(result: *JSValue, allocator: Allocator, arr_val: JSValue, depth: i64) anyerror!void {
+    if (arr_val == .array) {
+        const arr = &arr_val.array.value;
+        var i: usize = 0;
+        while (i < arr.length()) : (i += 1) {
+            if (arr.isHole(i)) continue;
+            const item = arr.get(i);
+            if (depth > 0 and item == .array) {
+                try flattenInto(result, allocator, item, depth - 1);
+            } else {
+                _ = try result.array.value.push(item.retain());
+            }
         }
     }
 }
@@ -801,18 +856,130 @@ fn arrayFlat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     const depth: i64 = if (arg(args, 0) == .undefined) 1 else toIntSat(try interp(ctx).toNumberJS(arg(args, 0)));
     var result = try interp(ctx).gcNewArray();
     if (this_value == .array) {
-        try flattenInto(&result, allocator, this_value.array.value.toSlice(), depth);
+        try flattenInto(&result, allocator, this_value, depth);
         return result;
     }
-    // No ZArray to hand flattenInto a borrowed slice of -- materialize
-    // one via the generic array-like walk, then release our own copies
-    // once flattenInto has retained what it kept.
     const items = try arrayLikeToList(interp(ctx), allocator, this_value);
     defer {
         for (items) |it| it.deinit();
         allocator.free(items);
     }
-    try flattenInto(&result, allocator, items, depth);
+    for (items) |item| {
+        if (depth > 0 and item == .array) {
+            try flattenInto(&result, allocator, item, depth - 1);
+        } else {
+            _ = try result.array.value.push(item.retain());
+        }
+    }
+    return result;
+}
+
+fn arrayToReversed(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    try requireArrayLike(ctx, this_value, "toReversed");
+    const len = try arrayLikeLength(ctx, this_value);
+    if (len > 4294967295) return interp(ctx).throwError(.range_error, "Invalid array length", .{});
+    var result = try interp(ctx).gcNewArray();
+    var i: usize = len;
+    while (i > 0) {
+        i -= 1;
+        const item = (try arrayLikeElem(ctx, allocator, this_value, i)) orelse JSValue.UNDEFINED;
+        _ = try result.array.value.push(item.retain());
+    }
+    return result;
+}
+
+fn arrayToSorted(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    try requireArrayLike(ctx, this_value, "toSorted");
+    const cmp = arg(args, 0);
+    const self = interp(ctx);
+    if (cmp != .undefined and cmp != .function) return self.throwError(.type_error, "The comparison function must be either a function or undefined", .{});
+    const len = try arrayLikeLength(ctx, this_value);
+    if (len > 4294967295) return interp(ctx).throwError(.range_error, "Invalid array length", .{});
+    const items = try allocator.alloc(JSValue, len);
+    defer allocator.free(items);
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        items[i] = (try arrayLikeElem(ctx, allocator, this_value, i)) orelse JSValue.UNDEFINED;
+    }
+    var idx: usize = 1;
+    while (idx < len) : (idx += 1) {
+        const key = items[idx];
+        var j = idx;
+        while (j > 0) {
+            const before = try sortLess(self, allocator, cmp, key, items[j - 1]);
+            if (!before) break;
+            items[j] = items[j - 1];
+            j -= 1;
+        }
+        items[j] = key;
+    }
+    var result = try interp(ctx).gcNewArray();
+    for (items) |it| _ = try result.array.value.push(it.retain());
+    return result;
+}
+
+fn arrayToSpliced(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    try requireArrayLike(ctx, this_value, "toSpliced");
+    const len = try arrayLikeLength(ctx, this_value);
+    const start_raw = if (args.len == 0) 0 else try interp(ctx).toNumberJS(arg(args, 0));
+    const start_int = toIntSat(start_raw);
+    const actual_start: usize = if (start_int < 0) blk: {
+        const p = @as(isize, @intCast(len)) + start_int;
+        break :blk if (p < 0) 0 else @intCast(p);
+    } else @min(@as(usize, @intCast(start_int)), len);
+
+    const delete_count: usize = if (args.len <= 1)
+        len - actual_start
+    else blk: {
+        const dc = try interp(ctx).toNumberJS(arg(args, 1));
+        if (dc <= 0) break :blk 0;
+        break :blk @min(@as(usize, @intCast(toIntSat(dc))), len - actual_start);
+    };
+
+    const raw_inserts = if (args.len > 2) args[2..] else &[_]JSValue{};
+    const new_len = len + raw_inserts.len - delete_count;
+    if (new_len > 4294967295) return interp(ctx).throwError(.range_error, "Invalid array length", .{});
+
+    var result = try interp(ctx).gcNewArray();
+    var i: usize = 0;
+    while (i < actual_start) : (i += 1) {
+        const item = (try arrayLikeElem(ctx, allocator, this_value, i)) orelse JSValue.UNDEFINED;
+        _ = try result.array.value.push(item.retain());
+    }
+    for (raw_inserts) |ins| _ = try result.array.value.push(ins.retain());
+    i = actual_start + delete_count;
+    while (i < len) : (i += 1) {
+        const item = (try arrayLikeElem(ctx, allocator, this_value, i)) orelse JSValue.UNDEFINED;
+        _ = try result.array.value.push(item.retain());
+    }
+    return result;
+}
+
+fn arrayWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    try requireArrayLike(ctx, this_value, "with");
+    const len = try arrayLikeLength(ctx, this_value);
+    const raw_index = try interp(ctx).toNumberJS(arg(args, 0));
+    const actual_index = toIntSat(raw_index);
+    const idx: usize = if (actual_index < 0) blk: {
+        const p = @as(isize, @intCast(len)) + actual_index;
+        if (p < 0 or p >= len) return interp(ctx).throwError(.range_error, "Invalid index", .{});
+        break :blk @intCast(p);
+    } else blk: {
+        if (actual_index >= len) return interp(ctx).throwError(.range_error, "Invalid index", .{});
+        break :blk @intCast(actual_index);
+    };
+    const value = arg(args, 1);
+    var result = try interp(ctx).gcNewArray();
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        if (i == idx) {
+            _ = try result.array.value.push(value.retain());
+        } else {
+            const item = (try arrayLikeElem(ctx, allocator, this_value, i)) orelse JSValue.UNDEFINED;
+            _ = try result.array.value.push(item.retain());
+        }
+    }
     return result;
 }
 

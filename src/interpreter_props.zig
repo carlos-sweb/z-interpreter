@@ -11,15 +11,30 @@ const error_builtins = @import("error_builtins.zig");
 const iterator_builtins = @import("iterator_builtins.zig");
 const zvalue = @import("zvalue");
 const zstring = @import("zstring");
+const zarray = @import("zarray");
+const property_desc = @import("property_desc.zig");
 const JSValue = zvalue.JSValue;
 
 const coercion = @import("coercion.zig");
 const builtins = @import("builtins.zig");
 const native_helpers = @import("native_helpers.zig");
 const date_builtins = @import("date_builtins.zig");
+const function_builtins = @import("function_builtins.zig");
 
 const interpreter_mod = @import("interpreter.zig");
 const Interpreter = interpreter_mod.Interpreter;
+
+pub fn getExtraPropsOrProto(self: *Interpreter, obj: JSValue, proto: JSValue, key: []const u8) anyerror!JSValue {
+    if (self.extraProps(obj)) |bag| {
+        if (bag.object.value.getOwnRecord(key)) |rec| {
+            if (!rec.isAccessor()) return rec.value.retain();
+            const g = rec.getter orelse return JSValue.UNDEFINED;
+            return try g.function.value.call(g.function.value.ctx, self.gc_allocator, obj, &.{});
+        }
+    }
+    if (try self.getFromProto(obj, proto, key)) |m| return m;
+    return JSValue.UNDEFINED;
+}
 
 pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!JSValue {
     return switch (obj) {
@@ -66,23 +81,22 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
         },
         .array => |box| blk: {
             if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.length()));
-            const idx = std.fmt.parseInt(usize, key, 10) catch {
-                // A named own property (array_props: exec-result
-                // index/input/groups, `a.constructor = ...`) shadows the
-                // inherited one; an own accessor runs with the array as
-                // `this`. Then Array.prototype's chain; else undefined.
-                if (self.array_props.get(@intFromPtr(box))) |bag| {
-                    if (bag.object.value.getOwnRecord(key)) |rec| {
-                        if (!rec.isAccessor()) break :blk rec.value.retain();
-                        const g = rec.getter orelse break :blk JSValue.UNDEFINED;
-                        break :blk try g.function.value.call(g.function.value.ctx, self.gc_allocator, obj, &.{});
-                    }
+            if (self.array_props.get(@intFromPtr(box))) |bag| {
+                if (bag.object.value.getOwnRecord(key)) |rec| {
+                    if (!rec.isAccessor()) break :blk rec.value.retain();
+                    const g = rec.getter orelse break :blk JSValue.UNDEFINED;
+                    break :blk try g.function.value.call(g.function.value.ctx, self.gc_allocator, obj, &.{});
                 }
+            }
+            const idx = zarray.CanonicalNumericIndexString(key) orelse {
                 if (try self.getFromProto(obj, self.protos.array, key)) |m| break :blk m;
                 break :blk JSValue.UNDEFINED;
             };
-            if (idx >= box.value.length()) break :blk JSValue.UNDEFINED;
-            break :blk box.value.get(idx).retain();
+            if (idx < box.value.length() and !box.value.isHole(idx)) {
+                if (box.value.getOpt(idx)) |v| break :blk v.retain();
+            }
+            if (try self.getFromProto(obj, self.protos.array, key)) |m| break :blk m;
+            break :blk JSValue.UNDEFINED;
         },
         .string => |box| blk: {
             // Real JS strings are UTF-16: `.length` and indexed access
@@ -112,6 +126,13 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
         // catch body in existence -- name/message are read-only views
         // over ZError's existing fields.
         .@"error" => |box| blk: {
+            if (self.extraProps(obj)) |bag| {
+                if (bag.object.value.getOwnRecord(key)) |rec| {
+                    if (!rec.isAccessor()) break :blk rec.value.retain();
+                    const g = rec.getter orelse break :blk JSValue.UNDEFINED;
+                    break :blk try g.function.value.call(g.function.value.ctx, self.gc_allocator, obj, &.{});
+                }
+            }
             if (std.mem.eql(u8, key, "name")) break :blk try self.gcNewString(box.value.kind.name());
             if (std.mem.eql(u8, key, "message")) break :blk try self.gcNewString(box.value.message);
             // `thrown.constructor === TypeError` -- what Test262's
@@ -148,7 +169,7 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
                     }
                 }
                 if (box.value.prototype) |p| break :blk p.retain();
-                if (!box.value.constructable) break :blk JSValue.UNDEFINED;
+                if (!box.value.constructable or function_builtins.boundContext(obj) != null) break :blk JSValue.UNDEFINED;
                 break :blk (try self.functionPrototype(obj)).retain();
             }
             // The statics bag (class statics, F.myProp = 1) shadows
@@ -188,10 +209,7 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             if (try self.getFromProto(obj, self.protos.boolean, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
-        .date => blk: {
-            if (try self.getFromProto(obj, self.protos.date, key)) |m| break :blk m;
-            break :blk JSValue.UNDEFINED;
-        },
+        .date => try self.getExtraPropsOrProto(obj, self.protos.date, key),
         .bigint => blk: {
             if (try self.getFromProto(obj, self.protos.bigint, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
@@ -225,20 +243,9 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             }
             break :blk try self.getProperty(box.value.target, key);
         },
-        .promise => blk: {
-            if (try self.getFromProto(obj, self.protos.promise, key)) |m| break :blk m;
-            break :blk JSValue.UNDEFINED;
-        },
-        .map => blk: {
-            // `size` is an accessor on Map.prototype (accessor_builtins).
-            if (try self.getFromProto(obj, self.protos.map, key)) |m| break :blk m;
-            break :blk JSValue.UNDEFINED;
-        },
-        .set => blk: {
-            // `size` is an accessor on Set.prototype (accessor_builtins).
-            if (try self.getFromProto(obj, self.protos.set, key)) |m| break :blk m;
-            break :blk JSValue.UNDEFINED;
-        },
+        .promise => try self.getExtraPropsOrProto(obj, self.protos.promise, key),
+        .map => try self.getExtraPropsOrProto(obj, self.protos.map, key),
+        .set => try self.getExtraPropsOrProto(obj, self.protos.set, key),
         // `.byteLength` is a real spec ACCESSOR property (no parens),
         // computed here rather than stored -- same category as
         // array/string's own special-cased `.length`.
@@ -299,37 +306,33 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
 pub fn setArrayProperty(self: *Interpreter, obj: JSValue, key: []const u8, value: JSValue) anyerror!void {
     const arr = &obj.array.value;
     if (std.mem.eql(u8, key, "length")) {
+        if (!arr.isLengthWritable()) return self.throwError(.type_error, "Cannot assign to read only property 'length' of array", .{});
         const n = try self.toUint32JS(value);
-        const cur = arr.length();
-        if (n < cur) {
-            var i = cur;
-            while (i > n) : (i -= 1) {
-                if (arr.pop()) |v| v.deinit();
-            }
-        } else {
-            var i = cur;
-            while (i < n) : (i += 1) _ = try arr.push(JSValue.UNDEFINED);
-        }
+        const num = try self.toNumberJS(value);
+        if (@as(f64, @floatFromInt(n)) != num) return self.throwError(.range_error, "Invalid array length", .{});
+        _ = try property_desc.arraySetLengthRaw(self, obj, n);
         return;
     }
-    // A non-index, non-"length" key (`arr.foo = 1`) has nowhere to
-    // live in ZArray itself (it's a bare index vector, no named-
-    // property storage) -- goes into the array's array_props bag, a
-    // real `.object` created lazily, exactly like `Object.defineProperty`
-    // already targets for this same case (see `arrayDefineProperty`).
-    // Reusing `setObjectProperty` on it gets frozen/sealed/non-
-    // extensible enforcement and the old-value disposal for free.
-    const idx = std.fmt.parseInt(usize, key, 10) catch
+    const idx = zarray.CanonicalNumericIndexString(key) orelse
         return self.setObjectProperty(try self.arrayPropsObject(obj), key, value);
-    const cur = arr.length();
-    if (idx < cur) {
-        arr.toSliceMut()[idx].deinit();
-        arr.toSliceMut()[idx] = value.retain();
-    } else {
-        var i = cur;
-        while (i < idx) : (i += 1) _ = try arr.push(JSValue.UNDEFINED);
-        _ = try arr.push(value.retain());
+    if (idx >= arr.length() and !arr.isLengthWritable()) {
+        return self.throwError(.type_error, "Cannot add property to array: length is not writable", .{});
     }
+    if (self.array_props.get(@intFromPtr(obj.array))) |bag| {
+        if (bag.object.value.getOwnRecord(key)) |rec| {
+            if (rec.isAccessor()) {
+                const s = rec.setter orelse return self.throwError(.type_error, "Cannot set property {s} of array which has only a getter", .{key});
+                _ = try s.function.value.call(s.function.value.ctx, self.gc_allocator, obj, &.{value});
+                return;
+            }
+            if (!rec.descriptor.writable) {
+                return self.throwError(.type_error, "Cannot assign to read only property '{s}' of array", .{key});
+            }
+        }
+    }
+    const old = arr.getOpt(idx);
+    try arr.set(idx, value.retain());
+    if (old) |o| o.deinit();
 }
 
 /// Integer-indexed exotic [[Set]]: a canonical numeric index writes
@@ -362,6 +365,9 @@ pub fn setObjectProperty(self: *Interpreter, obj: JSValue, key: []const u8, valu
             const s = rec.setter orelse return self.throwError(.type_error, "Cannot set property {s} of #<Object> which has only a getter", .{key});
             _ = try s.function.value.call(s.function.value.ctx, self.gc_allocator, obj, &.{value});
             return;
+        }
+        if (current != &obj.object.value and !rec.descriptor.writable) {
+            return self.throwError(.type_error, "Cannot assign to read only property '{s}' of object", .{key});
         }
         break;
     }
@@ -505,12 +511,6 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
     if (obj == .array) return self.setArrayProperty(obj, key, value);
     if (obj == .typed_array) return self.setTypedArrayProperty(obj, key, value);
     if (obj == .@"error") {
-        // No general property bag (same narrowing as arrays/regex),
-        // but `.message` specifically must be writable: the extremely
-        // common test262 harness idiom `catch(e){ e.message += "...";
-        // throw e; }` needs it, and without this it was an uncatchable
-        // NotImplemented that silently poisoned huge swaths of
-        // otherwise-passing tests across many areas.
         if (std.mem.eql(u8, key, "message")) {
             const s = try self.toDisplayStringJS(self.gc_allocator, value);
             defer self.gc_allocator.free(s);
@@ -665,7 +665,7 @@ pub fn deletePropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8) 
         // false (confirmed against real Node). Functions with no
         // `.prototype` at all (arrows, methods) have nothing to delete,
         // so fall through to the bag lookup below like any other miss.
-        if (std.mem.eql(u8, key, "prototype") and (obj.function.value.prototype != null or obj.function.value.constructable)) {
+        if (std.mem.eql(u8, key, "prototype") and !property_desc.isProxyConstructor(self, obj) and function_builtins.boundContext(obj) == null and (obj.function.value.prototype != null or obj.function.value.constructable)) {
             return self.throwError(.type_error, "Cannot delete property '{s}' of function", .{key});
         }
         // Everything else (class statics, ad-hoc `F.x = 1` properties)

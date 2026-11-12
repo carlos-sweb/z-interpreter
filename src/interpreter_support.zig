@@ -221,6 +221,21 @@ pub fn regexPropsObject(self: *Interpreter, re: JSValue) !JSValue {
     return bag;
 }
 
+/// Own-property bag for other boxed object types (date, error, map, set,
+/// promise, array_buffer, data_view, typed_array), stored in `array_props`
+/// keyed by the box pointer.
+pub fn extraProps(self: *Interpreter, value: JSValue) ?JSValue {
+    const addr = Interpreter.heapBoxAddress(value) orelse return null;
+    return self.array_props.get(addr);
+}
+
+pub fn extraPropsObject(self: *Interpreter, value: JSValue) !JSValue {
+    const addr = Interpreter.heapBoxAddress(value).?;
+    const gop = try self.array_props.getOrPut(self.gc_allocator, addr);
+    if (!gop.found_existing) gop.value_ptr.* = try self.gcNewObject();
+    return gop.value_ptr.*;
+}
+
 /// `new String(...)`/`new Number(...)`/`new Boolean(...)`: JSValue's
 /// `.object` variant has no internal-slot concept, so the wrapped
 /// primitive a boxed constructor computes has nowhere to live inside
@@ -299,11 +314,13 @@ pub fn proxyTrap(self: *Interpreter, proxy: *zvalue.Rc(zvalue.Proxy), trap_name:
     // A revoked proxy (Proxy.revocable) has a null [[ProxyHandler]].
     if (proxy.value.handler == .null)
         return self.throwError(.type_error, "Cannot perform '{s}' on a proxy that has been revoked", .{trap_name});
-    if (proxy.value.handler != .object) return null;
     const fn_val = try self.getProperty(proxy.value.handler, trap_name);
-    if (fn_val != .function) {
-        fn_val.deinit();
+    if (fn_val == .undefined or fn_val == .null) {
         return null;
+    }
+    if (!std.mem.eql(u8, fn_val.typeOf(), "function")) {
+        fn_val.deinit();
+        return self.throwError(.type_error, "'{s}' on proxy: trap is not a function", .{trap_name});
     }
     return fn_val;
 }

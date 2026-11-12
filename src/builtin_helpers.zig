@@ -153,6 +153,12 @@ pub fn callCallback(cb: JSValue, allocator: Allocator, item: JSValue, index: usi
     });
 }
 
+pub fn callCallbackWithThis(cb: JSValue, allocator: Allocator, this_arg: JSValue, item: JSValue, index: usize, receiver: JSValue) anyerror!JSValue {
+    return cb.function.value.call(cb.function.value.ctx, allocator, this_arg, &.{
+        item, JSValue.fromNumber(@floatFromInt(index)), receiver,
+    });
+}
+
 /// ECMA ToIntegerOrInfinity saturated into isize, so `@intFromFloat` can't
 /// panic on NaN / +/-Infinity / out-of-i64-range floats (NaN -> 0). Callers
 /// that need a length clamp non-negative afterwards.
