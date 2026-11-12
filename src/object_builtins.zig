@@ -677,6 +677,17 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, thi
             const is_sealed = if (bag_opt) |b| b.object.value.is_sealed else false;
             return dataDescObj(self, val.retain(), !is_frozen, true, !(is_frozen or is_sealed));
         },
+        .typed_array => |box| {
+            const idx = zarray.CanonicalNumericIndexString(key) orelse {
+                if (self.extraProps(obj)) |bag| {
+                    if (bag.object.value.getOwnRecord(key)) |rec| return descFromRecord(self, rec);
+                }
+                return JSValue.UNDEFINED;
+            };
+            if (idx >= box.value.len) return JSValue.UNDEFINED;
+            const val = try builtin_helpers.typedElemGet(self, box.value.kind, &box.value.owner.array_buffer.value, box.value.byte_offset, box.value.len, idx);
+            return dataDescObj(self, val, true, true, false);
+        },
         .undefined, .null => return self.throwError(.type_error, "Cannot convert undefined or null to object", .{}),
         .proxy => |box| {
             if (try self.proxyTrap(box, "getOwnPropertyDescriptor")) |trap_fn| {

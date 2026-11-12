@@ -329,6 +329,7 @@ pub fn defineOwnProperty(self: *Interpreter, obj: JSValue, key: []const u8, d: *
             return ok;
         },
         .array => return arrayDefineOwnProperty(self, obj, key, d),
+        .typed_array => return typedArrayDefineOwnProperty(self, obj, key, d),
         .temporal => return validateAndApply(self, try self.temporalPropsObject(obj), key, d),
         .regex => {
             if (std.mem.eql(u8, key, "lastIndex")) {
@@ -482,6 +483,21 @@ pub fn arraySetLengthRaw(self: *Interpreter, obj: JSValue, new_len: u32) anyerro
         try arr.setLength(@intCast(stop));
     }
     return ok;
+}
+
+pub fn typedArrayDefineOwnProperty(self: *Interpreter, obj: JSValue, key: []const u8, d: *const ParsedDesc) anyerror!bool {
+    const idx = zarray.CanonicalNumericIndexString(key) orelse
+        return validateAndApply(self, try self.extraPropsObject(obj), key, d);
+    const box = obj.typed_array;
+    if (idx >= box.value.len) return false;
+    if (d.has_configurable and !d.configurable) return false;
+    if (d.has_enumerable and !d.enumerable) return false;
+    if (d.isAccessor()) return false;
+    if (d.has_writable and !d.writable) return false;
+    if (d.has_value) {
+        try builtin_helpers.typedElemSet(self, box.value.kind, &box.value.owner.array_buffer.value, box.value.byte_offset, box.value.len, idx, d.value);
+    }
+    return true;
 }
 
 pub fn toObject(self: *Interpreter, v: JSValue) anyerror!JSValue {
