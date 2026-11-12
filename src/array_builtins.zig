@@ -29,7 +29,6 @@ const requireTag = builtin_helpers.requireTag;
 const requireCallback = builtin_helpers.requireCallback;
 const callCallback = builtin_helpers.callCallback;
 const callCallbackWithThis = builtin_helpers.callCallbackWithThis;
-const property_desc = @import("property_desc.zig");
 const toIntSat = builtin_helpers.toIntSat;
 const toLength = builtin_helpers.toLength;
 const hasIteratorMethod = builtin_helpers.hasIteratorMethod;
@@ -138,7 +137,6 @@ fn arrayLikeElem(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, i: 
     const self = interp(ctx);
     const key = try std.fmt.allocPrint(allocator, "{d}", .{i});
     defer allocator.free(key);
-    if (!try property_desc.hasProperty(self, this_value, key)) return null;
     return try self.getProperty(this_value, key);
 }
 
@@ -449,7 +447,9 @@ fn arrayReduce(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     const cb = try requireCallback(ctx, args);
     var acc: JSValue = undefined;
     var have = args.len > 1;
-    if (have) acc = args[1];
+    // Retain initial value: if the loop does 0 iterations, returning acc transfers
+    // an owned reference so caller deinit of call_args does not double-free it.
+    if (have) acc = args[1].retain();
     var i: usize = 0;
     while (i < len) : (i += 1) {
         const item = try arrayLikeElem(ctx, allocator, this_value, i) orelse continue;
@@ -689,7 +689,9 @@ fn arrayReduceRight(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     const cb = try requireCallback(ctx, args);
     var acc: JSValue = undefined;
     var have = args.len > 1;
-    if (have) acc = args[1];
+    // Retain initial value: if the loop does 0 iterations, returning acc transfers
+    // an owned reference so caller deinit of call_args does not double-free it.
+    if (have) acc = args[1].retain();
     while (i > 0) {
         i -= 1;
         const item = try arrayLikeElem(ctx, allocator, this_value, i) orelse continue;
