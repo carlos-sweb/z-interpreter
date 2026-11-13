@@ -10,6 +10,7 @@ const interpreter_mod = @import("interpreter.zig");
 const Interpreter = interpreter_mod.Interpreter;
 const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
+const property_desc = @import("property_desc.zig");
 
 pub const NativeFn = native_helpers.NativeFn;
 const MethodSpec = native_helpers.MethodSpec;
@@ -251,14 +252,23 @@ fn dateToISOString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     return interp(ctx).gcNewString(iso);
 }
 
-/// `toJSON` -> ISO string, or `null` for an Invalid Date (real JS: it calls
-/// toISOString only when the time is finite).
+/// ECMA-262 21.4.4.44 Date.prototype.toJSON: generic per spec.
+/// 1. Let O be ? ToObject(this value).
+/// 2. Let tv be ? ToPrimitive(O, number).
+/// 3. If tv is a Number and tv is not finite, return null.
+/// 4. Return ? Invoke(O, "toISOString").
 fn dateToJSON(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
     _ = args;
-    const d = try requireDate(ctx, this_value, "toJSON");
-    const s = (d.date.value.toJSON(allocator) catch null) orelse return JSValue.NULL;
-    defer allocator.free(s);
-    return interp(ctx).gcNewString(s);
+    const self = interp(ctx);
+    const o = try property_desc.toObject(self, this_value);
+    defer o.deinit();
+    const tv = try self.toPrimitive(o, .number);
+    defer tv.deinit();
+    if (tv == .number and !std.math.isFinite(tv.number)) return JSValue.NULL;
+    const to_iso = try self.getProperty(o, "toISOString");
+    defer to_iso.deinit();
+    return self.callValue(to_iso, o, &.{}, "toISOString");
 }
 
 /// String-returning ZDate formatters (`toString`/`toDateString`/... ). These
