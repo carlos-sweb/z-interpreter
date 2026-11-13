@@ -316,20 +316,24 @@ fn dateSetTime(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
 /// that isn't a finite in-range integer makes the Date Invalid (returns NaN),
 /// never panicking. Mutates the shared boxed ZDate in place (Date is mutable).
 fn dateSetter(comptime method: []const u8, comptime n_optional: usize) NativeFn {
+    const is_year = std.mem.indexOf(u8, method, "Year") != null;
     return struct {
         fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
             _ = allocator;
             const self = interp(ctx);
             const d = try requireDate(ctx, this_value, method);
             const p = &d.date.value;
+            const initial_t = p.getTime();
             // Every provided field is ToNumber'd regardless of an earlier
             // one already being invalid (confirmed against Node: every
             // valueOf still runs) -- convert them all first, THEN decide.
             const raw_first = try dateField(self, arg(args, 0));
             var raw_opt: [n_optional]?i32 = undefined;
             inline for (0..n_optional) |k| {
-                const a = arg(args, k + 1);
-                raw_opt[k] = if (a == .undefined) null else try dateField(self, a);
+                raw_opt[k] = if (k + 1 < args.len) try dateField(self, args[k + 1]) else null;
+            }
+            if (!is_year and initial_t == INVALID_DATE_MS) {
+                return JSValue.fromNumber(std.math.nan(f64));
             }
             const first = raw_first orelse {
                 p.* = zvalue.ZDate.fromTimestamp(INVALID_DATE_MS);
@@ -337,16 +341,16 @@ fn dateSetter(comptime method: []const u8, comptime n_optional: usize) NativeFn 
             };
             var opt: [n_optional]?i32 = undefined;
             inline for (0..n_optional) |k| {
-                const a = arg(args, k + 1);
-                if (a == .undefined) {
-                    opt[k] = null;
-                } else {
+                if (k + 1 < args.len) {
                     opt[k] = raw_opt[k] orelse {
                         p.* = zvalue.ZDate.fromTimestamp(INVALID_DATE_MS);
                         return JSValue.fromNumber(std.math.nan(f64));
                     };
+                } else {
+                    opt[k] = null;
                 }
             }
+            p.* = zvalue.ZDate.fromTimestamp(initial_t);
             const f = @field(zvalue.ZDate, method);
             const new_ts = if (n_optional == 0)
                 f(p, first)
