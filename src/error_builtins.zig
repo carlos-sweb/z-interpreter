@@ -156,6 +156,12 @@ fn aggregateErrorConstructor(ctx: *anyopaque, allocator: Allocator, this_value: 
 /// prototypes chained to Error.prototype. Runs from materializeProtos,
 /// once Error.prototype exists.
 pub fn installAggregate(self: *Interpreter) !void {
+    const eproto = self.protos.@"error";
+    const ector = self.global_env.get("Error").?;
+    try eproto.object.value.defineProperty("constructor", ector.retain(), hidden);
+    try eproto.object.value.defineProperty("name", try self.gcNewString("Error"), hidden);
+    try eproto.object.value.defineProperty("message", try self.gcNewString(""), hidden);
+
     inline for (.{
         "EvalError",
         "RangeError",
