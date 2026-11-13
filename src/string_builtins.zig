@@ -66,6 +66,8 @@ pub const string_methods = std.StaticStringMap(MethodSpec).initComptime(.{
     .{ "matchAll", MethodSpec{ .call = regex_protocol.stringMatchAll, .arity = 1 } },
     .{ "search", MethodSpec{ .call = regex_protocol.stringSearch, .arity = 1 } },
     .{ "localeCompare", MethodSpec{ .call = stringLocaleCompare, .arity = 1 } },
+    .{ "isWellFormed", MethodSpec{ .call = stringIsWellFormed, .arity = 0 } },
+    .{ "toWellFormed", MethodSpec{ .call = stringToWellFormed, .arity = 0 } },
     .{ "toString", MethodSpec{ .call = stringToStringMethod, .arity = 0 } },
     .{ "valueOf", MethodSpec{ .call = stringToStringMethod, .arity = 0 } },
 });
@@ -339,6 +341,24 @@ fn stringLocaleCompare(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
         .eq => 0,
         .gt => 1,
     });
+}
+
+fn stringIsWellFormed(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const data = try requireString(ctx, allocator, this_value, "isWellFormed");
+    defer allocator.free(data);
+    const zstr = zstring.ZString{ .data = data };
+    return JSValue.fromBool(zstr.isWellFormed());
+}
+
+fn stringToWellFormed(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const data = try requireString(ctx, allocator, this_value, "toWellFormed");
+    defer allocator.free(data);
+    const zstr = zstring.ZString{ .data = data };
+    const out = try zstr.toWellFormed(allocator);
+    defer allocator.free(out);
+    return interp(ctx).gcNewString(out);
 }
 
 fn stringToStringMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
