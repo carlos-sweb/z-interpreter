@@ -33,6 +33,7 @@ const native = native_helpers.native;
 const installBuiltin = builtin_helpers.installBuiltin;
 const toIntSat = builtin_helpers.toIntSat;
 const toLength = builtin_helpers.toLength;
+const isObjectLike = builtin_helpers.isObjectLike;
 const makeArrayIterator = builtin_helpers.makeArrayIterator;
 
 pub const string_methods = std.StaticStringMap(MethodSpec).initComptime(.{
@@ -135,12 +136,29 @@ fn stringCharAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     return interp(ctx).gcNewString(out);
 }
 
+fn toNumberStrict(self: *Interpreter, v: JSValue) anyerror!f64 {
+    const unwrapped = self.unboxPrimitiveWrapper(v) orelse v;
+    if (unwrapped == .bigint) return self.throwError(.type_error, "Cannot convert a BigInt value to a number", .{});
+    if (unwrapped == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a number", .{});
+    if (isObjectLike(unwrapped)) {
+        const prim = try self.toPrimitive(unwrapped, .number);
+        defer prim.deinit();
+        if (prim == .bigint) return self.throwError(.type_error, "Cannot convert a BigInt value to a number", .{});
+        if (prim == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a number", .{});
+        return try self.toNumberJS(prim);
+    }
+    return try self.toNumberJS(unwrapped);
+}
+
 fn stringIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self = interp(ctx);
     const data = try requireString(ctx, allocator, this_value, "indexOf");
     defer allocator.free(data);
-    const search = try argString(interp(ctx), allocator, args, 0);
+    const search = try argString(self, allocator, args, 0);
     defer allocator.free(search);
-    return JSValue.fromNumber(@floatFromInt(zstring.search.indexOf(data, search, null)));
+    const pos_arg = arg(args, 1);
+    const pos: ?isize = if (pos_arg == .undefined) null else toIntSat(try toNumberStrict(self, pos_arg));
+    return JSValue.fromNumber(@floatFromInt(zstring.search.indexOf(data, search, pos)));
 }
 
 fn stringIncludes(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -299,10 +317,18 @@ fn stringSubstr(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 }
 
 fn stringLastIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self = interp(ctx);
     const data = try requireString(ctx, allocator, this_value, "lastIndexOf");
     defer allocator.free(data);
-    if (arg(args, 0) != .string) return JSValue.fromNumber(-1);
-    return JSValue.fromNumber(@floatFromInt(zstring.search.lastIndexOf(data, arg(args, 0).string.value.data, null)));
+    const search = try argString(self, allocator, args, 0);
+    defer allocator.free(search);
+    const pos_arg = arg(args, 1);
+    const pos: ?isize = if (pos_arg == .undefined) null else blk: {
+        const num = try toNumberStrict(self, pos_arg);
+        if (std.math.isNan(num)) break :blk null;
+        break :blk toIntSat(num);
+    };
+    return JSValue.fromNumber(@floatFromInt(zstring.search.lastIndexOf(data, search, pos)));
 }
 
 fn stringConcat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
