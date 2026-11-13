@@ -26,6 +26,8 @@ const zstring = @import("zstring");
 const coercion = @import("coercion.zig");
 const builtins = @import("builtins.zig");
 const function_builtins = @import("function_builtins.zig");
+const promise_builtins = @import("promise_builtins.zig");
+const arraybuffer_builtins = @import("arraybuffer_builtins.zig");
 
 const interpreter_mod = @import("interpreter.zig");
 const Interpreter = interpreter_mod.Interpreter;
@@ -1084,6 +1086,21 @@ pub fn constructValueWithNewTarget(self: *Interpreter, target: JSValue, args: []
         @memcpy(combined[bound.pre_args.len..], args);
         const effective_new_target = if (zvalue.equality.strictEquals(target, new_target)) bound.target else new_target;
         return self.constructValueWithNewTarget(bound.target, combined, effective_new_target, callee_name);
+    }
+
+    // Pre-prototype validation for builtins that validate arguments before OrdinaryCreateFromConstructor:
+    if (promise_builtins.isPromiseConstructor(target)) {
+        const executor = if (args.len > 0) args[0] else JSValue.UNDEFINED;
+        if (executor != .function) {
+            return self.throwError(.type_error, "Promise resolver {s} is not a function", .{executor.typeOf()});
+        }
+    } else if (arraybuffer_builtins.isTypedArrayConstructor(target)) {
+        if (args.len > 0) {
+            const first = args[0];
+            if (first == .symbol or first == .bigint) {
+                return self.throwError(.type_error, "Cannot convert a {s} value to a number", .{@tagName(first)});
+            }
+        }
     }
 
     // GetPrototypeFromConstructor observes newTarget.prototype exactly once.

@@ -58,6 +58,10 @@ fn capReject(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     return JSValue.UNDEFINED;
 }
 
+pub fn isPromiseConstructor(v: JSValue) bool {
+    return v == .function and v.function.value.call == promiseConstructor;
+}
+
 /// `new Promise(executor)`: executor runs SYNCHRONOUSLY (real spec
 /// behavior -- logs inside it appear before the line after `new`); its
 /// throw rejects. Calling Promise without `new` also works here (real JS
