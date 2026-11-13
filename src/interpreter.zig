@@ -990,6 +990,7 @@ pub const Interpreter = struct {
     pub const extraPropsObject = interpreter_support.extraPropsObject;
     pub const boxPrimitiveIfConstructed = interpreter_support.boxPrimitiveIfConstructed;
     pub const unboxPrimitiveWrapper = interpreter_support.unboxPrimitiveWrapper;
+    pub const initStringWrapperProperties = interpreter_support.initStringWrapperProperties;
 
     // ===== Modules (import/export) =====
     // z-interpreter-refactor.md, Step 5 Phase C batch 2: moved to

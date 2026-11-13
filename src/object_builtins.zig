@@ -463,6 +463,9 @@ fn boxWrapper(self: *Interpreter, proto: JSValue, primitive: JSValue) anyerror!J
     const obj = try self.gcNewObject();
     try obj.object.value.setPrototype(&proto.object.value);
     try self.primitive_wrapper_data.put(self.gc_allocator, @intFromPtr(obj.object), primitive.retain());
+    if (primitive == .string) {
+        try self.initStringWrapperProperties(obj, primitive);
+    }
     return obj;
 }
 
