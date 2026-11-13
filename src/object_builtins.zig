@@ -1039,6 +1039,30 @@ fn objectIsExtensible(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     return JSValue.fromBool(v == .array or v == .function or v == .temporal);
 }
 
+fn setPrototypeOfInternal(self: *Interpreter, obj: JSValue, proto: JSValue) anyerror!bool {
+    if (obj == .proxy) {
+        const box = obj.proxy;
+        if (try self.proxyTrap(box, "setPrototypeOf")) |trap_fn| {
+            defer trap_fn.deinit();
+            const result = try trap_fn.function.value.call(trap_fn.function.value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, proto });
+            defer result.deinit();
+            if (!coercion.isTruthy(result)) return false;
+            const ext = try objectIsExtensible(self, self.gc_allocator, JSValue.UNDEFINED, &.{box.value.target});
+            if (!coercion.isTruthy(ext)) {
+                const target_proto = try objectGetPrototypeOf(self, self.gc_allocator, JSValue.UNDEFINED, &.{box.value.target});
+                defer target_proto.deinit();
+                if (!zvalue.equality.strictEquals(proto, target_proto)) {
+                    return self.throwError(.type_error, "'setPrototypeOf' on proxy: proxy target is not extensible and prototype does not match", .{});
+                }
+            }
+            return true;
+        }
+        return setPrototypeOfInternal(self, box.value.target, proto);
+    }
+    try self.setOwnedPrototype(obj, proto);
+    return true;
+}
+
 fn objectSetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     _ = this_value;
@@ -1049,7 +1073,10 @@ fn objectSetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     if (proto != .object and proto != .null) {
         return self.throwError(.type_error, "Object prototype may only be an Object or null", .{});
     }
-    try self.setOwnedPrototype(obj, proto);
+    const success = try setPrototypeOfInternal(self, obj, proto);
+    if (!success) {
+        return self.throwError(.type_error, "Object.setPrototypeOf: cannot set prototype", .{});
+    }
     return obj.retain();
 }
 
