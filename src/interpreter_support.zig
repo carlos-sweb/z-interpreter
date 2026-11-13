@@ -254,7 +254,37 @@ pub fn extraPropsObject(self: *Interpreter, value: JSValue) !JSValue {
 pub fn boxPrimitiveIfConstructed(self: *Interpreter, ctx: *anyopaque, this_value: JSValue, primitive: JSValue) anyerror!JSValue {
     if (self.construct_target != ctx) return primitive;
     try self.primitive_wrapper_data.put(self.gc_allocator, @intFromPtr(this_value.object), primitive);
+    if (primitive == .string) {
+        try self.initStringWrapperProperties(this_value, primitive);
+    }
     return this_value;
+}
+
+pub fn initStringWrapperProperties(self: *Interpreter, obj: JSValue, str_prim: JSValue) anyerror!void {
+    if (obj != .object or str_prim != .string) return;
+    const raw = str_prim.string.value.data;
+    const len = zstring.utf16.lengthUtf16(raw);
+    var buf: [32]u8 = undefined;
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        const ch = try zstring.access.charAt(self.gc_allocator, raw, @intCast(i));
+        defer self.gc_allocator.free(ch);
+        const ch_str = try self.gcNewString(ch);
+        const key_str = std.fmt.bufPrint(&buf, "{d}", .{i}) catch continue;
+        obj.object.value.defineProperty(key_str, ch_str, .{
+            .writable = false,
+            .enumerable = true,
+            .configurable = false,
+        }) catch |err| {
+            ch_str.deinit();
+            return err;
+        };
+    }
+    obj.object.value.defineProperty("length", JSValue.fromNumber(@floatFromInt(len)), .{
+        .writable = false,
+        .enumerable = false,
+        .configurable = false,
+    }) catch |err| return err;
 }
 
 /// The primitive value boxed inside a wrapper object created via

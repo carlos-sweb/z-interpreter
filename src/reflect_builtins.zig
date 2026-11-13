@@ -90,7 +90,10 @@ fn reflectDeleteProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
 /// real Node that a plain object with both string and symbol own
 /// properties returns both from Reflect.ownKeys, in that order.
 fn reflectOwnKeys(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = try reflectRequireObject(ctx, "ownKeys", arg(args, 0));
+    const target = try reflectRequireObject(ctx, "ownKeys", arg(args, 0));
+    if (target == .proxy) {
+        return object_builtins.proxyOwnPropertyKeys(interp(ctx), allocator, target);
+    }
     const names = try objectGetOwnPropertyNames(ctx, allocator, this_value, args);
     const symbols = try objectGetOwnPropertySymbols(ctx, allocator, this_value, args);
     defer symbols.deinit();

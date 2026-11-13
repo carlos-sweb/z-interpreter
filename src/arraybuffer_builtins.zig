@@ -360,6 +360,10 @@ fn typedArrayCtx(ctx: *anyopaque) *TypedArrayCtorCtx {
     return @ptrCast(@alignCast(ctx));
 }
 
+pub fn isTypedArrayConstructor(v: JSValue) bool {
+    return v == .function and v.function.value.call == typedArrayConstructor;
+}
+
 /// The 3 real constructor overloads: `new XArray(length)`, `new
 /// XArray(buffer, byteOffset?, length?)`, `new XArray(iterableOrArray
 /// Like)`. Non-iterable array-likes (`{length: 3, 0: 1, ...}` with no
