@@ -66,6 +66,7 @@ pub const string_methods = std.StaticStringMap(MethodSpec).initComptime(.{
     .{ "matchAll", MethodSpec{ .call = regex_protocol.stringMatchAll, .arity = 1 } },
     .{ "search", MethodSpec{ .call = regex_protocol.stringSearch, .arity = 1 } },
     .{ "localeCompare", MethodSpec{ .call = stringLocaleCompare, .arity = 1 } },
+    .{ "normalize", MethodSpec{ .call = stringNormalize, .arity = 0 } },
     .{ "toString", MethodSpec{ .call = stringToStringMethod, .arity = 0 } },
     .{ "valueOf", MethodSpec{ .call = stringToStringMethod, .arity = 0 } },
 });
@@ -339,6 +340,25 @@ fn stringLocaleCompare(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
         .eq => 0,
         .gt => 1,
     });
+}
+
+fn stringNormalize(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self = interp(ctx);
+    const data = try requireString(ctx, allocator, this_value, "normalize");
+    defer allocator.free(data);
+    const form_val = arg(args, 0);
+    const form_str = if (form_val == .undefined) null else blk: {
+        const s = try argString(self, allocator, args, 0);
+        break :blk s;
+    };
+    defer if (form_str) |s| allocator.free(s);
+    const zstr = zstring.ZString{ .data = data };
+    const out = zstr.normalizeStrict(allocator, form_str) catch |err| switch (err) {
+        error.InvalidNormalizationForm => return self.throwError(.range_error, "The normalization form should be one of 'NFC', 'NFD', 'NFKC', or 'NFKD'", .{}),
+        else => return err,
+    };
+    defer allocator.free(out);
+    return self.gcNewString(out);
 }
 
 fn stringToStringMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
