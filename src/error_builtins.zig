@@ -152,9 +152,26 @@ fn aggregateErrorConstructor(ctx: *anyopaque, allocator: Allocator, this_value: 
     return o;
 }
 
-/// The `AggregateError` global and its prototype. Runs from
-/// materializeProtos, once Error.prototype exists.
+/// The `AggregateError` global and its prototype, and NativeError
+/// prototypes chained to Error.prototype. Runs from materializeProtos,
+/// once Error.prototype exists.
 pub fn installAggregate(self: *Interpreter) !void {
+    inline for (.{
+        "EvalError",
+        "RangeError",
+        "ReferenceError",
+        "SyntaxError",
+        "TypeError",
+        "URIError",
+    }) |name| {
+        const nctor = self.global_env.get(name).?;
+        const nproto = try self.functionPrototype(nctor);
+        try nproto.object.value.setPrototype(&self.protos.@"error".object.value);
+        try nproto.object.value.defineProperty("constructor", nctor.retain(), hidden);
+        try nproto.object.value.defineProperty("name", try self.gcNewString(name), hidden);
+        try nproto.object.value.defineProperty("message", try self.gcNewString(""), hidden);
+    }
+
     const ctor = try builtin_helpers.installBuiltin(self, .{ .name = "AggregateError", .ctor = .{ .arity = 2, .call = aggregateErrorConstructor, .constructable = true } });
     const proto = try self.functionPrototype(ctor);
     try proto.object.value.setPrototype(&self.protos.@"error".object.value);
