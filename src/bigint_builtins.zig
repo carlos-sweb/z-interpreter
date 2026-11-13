@@ -87,16 +87,21 @@ fn bigintValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
 }
 
 /// Shared by `BigInt.asIntN`/`asUintN`: validates the `bits` argument
-/// (a non-negative safe integer, matching Node's exact RangeError text)
-/// and the `bigint` argument, then returns `(1n << bits) - 1n` (the
-/// low-`bits`-bits mask) -- caller owns the returned `ZBigInt`.
+/// (a non-negative safe integer per ToIndex) and the `bigint` argument
+/// (via ToBigInt), then returns `(1n << bits) - 1n` (the low-`bits`-bits
+/// mask) -- caller owns the returned `ZBigInt`.
 fn bigintAsNArgs(ctx: *anyopaque, args: []const JSValue) anyerror!struct { bits: usize, x: JSValue, mask: zbigint.ZBigInt } {
     const self = interp(ctx);
-    const bits_n = try self.toNumberJS(arg(args, 0));
-    if (std.math.isNan(bits_n) or std.math.isInf(bits_n) or bits_n < 0 or @floor(bits_n) != bits_n) {
-        return self.throwError(.range_error, "Invalid value: not (convertible to) a safe integer", .{});
-    }
-    const bits: usize = @intFromFloat(bits_n);
+    const bits_arg = arg(args, 0);
+    const bits: usize = if (bits_arg == .undefined) 0 else blk: {
+        const bits_n = try self.toNumberJS(bits_arg);
+        const integer: f64 = if (std.math.isNan(bits_n)) 0 else @trunc(bits_n);
+        const max_index: f64 = 9007199254740991.0;
+        if (integer < 0 or integer > max_index) {
+            return self.throwError(.range_error, "Invalid value: not (convertible to) a safe integer", .{});
+        }
+        break :blk @intFromFloat(integer);
+    };
     // Real spec: `bigint` also goes through ToBigInt (accepts boolean/
     // string/number, not just an already-bigint value) -- `x` is OWNED
     // (`toBigIntValue` always returns a fresh reference), so every
