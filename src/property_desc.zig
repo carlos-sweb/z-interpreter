@@ -485,19 +485,30 @@ pub fn arraySetLengthRaw(self: *Interpreter, obj: JSValue, new_len: u32) anyerro
     return ok;
 }
 
+fn isCanonicalNumericIndex(allocator: Allocator, key: []const u8) bool {
+    if (key.len == 0) return false;
+    if (std.mem.eql(u8, key, "-0")) return true;
+    const n = std.fmt.parseFloat(f64, key) catch return false;
+    const s = coercion.toDisplayString(allocator, JSValue.fromNumber(n)) catch return false;
+    defer allocator.free(s);
+    return std.mem.eql(u8, s, key);
+}
+
 pub fn typedArrayDefineOwnProperty(self: *Interpreter, obj: JSValue, key: []const u8, d: *const ParsedDesc) anyerror!bool {
-    const idx = zarray.CanonicalNumericIndexString(key) orelse
-        return validateAndApply(self, try self.extraPropsObject(obj), key, d);
-    const box = obj.typed_array;
-    if (idx >= box.value.len) return false;
-    if (d.has_configurable and !d.configurable) return false;
-    if (d.has_enumerable and !d.enumerable) return false;
-    if (d.isAccessor()) return false;
-    if (d.has_writable and !d.writable) return false;
-    if (d.has_value) {
-        try builtin_helpers.typedElemSet(self, box.value.kind, &box.value.owner.array_buffer.value, box.value.byte_offset, box.value.len, idx, d.value);
+    if (zarray.CanonicalNumericIndexString(key)) |idx| {
+        const box = obj.typed_array;
+        if (idx >= box.value.len) return false;
+        if (d.has_configurable and !d.configurable) return false;
+        if (d.has_enumerable and !d.enumerable) return false;
+        if (d.isAccessor()) return false;
+        if (d.has_writable and !d.writable) return false;
+        if (d.has_value) {
+            try builtin_helpers.typedElemSet(self, box.value.kind, &box.value.owner.array_buffer.value, box.value.byte_offset, box.value.len, idx, d.value);
+        }
+        return true;
     }
-    return true;
+    if (isCanonicalNumericIndex(self.gc_allocator, key)) return false;
+    return validateAndApply(self, try self.extraPropsObject(obj), key, d);
 }
 
 pub fn toObject(self: *Interpreter, v: JSValue) anyerror!JSValue {
