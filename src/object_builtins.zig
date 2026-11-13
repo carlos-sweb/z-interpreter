@@ -1039,7 +1039,7 @@ fn objectIsExtensible(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     return JSValue.fromBool(v == .array or v == .function or v == .temporal);
 }
 
-fn setPrototypeOfInternal(self: *Interpreter, obj: JSValue, proto: JSValue) anyerror!bool {
+pub fn setPrototypeOfInternal(self: *Interpreter, obj: JSValue, proto: JSValue) anyerror!bool {
     if (obj == .proxy) {
         const box = obj.proxy;
         if (try self.proxyTrap(box, "setPrototypeOf")) |trap_fn| {
