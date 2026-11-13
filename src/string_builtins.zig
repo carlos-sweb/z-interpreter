@@ -22,6 +22,7 @@ const interpreter_mod = @import("interpreter.zig");
 const Interpreter = interpreter_mod.Interpreter;
 const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
+const coercion = @import("coercion.zig");
 const regex_builtins = @import("regex_builtins.zig");
 const regex_protocol = @import("regex_protocol.zig");
 
@@ -163,28 +164,59 @@ fn stringIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     return JSValue.fromNumber(@floatFromInt(zstring.search.indexOf(data, search, pos)));
 }
 
+fn isRegExp(self: *Interpreter, v: JSValue) anyerror!bool {
+    if (!isObjectLike(v)) return false;
+    const key = try regex_builtins.wellKnownKey(self, "match");
+    defer self.gc_allocator.free(key);
+    const m = try self.getProperty(v, key);
+    defer m.deinit();
+    if (m != .undefined) return coercion.isTruthy(m);
+    return v == .regex;
+}
+
+fn throwIfRegExp(self: *Interpreter, v: JSValue, comptime method: []const u8) anyerror!void {
+    if (try isRegExp(self, v)) {
+        return self.throwError(.type_error, "First argument to String.prototype.{s} must not be a regular expression", .{method});
+    }
+}
+
 fn stringIncludes(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self = interp(ctx);
     const data = try requireString(ctx, allocator, this_value, "includes");
     defer allocator.free(data);
-    const search = try argString(interp(ctx), allocator, args, 0);
+    const search_val = arg(args, 0);
+    try throwIfRegExp(self, search_val, "includes");
+    const search = try argString(self, allocator, args, 0);
     defer allocator.free(search);
-    return JSValue.fromBool(zstring.search.includes(data, search, null));
+    const pos_arg = arg(args, 1);
+    const pos: ?isize = if (pos_arg == .undefined) null else toIntSat(try toNumberStrict(self, pos_arg));
+    return JSValue.fromBool(zstring.search.includes(data, search, pos));
 }
 
 fn stringStartsWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self = interp(ctx);
     const data = try requireString(ctx, allocator, this_value, "startsWith");
     defer allocator.free(data);
-    const search = try argString(interp(ctx), allocator, args, 0);
+    const search_val = arg(args, 0);
+    try throwIfRegExp(self, search_val, "startsWith");
+    const search = try argString(self, allocator, args, 0);
     defer allocator.free(search);
-    return JSValue.fromBool(zstring.search.startsWith(data, search, null));
+    const pos_arg = arg(args, 1);
+    const pos: ?isize = if (pos_arg == .undefined) null else toIntSat(try toNumberStrict(self, pos_arg));
+    return JSValue.fromBool(zstring.search.startsWith(data, search, pos));
 }
 
 fn stringEndsWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self = interp(ctx);
     const data = try requireString(ctx, allocator, this_value, "endsWith");
     defer allocator.free(data);
-    const search = try argString(interp(ctx), allocator, args, 0);
+    const search_val = arg(args, 0);
+    try throwIfRegExp(self, search_val, "endsWith");
+    const search = try argString(self, allocator, args, 0);
     defer allocator.free(search);
-    return JSValue.fromBool(zstring.search.endsWith(data, search, null));
+    const pos_arg = arg(args, 1);
+    const pos: ?isize = if (pos_arg == .undefined) null else toIntSat(try toNumberStrict(self, pos_arg));
+    return JSValue.fromBool(zstring.search.endsWith(data, search, pos));
 }
 
 fn stringSlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
