@@ -161,18 +161,44 @@ fn reflectConstruct(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     return self.constructValueWithNewTarget(target, call_args, new_target, "target");
 }
 
+fn reflectSetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const self = interp(ctx);
+    const target = try reflectRequireObject(ctx, "setPrototypeOf", arg(args, 0));
+    const proto = arg(args, 1);
+    if (proto != .object and proto != .null) {
+        return self.throwError(.type_error, "Object prototype may only be an Object or null", .{});
+    }
+    const ok = object_builtins.setPrototypeOfInternal(self, target, proto) catch |err| switch (err) {
+        error.PrototypeCycle, error.ObjectNotExtensible => false,
+        else => return err,
+    };
+    return JSValue.fromBool(ok);
+}
+
 /// Installs the `Reflect` namespace (statics-only, no constructor).
 pub fn install(self: *Interpreter) !void {
-    _ = try installBuiltin(self, .{ .name = "Reflect", .statics = &.{
+    const reflect_obj = try installBuiltin(self, .{ .name = "Reflect", .statics = &.{
         .{ .name = "get", .value = .{ .method = .{ .call = reflectGet, .arity = 2 } } },
         .{ .name = "set", .value = .{ .method = .{ .call = reflectSet, .arity = 3 } } },
         .{ .name = "has", .value = .{ .method = .{ .call = reflectHas, .arity = 2 } } },
         .{ .name = "deleteProperty", .value = .{ .method = .{ .call = reflectDeleteProperty, .arity = 2 } } },
         .{ .name = "ownKeys", .value = .{ .method = .{ .call = reflectOwnKeys, .arity = 1 } } },
         .{ .name = "getPrototypeOf", .value = .{ .method = .{ .call = reflectGetPrototypeOf, .arity = 1 } } },
+        .{ .name = "setPrototypeOf", .value = .{ .method = .{ .call = reflectSetPrototypeOf, .arity = 2 } } },
         .{ .name = "defineProperty", .value = .{ .method = .{ .call = reflectDefineProperty, .arity = 3 } } },
         .{ .name = "getOwnPropertyDescriptor", .value = .{ .method = .{ .call = reflectGetOwnPropertyDescriptor, .arity = 2 } } },
         .{ .name = "apply", .value = .{ .method = .{ .call = reflectApply, .arity = 3 } } },
         .{ .name = "construct", .value = .{ .method = .{ .call = reflectConstruct, .arity = 2 } } },
     } });
+    if (self.symbol_to_string_tag) |tag_sym| {
+        const tag_key = try self.encodeKey(tag_sym);
+        defer self.gc_allocator.free(tag_key);
+        try reflect_obj.object.value.defineProperty(tag_key, try self.gcNewString("Reflect"), .{
+            .writable = false,
+            .enumerable = false,
+            .configurable = true,
+        });
+    }
 }
