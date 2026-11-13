@@ -131,12 +131,21 @@ fn numberIsInteger(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     return JSValue.fromBool(v == .number and std.math.isFinite(v.number) and v.number == @trunc(v.number));
 }
 
+fn numberIsSafeInteger(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = ctx;
+    _ = allocator;
+    _ = this_value;
+    const v = arg(args, 0);
+    return JSValue.fromBool(v == .number and std.math.isFinite(v.number) and v.number == @trunc(v.number) and @abs(v.number) <= 9007199254740991.0);
+}
+
 /// Installs the `Number` constructor + statics.
 pub fn install(self: *Interpreter) !void {
     _ = try installBuiltin(self, .{ .name = "Number", .ctor = .{ .arity = 1, .call = globalNumber, .constructable = true }, .statics = &.{
         .{ .name = "isNaN", .value = .{ .method = .{ .call = numberIsNaN, .arity = 1 } } },
         .{ .name = "isFinite", .value = .{ .method = .{ .call = numberIsFinite, .arity = 1 } } },
         .{ .name = "isInteger", .value = .{ .method = .{ .call = numberIsInteger, .arity = 1 } } },
+        .{ .name = "isSafeInteger", .value = .{ .method = .{ .call = numberIsSafeInteger, .arity = 1 } } },
         .{ .name = "parseFloat", .value = .{ .method = .{ .call = globals_builtins.globalParseFloat, .arity = 1 } } },
         .{ .name = "parseInt", .value = .{ .method = .{ .call = globals_builtins.globalParseInt, .arity = 2 } } },
         .{ .name = "MAX_SAFE_INTEGER", .value = .{ .constant = JSValue.fromNumber(9007199254740991.0) } },
