@@ -966,6 +966,143 @@ pub const typed_array_methods = std.StaticStringMap(MethodSpec).initComptime(.{
     .{ "values", MethodSpec{ .call = taValues, .arity = 0 } },
 });
 
+fn typedArrayAbstractConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    _ = args;
+    const self = interp(ctx);
+    if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor TypedArray requires 'new'", .{});
+    return self.throwError(.type_error, "Abstract class TypedArray not directly constructable", .{});
+}
+
+fn typedArrayCreateFromConstructor(self: *Interpreter, ctor: JSValue, len: usize) anyerror!JSValue {
+    if (!self.isConstructor(ctor)) return self.throwError(.type_error, "{s} is not a constructor", .{ctor.typeOf()});
+    const new_ta = try self.constructValue(ctor, &.{JSValue.fromNumber(@floatFromInt(len))}, "TypedArray");
+    errdefer new_ta.deinit();
+    if (new_ta != .typed_array) return self.throwError(.type_error, "Derived TypedArray constructor created a non-TypedArray object", .{});
+    if (new_ta.typed_array.value.len < len) return self.throwError(.type_error, "Derived TypedArray constructor created an array which was too small", .{});
+    return new_ta;
+}
+
+fn typedArrayFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self = interp(ctx);
+    const C = this_value;
+    if (!self.isConstructor(C)) return self.throwError(.type_error, "{s} is not a constructor", .{C.typeOf()});
+    const source = arg(args, 0);
+    const mapfn = arg(args, 1);
+    const this_arg = arg(args, 2);
+    if (mapfn != .undefined and mapfn != .function) return self.throwError(.type_error, "TypedArray.from: mapfn is not a function", .{});
+    const mapping = mapfn == .function;
+    if (source == .undefined or source == .null) return self.throwError(.type_error, "Cannot convert undefined or null to object", .{});
+
+    var using_iter: JSValue = JSValue.UNDEFINED;
+    if (self.symbol_iterator) |sym| {
+        const key = try self.encodeKey(sym);
+        defer self.gc_allocator.free(key);
+        using_iter = try self.getProperty(source, key);
+    }
+    defer using_iter.deinit();
+
+    if (using_iter != .undefined and using_iter != .null) {
+        if (using_iter != .function) return self.throwError(.type_error, "Symbol.iterator is not a function", .{});
+        const iter = try self.callValue(using_iter, source, &.{}, "[Symbol.iterator]");
+        defer iter.deinit();
+        if (!builtin_helpers.isObjectLike(iter)) return self.throwError(.type_error, "Result of the Symbol.iterator method is not an object", .{});
+        const values = try self.drainIterator(iter);
+        defer {
+            for (values) |v| v.deinit();
+            self.gc_allocator.free(values);
+        }
+        const target_obj = try typedArrayCreateFromConstructor(self, C, values.len);
+        errdefer target_obj.deinit();
+        for (values, 0..) |k_val, k| {
+            const mapped = if (mapping)
+                try mapfn.function.value.call(mapfn.function.value.ctx, allocator, this_arg, &.{ k_val, JSValue.fromNumber(@floatFromInt(k)) })
+            else
+                k_val.retain();
+            defer mapped.deinit();
+            try taWrite(self, target_obj, k, mapped);
+        }
+        return target_obj;
+    }
+
+    const len_v = try self.getProperty(source, "length");
+    defer len_v.deinit();
+    const len = try toLength(self, len_v);
+    const target_obj = try typedArrayCreateFromConstructor(self, C, len);
+    errdefer target_obj.deinit();
+    var k: usize = 0;
+    while (k < len) : (k += 1) {
+        var key_buf: [32]u8 = undefined;
+        const pk = std.fmt.bufPrint(&key_buf, "{d}", .{k}) catch unreachable;
+        const k_val = try self.getProperty(source, pk);
+        defer k_val.deinit();
+        const mapped = if (mapping)
+            try mapfn.function.value.call(mapfn.function.value.ctx, allocator, this_arg, &.{ k_val, JSValue.fromNumber(@floatFromInt(k)) })
+        else
+            k_val.retain();
+        defer mapped.deinit();
+        try taWrite(self, target_obj, k, mapped);
+    }
+    return target_obj;
+}
+
+fn typedArrayOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const C = this_value;
+    if (!self.isConstructor(C)) return self.throwError(.type_error, "{s} is not a constructor", .{C.typeOf()});
+    const new_obj = try typedArrayCreateFromConstructor(self, C, args.len);
+    errdefer new_obj.deinit();
+    for (args, 0..) |item, k| {
+        try taWrite(self, new_obj, k, item);
+    }
+    return new_obj;
+}
+
+/// Wires the intrinsic `%TypedArray%` constructor, its `.from`/`.of` statics,
+/// `%TypedArray%.prototype.constructor`, and the prototype/statics inheritance
+/// chain for all 11 concrete TypedArray constructors. Returns `%TypedArray%`'s
+/// statics bag so `accessor_builtins.install` can attach `get [Symbol.species]`.
+pub fn installHierarchy(self: *Interpreter) !JSValue {
+    const typed_array_base = self.protos.typed_array_base;
+    const typed_array_ctor = try self.gcNewFunction(.{
+        .ctx = self,
+        .name = "TypedArray",
+        .arity = 0,
+        .call = typedArrayAbstractConstructor,
+        .constructable = true,
+    });
+    typed_array_ctor.function.value.prototype = typed_array_base.retain();
+    const ta_statics = try self.functionStatics(typed_array_ctor);
+    try builtin_helpers.dneConst(ta_statics, "prototype", typed_array_base.retain());
+    try builtin_helpers.dneMethod(ta_statics, "from", try native(self, "from", 1, typedArrayFrom));
+    try builtin_helpers.dneMethod(ta_statics, "of", try native(self, "of", 0, typedArrayOf));
+    try builtin_helpers.dneMethod(typed_array_base, "constructor", typed_array_ctor.retain());
+
+    const g = self.global_env;
+    inline for (.{
+        "Int8Array",
+        "Uint8Array",
+        "Uint8ClampedArray",
+        "Int16Array",
+        "Uint16Array",
+        "Int32Array",
+        "Uint32Array",
+        "Float32Array",
+        "Float64Array",
+        "BigInt64Array",
+        "BigUint64Array",
+    }) |name| {
+        const ctor = g.get(name).?;
+        const proto = try self.functionPrototype(ctor);
+        const ctor_statics = try self.functionStatics(ctor);
+        try builtin_helpers.dneConst(ctor_statics, "prototype", proto.retain());
+        try ctor_statics.object.value.setPrototype(&ta_statics.object.value);
+    }
+    return ta_statics;
+}
+
 /// Installs `ArrayBuffer`, `DataView`, and the 10 TypedArray constructors.
 pub fn install(self: *Interpreter) !void {
     const arena = self.gc_allocator;
@@ -1004,7 +1141,7 @@ pub fn install(self: *Interpreter) !void {
         const ctor = try self.gcNewFunction(.{
             .ctx = cctx,
             .name = e[0],
-            .arity = 1,
+            .arity = 3,
             .call = typedArrayConstructor,
             .constructable = true,
         });
