@@ -204,14 +204,11 @@ fn protoSetter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     // A non-object, non-null value is ignored; so is a primitive receiver.
     if (proto != .null and !isObjectLike(proto)) return JSValue.UNDEFINED;
     if (!isObjectLike(this_value)) return JSValue.UNDEFINED;
-    if (this_value != .object)
-        return self.throwError(.type_error, "Setting the prototype of a {s} is not supported yet", .{@tagName(this_value)});
-    if (proto != .null and proto != .object)
-        return self.throwError(.type_error, "A {s} as a prototype is not supported yet", .{@tagName(proto)});
-    self.setOwnedPrototype(this_value, proto) catch |err| switch (err) {
+    const ok = object_builtins.setPrototypeOfInternal(self, this_value, proto) catch |err| switch (err) {
         error.PrototypeCycle => return self.throwError(.type_error, "Cyclic __proto__ value", .{}),
         else => return self.throwError(.type_error, "Object.prototype.__proto__ setter failed: {s}", .{@errorName(err)}),
     };
+    if (!ok) return self.throwError(.type_error, "Object.prototype.__proto__ setter failed", .{});
     return JSValue.UNDEFINED;
 }
 

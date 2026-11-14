@@ -134,6 +134,26 @@ pub fn ownEnumerableKeys(ctx: *anyopaque, allocator: Allocator, v: JSValue) anye
             }
             return keys.toOwnedSlice(allocator);
         },
+        .typed_array => |box| {
+            var keys: std.ArrayList([]const u8) = .empty;
+            errdefer {
+                for (keys.items) |k| allocator.free(k);
+                keys.deinit(allocator);
+            }
+            var i: usize = 0;
+            while (i < box.value.len) : (i += 1) {
+                try keys.append(allocator, try std.fmt.allocPrint(allocator, "{d}", .{i}));
+            }
+            if (self.extraProps(v)) |bag| {
+                const extra = try bag.object.value.keys(allocator);
+                defer allocator.free(extra);
+                for (extra) |k| {
+                    if (isSymbolKey(k)) continue;
+                    try keys.append(allocator, try allocator.dupe(u8, k));
+                }
+            }
+            return keys.toOwnedSlice(allocator);
+        },
         // ownKeys(target) -- narrowed: every trap-returned key is treated
         // as enumerable (real spec would filter via a
         // getOwnPropertyDescriptor call per key), matching this
@@ -294,6 +314,11 @@ fn objHasOwnProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
         .regex => JSValue.fromBool(std.mem.eql(u8, key, "lastIndex") or
             (if (self.regexProps(this_value)) |bag| bag.object.value.hasOwnProperty(key) else false)),
         .temporal => JSValue.fromBool(if (self.temporalProps(this_value)) |bag| bag.object.value.hasOwnProperty(key) else false),
+        .typed_array => |box| switch (@import("interpreter_props.zig").canonicalNumericIndex(self.gc_allocator, key, box.value.len)) {
+            .valid_index => JSValue.fromBool(true),
+            .invalid_index => JSValue.fromBool(false),
+            .not_numeric => JSValue.fromBool(if (self.extraProps(this_value)) |bag| bag.object.value.hasOwnProperty(key) else false),
+        },
         else => JSValue.fromBool(if (self.extraProps(this_value)) |bag| bag.object.value.hasOwnProperty(key) else false),
     };
 }
@@ -312,6 +337,11 @@ fn objPropertyIsEnumerable(ctx: *anyopaque, allocator: Allocator, this_value: JS
             }
             const idx = zarray.CanonicalNumericIndexString(key) orelse return JSValue.fromBool(false);
             return JSValue.fromBool(idx < box.value.length() and !box.value.isHole(idx));
+        },
+        .typed_array => |box| switch (@import("interpreter_props.zig").canonicalNumericIndex(self.gc_allocator, key, box.value.len)) {
+            .valid_index => return JSValue.fromBool(true),
+            .invalid_index => return JSValue.fromBool(false),
+            .not_numeric => return JSValue.fromBool(if (self.extraProps(this_value)) |bag| bag.object.value.propertyIsEnumerable(key) else false),
         },
         else => return JSValue.fromBool(if (self.extraProps(this_value)) |bag| bag.object.value.propertyIsEnumerable(key) else false),
     }
@@ -435,7 +465,7 @@ pub fn objectConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
     const v = arg(args, 0);
     return switch (v) {
         // Object(x) on object-likes returns x; on nothing, a fresh {}.
-        .object, .array, .function, .@"error", .date, .promise, .map, .set, .regex, .temporal => v.retain(),
+        .object, .array, .function, .@"error", .date, .promise, .map, .set, .regex, .temporal, .typed_array, .array_buffer, .data_view, .proxy => v.retain(),
         // Real ToObject on a primitive: a boxed wrapper chaining to
         // that primitive's OWN prototype (Number.prototype/etc, not
         // Object.prototype), carrying the primitive so
@@ -681,15 +711,19 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, thi
             return dataDescObj(self, val.retain(), !is_frozen, true, !(is_frozen or is_sealed));
         },
         .typed_array => |box| {
-            const idx = zarray.CanonicalNumericIndexString(key) orelse {
-                if (self.extraProps(obj)) |bag| {
-                    if (bag.object.value.getOwnRecord(key)) |rec| return descFromRecord(self, rec);
-                }
-                return JSValue.UNDEFINED;
-            };
-            if (idx >= box.value.len) return JSValue.UNDEFINED;
-            const val = try builtin_helpers.typedElemGet(self, box.value.kind, &box.value.owner.array_buffer.value, box.value.byte_offset, box.value.len, idx);
-            return dataDescObj(self, val, true, true, false);
+            switch (@import("interpreter_props.zig").canonicalNumericIndex(self.gc_allocator, key, box.value.len)) {
+                .valid_index => |idx| {
+                    const val = try builtin_helpers.typedElemGet(self, box.value.kind, &box.value.owner.array_buffer.value, box.value.byte_offset, box.value.len, idx);
+                    return dataDescObj(self, val, true, true, true);
+                },
+                .invalid_index => return JSValue.UNDEFINED,
+                .not_numeric => {
+                    if (self.extraProps(obj)) |bag| {
+                        if (bag.object.value.getOwnRecord(key)) |rec| return descFromRecord(self, rec);
+                    }
+                    return JSValue.UNDEFINED;
+                },
+            }
         },
         .undefined, .null => return self.throwError(.type_error, "Cannot convert undefined or null to object", .{}),
         .proxy => |box| {
@@ -759,7 +793,7 @@ pub fn proxyOwnPropertyKeys(self: *Interpreter, allocator: Allocator, proxy_val:
     }
 
     const target = box.value.target;
-    const is_extensible = if (extensibilityBag(self, target)) |bag| bag.object.value.is_extensible else (target == .array or target == .function or target == .temporal);
+    const is_extensible = if (extensibilityBag(self, target)) |bag| bag.object.value.is_extensible else (target == .array or target == .function or target == .temporal or target == .typed_array);
     const target_keys = try ownPropertyKeyList(self, allocator, target);
     defer freeOwnedKeys(allocator, target_keys);
 
@@ -896,6 +930,21 @@ pub fn objectGetOwnPropertyNames(ctx: *anyopaque, allocator: Allocator, this_val
                 if (item == .string) _ = try result.array.value.push(item.retain());
             }
         },
+        .typed_array => |box| {
+            var i: usize = 0;
+            while (i < box.value.len) : (i += 1) {
+                const idx_str = try std.fmt.allocPrint(allocator, "{d}", .{i});
+                defer allocator.free(idx_str);
+                _ = try result.array.value.push(try interp(ctx).gcNewString(idx_str));
+            }
+            if (self.extraProps(o)) |bag| {
+                const names = try bag.object.value.getOwnPropertyNames(allocator);
+                defer allocator.free(names);
+                for (names) |n| {
+                    if (!isSymbolKey(n)) _ = try result.array.value.push(try interp(ctx).gcNewString(n));
+                }
+            }
+        },
         else => {
             if (self.extraProps(o)) |bag| {
                 const names = try bag.object.value.getOwnPropertyNames(allocator);
@@ -945,11 +994,11 @@ fn objectCreate(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     _ = this_value;
     const self = interp(ctx);
     const proto = arg(args, 0);
-    if (proto != .object and proto != .null) {
+    if (!builtin_helpers.isObjectLike(proto) and proto != .null) {
         return self.throwError(.type_error, "Object prototype may only be an Object or null", .{});
     }
     const obj = try interp(ctx).gcNewObject();
-    if (proto == .object) try self.setOwnedPrototype(obj, proto);
+    if (proto != .null) try self.setOwnedPrototype(obj, proto);
     if (args.len >= 2 and args[1] != .undefined) {
         try property_desc.objectDefinePropertiesImpl(self, allocator, obj, args[1]);
     }
@@ -983,6 +1032,9 @@ fn objectFreeze(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     _ = this_value;
     const self = interp(ctx);
     const v = arg(args, 0);
+    if (v == .typed_array and v.typed_array.value.len > 0) {
+        return self.throwError(.type_error, "Cannot freeze array buffer views with elements", .{});
+    }
     if (v == .array) {
         v.array.value.setLengthWritable(false) catch {};
     }
@@ -996,11 +1048,12 @@ fn objectIsFrozen(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     _ = this_value;
     const self = interp(ctx);
     const v = arg(args, 0);
+    if (v == .typed_array and v.typed_array.value.len > 0) return JSValue.fromBool(false);
     if (v == .array) {
         if (v.array.value.isLengthWritable() and v.array.value.length() > 0) return JSValue.fromBool(false);
     }
     if (extensibilityBag(self, v)) |bag| return JSValue.fromBool(bag.object.value.is_frozen);
-    return JSValue.fromBool(!(v == .array or v == .function or v == .temporal));
+    return JSValue.fromBool(!(v == .array or v == .function or v == .temporal or v == .typed_array));
 }
 
 fn objectSeal(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1008,6 +1061,9 @@ fn objectSeal(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     _ = this_value;
     const self = interp(ctx);
     const v = arg(args, 0);
+    if (v == .typed_array and v.typed_array.value.len > 0) {
+        return self.throwError(.type_error, "Cannot seal array buffer views with elements", .{});
+    }
     if (try extensibilityBagForWrite(self, v)) |bag| bag.object.value.seal();
     return v.retain();
 }
@@ -1017,8 +1073,9 @@ fn objectIsSealed(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     _ = this_value;
     const self = interp(ctx);
     const v = arg(args, 0);
+    if (v == .typed_array and v.typed_array.value.len > 0) return JSValue.fromBool(false);
     if (extensibilityBag(self, v)) |bag| return JSValue.fromBool(bag.object.value.is_sealed or bag.object.value.is_frozen);
-    return JSValue.fromBool(!(v == .array or v == .function or v == .temporal));
+    return JSValue.fromBool(!(v == .array or v == .function or v == .temporal or v == .typed_array));
 }
 
 fn objectPreventExtensions(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1036,7 +1093,7 @@ fn objectIsExtensible(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     const self = interp(ctx);
     const v = arg(args, 0);
     if (extensibilityBag(self, v)) |bag| return JSValue.fromBool(bag.object.value.is_extensible);
-    return JSValue.fromBool(v == .array or v == .function or v == .temporal);
+    return JSValue.fromBool(v == .array or v == .function or v == .temporal or v == .typed_array);
 }
 
 pub fn setPrototypeOfInternal(self: *Interpreter, obj: JSValue, proto: JSValue) anyerror!bool {
@@ -1059,6 +1116,14 @@ pub fn setPrototypeOfInternal(self: *Interpreter, obj: JSValue, proto: JSValue) 
         }
         return setPrototypeOfInternal(self, box.value.target, proto);
     }
+    if (obj != .object) {
+        const cur_proto = try objectGetPrototypeOf(self, self.gc_allocator, JSValue.UNDEFINED, &.{obj});
+        defer cur_proto.deinit();
+        if (zvalue.equality.strictEquals(proto, cur_proto)) return true;
+        if (extensibilityBag(self, obj)) |bag| {
+            if (!bag.object.value.is_extensible) return error.ObjectNotExtensible;
+        }
+    }
     try self.setOwnedPrototype(obj, proto);
     return true;
 }
@@ -1070,10 +1135,13 @@ fn objectSetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     const obj = arg(args, 0);
     const proto = arg(args, 1);
     if (!builtin_helpers.isObjectLike(obj)) return self.throwError(.type_error, "Object.setPrototypeOf called on non-object", .{});
-    if (proto != .object and proto != .null) {
+    if (proto != .null and !builtin_helpers.isObjectLike(proto)) {
         return self.throwError(.type_error, "Object prototype may only be an Object or null", .{});
     }
-    const success = try setPrototypeOfInternal(self, obj, proto);
+    const success = setPrototypeOfInternal(self, obj, proto) catch |err| switch (err) {
+        error.PrototypeCycle, error.ObjectNotExtensible => false,
+        else => return err,
+    };
     if (!success) {
         return self.throwError(.type_error, "Object.setPrototypeOf: cannot set prototype", .{});
     }
@@ -1272,7 +1340,7 @@ fn objectGetOwnPropertyDescriptors(ctx: *anyopaque, allocator: Allocator, this_v
         .array => |box| self.array_props.get(@intFromPtr(box)),
         .regex => self.regexProps(value),
         .temporal => self.temporalProps(value),
-        else => null,
+        else => self.extraProps(value),
     };
     if (bag) |props| {
         const keys = try props.object.value.getOwnPropertyNames(allocator);

@@ -24,6 +24,38 @@ const function_builtins = @import("function_builtins.zig");
 const interpreter_mod = @import("interpreter.zig");
 const Interpreter = interpreter_mod.Interpreter;
 
+pub const NumericIndexClass = union(enum) {
+    not_numeric,
+    invalid_index,
+    valid_index: usize,
+};
+
+/// ECMA-262 7.1.21 CanonicalNumericIndexString + 10.4.5.9 IsValidIntegerIndex.
+pub fn canonicalNumericIndex(allocator: std.mem.Allocator, key: []const u8, len: usize) NumericIndexClass {
+    if (key.len == 0 or key[0] == 0) return .not_numeric;
+    if (std.mem.eql(u8, key, "-0") or std.mem.eql(u8, key, "NaN") or std.mem.eql(u8, key, "Infinity") or std.mem.eql(u8, key, "-Infinity")) {
+        return .invalid_index;
+    }
+    if (zarray.CanonicalNumericIndexString(key)) |idx| {
+        return if (idx < len) .{ .valid_index = idx } else .invalid_index;
+    }
+    const n = std.fmt.parseFloat(f64, key) catch return .not_numeric;
+    if (std.math.isNan(n)) return .not_numeric;
+    const s = coercion.toDisplayString(allocator, JSValue.fromNumber(n)) catch return .not_numeric;
+    defer allocator.free(s);
+    if (!std.mem.eql(u8, s, key)) return .not_numeric;
+    if (!std.math.isFinite(n) or @trunc(n) != n or n < 0) return .invalid_index;
+    if (n >= @as(f64, @floatFromInt(len))) return .invalid_index;
+    return .{ .valid_index = @intFromFloat(n) };
+}
+
+pub fn typedArrayInstanceProto(self: *Interpreter, obj: JSValue) JSValue {
+    if (Interpreter.heapBoxAddress(obj)) |addr| {
+        if (self.proto_refs.get(addr)) |p| return p;
+    }
+    return self.typedArrayProto(obj.typed_array.value.kind);
+}
+
 pub fn getExtraPropsOrProto(self: *Interpreter, obj: JSValue, proto: JSValue, key: []const u8) anyerror!JSValue {
     if (self.extraProps(obj)) |bag| {
         if (bag.object.value.getOwnRecord(key)) |rec| {
@@ -63,14 +95,36 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
                     if (lookup_env.get(key)) |v| break :blk v.retain();
                 }
             }
+            var last_obj: *const @TypeOf(box.value) = &box.value;
             var current: ?*const @TypeOf(box.value) = &box.value;
             while (current) |o| : (current = o.getPrototype()) {
+                last_obj = o;
                 const rec = o.getOwnRecord(key) orelse continue;
                 if (rec.isAccessor()) {
                     const g = rec.getter orelse break :blk JSValue.UNDEFINED;
                     break :blk try g.function.value.call(g.function.value.ctx, arena, obj, &.{});
                 }
                 break :blk rec.value.retain();
+            }
+            const Box = @TypeOf(obj.object.*);
+            const last_box: *const Box = @fieldParentPtr("value", last_obj);
+            if (self.proto_refs.get(@intFromPtr(last_box))) |ext_proto| {
+                if (ext_proto == .typed_array) {
+                    const tbox = ext_proto.typed_array;
+                    switch (canonicalNumericIndex(self.gc_allocator, key, tbox.value.len)) {
+                        .valid_index => |idx| break :blk try builtins.typedElemGet(self, tbox.value.kind, &tbox.value.owner.array_buffer.value, tbox.value.byte_offset, tbox.value.len, idx),
+                        .invalid_index => break :blk JSValue.UNDEFINED,
+                        .not_numeric => {
+                            if (self.extraProps(ext_proto)) |bag| {
+                                if (try self.getFromProto(obj, bag, key)) |m| break :blk m;
+                            }
+                            if (try self.getFromProto(obj, typedArrayInstanceProto(self, ext_proto), key)) |m| break :blk m;
+                            break :blk JSValue.UNDEFINED;
+                        },
+                    }
+                } else if (ext_proto != .object and ext_proto != .null) {
+                    break :blk try self.getProperty(ext_proto, key);
+                }
             }
             // Chain miss: ordinary objects chain to the real
             // Object.prototype (which carries hasOwnProperty & co as own
@@ -164,7 +218,7 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             // GetPrototypeFromConstructor observable.
             if (std.mem.eql(u8, key, "prototype")) {
                 if (box.value.statics) |bag| {
-                    if (bag.object.value.has(key)) {
+                    if (bag.object.value.hasOwnProperty(key)) {
                         if (try self.getFromProto(obj, bag, key)) |v| break :blk v;
                     }
                 }
@@ -249,20 +303,12 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
         // `.byteLength` is a real spec ACCESSOR property (no parens),
         // computed here rather than stored -- same category as
         // array/string's own special-cased `.length`.
-        .array_buffer => |box| blk: {
-            // byteLength & co. are accessors on the prototype (accessor_builtins).
-            if (try self.getFromProto(obj, self.arrayBufferProto(box.value.is_shared), key)) |m| break :blk m;
-            break :blk JSValue.UNDEFINED;
-        },
+        .array_buffer => |box| try self.getExtraPropsOrProto(obj, self.arrayBufferProto(box.value.is_shared), key),
         // `.buffer`/`.byteOffset`/`.byteLength` are all real spec
         // accessor properties. `.buffer` returns the SAME `.array_buffer`
         // JSValue this view was constructed over (retained) -- real JS:
         // `dv.buffer === buf`.
-        .data_view => blk: {
-            // buffer/byteOffset/byteLength are accessors on DataView.prototype.
-            if (try self.getFromProto(obj, self.protos.data_view, key)) |m| break :blk m;
-            break :blk JSValue.UNDEFINED;
-        },
+        .data_view => try self.getExtraPropsOrProto(obj, self.protos.data_view, key),
         // Integer-indexed exotic access: a canonical numeric index
         // out of `[0,len)` reads as `undefined` (real spec) --
         // NEVER falls through to the prototype chain like a plain
@@ -270,12 +316,11 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
         .typed_array => |box| blk: {
             // length/buffer/byteOffset/byteLength are accessors on
             // %TypedArray%.prototype (accessor_builtins).
-            if (std.fmt.parseInt(usize, key, 10)) |idx| {
-                if (idx >= box.value.len) break :blk JSValue.UNDEFINED;
-                break :blk try builtins.typedElemGet(self, box.value.kind, &box.value.owner.array_buffer.value, box.value.byte_offset, box.value.len, idx);
-            } else |_| {}
-            if (try self.getFromProto(obj, self.typedArrayProto(box.value.kind), key)) |m| break :blk m;
-            break :blk JSValue.UNDEFINED;
+            switch (canonicalNumericIndex(self.gc_allocator, key, box.value.len)) {
+                .valid_index => |idx| break :blk try builtins.typedElemGet(self, box.value.kind, &box.value.owner.array_buffer.value, box.value.byte_offset, box.value.len, idx),
+                .invalid_index => break :blk JSValue.UNDEFINED,
+                .not_numeric => break :blk try self.getExtraPropsOrProto(obj, typedArrayInstanceProto(self, obj), key),
+            }
         },
         .symbol => blk: {
             // `description` is an accessor on Symbol.prototype.
@@ -313,8 +358,24 @@ pub fn setArrayProperty(self: *Interpreter, obj: JSValue, key: []const u8, value
         _ = try property_desc.arraySetLengthRaw(self, obj, n);
         return;
     }
-    const idx = zarray.CanonicalNumericIndexString(key) orelse
+    const idx = zarray.CanonicalNumericIndexString(key) orelse {
+        if (self.proto_refs.get(@intFromPtr(obj.array))) |ext_proto| {
+            if (ext_proto == .typed_array) {
+                switch (canonicalNumericIndex(self.gc_allocator, key, ext_proto.typed_array.value.len)) {
+                    .invalid_index => return,
+                    else => {},
+                }
+            }
+        }
         return self.setObjectProperty(try self.arrayPropsObject(obj), key, value);
+    };
+    if (idx >= arr.length() or arr.isHole(idx)) {
+        if (self.proto_refs.get(@intFromPtr(obj.array))) |ext_proto| {
+            if (ext_proto == .typed_array and idx >= ext_proto.typed_array.value.len) {
+                return;
+            }
+        }
+    }
     if (idx >= arr.length() and !arr.isLengthWritable()) {
         return self.throwError(.type_error, "Cannot add property to array: length is not writable", .{});
     }
@@ -340,14 +401,49 @@ pub fn setArrayProperty(self: *Interpreter, obj: JSValue, key: []const u8, value
 /// Integer-indexed exotic [[Set]]: a canonical numeric index writes
 /// through `typedElemSet` (which itself coerces the value BEFORE
 /// checking bounds and silently no-ops if out of range -- matches
-/// real spec exactly, verified against real Node). Any other key is
-/// `error.NotImplemented`, same narrowing `setArrayProperty` already
-/// has for arrays (no general property bag).
+/// real spec exactly, verified against real Node). Non-numeric keys
+/// delegate to OrdinarySet (extraProps bag + prototype chain).
 pub fn setTypedArrayProperty(self: *Interpreter, obj: JSValue, key: []const u8, value: JSValue) anyerror!void {
     const box = obj.typed_array;
-    const idx = std.fmt.parseInt(usize, key, 10) catch
-        return self.throwError(.type_error, "Cannot set property {s} of a typed array: named properties are not supported yet", .{key});
-    try builtins.typedElemSet(self, box.value.kind, &box.value.owner.array_buffer.value, box.value.byte_offset, box.value.len, idx, value);
+    switch (canonicalNumericIndex(self.gc_allocator, key, box.value.len)) {
+        .valid_index => |idx| {
+            try builtins.typedElemSet(self, box.value.kind, &box.value.owner.array_buffer.value, box.value.byte_offset, box.value.len, idx, value);
+            return;
+        },
+        .invalid_index => {
+            try builtins.typedElemSet(self, box.value.kind, &box.value.owner.array_buffer.value, box.value.byte_offset, box.value.len, box.value.len, value);
+            return;
+        },
+        .not_numeric => {
+            if (self.extraProps(obj)) |bag| {
+                if (bag.object.value.getOwnRecord(key)) |rec| {
+                    if (rec.isAccessor()) {
+                        const setter = rec.setter orelse return self.throwError(.type_error, "Cannot set property {s} of TypedArray which has only a getter", .{key});
+                        _ = try setter.function.value.call(setter.function.value.ctx, self.gc_allocator, obj, &.{value});
+                        return;
+                    }
+                    return self.setObjectProperty(bag, key, value);
+                }
+            }
+            const proto = typedArrayInstanceProto(self, obj);
+            if (proto == .object) {
+                var current: ?*const @TypeOf(proto.object.value) = &proto.object.value;
+                while (current) |o| : (current = o.getPrototype()) {
+                    const rec = o.getOwnRecord(key) orelse continue;
+                    if (rec.isAccessor()) {
+                        const setter = rec.setter orelse return self.throwError(.type_error, "Cannot set property {s} of TypedArray which has only a getter", .{key});
+                        _ = try setter.function.value.call(setter.function.value.ctx, self.gc_allocator, obj, &.{value});
+                        return;
+                    }
+                    if (!rec.descriptor.writable) {
+                        return self.throwError(.type_error, "Cannot assign to read only property '{s}' of TypedArray", .{key});
+                    }
+                    break;
+                }
+            }
+            return self.setObjectProperty(try self.extraPropsObject(obj), key, value);
+        },
+    }
 }
 
 /// [[Set]] on an `.object` JSValue with accessor dispatch: a setter
@@ -360,9 +456,13 @@ pub fn setTypedArrayProperty(self: *Interpreter, obj: JSValue, key: []const u8, 
 /// there too). The first *data* record found stops the walk and the
 /// write shadows it as an own property, exactly like real JS.
 pub fn setObjectProperty(self: *Interpreter, obj: JSValue, key: []const u8, value: JSValue) anyerror!void {
+    var last_obj: *const @TypeOf(obj.object.value) = &obj.object.value;
     var current: ?*const @TypeOf(obj.object.value) = &obj.object.value;
+    var found = false;
     while (current) |o| : (current = o.getPrototype()) {
+        last_obj = o;
         const rec = o.getOwnRecord(key) orelse continue;
+        found = true;
         if (rec.isAccessor()) {
             const s = rec.setter orelse return self.throwError(.type_error, "Cannot set property {s} of #<Object> which has only a getter", .{key});
             _ = try s.function.value.call(s.function.value.ctx, self.gc_allocator, obj, &.{value});
@@ -372,6 +472,48 @@ pub fn setObjectProperty(self: *Interpreter, obj: JSValue, key: []const u8, valu
             return self.throwError(.type_error, "Cannot assign to read only property '{s}' of object", .{key});
         }
         break;
+    }
+    if (!found) {
+        const Box = @TypeOf(obj.object.*);
+        const last_box: *const Box = @fieldParentPtr("value", last_obj);
+        if (self.proto_refs.get(@intFromPtr(last_box))) |ext_proto| {
+            if (ext_proto == .typed_array) {
+                switch (canonicalNumericIndex(self.gc_allocator, key, ext_proto.typed_array.value.len)) {
+                    .invalid_index => return,
+                    .valid_index => {},
+                    .not_numeric => {
+                        if (self.extraProps(ext_proto)) |bag| {
+                            if (bag.object.value.getOwnRecord(key)) |rec| {
+                                if (rec.isAccessor()) {
+                                    const s = rec.setter orelse return self.throwError(.type_error, "Cannot set property {s} of #<Object> which has only a getter", .{key});
+                                    _ = try s.function.value.call(s.function.value.ctx, self.gc_allocator, obj, &.{value});
+                                    return;
+                                }
+                                if (!rec.descriptor.writable) {
+                                    return self.throwError(.type_error, "Cannot assign to read only property '{s}' of object", .{key});
+                                }
+                            }
+                        }
+                        const ta_proto = typedArrayInstanceProto(self, ext_proto);
+                        if (ta_proto == .object) {
+                            var cur: ?*const @TypeOf(ta_proto.object.value) = &ta_proto.object.value;
+                            while (cur) |p| : (cur = p.getPrototype()) {
+                                const rec = p.getOwnRecord(key) orelse continue;
+                                if (rec.isAccessor()) {
+                                    const s = rec.setter orelse return self.throwError(.type_error, "Cannot set property {s} of #<Object> which has only a getter", .{key});
+                                    _ = try s.function.value.call(s.function.value.ctx, self.gc_allocator, obj, &.{value});
+                                    return;
+                                }
+                                if (!rec.descriptor.writable) {
+                                    return self.throwError(.type_error, "Cannot assign to read only property '{s}' of object", .{key});
+                                }
+                                break;
+                            }
+                        }
+                    },
+                }
+            }
+        }
     }
     // Always-strict [[Set]] failures are real TypeErrors, not raw
     // Zig errors (the descriptor flags finally bite here).
@@ -462,7 +604,14 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
         // gap is gone).
         if (std.mem.eql(u8, key, "prototype")) {
             if (@import("temporal_builtins.zig").isIntrinsicConstructor(obj)) return self.throwError(.type_error, "Cannot assign to read only Temporal prototype", .{});
-            if (value != .object) return self.throwError(.type_error, "Setting a function's prototype to a non-object is not supported yet", .{});
+            if (obj.function.value.statics) |bag| {
+                if (bag.object.value.getOwnRecord("prototype")) |rec| {
+                    if (!rec.isAccessor() and !rec.descriptor.writable) {
+                        return self.throwError(.type_error, "Cannot assign to read only property 'prototype' of function '{s}'", .{obj.function.value.name});
+                    }
+                    return self.setObjectProperty(bag, key, value);
+                }
+            }
             // Old one released only after the new one is stored, so
             // `F.prototype = F.prototype` never drops it to zero midway.
             // Instances made from the old one hold their own reference.
@@ -512,6 +661,36 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
     }
     if (obj == .array) return self.setArrayProperty(obj, key, value);
     if (obj == .typed_array) return self.setTypedArrayProperty(obj, key, value);
+    if (obj == .array_buffer or obj == .data_view) {
+        if (self.extraProps(obj)) |bag| {
+            if (bag.object.value.getOwnRecord(key)) |rec| {
+                if (rec.isAccessor()) {
+                    const setter = rec.setter orelse return self.throwError(.type_error, "Cannot set getter-only property {s}", .{key});
+                    const res = try setter.function.value.call(setter.function.value.ctx, self.gc_allocator, obj, &.{value});
+                    res.deinit();
+                    return;
+                }
+                return self.setObjectProperty(bag, key, value);
+            }
+        }
+        const proto = if (obj == .array_buffer) self.arrayBufferProto(obj.array_buffer.value.is_shared) else self.protos.data_view;
+        if (proto == .object) {
+            var current: ?*const @TypeOf(proto.object.value) = &proto.object.value;
+            while (current) |p| : (current = p.getPrototype()) {
+                const rec = p.getOwnRecord(key) orelse continue;
+                if (rec.isAccessor()) {
+                    const setter = rec.setter orelse return self.throwError(.type_error, "Cannot set getter-only property {s}", .{key});
+                    const res = try setter.function.value.call(setter.function.value.ctx, self.gc_allocator, obj, &.{value});
+                    res.deinit();
+                    return;
+                }
+                if (!rec.descriptor.writable) return self.throwError(.type_error, "Cannot assign to read only property '{s}'", .{key});
+                break;
+            }
+        }
+        const bag = try self.extraPropsObject(obj);
+        return self.setObjectProperty(bag, key, value);
+    }
     if (obj == .@"error") {
         if (std.mem.eql(u8, key, "message")) {
             const s = try self.toDisplayStringJS(self.gc_allocator, value);
@@ -721,7 +900,17 @@ pub fn deletePropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8) 
         if (self.regexProps(obj)) |bag| return self.deleteObjectProperty(bag, key);
         return true;
     }
-    if (obj != .object) return true;
+    if (obj == .typed_array) {
+        return switch (canonicalNumericIndex(self.gc_allocator, key, obj.typed_array.value.len)) {
+            .valid_index => false,
+            .invalid_index => true,
+            .not_numeric => if (self.extraProps(obj)) |bag| try self.deleteObjectProperty(bag, key) else true,
+        };
+    }
+    if (obj != .object) {
+        if (self.extraProps(obj)) |bag| return self.deleteObjectProperty(bag, key);
+        return true;
+    }
     return self.deleteObjectProperty(obj, key);
 }
 
@@ -739,7 +928,10 @@ pub fn functionStatics(self: *Interpreter, fn_val: JSValue) anyerror!JSValue {
 /// `F.prototype.constructor === F` behavior). Chains to Object.prototype
 /// once it exists (every ordinary object's [[Prototype]]).
 pub fn functionPrototype(self: *Interpreter, fn_val: JSValue) anyerror!JSValue {
-    if (fn_val.function.value.prototype) |p| return p;
+    if (fn_val.function.value.prototype) |p| {
+        if (@import("builtin_helpers.zig").isObjectLike(p)) return p;
+        return self.protos.object;
+    }
     var proto = try self.gcNewObject();
     if (self.protos.object == .object) try proto.object.value.setPrototype(&self.protos.object.object.value);
     try proto.object.value.set("constructor", fn_val.retain());
