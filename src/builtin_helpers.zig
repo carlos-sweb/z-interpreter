@@ -217,6 +217,18 @@ pub fn toBigIntValue(self: *Interpreter, allocator: Allocator, a_in: JSValue) an
     };
 }
 
+/// ECMA-262 7.1.4 ToNumber: invokes ToPrimitive(v, number) for objects and
+/// throws TypeError on Symbol or BigInt (unlike `coercion.toNumber` which
+/// permits BigInt->f64 for internal helpers).
+pub fn toNumberStrict(self: *Interpreter, v: JSValue) anyerror!f64 {
+    const prim = if (Interpreter.isPrimitiveTag(v)) v.retain() else try self.toPrimitive(v, .number);
+    defer prim.deinit();
+    if (prim == .symbol or prim == .bigint) {
+        return self.throwError(.type_error, "Cannot convert a {s} value to a number", .{@tagName(prim)});
+    }
+    return try self.toNumberJS(prim);
+}
+
 /// ECMA-262 ToIndex: ToIntegerOrInfinity (real ToNumber, so an object
 /// with valueOf/@@toPrimitive works, a fractional number truncates
 /// toward zero, and NaN becomes +0 -- NOT "must already be an integer
@@ -226,7 +238,7 @@ pub fn toBigIntValue(self: *Interpreter, allocator: Allocator, a_in: JSValue) an
 /// against [0, 2^53-1]. Checked BEFORE @intFromFloat, which panics (not
 /// an error) on a magnitude that doesn't fit in the target type.
 pub fn toByteIndexArg(self: *Interpreter, v: JSValue, what: []const u8) anyerror!usize {
-    const n = try self.toNumberJS(v);
+    const n = try toNumberStrict(self, v);
     const integer: f64 = if (std.math.isNan(n)) 0 else @trunc(n);
     const max_index: f64 = 9007199254740991.0;
     if (integer < 0 or integer > max_index) {
@@ -353,41 +365,42 @@ pub fn typedElemSet(self: *Interpreter, kind: zvalue.TypedKind, buffer: *zbuffer
     // is uncatchable from JS). Guarded once here rather than in each of
     // the 8 branches.
     if (value == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a {s}", .{if (kind.isBigInt()) "BigInt" else "number"});
+    const num_val: JSValue = if (kind.isBigInt()) JSValue.UNDEFINED else JSValue.fromNumber(try toNumberStrict(self, value));
     switch (kind) {
         .i8 => {
-            const v = try toInt8Wrap(self, value);
+            const v = try toInt8Wrap(self, num_val);
             typedView(i8, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
         },
         .u8 => {
-            const v = try toUint8Wrap(self, value);
+            const v = try toUint8Wrap(self, num_val);
             typedView(u8, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
         },
         .u8_clamped => {
-            const v = try toUint8Clamp(self, value);
+            const v = try toUint8Clamp(self, num_val);
             typedView(u8, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
         },
         .i16 => {
-            const v = try toInt16Wrap(self, value);
+            const v = try toInt16Wrap(self, num_val);
             typedView(i16, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
         },
         .u16 => {
-            const v = try toUint16Wrap(self, value);
+            const v = try toUint16Wrap(self, num_val);
             typedView(u16, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
         },
         .i32 => {
-            const v = try self.toInt32JS(value);
+            const v = try self.toInt32JS(num_val);
             typedView(i32, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
         },
         .u32 => {
-            const v = try self.toUint32JS(value);
+            const v = try self.toUint32JS(num_val);
             typedView(u32, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
         },
         .f32 => {
-            const v: f32 = @floatCast(try self.toNumberJS(value));
+            const v: f32 = @floatCast(num_val.number);
             typedView(f32, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
         },
         .f64 => {
-            const v = try self.toNumberJS(value);
+            const v = num_val.number;
             typedView(f64, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
         },
         .i64 => {
@@ -427,7 +440,7 @@ pub fn oobIsNoop(e: zbuffer.BufferError) anyerror!void {
 /// only has an uncatchable `error.NotImplemented` for that today, so it
 /// must be mapped to a real, catchable TypeError here.
 pub fn toLength(self: *Interpreter, v: JSValue) anyerror!usize {
-    const n = try self.toNumberJS(v);
+    const n = try toNumberStrict(self, v);
     if (std.math.isNan(n) or n <= 0) return 0;
     return @intFromFloat(@min(@floor(n), 9007199254740991.0));
 }

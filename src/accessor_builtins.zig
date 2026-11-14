@@ -125,6 +125,26 @@ fn typedArrayGetter(comptime field: enum { buffer, byte_length, byte_offset, len
     }.call;
 }
 
+fn typedArrayToStringTag(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = args;
+    if (this_value != .typed_array) return JSValue.UNDEFINED;
+    const name: []const u8 = switch (this_value.typed_array.value.kind) {
+        .i8 => "Int8Array",
+        .u8 => "Uint8Array",
+        .u8_clamped => "Uint8ClampedArray",
+        .i16 => "Int16Array",
+        .u16 => "Uint16Array",
+        .i32 => "Int32Array",
+        .u32 => "Uint32Array",
+        .f32 => "Float32Array",
+        .f64 => "Float64Array",
+        .i64 => "BigInt64Array",
+        .u64 => "BigUint64Array",
+    };
+    return interp(ctx).gcNewString(name);
+}
+
 // ===== Symbol.prototype.description =====
 
 fn symbolDescription(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -148,11 +168,31 @@ fn speciesGetter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
 
 // ===== Object.prototype.__proto__ (Annex B.2.2.1) =====
 
+fn getPrototypeOfWithTypedArray(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self = interp(ctx);
+    const obj = arg(args, 0);
+    if (@import("arraybuffer_builtins.zig").isTypedArrayConstructor(obj)) {
+        if (Interpreter.heapBoxAddress(obj)) |addr| {
+            if (self.proto_refs.get(addr)) |p| return p.retain();
+        }
+        if (self.protos.typed_array_base.object.value.get("constructor")) |ta_ctor| {
+            return ta_ctor.retain();
+        }
+    }
+    return object_builtins.objectGetPrototypeOf(ctx, allocator, this_value, args);
+}
+
+fn reflectGetPrototypeOfWithTypedArray(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self = interp(ctx);
+    if (!isObjectLike(arg(args, 0))) return self.throwError(.type_error, "Reflect.getPrototypeOf called on non-object", .{});
+    return getPrototypeOfWithTypedArray(ctx, allocator, this_value, args);
+}
+
 fn protoGetter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
     // ToObject(this), then [[GetPrototypeOf]] (objectGetPrototypeOf
     // throws the TypeError for undefined/null).
-    return object_builtins.objectGetPrototypeOf(ctx, allocator, JSValue.UNDEFINED, &.{this_value});
+    return getPrototypeOfWithTypedArray(ctx, allocator, JSValue.UNDEFINED, &.{this_value});
 }
 
 fn protoSetter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -198,19 +238,35 @@ pub fn install(self: *Interpreter) !void {
     try defineAccessor(self, p.typed_array_base, "byteLength", "byteLength", typedArrayGetter(.byte_length, "%TypedArray%.prototype.byteLength"), null);
     try defineAccessor(self, p.typed_array_base, "byteOffset", "byteOffset", typedArrayGetter(.byte_offset, "%TypedArray%.prototype.byteOffset"), null);
     try defineAccessor(self, p.typed_array_base, "length", "length", typedArrayGetter(.length, "%TypedArray%.prototype.length"), null);
+    if (self.symbol_to_string_tag) |tag_sym| {
+        const tag_key = try self.encodeKey(tag_sym);
+        defer self.gc_allocator.free(tag_key);
+        try defineAccessor(self, p.typed_array_base, tag_key, "[Symbol.toStringTag]", typedArrayToStringTag, null);
+    }
 
     try defineAccessor(self, p.symbol, "description", "description", symbolDescription, null);
 
     try defineAccessor(self, p.object, "__proto__", "__proto__", protoGetter, protoSetter);
 
     // get [Symbol.species] on the constructors that have one (RegExp's
-    // is installed with the rest of RegExp; %TypedArray% has no
-    // constructor in this engine yet).
+    // is installed with the rest of RegExp; %TypedArray%'s is installed
+    // on the intrinsic %TypedArray% statics bag).
     const species_sym = (try self.functionStatics(self.global_env.get("Symbol").?)).object.value.get("species").?;
     const species_key = try self.encodeKey(species_sym);
     defer self.gc_allocator.free(species_key);
     inline for (.{ "Array", "ArrayBuffer", "SharedArrayBuffer", "Map", "Set", "Promise" }) |name| {
         const statics = try self.functionStatics(self.global_env.get(name).?);
         try defineAccessor(self, statics, species_key, "[Symbol.species]", speciesGetter, null);
+    }
+    const ta_statics = try @import("arraybuffer_builtins.zig").installHierarchy(self);
+    try defineAccessor(self, ta_statics, species_key, "[Symbol.species]", speciesGetter, null);
+    const object_statics = try self.functionStatics(self.global_env.get("Object").?);
+    const old_obj_gpo = object_statics.object.value.get("getPrototypeOf");
+    try builtin_helpers.dneMethod(object_statics, "getPrototypeOf", try native(self, "getPrototypeOf", 1, getPrototypeOfWithTypedArray));
+    if (old_obj_gpo) |old| old.deinit();
+    if (self.global_env.get("Reflect")) |reflect_obj| {
+        const old_ref_gpo = reflect_obj.object.value.get("getPrototypeOf");
+        try builtin_helpers.dneMethod(reflect_obj, "getPrototypeOf", try native(self, "getPrototypeOf", 1, reflectGetPrototypeOfWithTypedArray));
+        if (old_ref_gpo) |old| old.deinit();
     }
 }

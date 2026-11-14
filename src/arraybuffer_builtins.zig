@@ -33,7 +33,8 @@ const native = native_helpers.native;
 const installBuiltin = builtin_helpers.installBuiltin;
 const requireTag = builtin_helpers.requireTag;
 const requireCallback = builtin_helpers.requireCallback;
-const callCallback = builtin_helpers.callCallback;
+const callCallbackWithThis = builtin_helpers.callCallbackWithThis;
+const toNumberStrict = builtin_helpers.toNumberStrict;
 const toByteIndexArg = builtin_helpers.toByteIndexArg;
 const toIntSat = builtin_helpers.toIntSat;
 const toBigIntValue = builtin_helpers.toBigIntValue;
@@ -47,7 +48,6 @@ const bigIntFromU64 = builtin_helpers.bigIntFromU64;
 const typedElemGet = builtin_helpers.typedElemGet;
 const typedElemSet = builtin_helpers.typedElemSet;
 const toLength = builtin_helpers.toLength;
-const hasIteratorMethod = builtin_helpers.hasIteratorMethod;
 const ArrayIterCtx = builtin_helpers.ArrayIterCtx;
 const arrayIterNext = builtin_helpers.arrayIterNext;
 const iteratorSelfBuiltin = builtin_helpers.iteratorSelfBuiltin;
@@ -385,61 +385,70 @@ fn typedArrayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
         return self.gcNewTypedArray(first.retain(), byte_offset, len, kind) catch |e| self.bufferErr(e);
     }
 
-    if (first == .undefined or first == .number) {
+    if (!builtin_helpers.isObjectLike(first)) {
         const n: usize = if (first == .undefined) 0 else try toByteIndexArg(self, first, "length");
-        const buf = try self.gcNewArrayBuffer(n * elem_size);
+        const buf = self.gcNewArrayBuffer(n * elem_size) catch return self.throwError(.range_error, "Invalid typed array length: {d}", .{n});
         // gcNewTypedArray takes `buf` (its owner) even when it fails.
         return self.gcNewTypedArray(buf, 0, n, kind) catch |e| self.bufferErr(e);
     }
 
-    // Non-iterable array-like (`{length:3, 0:1, ...}`, no @@iterator):
-    // allocate the buffer FIRST, matching real spec order
-    // (AllocateTypedArrayBuffer happens before InitializeTypedArray-
-    // FromArrayLike's per-index Get loop) -- an absurd `length`
-    // (`new Int32Array({length: 2**53})`) then fails fast via the
-    // allocator itself refusing an impossible byte request, instead of
-    // looping `length` times BEFORE ever attempting the allocation
-    // (which would time out for any length past a few million).
-    if (first == .object and !(try hasIteratorMethod(self, first))) {
-        const len_v = try self.getProperty(first, "length");
-        defer len_v.deinit();
-        const len = try toLength(self, len_v);
-        // Real spec (AllocateArrayBuffer): "If it is not possible to
-        // create a Data Block of size byteLength bytes, throw a
-        // RangeError" -- an allocation failure here is exactly that
-        // case (`toLength` already clamped `len` to 2^53-1, so
-        // `len * elem_size` can legitimately be an impossible request),
-        // not an unrecoverable engine error.
-        const buf = self.gcNewArrayBuffer(len * elem_size) catch return self.throwError(.range_error, "Invalid typed array length: {d}", .{len});
-        // gcNewTypedArray takes `buf` (its owner) even when it fails.
-        const ta = self.gcNewTypedArray(buf, 0, len, kind) catch |e| return self.bufferErr(e);
+    if (first == .typed_array) {
+        if (first.typed_array.value.kind.isBigInt() != kind.isBigInt()) {
+            return self.throwError(.type_error, "Cannot mix BigInt and other types, use explicit conversions", .{});
+        }
+        const src_len = first.typed_array.value.len;
+        const buf = self.gcNewArrayBuffer(src_len * elem_size) catch return self.throwError(.range_error, "Invalid typed array length: {d}", .{src_len});
+        const ta = self.gcNewTypedArray(buf, 0, src_len, kind) catch |e| return self.bufferErr(e);
+        errdefer ta.deinit();
         var i: usize = 0;
-        while (i < len) : (i += 1) {
-            const key = try std.fmt.allocPrint(allocator, "{d}", .{i});
-            defer allocator.free(key);
-            const v = try self.getProperty(first, key);
+        while (i < src_len) : (i += 1) {
+            const v = try taGet(self, first, i);
             defer v.deinit();
-            typedElemSet(self, kind, &buf.array_buffer.value, 0, len, i, v) catch |e| {
-                ta.deinit();
-                return e;
-            };
+            try typedElemSet(self, kind, &buf.array_buffer.value, 0, src_len, i, v);
         }
         return ta;
     }
 
-    // Iterable: copy element VALUES (coerced per kind, going through
-    // the exact same conversion writes do), never a raw byte
-    // reinterpretation -- `new Int32Array(new Uint8Array([1,2,3]))` is
-    // `[1,2,3]`, not an empty/aliased view.
-    const items = try self.iterableItems(first);
-    defer self.gc_allocator.free(items);
-    const buf = try self.gcNewArrayBuffer(items.len * elem_size);
-    const ta = self.gcNewTypedArray(buf, 0, items.len, kind) catch |e| return self.bufferErr(e);
-    for (items, 0..) |item, i| {
-        typedElemSet(self, kind, &buf.array_buffer.value, 0, items.len, i, item) catch |e| {
-            ta.deinit();
-            return e;
-        };
+    var using_iter: JSValue = JSValue.UNDEFINED;
+    if (self.symbol_iterator) |sym| {
+        const key = try self.encodeKey(sym);
+        defer self.gc_allocator.free(key);
+        using_iter = try self.getProperty(first, key);
+    }
+    defer using_iter.deinit();
+
+    if (using_iter != .undefined and using_iter != .null) {
+        if (using_iter != .function) return self.throwError(.type_error, "Symbol.iterator is not a function", .{});
+        const iter = try self.callValue(using_iter, first, &.{}, "[Symbol.iterator]");
+        defer iter.deinit();
+        if (!builtin_helpers.isObjectLike(iter)) return self.throwError(.type_error, "Result of the Symbol.iterator method is not an object", .{});
+        const values = try self.drainIterator(iter);
+        defer {
+            for (values) |v| v.deinit();
+            self.gc_allocator.free(values);
+        }
+        const buf = self.gcNewArrayBuffer(values.len * elem_size) catch return self.throwError(.range_error, "Invalid typed array length: {d}", .{values.len});
+        const ta = self.gcNewTypedArray(buf, 0, values.len, kind) catch |e| return self.bufferErr(e);
+        errdefer ta.deinit();
+        for (values, 0..) |item, i| {
+            try typedElemSet(self, kind, &buf.array_buffer.value, 0, values.len, i, item);
+        }
+        return ta;
+    }
+
+    const len_v = try self.getProperty(first, "length");
+    defer len_v.deinit();
+    const len = try toLength(self, len_v);
+    const buf = self.gcNewArrayBuffer(len * elem_size) catch return self.throwError(.range_error, "Invalid typed array length: {d}", .{len});
+    const ta = self.gcNewTypedArray(buf, 0, len, kind) catch |e| return self.bufferErr(e);
+    errdefer ta.deinit();
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        const key = try std.fmt.allocPrint(allocator, "{d}", .{i});
+        defer allocator.free(key);
+        const v = try self.getProperty(first, key);
+        defer v.deinit();
+        try typedElemSet(self, kind, &buf.array_buffer.value, 0, len, i, v);
     }
     return ta;
 }
@@ -487,23 +496,27 @@ fn newSameKindTypedArray(self: *Interpreter, kind: zvalue.TypedKind, len: usize)
 fn taForEach(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireTypedArray(ctx, this_value, "forEach");
     const cb = try requireCallback(ctx, args);
+    const this_arg = arg(args, 1);
     const self = interp(ctx);
     const len = taLen(this_value);
     var i: usize = 0;
-    while (i < len) : (i += 1) _ = try callCallback(cb, allocator, try taGet(self, this_value, i), i, this_value);
+    while (i < len) : (i += 1) _ = try callCallbackWithThis(cb, allocator, this_arg, try taGet(self, this_value, i), i, this_value);
     return JSValue.UNDEFINED;
 }
 
 fn taMap(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireTypedArray(ctx, this_value, "map");
     const cb = try requireCallback(ctx, args);
+    const this_arg = arg(args, 1);
     const self = interp(ctx);
     const box = this_value.typed_array.value;
     const len = box.len;
     const result = try newSameKindTypedArray(self, box.kind, len);
+    errdefer result.deinit();
     var i: usize = 0;
     while (i < len) : (i += 1) {
-        const v = try callCallback(cb, allocator, try taGet(self, this_value, i), i, this_value);
+        const v = try callCallbackWithThis(cb, allocator, this_arg, try taGet(self, this_value, i), i, this_value);
+        defer v.deinit();
         try taWrite(self, result, i, v);
     }
     return result;
@@ -512,6 +525,7 @@ fn taMap(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []con
 fn taFilter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireTypedArray(ctx, this_value, "filter");
     const cb = try requireCallback(ctx, args);
+    const this_arg = arg(args, 1);
     const self = interp(ctx);
     const box = this_value.typed_array.value;
     const len = box.len;
@@ -520,9 +534,10 @@ fn taFilter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
     var i: usize = 0;
     while (i < len) : (i += 1) {
         const item = try taGet(self, this_value, i);
-        if (coercion.isTruthy(try callCallback(cb, allocator, item, i, this_value))) try kept.append(allocator, item);
+        if (coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, item, i, this_value))) try kept.append(allocator, item);
     }
     const result = try newSameKindTypedArray(self, box.kind, kept.items.len);
+    errdefer result.deinit();
     for (kept.items, 0..) |item, idx| try taWrite(self, result, idx, item);
     return result;
 }
@@ -530,12 +545,13 @@ fn taFilter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
 fn taFind(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireTypedArray(ctx, this_value, "find");
     const cb = try requireCallback(ctx, args);
+    const this_arg = arg(args, 1);
     const self = interp(ctx);
     const len = taLen(this_value);
     var i: usize = 0;
     while (i < len) : (i += 1) {
         const item = try taGet(self, this_value, i);
-        if (coercion.isTruthy(try callCallback(cb, allocator, item, i, this_value))) return item;
+        if (coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, item, i, this_value))) return item;
     }
     return JSValue.UNDEFINED;
 }
@@ -543,11 +559,12 @@ fn taFind(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
 fn taFindIndex(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireTypedArray(ctx, this_value, "findIndex");
     const cb = try requireCallback(ctx, args);
+    const this_arg = arg(args, 1);
     const self = interp(ctx);
     const len = taLen(this_value);
     var i: usize = 0;
     while (i < len) : (i += 1) {
-        if (coercion.isTruthy(try callCallback(cb, allocator, try taGet(self, this_value, i), i, this_value))) return JSValue.fromNumber(@floatFromInt(i));
+        if (coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, try taGet(self, this_value, i), i, this_value))) return JSValue.fromNumber(@floatFromInt(i));
     }
     return JSValue.fromNumber(-1);
 }
@@ -555,12 +572,13 @@ fn taFindIndex(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
 fn taFindLast(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireTypedArray(ctx, this_value, "findLast");
     const cb = try requireCallback(ctx, args);
+    const this_arg = arg(args, 1);
     const self = interp(ctx);
     var i = taLen(this_value);
     while (i > 0) {
         i -= 1;
         const item = try taGet(self, this_value, i);
-        if (coercion.isTruthy(try callCallback(cb, allocator, item, i, this_value))) return item;
+        if (coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, item, i, this_value))) return item;
     }
     return JSValue.UNDEFINED;
 }
@@ -568,11 +586,12 @@ fn taFindLast(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 fn taFindLastIndex(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireTypedArray(ctx, this_value, "findLastIndex");
     const cb = try requireCallback(ctx, args);
+    const this_arg = arg(args, 1);
     const self = interp(ctx);
     var i = taLen(this_value);
     while (i > 0) {
         i -= 1;
-        if (coercion.isTruthy(try callCallback(cb, allocator, try taGet(self, this_value, i), i, this_value))) return JSValue.fromNumber(@floatFromInt(i));
+        if (coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, try taGet(self, this_value, i), i, this_value))) return JSValue.fromNumber(@floatFromInt(i));
     }
     return JSValue.fromNumber(-1);
 }
@@ -580,11 +599,12 @@ fn taFindLastIndex(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
 fn taSome(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireTypedArray(ctx, this_value, "some");
     const cb = try requireCallback(ctx, args);
+    const this_arg = arg(args, 1);
     const self = interp(ctx);
     const len = taLen(this_value);
     var i: usize = 0;
     while (i < len) : (i += 1) {
-        if (coercion.isTruthy(try callCallback(cb, allocator, try taGet(self, this_value, i), i, this_value))) return JSValue.fromBool(true);
+        if (coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, try taGet(self, this_value, i), i, this_value))) return JSValue.fromBool(true);
     }
     return JSValue.fromBool(false);
 }
@@ -592,11 +612,12 @@ fn taSome(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
 fn taEvery(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireTypedArray(ctx, this_value, "every");
     const cb = try requireCallback(ctx, args);
+    const this_arg = arg(args, 1);
     const self = interp(ctx);
     const len = taLen(this_value);
     var i: usize = 0;
     while (i < len) : (i += 1) {
-        if (!coercion.isTruthy(try callCallback(cb, allocator, try taGet(self, this_value, i), i, this_value))) return JSValue.fromBool(false);
+        if (!coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, try taGet(self, this_value, i), i, this_value))) return JSValue.fromBool(false);
     }
     return JSValue.fromBool(true);
 }
@@ -649,8 +670,12 @@ fn taIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     try requireTypedArray(ctx, this_value, "indexOf");
     const self = interp(ctx);
     const len = taLen(this_value);
+    if (len == 0) return JSValue.fromNumber(-1);
     const target = arg(args, 0);
-    var i: usize = 0;
+    const n = if (args.len >= 2) try toNumberStrict(self, args[1]) else 0.0;
+    if (std.math.isPositiveInf(n)) return JSValue.fromNumber(-1);
+    const start = normIndex(n, len);
+    var i: usize = start;
     while (i < len) : (i += 1) {
         if (zvalue.equality.strictEquals(try taGet(self, this_value, i), target)) return JSValue.fromNumber(@floatFromInt(i));
     }
@@ -662,8 +687,12 @@ fn taIncludes(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     try requireTypedArray(ctx, this_value, "includes");
     const self = interp(ctx);
     const len = taLen(this_value);
+    if (len == 0) return JSValue.fromBool(false);
     const target = arg(args, 0);
-    var i: usize = 0;
+    const n = if (args.len >= 2) try toNumberStrict(self, args[1]) else 0.0;
+    if (std.math.isPositiveInf(n)) return JSValue.fromBool(false);
+    const start = normIndex(n, len);
+    var i: usize = start;
     while (i < len) : (i += 1) {
         if (zvalue.equality.sameValueZero(try taGet(self, this_value, i), target)) return JSValue.fromBool(true);
     }
@@ -674,8 +703,15 @@ fn taLastIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     _ = allocator;
     try requireTypedArray(ctx, this_value, "lastIndexOf");
     const self = interp(ctx);
+    const len = taLen(this_value);
+    if (len == 0) return JSValue.fromNumber(-1);
     const target = arg(args, 0);
-    var i = taLen(this_value);
+    const n = if (args.len >= 2) try toNumberStrict(self, args[1]) else @as(f64, @floatFromInt(len - 1));
+    if (std.math.isNegativeInf(n)) return JSValue.fromNumber(-1);
+    const rel = toIntSat(n);
+    const k_signed: isize = if (rel >= 0) @min(rel, @as(isize, @intCast(len)) - 1) else @as(isize, @intCast(len)) + rel;
+    if (k_signed < 0) return JSValue.fromNumber(-1);
+    var i: usize = @as(usize, @intCast(k_signed)) + 1;
     while (i > 0) {
         i -= 1;
         if (zvalue.equality.strictEquals(try taGet(self, this_value, i), target)) return JSValue.fromNumber(@floatFromInt(i));
@@ -688,7 +724,7 @@ fn taAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []cons
     try requireTypedArray(ctx, this_value, "at");
     const self = interp(ctx);
     const len: isize = @intCast(taLen(this_value));
-    const rel = toIntSat(try self.toNumberJS(arg(args, 0)));
+    const rel = toIntSat(try toNumberStrict(self, arg(args, 0)));
     const idx = if (rel < 0) len + rel else rel;
     if (idx < 0 or idx >= len) return JSValue.UNDEFINED;
     return taGet(self, this_value, @intCast(idx));
@@ -722,6 +758,32 @@ fn taJoin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     return taJoinWith(self, allocator, this_value, sep);
 }
 
+fn taToLocaleString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    try requireTypedArray(ctx, this_value, "toLocaleString");
+    const self = interp(ctx);
+    const len = taLen(this_value);
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        if (i != 0) try buf.appendSlice(allocator, ",");
+        const elem = try taGet(self, this_value, i);
+        defer elem.deinit();
+        const tl_fn = try self.getProperty(elem, "toLocaleString");
+        defer tl_fn.deinit();
+        if (tl_fn != .function and tl_fn != .proxy) {
+            return self.throwError(.type_error, "toLocaleString is not a function", .{});
+        }
+        const res = try self.callValue(tl_fn, elem, &.{}, "toLocaleString");
+        defer res.deinit();
+        const s = try self.toDisplayStringJS(allocator, res);
+        defer allocator.free(s);
+        try buf.appendSlice(allocator, s);
+    }
+    return self.gcNewString(buf.items);
+}
+
 fn taToStringMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
     try requireTypedArray(ctx, this_value, "toString");
@@ -732,12 +794,17 @@ fn taFill(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     _ = allocator;
     try requireTypedArray(ctx, this_value, "fill");
     const self = interp(ctx);
-    const len = taLen(this_value);
-    const val = arg(args, 0);
-    const start = if (arg(args, 1) == .undefined) 0 else normIndex(try self.toNumberJS(arg(args, 1)), len);
-    const end = if (arg(args, 2) == .undefined) len else normIndex(try self.toNumberJS(arg(args, 2)), len);
+    const box = this_value.typed_array.value;
+    const len = box.len;
+    const coerced_val: JSValue = if (box.kind.isBigInt())
+        try toBigIntValue(self, self.gc_allocator, arg(args, 0))
+    else
+        JSValue.fromNumber(try toNumberStrict(self, arg(args, 0)));
+    defer coerced_val.deinit();
+    const start = if (arg(args, 1) == .undefined) 0 else normIndex(try toNumberStrict(self, arg(args, 1)), len);
+    const end = if (arg(args, 2) == .undefined) len else normIndex(try toNumberStrict(self, arg(args, 2)), len);
     var i = start;
-    while (i < end) : (i += 1) try taWrite(self, this_value, i, val);
+    while (i < end) : (i += 1) try taWrite(self, this_value, i, coerced_val);
     return this_value.retain();
 }
 
@@ -745,9 +812,9 @@ fn taCopyWithin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     try requireTypedArray(ctx, this_value, "copyWithin");
     const self = interp(ctx);
     const len = taLen(this_value);
-    const target = normIndex(try self.toNumberJS(arg(args, 0)), len);
-    const start = if (arg(args, 1) == .undefined) 0 else normIndex(try self.toNumberJS(arg(args, 1)), len);
-    const end = if (arg(args, 2) == .undefined) len else normIndex(try self.toNumberJS(arg(args, 2)), len);
+    const target = normIndex(try toNumberStrict(self, arg(args, 0)), len);
+    const start = if (arg(args, 1) == .undefined) 0 else normIndex(try toNumberStrict(self, arg(args, 1)), len);
+    const end = if (arg(args, 2) == .undefined) len else normIndex(try toNumberStrict(self, arg(args, 2)), len);
     if (start >= end or target >= len) return this_value.retain();
     const count = @min(end - start, len - target);
     // Snapshot first so overlapping source/destination ranges are always
@@ -789,11 +856,13 @@ fn taReverse(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
 fn taSortLess(self: *Interpreter, allocator: Allocator, cmp: JSValue, kind: zvalue.TypedKind, a: JSValue, b: JSValue) anyerror!bool {
     if (cmp == .function) {
         const r = try cmp.function.value.call(cmp.function.value.ctx, allocator, JSValue.UNDEFINED, &.{ a, b });
-        return (try self.toNumberJS(r)) < 0;
+        defer r.deinit();
+        return (try toNumberStrict(self, r)) < 0;
     }
     if (kind.isBigInt()) return a.bigint.value.cmp(b.bigint.value) == .lt;
     if (std.math.isNan(a.number)) return false;
     if (std.math.isNan(b.number)) return true;
+    if (a.number == 0 and b.number == 0) return std.math.signbit(a.number) and !std.math.signbit(b.number);
     return a.number < b.number;
 }
 
@@ -827,36 +896,140 @@ fn taSort(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     return this_value.retain();
 }
 
+fn taToReversed(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = args;
+    try requireTypedArray(ctx, this_value, "toReversed");
+    const self = interp(ctx);
+    const box = this_value.typed_array.value;
+    const len = box.len;
+    const result = try newSameKindTypedArray(self, box.kind, len);
+    errdefer result.deinit();
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        const v = try taGet(self, this_value, len - 1 - i);
+        defer v.deinit();
+        try taWrite(self, result, i, v);
+    }
+    return result;
+}
+
+fn taToSorted(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    try requireTypedArray(ctx, this_value, "toSorted");
+    const self = interp(ctx);
+    const cmp = arg(args, 0);
+    if (cmp != .undefined and cmp != .function) return self.throwError(.type_error, "The comparison function must be either a function or undefined", .{});
+    const box = this_value.typed_array.value;
+    const n = box.len;
+    const tmp = try allocator.alloc(JSValue, n);
+    defer allocator.free(tmp);
+    var i: usize = 0;
+    while (i < n) : (i += 1) tmp[i] = try taGet(self, this_value, i);
+    if (n >= 2) {
+        i = 1;
+        while (i < n) : (i += 1) {
+            const key = tmp[i];
+            var j = i;
+            while (j > 0) {
+                const before = try taSortLess(self, allocator, cmp, box.kind, key, tmp[j - 1]);
+                if (!before) break;
+                tmp[j] = tmp[j - 1];
+                j -= 1;
+            }
+            tmp[j] = key;
+        }
+    }
+    const result = try newSameKindTypedArray(self, box.kind, n);
+    errdefer result.deinit();
+    i = 0;
+    while (i < n) : (i += 1) try taWrite(self, result, i, tmp[i]);
+    return result;
+}
+
+fn taWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    try requireTypedArray(ctx, this_value, "with");
+    const self = interp(ctx);
+    const box = this_value.typed_array.value;
+    const len = box.len;
+    const rel = toIntSat(try toNumberStrict(self, arg(args, 0)));
+    const actual_index: isize = if (rel >= 0) rel else @as(isize, @intCast(len)) + rel;
+    const coerced_val: JSValue = if (box.kind.isBigInt())
+        try toBigIntValue(self, self.gc_allocator, arg(args, 1))
+    else
+        JSValue.fromNumber(try toNumberStrict(self, arg(args, 1)));
+    defer coerced_val.deinit();
+    if (actual_index < 0 or actual_index >= @as(isize, @intCast(len))) {
+        return self.throwError(.range_error, "Invalid typed array index", .{});
+    }
+    const target_idx: usize = @intCast(actual_index);
+    const result = try newSameKindTypedArray(self, box.kind, len);
+    errdefer result.deinit();
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        const v = if (i == target_idx) coerced_val.retain() else try taGet(self, this_value, i);
+        defer v.deinit();
+        try taWrite(self, result, i, v);
+    }
+    return result;
+}
+
 /// `TypedArray.prototype.set(source, offset=0)`: copies element VALUES
 /// (per-kind coerced, like every other write path) from `source` into
-/// `this` starting at `offset`. Source values are all materialized FIRST,
-/// which correctly handles the same-buffer-overlap case by construction
-/// (same trick `copyWithin` uses) without needing to detect overlap
-/// explicitly.
+/// `this` starting at `offset`. Source values are all materialized FIRST
+/// when `source` is a TypedArray, which correctly handles the
+/// same-buffer-overlap case by construction; non-TypedArray sources use
+/// `SetTypedArrayFromArrayLike` (`ToObject` + `LengthOfArrayLike` +
+/// per-index `Get`).
 fn taSetMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireTypedArray(ctx, this_value, "set");
     const self = interp(ctx);
     const len = taLen(this_value);
     const source = arg(args, 0);
-    const offset_n = if (arg(args, 1) == .undefined) 0 else try self.toNumberJS(arg(args, 1));
-    if (std.math.isNan(offset_n) or offset_n < 0 or offset_n > @as(f64, @floatFromInt(len))) {
-        return self.throwError(.range_error, "Offset is out of bounds", .{});
-    }
-    const offset: usize = @intFromFloat(offset_n);
+    const offset_raw = if (arg(args, 1) == .undefined) 0.0 else try toNumberStrict(self, arg(args, 1));
+    const offset_int: f64 = if (std.math.isNan(offset_raw)) 0.0 else @trunc(offset_raw);
+    if (offset_int < 0) return self.throwError(.range_error, "Offset is out of bounds", .{});
 
-    var values: std.ArrayList(JSValue) = .empty;
-    defer values.deinit(allocator);
     if (source == .typed_array) {
+        if (source.typed_array.value.kind.isBigInt() != this_value.typed_array.value.kind.isBigInt()) {
+            return self.throwError(.type_error, "Cannot mix BigInt and other types, use explicit conversions", .{});
+        }
         const slen = source.typed_array.value.len;
+        if (std.math.isPositiveInf(offset_int) or offset_int + @as(f64, @floatFromInt(slen)) > @as(f64, @floatFromInt(len))) {
+            const msg = if (offset_int > @as(f64, @floatFromInt(len))) "Offset is out of bounds" else "Source is too large";
+            return self.throwError(.range_error, "{s}", .{msg});
+        }
+        const offset: usize = @intFromFloat(offset_int);
+        var values: std.ArrayList(JSValue) = .empty;
+        defer {
+            for (values.items) |v| v.deinit();
+            values.deinit(allocator);
+        }
         var i: usize = 0;
         while (i < slen) : (i += 1) try values.append(allocator, try taGet(self, source, i));
-    } else {
-        const items = try self.iterableItems(source);
-        defer self.gc_allocator.free(items);
-        try values.appendSlice(allocator, items);
+        for (values.items, 0..) |v, idx| try taWrite(self, this_value, offset + idx, v);
+        return JSValue.UNDEFINED;
     }
-    if (offset + values.items.len > len) return self.throwError(.range_error, "Source is too large", .{});
-    for (values.items, 0..) |v, i| try taWrite(self, this_value, offset + i, v);
+
+    if (source == .undefined or source == .null) {
+        return self.throwError(.type_error, "Cannot convert undefined or null to object", .{});
+    }
+    const len_v = try self.getProperty(source, "length");
+    defer len_v.deinit();
+    const slen = try toLength(self, len_v);
+    if (std.math.isPositiveInf(offset_int) or offset_int + @as(f64, @floatFromInt(slen)) > @as(f64, @floatFromInt(len))) {
+        const msg = if (offset_int > @as(f64, @floatFromInt(len))) "Offset is out of bounds" else "Source is too large";
+        return self.throwError(.range_error, "{s}", .{msg});
+    }
+    const offset: usize = @intFromFloat(offset_int);
+    var k: usize = 0;
+    while (k < slen) : (k += 1) {
+        var key_buf: [32]u8 = undefined;
+        const pk = std.fmt.bufPrint(&key_buf, "{d}", .{k}) catch unreachable;
+        const val = try self.getProperty(source, pk);
+        defer val.deinit();
+        try taWrite(self, this_value, offset + k, val);
+    }
     return JSValue.UNDEFINED;
 }
 
@@ -868,8 +1041,8 @@ fn taSubarray(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     const self = interp(ctx);
     const box = this_value.typed_array.value;
     const len = box.len;
-    const start = if (arg(args, 0) == .undefined) 0 else normIndex(try self.toNumberJS(arg(args, 0)), len);
-    const end = if (arg(args, 1) == .undefined) len else normIndex(try self.toNumberJS(arg(args, 1)), len);
+    const start = if (arg(args, 0) == .undefined) 0 else normIndex(try toNumberStrict(self, arg(args, 0)), len);
+    const end = if (arg(args, 1) == .undefined) len else normIndex(try toNumberStrict(self, arg(args, 1)), len);
     const count = if (end > start) end - start else 0;
     const new_byte_offset = box.byte_offset + start * box.kind.elemSize();
     return self.gcNewTypedArray(box.owner.retain(), new_byte_offset, count, box.kind) catch |e| self.bufferErr(e);
@@ -882,10 +1055,11 @@ fn taSlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const self = interp(ctx);
     const box = this_value.typed_array.value;
     const len = box.len;
-    const start = if (arg(args, 0) == .undefined) 0 else normIndex(try self.toNumberJS(arg(args, 0)), len);
-    const end = if (arg(args, 1) == .undefined) len else normIndex(try self.toNumberJS(arg(args, 1)), len);
+    const start = if (arg(args, 0) == .undefined) 0 else normIndex(try toNumberStrict(self, arg(args, 0)), len);
+    const end = if (arg(args, 1) == .undefined) len else normIndex(try toNumberStrict(self, arg(args, 1)), len);
     const count = if (end > start) end - start else 0;
     const result = try newSameKindTypedArray(self, box.kind, count);
+    errdefer result.deinit();
     var i: usize = 0;
     while (i < count) : (i += 1) try taWrite(self, result, i, try taGet(self, this_value, start + i));
     return result;
@@ -961,10 +1135,155 @@ pub const typed_array_methods = std.StaticStringMap(MethodSpec).initComptime(.{
     .{ "some", MethodSpec{ .call = taSome, .arity = 1 } },
     .{ "sort", MethodSpec{ .call = taSort, .arity = 1 } },
     .{ "subarray", MethodSpec{ .call = taSubarray, .arity = 2 } },
-    .{ "toLocaleString", MethodSpec{ .call = taToStringMethod, .arity = 0 } },
+    .{ "toLocaleString", MethodSpec{ .call = taToLocaleString, .arity = 0 } },
+    .{ "toReversed", MethodSpec{ .call = taToReversed, .arity = 0 } },
+    .{ "toSorted", MethodSpec{ .call = taToSorted, .arity = 1 } },
     .{ "toString", MethodSpec{ .call = taToStringMethod, .arity = 0 } },
     .{ "values", MethodSpec{ .call = taValues, .arity = 0 } },
+    .{ "with", MethodSpec{ .call = taWith, .arity = 2 } },
 });
+
+fn typedArrayAbstractConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    _ = args;
+    const self = interp(ctx);
+    if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor TypedArray requires 'new'", .{});
+    return self.throwError(.type_error, "Abstract class TypedArray not directly constructable", .{});
+}
+
+fn typedArrayCreateFromConstructor(self: *Interpreter, ctor: JSValue, len: usize) anyerror!JSValue {
+    if (!self.isConstructor(ctor)) return self.throwError(.type_error, "{s} is not a constructor", .{ctor.typeOf()});
+    const new_ta = try self.constructValue(ctor, &.{JSValue.fromNumber(@floatFromInt(len))}, "TypedArray");
+    errdefer new_ta.deinit();
+    if (new_ta != .typed_array) return self.throwError(.type_error, "Derived TypedArray constructor created a non-TypedArray object", .{});
+    if (new_ta.typed_array.value.len < len) return self.throwError(.type_error, "Derived TypedArray constructor created an array which was too small", .{});
+    return new_ta;
+}
+
+fn typedArrayFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self = interp(ctx);
+    const C = this_value;
+    if (!self.isConstructor(C)) return self.throwError(.type_error, "{s} is not a constructor", .{C.typeOf()});
+    const source = arg(args, 0);
+    const mapfn = arg(args, 1);
+    const this_arg = arg(args, 2);
+    if (mapfn != .undefined and mapfn != .function) return self.throwError(.type_error, "TypedArray.from: mapfn is not a function", .{});
+    const mapping = mapfn == .function;
+    if (source == .undefined or source == .null) return self.throwError(.type_error, "Cannot convert undefined or null to object", .{});
+
+    var using_iter: JSValue = JSValue.UNDEFINED;
+    if (self.symbol_iterator) |sym| {
+        const key = try self.encodeKey(sym);
+        defer self.gc_allocator.free(key);
+        using_iter = try self.getProperty(source, key);
+    }
+    defer using_iter.deinit();
+
+    if (using_iter != .undefined and using_iter != .null) {
+        if (using_iter != .function) return self.throwError(.type_error, "Symbol.iterator is not a function", .{});
+        const iter = try self.callValue(using_iter, source, &.{}, "[Symbol.iterator]");
+        defer iter.deinit();
+        if (!builtin_helpers.isObjectLike(iter)) return self.throwError(.type_error, "Result of the Symbol.iterator method is not an object", .{});
+        const values = try self.drainIterator(iter);
+        defer {
+            for (values) |v| v.deinit();
+            self.gc_allocator.free(values);
+        }
+        const target_obj = try typedArrayCreateFromConstructor(self, C, values.len);
+        errdefer target_obj.deinit();
+        for (values, 0..) |k_val, k| {
+            const mapped = if (mapping)
+                try mapfn.function.value.call(mapfn.function.value.ctx, allocator, this_arg, &.{ k_val, JSValue.fromNumber(@floatFromInt(k)) })
+            else
+                k_val.retain();
+            defer mapped.deinit();
+            try taWrite(self, target_obj, k, mapped);
+        }
+        return target_obj;
+    }
+
+    const len_v = try self.getProperty(source, "length");
+    defer len_v.deinit();
+    const len = try toLength(self, len_v);
+    const target_obj = try typedArrayCreateFromConstructor(self, C, len);
+    errdefer target_obj.deinit();
+    var k: usize = 0;
+    while (k < len) : (k += 1) {
+        var key_buf: [32]u8 = undefined;
+        const pk = std.fmt.bufPrint(&key_buf, "{d}", .{k}) catch unreachable;
+        const k_val = try self.getProperty(source, pk);
+        defer k_val.deinit();
+        const mapped = if (mapping)
+            try mapfn.function.value.call(mapfn.function.value.ctx, allocator, this_arg, &.{ k_val, JSValue.fromNumber(@floatFromInt(k)) })
+        else
+            k_val.retain();
+        defer mapped.deinit();
+        try taWrite(self, target_obj, k, mapped);
+    }
+    return target_obj;
+}
+
+fn typedArrayOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const C = this_value;
+    if (!self.isConstructor(C)) return self.throwError(.type_error, "{s} is not a constructor", .{C.typeOf()});
+    const new_obj = try typedArrayCreateFromConstructor(self, C, args.len);
+    errdefer new_obj.deinit();
+    for (args, 0..) |item, k| {
+        try taWrite(self, new_obj, k, item);
+    }
+    return new_obj;
+}
+
+/// Wires the intrinsic `%TypedArray%` constructor, its `.from`/`.of` statics,
+/// `%TypedArray%.prototype.constructor`, and the prototype/statics inheritance
+/// chain for all 11 concrete TypedArray constructors. Returns `%TypedArray%`'s
+/// statics bag so `accessor_builtins.install` can attach `get [Symbol.species]`.
+pub fn installHierarchy(self: *Interpreter) !JSValue {
+    const typed_array_base = self.protos.typed_array_base;
+    const typed_array_ctor = try self.gcNewFunction(.{
+        .ctx = self,
+        .name = "TypedArray",
+        .arity = 0,
+        .call = typedArrayAbstractConstructor,
+        .constructable = true,
+    });
+    typed_array_ctor.function.value.prototype = typed_array_base.retain();
+    const ta_statics = try self.functionStatics(typed_array_ctor);
+    try builtin_helpers.dneConst(ta_statics, "prototype", typed_array_base.retain());
+    try builtin_helpers.dneMethod(ta_statics, "from", try native(self, "from", 1, typedArrayFrom));
+    try builtin_helpers.dneMethod(ta_statics, "of", try native(self, "of", 0, typedArrayOf));
+    try builtin_helpers.dneMethod(typed_array_base, "constructor", typed_array_ctor.retain());
+    if (self.protos.array.object.value.get("toString")) |arr_to_str| {
+        const old_to_str = typed_array_base.object.value.get("toString");
+        try builtin_helpers.dneMethod(typed_array_base, "toString", arr_to_str.retain());
+        if (old_to_str) |old| old.deinit();
+    }
+
+    const g = self.global_env;
+    inline for (.{
+        "Int8Array",
+        "Uint8Array",
+        "Uint8ClampedArray",
+        "Int16Array",
+        "Uint16Array",
+        "Int32Array",
+        "Uint32Array",
+        "Float32Array",
+        "Float64Array",
+        "BigInt64Array",
+        "BigUint64Array",
+    }) |name| {
+        const ctor = g.get(name).?;
+        const proto = try self.functionPrototype(ctor);
+        const ctor_statics = try self.functionStatics(ctor);
+        try builtin_helpers.dneConst(ctor_statics, "prototype", proto.retain());
+        try ctor_statics.object.value.setPrototype(&ta_statics.object.value);
+    }
+    return ta_statics;
+}
 
 /// Installs `ArrayBuffer`, `DataView`, and the 10 TypedArray constructors.
 pub fn install(self: *Interpreter) !void {
@@ -1004,7 +1323,7 @@ pub fn install(self: *Interpreter) !void {
         const ctor = try self.gcNewFunction(.{
             .ctx = cctx,
             .name = e[0],
-            .arity = 1,
+            .arity = 3,
             .call = typedArrayConstructor,
             .constructable = true,
         });
