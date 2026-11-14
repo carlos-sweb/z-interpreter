@@ -73,7 +73,16 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
             .tdz => return self.throwError(.reference_error, "Cannot access '{s}' before initialization", .{name}),
             .not_found => return self.throwError(.reference_error, "{s} is not defined", .{name}),
         },
-        .this_expr => return env.resolveThis(),
+        .this_expr => {
+            if (self.pending_field_init) |pending| {
+                if (env.resolvePrivateCtx()) |pctx| {
+                    if (pending == pctx) {
+                        return self.throwError(.reference_error, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor", .{});
+                    }
+                }
+            }
+            return env.resolveThis();
+        },
         .paren => |inner| return self.evalExpression(env, inner),
         .sequence => |items| {
             // Every value but the last is discarded: release it.
@@ -863,7 +872,7 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
         // Adopt it as the derived constructor's this only when commit 2 gave
         // it an explicit newTarget prototype; ordinary super() returns keep
         // the provisional ordinary instance.
-        if (result == .temporal and self.temporal_protos.contains(@intFromPtr(result.temporal))) {
+        if ((result == .temporal and self.temporal_protos.contains(@intFromPtr(result.temporal))) or result == .typed_array or result == .array_buffer or result == .data_view) {
             if (env.this_value) |previous| previous.deinit();
             env.this_value = result.retain();
             if (self.adopted_super_this) |previous| previous.deinit();
@@ -1165,23 +1174,26 @@ pub fn constructValueWithNewTarget(self: *Interpreter, target: JSValue, args: []
     // GetPrototypeFromConstructor observes newTarget.prototype exactly once.
     const observed_proto = try self.getProperty(new_target, "prototype");
     defer observed_proto.deinit();
-    const proto = if (observed_proto == .object) observed_proto else try self.functionPrototype(target);
+    const has_custom_proto = @import("builtin_helpers.zig").isObjectLike(observed_proto);
+    const proto = if (has_custom_proto) observed_proto else try self.functionPrototype(target);
 
     const instance = try self.gcNewObject();
     errdefer instance.deinit();
-    try self.setOwnedPrototype(instance, proto);
+    if (proto == .object or !arraybuffer_builtins.isTypedArrayConstructor(target)) {
+        try self.setOwnedPrototype(instance, proto);
+    }
 
     const prev_target = self.construct_target;
     const prev_new_target = self.construct_new_target;
     const prev_proto = self.construct_proto;
     self.construct_target = target.function.value.ctx;
     self.construct_new_target = new_target.retain();
-    self.construct_proto = proto.retain();
+    self.construct_proto = if (has_custom_proto) observed_proto.retain() else null;
     defer {
         self.construct_target = prev_target;
         self.construct_new_target.?.deinit();
         self.construct_new_target = prev_new_target;
-        self.construct_proto.?.deinit();
+        if (self.construct_proto) |cp| cp.deinit();
         self.construct_proto = prev_proto;
     }
 
