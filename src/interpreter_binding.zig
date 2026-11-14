@@ -539,6 +539,15 @@ pub fn forIterationStep(self: *Interpreter, env: *Environment, binding: zstateme
     }
 }
 
+fn closeIterator(self: *Interpreter, iterator: JSValue) anyerror!void {
+    const ret = try self.getProperty(iterator, "return");
+    defer ret.deinit();
+    if (ret == .undefined or ret == .null) return;
+    const r = try self.callValue(ret, iterator, &.{}, "return");
+    defer r.deinit();
+    if (!@import("builtin_helpers.zig").isObjectLike(r)) return self.throwError(.type_error, "Iterator result {s} is not an object", .{r.typeOf()});
+}
+
 /// for-of over the built-in iterables, natively: arrays (elements),
 /// strings (Unicode code points -- the spec iterates by code point,
 /// surrogate pairs together), maps ([key, value] pair arrays), sets
@@ -676,7 +685,11 @@ pub fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zs
                 }
                 const step = try self.forIterationStep(env, head.binding, value, body, labels);
                 value.deinit();
-                if (step) |c| return c;
+                if (step) |c| {
+                    errdefer c.value.deinit();
+                    try closeIterator(self, iter);
+                    return c;
+                }
             }
         },
         else => return self.throwError(.type_error, "{s} is not iterable", .{iterable.typeOf()}),
