@@ -465,8 +465,14 @@ pub fn evalInstanceof(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSVal
         .map => &self.protos.map.object.value,
         .set => &self.protos.set.object.value,
         .promise => &self.protos.promise.object.value,
-        .array_buffer => |box| &self.arrayBufferProto(box.value.is_shared).object.value,
-        .data_view => &self.protos.data_view.object.value,
+        .array_buffer => |box| blk: {
+            const p = self.proto_refs.get(@intFromPtr(box)) orelse self.arrayBufferProto(box.value.is_shared);
+            break :blk if (p == .object) &p.object.value else null;
+        },
+        .data_view => |box| blk: {
+            const p = self.proto_refs.get(@intFromPtr(box)) orelse self.protos.data_view;
+            break :blk if (p == .object) &p.object.value else null;
+        },
         .@"error" => &self.protos.@"error".object.value,
         .temporal => blk: {
             const temporal_proto = self.temporalPrototype(l);

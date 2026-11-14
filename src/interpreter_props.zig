@@ -56,7 +56,7 @@ pub fn typedArrayInstanceProto(self: *Interpreter, obj: JSValue) JSValue {
     return self.typedArrayProto(obj.typed_array.value.kind);
 }
 
-pub fn getExtraPropsOrProto(self: *Interpreter, obj: JSValue, proto: JSValue, key: []const u8) anyerror!JSValue {
+pub fn getExtraPropsOrProto(self: *Interpreter, obj: JSValue, default_proto: JSValue, key: []const u8) anyerror!JSValue {
     if (self.extraProps(obj)) |bag| {
         if (bag.object.value.getOwnRecord(key)) |rec| {
             if (!rec.isAccessor()) return rec.value.retain();
@@ -64,6 +64,7 @@ pub fn getExtraPropsOrProto(self: *Interpreter, obj: JSValue, proto: JSValue, ke
             return try g.function.value.call(g.function.value.ctx, self.gc_allocator, obj, &.{});
         }
     }
+    const proto = if (Interpreter.heapBoxAddress(obj)) |addr| (self.proto_refs.get(addr) orelse default_proto) else default_proto;
     if (try self.getFromProto(obj, proto, key)) |m| return m;
     return JSValue.UNDEFINED;
 }
@@ -602,7 +603,7 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
         // everything else goes into the statics bag (class statics,
         // F.myProp = 1 -- the old "functions have no property bag"
         // gap is gone).
-        if (std.mem.eql(u8, key, "prototype")) {
+        if (std.mem.eql(u8, key, "prototype") and obj.function.value.constructable) {
             if (@import("temporal_builtins.zig").isIntrinsicConstructor(obj)) return self.throwError(.type_error, "Cannot assign to read only Temporal prototype", .{});
             if (obj.function.value.statics) |bag| {
                 if (bag.object.value.getOwnRecord("prototype")) |rec| {
