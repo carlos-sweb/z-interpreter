@@ -22,12 +22,14 @@ const znumber = @import("znumber");
 const zfunctions = @import("zfunctions");
 const zbigint = @import("zbigint");
 const zstring = @import("zstring");
+const zarray = @import("zarray");
 
 const coercion = @import("coercion.zig");
 const builtins = @import("builtins.zig");
 const function_builtins = @import("function_builtins.zig");
 const promise_builtins = @import("promise_builtins.zig");
 const arraybuffer_builtins = @import("arraybuffer_builtins.zig");
+const property_desc = @import("property_desc.zig");
 
 const interpreter_mod = @import("interpreter.zig");
 const Interpreter = interpreter_mod.Interpreter;
@@ -71,7 +73,16 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
             .tdz => return self.throwError(.reference_error, "Cannot access '{s}' before initialization", .{name}),
             .not_found => return self.throwError(.reference_error, "{s} is not defined", .{name}),
         },
-        .this_expr => return env.resolveThis(),
+        .this_expr => {
+            if (self.pending_field_init) |pending| {
+                if (env.resolvePrivateCtx()) |pctx| {
+                    if (pending == pctx) {
+                        return self.throwError(.reference_error, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor", .{});
+                    }
+                }
+            }
+            return env.resolveThis();
+        },
         .paren => |inner| return self.evalExpression(env, inner),
         .sequence => |items| {
             // Every value but the last is discarded: release it.
@@ -443,7 +454,10 @@ pub fn evalInstanceof(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSVal
     // `.object` case below.
     var current: ?*const zobject.ZObject(JSValue) = switch (l) {
         .object => l.object.value.getPrototype(),
-        .typed_array => |box| &self.typedArrayProto(box.value.kind).object.value,
+        .typed_array => blk: {
+            const tp = @import("interpreter_props.zig").typedArrayInstanceProto(self, l);
+            break :blk if (tp == .object) &tp.object.value else null;
+        },
         .array => &self.protos.array.object.value,
         .date => &self.protos.date.object.value,
         .regex => &self.protos.regex.object.value,
@@ -479,11 +493,32 @@ pub fn evalIn(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
     const key = try self.encodeKey(l);
     defer arena.free(key);
     return switch (r) {
-        .object => |box| JSValue.fromBool(box.value.has(key)),
+        .object => |box| blk: {
+            if (box.value.has(key)) break :blk JSValue.fromBool(true);
+            var last_obj: *const @TypeOf(box.value) = &box.value;
+            while (last_obj.getPrototype()) |p| last_obj = p;
+            const Box = @TypeOf(r.object.*);
+            const last_box: *const Box = @fieldParentPtr("value", last_obj);
+            if (self.proto_refs.get(@intFromPtr(last_box))) |ext_proto| {
+                if (ext_proto != .object and ext_proto != .null) {
+                    break :blk try self.evalIn(l, ext_proto);
+                }
+            }
+            break :blk JSValue.fromBool(false);
+        },
         .array => |box| blk: {
             if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromBool(true);
-            const idx = std.fmt.parseInt(usize, key, 10) catch break :blk JSValue.fromBool(false);
-            break :blk JSValue.fromBool(idx < box.value.length());
+            if (self.array_props.get(@intFromPtr(box))) |bag| {
+                if (bag.object.value.hasOwnProperty(key)) break :blk JSValue.fromBool(true);
+            }
+            if (zarray.CanonicalNumericIndexString(key)) |idx| {
+                if (idx < box.value.length() and !box.value.isHole(idx)) break :blk JSValue.fromBool(true);
+            }
+            if (self.proto_refs.get(@intFromPtr(box))) |ext_proto| {
+                if (ext_proto != .null) break :blk try self.evalIn(l, ext_proto);
+                break :blk JSValue.fromBool(false);
+            }
+            break :blk JSValue.fromBool(self.protos.array.object.value.has(key));
         },
         // `key` is the raw `\x00S<ptr>` encoding when `l` is a symbol --
         // display the real "Symbol(desc)" form in the message instead
@@ -511,9 +546,38 @@ pub fn evalIn(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
             self.protos.regex.object.value.has(key)),
         .temporal => |box| JSValue.fromBool((if (self.temporal_props.get(@intFromPtr(box))) |bag| bag.object.value.hasOwnProperty(key) else false) or
             self.protos.temporalProtoFor(box.value).object.value.has(key)),
+        .typed_array => |box| blk: {
+            switch (@import("interpreter_props.zig").canonicalNumericIndex(self.gc_allocator, key, box.value.len)) {
+                .valid_index => break :blk JSValue.fromBool(true),
+                .invalid_index => break :blk JSValue.fromBool(false),
+                .not_numeric => {
+                    if (self.extraProps(r)) |bag| {
+                        if (bag.object.value.hasOwnProperty(key)) break :blk JSValue.fromBool(true);
+                    }
+                    const proto = @import("interpreter_props.zig").typedArrayInstanceProto(self, r);
+                    if (proto == .object) break :blk JSValue.fromBool(proto.object.value.has(key));
+                    if (proto != .null) break :blk try self.evalIn(l, proto);
+                    break :blk JSValue.fromBool(false);
+                },
+            }
+        },
+        .function => |box| blk: {
+            const deleted = self.deletedFnProps(r);
+            if (box.value.statics) |bag| {
+                if (bag.object.value.has(key)) break :blk JSValue.fromBool(true);
+            }
+            if (std.mem.eql(u8, key, "length") and !deleted.length) break :blk JSValue.fromBool(true);
+            if (std.mem.eql(u8, key, "name") and !deleted.name) break :blk JSValue.fromBool(true);
+            if (std.mem.eql(u8, key, "prototype") and !property_desc.isProxyConstructor(self, r) and function_builtins.boundContext(r) == null and (box.value.prototype != null or box.value.constructable)) break :blk JSValue.fromBool(true);
+            break :blk JSValue.fromBool(self.protos.function.object.value.has(key));
+        },
+        .array_buffer => |box| JSValue.fromBool((if (self.extraProps(r)) |bag| bag.object.value.hasOwnProperty(key) else false) or
+            self.arrayBufferProto(box.value.is_shared).object.value.has(key)),
+        .data_view => JSValue.fromBool((if (self.extraProps(r)) |bag| bag.object.value.hasOwnProperty(key) else false) or
+            self.protos.data_view.object.value.has(key)),
         // A BigInt is a primitive: the real TypeError.
         .bigint => self.throwError(.type_error, "Cannot use 'in' operator to search for '{s}' in a BigInt", .{key}),
-        .function, .symbol, .map, .set, .@"error", .date, .promise, .array_buffer, .data_view, .typed_array => self.throwError(.type_error, "The 'in' operator on a {s} is not supported yet", .{@tagName(r)}),
+        .symbol, .map, .set, .@"error", .date, .promise => self.throwError(.type_error, "The 'in' operator on a {s} is not supported yet", .{@tagName(r)}),
     };
 }
 
@@ -632,7 +696,11 @@ pub fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSV
                 defer obj.deinit();
                 const pk = try self.memberKeyString(env, m);
                 defer pk.free(self.gc_allocator);
-                return JSValue.fromBool(try self.deletePropertyOnValue(obj, pk.key));
+                const ok = try self.deletePropertyOnValue(obj, pk.key);
+                if (!ok) {
+                    return self.throwError(.type_error, "Cannot delete property '{s}'", .{pk.key});
+                }
+                return JSValue.fromBool(true);
             }
             (try self.evalExpression(env, u.operand)).deinit();
             return JSValue.fromBool(true);
@@ -804,7 +872,7 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
         // Adopt it as the derived constructor's this only when commit 2 gave
         // it an explicit newTarget prototype; ordinary super() returns keep
         // the provisional ordinary instance.
-        if (result == .temporal and self.temporal_protos.contains(@intFromPtr(result.temporal))) {
+        if ((result == .temporal and self.temporal_protos.contains(@intFromPtr(result.temporal))) or result == .typed_array or result == .array_buffer or result == .data_view) {
             if (env.this_value) |previous| previous.deinit();
             env.this_value = result.retain();
             if (self.adopted_super_this) |previous| previous.deinit();
@@ -1106,23 +1174,26 @@ pub fn constructValueWithNewTarget(self: *Interpreter, target: JSValue, args: []
     // GetPrototypeFromConstructor observes newTarget.prototype exactly once.
     const observed_proto = try self.getProperty(new_target, "prototype");
     defer observed_proto.deinit();
-    const proto = if (observed_proto == .object) observed_proto else try self.functionPrototype(target);
+    const has_custom_proto = @import("builtin_helpers.zig").isObjectLike(observed_proto);
+    const proto = if (has_custom_proto) observed_proto else try self.functionPrototype(target);
 
     const instance = try self.gcNewObject();
     errdefer instance.deinit();
-    try self.setOwnedPrototype(instance, proto);
+    if (proto == .object or !arraybuffer_builtins.isTypedArrayConstructor(target)) {
+        try self.setOwnedPrototype(instance, proto);
+    }
 
     const prev_target = self.construct_target;
     const prev_new_target = self.construct_new_target;
     const prev_proto = self.construct_proto;
     self.construct_target = target.function.value.ctx;
     self.construct_new_target = new_target.retain();
-    self.construct_proto = proto.retain();
+    self.construct_proto = if (has_custom_proto) observed_proto.retain() else null;
     defer {
         self.construct_target = prev_target;
         self.construct_new_target.?.deinit();
         self.construct_new_target = prev_new_target;
-        self.construct_proto.?.deinit();
+        if (self.construct_proto) |cp| cp.deinit();
         self.construct_proto = prev_proto;
     }
 

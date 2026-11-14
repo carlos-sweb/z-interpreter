@@ -97,7 +97,14 @@ fn arrayBufferConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSV
     if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor ArrayBuffer requires 'new'", .{});
     const len_arg = arg(args, 0);
     const byte_length: usize = if (len_arg == .undefined) 0 else try toByteIndexArg(self, len_arg, "length");
-    return self.gcNewArrayBuffer(byte_length);
+    const ab = try self.gcNewArrayBuffer(byte_length);
+    errdefer ab.deinit();
+    if (self.construct_proto) |proto| {
+        if (!zvalue.equality.strictEquals(proto, self.protos.array_buffer)) {
+            try self.setOwnedPrototype(ab, proto);
+        }
+    }
+    return ab;
 }
 
 /// `SharedArrayBuffer` -- see atomics-sharedarraybuffer.md: this engine
@@ -111,7 +118,14 @@ fn sharedArrayBufferConstructor(ctx: *anyopaque, allocator: Allocator, this_valu
     if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor SharedArrayBuffer requires 'new'", .{});
     const len_arg = arg(args, 0);
     const byte_length: usize = if (len_arg == .undefined) 0 else try toByteIndexArg(self, len_arg, "length");
-    return self.gcNewSharedArrayBuffer(byte_length);
+    const sab = try self.gcNewSharedArrayBuffer(byte_length);
+    errdefer sab.deinit();
+    if (self.construct_proto) |proto| {
+        if (!zvalue.equality.strictEquals(proto, self.protos.shared_array_buffer)) {
+            try self.setOwnedPrototype(sab, proto);
+        }
+    }
+    return sab;
 }
 
 /// Shared by `ArrayBuffer.prototype.slice` and
@@ -131,12 +145,28 @@ fn arrayBufferSlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     const end_arg = arg(args, 1);
     const start: usize = if (start_arg == .undefined) 0 else try toByteIndexArg(self, start_arg, "start");
     const end: usize = if (end_arg == .undefined) len else try toByteIndexArg(self, end_arg, "end");
-    // Real ToIntegerOrInfinity clamping (negative/over-length indices
-    // wrap/clamp instead of erroring) is not implemented -- narrowed to
-    // already-in-range indices, matching this repo's existing ToIndex
-    // narrowing elsewhere; out-of-range is a real RangeError here rather
-    // than a silent clamp.
-    var copy = src.slice(self.gc_allocator, @min(start, len), @min(end, len)) catch |e| return self.bufferErr(e);
+    const first = @min(start, len);
+    const final = @min(end, len);
+    const new_len = if (final > first) final - first else 0;
+    if (try speciesConstructor(self, this_value)) |ctor| {
+        defer ctor.deinit();
+        const new_buf = try self.constructValue(ctor, &.{JSValue.fromNumber(@floatFromInt(new_len))}, "ArrayBuffer");
+        errdefer new_buf.deinit();
+        if (new_buf != .array_buffer or new_buf.array_buffer.value.is_shared != src.is_shared) {
+            return self.throwError(.type_error, "Species constructor did not return a compatible ArrayBuffer", .{});
+        }
+        if (new_buf.array_buffer == this_value.array_buffer) {
+            return self.throwError(.type_error, "Species constructor returned the same ArrayBuffer", .{});
+        }
+        if (new_buf.array_buffer.value.byteLength() < new_len) {
+            return self.throwError(.type_error, "Species constructor returned an ArrayBuffer that is too small", .{});
+        }
+        if (new_len > 0) {
+            @memcpy(new_buf.array_buffer.value.bytes[0..new_len], src.bytes[first .. first + new_len]);
+        }
+        return new_buf;
+    }
+    var copy = src.slice(self.gc_allocator, first, final) catch |e| return self.bufferErr(e);
     copy.is_shared = src.is_shared;
     return self.gcNewArrayBufferFromValue(copy);
 }
@@ -154,7 +184,14 @@ fn dataViewConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
     const byte_offset: usize = if (offset_arg == .undefined) 0 else try toByteIndexArg(self, offset_arg, "byteOffset");
     const length_arg = arg(args, 2);
     const byte_length: ?usize = if (length_arg == .undefined) null else try toByteIndexArg(self, length_arg, "byteLength");
-    return self.gcNewDataView(buffer_arg.retain(), byte_offset, byte_length) catch |e| self.bufferErr(e);
+    const dv = self.gcNewDataView(buffer_arg.retain(), byte_offset, byte_length) catch |e| return self.bufferErr(e);
+    errdefer dv.deinit();
+    if (self.construct_proto) |proto| {
+        if (!zvalue.equality.strictEquals(proto, self.protos.data_view)) {
+            try self.setOwnedPrototype(dv, proto);
+        }
+    }
+    return dv;
 }
 
 fn requireDataView(self: *Interpreter, v: JSValue, method: []const u8) anyerror!zbuffer.DataView {
@@ -364,6 +401,18 @@ pub fn isTypedArrayConstructor(v: JSValue) bool {
     return v == .function and v.function.value.call == typedArrayConstructor;
 }
 
+fn constructedTypedArray(self: *Interpreter, buf: JSValue, byte_offset: usize, len: ?usize, kind: zvalue.TypedKind) anyerror!JSValue {
+    const ta = self.gcNewTypedArray(buf, byte_offset, len, kind) catch |e| return self.bufferErr(e);
+    errdefer ta.deinit();
+    if (self.construct_proto) |proto| {
+        const intrinsic = self.typedArrayProto(kind);
+        if (!zvalue.equality.strictEquals(proto, intrinsic)) {
+            try self.setOwnedPrototype(ta, proto);
+        }
+    }
+    return ta;
+}
+
 /// The 3 real constructor overloads: `new XArray(length)`, `new
 /// XArray(buffer, byteOffset?, length?)`, `new XArray(iterableOrArray
 /// Like)`. Non-iterable array-likes (`{length: 3, 0: 1, ...}` with no
@@ -382,14 +431,14 @@ fn typedArrayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
         const byte_offset: usize = if (arg(args, 1) == .undefined) 0 else try toByteIndexArg(self, arg(args, 1), "byteOffset");
         const length_arg = arg(args, 2);
         const len: ?usize = if (length_arg == .undefined) null else try toByteIndexArg(self, length_arg, "length");
-        return self.gcNewTypedArray(first.retain(), byte_offset, len, kind) catch |e| self.bufferErr(e);
+        return constructedTypedArray(self, first.retain(), byte_offset, len, kind);
     }
 
     if (!builtin_helpers.isObjectLike(first)) {
         const n: usize = if (first == .undefined) 0 else try toByteIndexArg(self, first, "length");
         const buf = self.gcNewArrayBuffer(n * elem_size) catch return self.throwError(.range_error, "Invalid typed array length: {d}", .{n});
         // gcNewTypedArray takes `buf` (its owner) even when it fails.
-        return self.gcNewTypedArray(buf, 0, n, kind) catch |e| self.bufferErr(e);
+        return constructedTypedArray(self, buf, 0, n, kind);
     }
 
     if (first == .typed_array) {
@@ -398,7 +447,7 @@ fn typedArrayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
         }
         const src_len = first.typed_array.value.len;
         const buf = self.gcNewArrayBuffer(src_len * elem_size) catch return self.throwError(.range_error, "Invalid typed array length: {d}", .{src_len});
-        const ta = self.gcNewTypedArray(buf, 0, src_len, kind) catch |e| return self.bufferErr(e);
+        const ta = try constructedTypedArray(self, buf, 0, src_len, kind);
         errdefer ta.deinit();
         var i: usize = 0;
         while (i < src_len) : (i += 1) {
@@ -428,7 +477,7 @@ fn typedArrayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
             self.gc_allocator.free(values);
         }
         const buf = self.gcNewArrayBuffer(values.len * elem_size) catch return self.throwError(.range_error, "Invalid typed array length: {d}", .{values.len});
-        const ta = self.gcNewTypedArray(buf, 0, values.len, kind) catch |e| return self.bufferErr(e);
+        const ta = try constructedTypedArray(self, buf, 0, values.len, kind);
         errdefer ta.deinit();
         for (values, 0..) |item, i| {
             try typedElemSet(self, kind, &buf.array_buffer.value, 0, values.len, i, item);
@@ -440,7 +489,7 @@ fn typedArrayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
     defer len_v.deinit();
     const len = try toLength(self, len_v);
     const buf = self.gcNewArrayBuffer(len * elem_size) catch return self.throwError(.range_error, "Invalid typed array length: {d}", .{len});
-    const ta = self.gcNewTypedArray(buf, 0, len, kind) catch |e| return self.bufferErr(e);
+    const ta = try constructedTypedArray(self, buf, 0, len, kind);
     errdefer ta.deinit();
     var i: usize = 0;
     while (i < len) : (i += 1) {
@@ -493,6 +542,29 @@ fn newSameKindTypedArray(self: *Interpreter, kind: zvalue.TypedKind, len: usize)
     return self.gcNewTypedArray(buf, 0, len, kind) catch |e| self.bufferErr(e);
 }
 
+fn speciesConstructor(self: *Interpreter, exemplar: JSValue) anyerror!?JSValue {
+    const c = try self.getProperty(exemplar, "constructor");
+    if (c == .undefined) return null;
+    defer c.deinit();
+    if (!builtin_helpers.isObjectLike(c)) return self.throwError(.type_error, "Constructor is not an object", .{});
+    const key = try @import("regex_builtins.zig").wellKnownKey(self, "species");
+    defer self.gc_allocator.free(key);
+    const s = try self.getProperty(c, key);
+    if (s == .undefined or s == .null) return null;
+    if (self.isConstructor(s)) return s;
+    s.deinit();
+    return self.throwError(.type_error, "Species constructor is not a constructor", .{});
+}
+
+fn typedArraySpeciesCreate(self: *Interpreter, exemplar: JSValue, len: usize) anyerror!JSValue {
+    const box = exemplar.typed_array.value;
+    if (try speciesConstructor(self, exemplar)) |ctor| {
+        defer ctor.deinit();
+        return typedArrayCreateFromConstructor(self, ctor, len);
+    }
+    return newSameKindTypedArray(self, box.kind, len);
+}
+
 fn taForEach(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireTypedArray(ctx, this_value, "forEach");
     const cb = try requireCallback(ctx, args);
@@ -511,7 +583,7 @@ fn taMap(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []con
     const self = interp(ctx);
     const box = this_value.typed_array.value;
     const len = box.len;
-    const result = try newSameKindTypedArray(self, box.kind, len);
+    const result = try typedArraySpeciesCreate(self, this_value, len);
     errdefer result.deinit();
     var i: usize = 0;
     while (i < len) : (i += 1) {
@@ -530,13 +602,20 @@ fn taFilter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
     const box = this_value.typed_array.value;
     const len = box.len;
     var kept: std.ArrayList(JSValue) = .empty;
-    defer kept.deinit(allocator);
+    defer {
+        for (kept.items) |v| v.deinit();
+        kept.deinit(allocator);
+    }
     var i: usize = 0;
     while (i < len) : (i += 1) {
         const item = try taGet(self, this_value, i);
-        if (coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, item, i, this_value))) try kept.append(allocator, item);
+        if (coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, item, i, this_value))) {
+            try kept.append(allocator, item);
+        } else {
+            item.deinit();
+        }
     }
-    const result = try newSameKindTypedArray(self, box.kind, kept.items.len);
+    const result = try typedArraySpeciesCreate(self, this_value, kept.items.len);
     errdefer result.deinit();
     for (kept.items, 0..) |item, idx| try taWrite(self, result, idx, item);
     return result;
@@ -1045,12 +1124,22 @@ fn taSubarray(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     const end = if (arg(args, 1) == .undefined) len else normIndex(try toNumberStrict(self, arg(args, 1)), len);
     const count = if (end > start) end - start else 0;
     const new_byte_offset = box.byte_offset + start * box.kind.elemSize();
+    if (try speciesConstructor(self, this_value)) |ctor| {
+        defer ctor.deinit();
+        const new_ta = try self.constructValue(ctor, &.{
+            box.owner,
+            JSValue.fromNumber(@floatFromInt(new_byte_offset)),
+            JSValue.fromNumber(@floatFromInt(count)),
+        }, "TypedArray");
+        errdefer new_ta.deinit();
+        if (new_ta != .typed_array) return self.throwError(.type_error, "Derived TypedArray constructor created a non-TypedArray object", .{});
+        return new_ta;
+    }
     return self.gcNewTypedArray(box.owner.retain(), new_byte_offset, count, box.kind) catch |e| self.bufferErr(e);
 }
 
 /// A COPY into a fresh buffer (unlike `subarray`).
 fn taSlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
     try requireTypedArray(ctx, this_value, "slice");
     const self = interp(ctx);
     const box = this_value.typed_array.value;
@@ -1058,10 +1147,19 @@ fn taSlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const start = if (arg(args, 0) == .undefined) 0 else normIndex(try toNumberStrict(self, arg(args, 0)), len);
     const end = if (arg(args, 1) == .undefined) len else normIndex(try toNumberStrict(self, arg(args, 1)), len);
     const count = if (end > start) end - start else 0;
-    const result = try newSameKindTypedArray(self, box.kind, count);
+    const result = try typedArraySpeciesCreate(self, this_value, count);
     errdefer result.deinit();
-    var i: usize = 0;
-    while (i < count) : (i += 1) try taWrite(self, result, i, try taGet(self, this_value, start + i));
+    if (count > 0) {
+        const tmp = try allocator.alloc(JSValue, count);
+        defer {
+            for (tmp) |v| v.deinit();
+            allocator.free(tmp);
+        }
+        var i: usize = 0;
+        while (i < count) : (i += 1) tmp[i] = try taGet(self, this_value, start + i);
+        i = 0;
+        while (i < count) : (i += 1) try taWrite(self, result, i, tmp[i]);
+    }
     return result;
 }
 

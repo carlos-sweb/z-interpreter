@@ -381,6 +381,7 @@ pub fn privateHolder(self: *Interpreter, obj: JSValue) !?JSValue {
     return switch (obj) {
         .object => obj,
         .function => try self.functionStatics(obj),
+        .typed_array, .array_buffer, .data_view => try self.extraPropsObject(obj),
         else => null,
     };
 }
@@ -466,7 +467,7 @@ pub fn privateHas(self: *Interpreter, env: *Environment, obj: JSValue, name: []c
 /// `super()` returns for derived ones.
 pub fn runInstanceFields(self: *Interpreter, cctx: *ClassCtx, instance: JSValue) anyerror!void {
     if (cctx.instance_fields.len == 0) return;
-    if (instance != .object) return; // exotic `this` -- nothing to define on
+    if (instance != .object and instance != .typed_array and instance != .array_buffer and instance != .data_view) return; // exotic `this` -- nothing to define on
     const field_env = try self.gcChildEnv(cctx.closure_env);
     // Etapa 2 de uniform-ownership-contract.md: Environment.this_value/
     // super_proto are plain JSValue fields with no release mechanism of
@@ -488,7 +489,8 @@ pub fn runInstanceFields(self: *Interpreter, cctx: *ClassCtx, instance: JSValue)
         // internal `\x00P<hex>|#x` encoding, per real spec.
         if (fd.value) |vexpr| try self.maybeNameAnonymousValue(vexpr, v, fieldDisplayName(fd.key));
         const is_private = fd.key.len > 0 and fd.key[0] == 0;
-        const target = &instance.object.value;
+        const target_obj = if (instance == .object) instance else try self.extraPropsObject(instance);
+        const target = &target_obj.object.value;
         target.set(fd.key, v) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             // A constructor can freeze/preventExtensions `this` BEFORE
@@ -912,7 +914,15 @@ fn classConstructorCall(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
                 self.adopted_super_this = prev_adopted;
             }
             const result = try invokeFunctionNode(self, fnode, cctx.closure_env, allocator, this_value, cctx.super_proto, cctx.super_ctor, cctx, args, null);
-            if (result == .undefined) if (self.adopted_super_this) |value| return value.retain();
+            if (result == .undefined) {
+                if (self.pending_field_init != null) {
+                    return self.throwError(.reference_error, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor", .{});
+                }
+                if (self.adopted_super_this) |value| return value.retain();
+            } else if (!@import("builtin_helpers.zig").isObjectLike(result)) {
+                result.deinit();
+                return self.throwError(.type_error, "Derived constructors may only return object or undefined", .{});
+            }
             return result;
         }
         return invokeFunctionNode(self, fnode, cctx.closure_env, allocator, this_value, cctx.super_proto, cctx.super_ctor, cctx, args, null);
@@ -924,7 +934,7 @@ fn classConstructorCall(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
         self.construct_target = parent.function.value.ctx;
         defer self.construct_target = null;
         const parent_result = try parent.function.value.call(parent.function.value.ctx, allocator, this_value, args);
-        if (parent_result == .temporal and self.temporal_protos.contains(@intFromPtr(parent_result.temporal))) {
+        if ((parent_result == .temporal and self.temporal_protos.contains(@intFromPtr(parent_result.temporal))) or parent_result == .typed_array or parent_result == .array_buffer or parent_result == .data_view) {
             errdefer parent_result.deinit();
             try self.runInstanceFields(cctx, parent_result);
             return parent_result;
