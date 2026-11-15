@@ -105,6 +105,7 @@ pub const ExceptionHandler = struct {
 
 pub const CallSiteCache = struct {
     arg_count: u8 = 0,
+    this_reg: ?u8 = null,
     callee: ?JSValue = null,
     target_block: ?*const CodeBlock = null,
     closure_env: ?*anyopaque = null,

@@ -400,6 +400,7 @@ pub const BytecodeEmitter = struct {
             .object_literal => |items| return self.emitObjectLiteral(items),
             .array_literal => |items| return self.emitArrayLiteral(items),
             .member => |member| return self.emitMember(member),
+            .this_expr => return self.emitSimple(.load_this),
             .function_like => |ptr| return self.emitFunctionLike(ptr),
             .yield_expr, .await_expr => return error.UnsupportedSyntax,
             else => return error.UnsupportedSyntax,
@@ -549,6 +550,7 @@ pub const BytecodeEmitter = struct {
             .load_null,
             .load_true,
             .load_false,
+            .load_this,
             .move,
             .neg,
             .not,
@@ -586,7 +588,34 @@ pub const BytecodeEmitter = struct {
 
     fn emitCall(self: *BytecodeEmitter, call: anytype) anyerror!u8 {
         if (call.optional) return error.UnsupportedSyntax;
-        const callee = try self.emitExpression(call.callee);
+        var this_reg: ?u8 = null;
+        const unwrapped = unwrapParen(call.callee);
+        const callee = if (unwrapped.data == .member) blk: {
+            const m = unwrapped.data.member;
+            if (m.optional) return error.UnsupportedSyntax;
+            const obj_reg = try self.emitExpression(m.object);
+            this_reg = obj_reg;
+            const dst = try self.allocRegister();
+            if (!m.computed) {
+                if (m.property.data != .identifier) return error.UnsupportedSyntax;
+                const key_const = try self.addConstant(.{ .property_key = m.property.data.identifier });
+                try self.emitOp(.{ .opcode = .get_prop, .a = dst, .b = obj_reg, .c = key_const });
+            } else if (asIntegerIndex(m.property)) |num| {
+                if (self.constants.items.len < std.math.maxInt(u8)) {
+                    const const_idx = try self.addConstant(.{ .number = num });
+                    try self.emitOp(.{ .opcode = .get_elem_const, .a = dst, .b = obj_reg, .c = const_idx });
+                } else {
+                    const key_reg = try self.emitExpression(m.property);
+                    try self.emitOp(.{ .opcode = .get_elem, .a = dst, .b = obj_reg, .c = key_reg });
+                    self.freeRegister(key_reg);
+                }
+            } else {
+                const key_reg = try self.emitExpression(m.property);
+                try self.emitOp(.{ .opcode = .get_elem, .a = dst, .b = obj_reg, .c = key_reg });
+                self.freeRegister(key_reg);
+            }
+            break :blk dst;
+        } else try self.emitExpression(call.callee);
         if (self.next_register != @as(u16, callee) + 1) return error.UnsupportedSyntax;
         const argument_slots: u16 = std.math.cast(u16, call.args.len) orelse return error.TooManyRegisters;
         const arg_count = try small(argument_slots);
@@ -610,8 +639,9 @@ pub const BytecodeEmitter = struct {
         for (0..argument_slots) |i| self.freeRegister(@intCast(arg_base + argument_slots - 1 - i));
         const destination = callee;
         const slot = std.math.cast(u8, self.call_sites.items.len) orelse return error.UnsupportedSyntax;
-        try self.call_sites.append(self.allocator, .{ .arg_count = arg_count });
+        try self.call_sites.append(self.allocator, .{ .arg_count = arg_count, .this_reg = this_reg });
         try self.emitOp(.{ .opcode = .call, .a = destination, .b = callee, .c = slot });
+        if (this_reg) |r| self.freeRegister(r);
         return destination;
     }
 
@@ -815,6 +845,7 @@ pub fn disassemble(allocator: Allocator, block: *const codeblock.CodeBlock) ![]u
             .iter_end => try output.print(allocator, " r{d}", .{op.a}),
             .setup_catch => try output.print(allocator, " r{d}, {d}", .{ op.a, jumpTarget(op) }),
             .end_catch => {},
+            .load_this => try output.print(allocator, " r{d}", .{op.a}),
             .throw_value => try output.print(allocator, " r{d}", .{op.a}),
             .return_value => try output.print(allocator, " r{d}", .{op.a}),
             else => {},

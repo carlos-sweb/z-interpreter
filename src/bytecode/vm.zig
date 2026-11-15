@@ -66,7 +66,7 @@ fn deinitSlot(v: *JSValue) void {
     }
 }
 
-fn callFallback(allocator: Allocator, callee: JSValue, args_slice: []const JSValue) !JSValue {
+fn callFallback(allocator: Allocator, callee: JSValue, this_value: JSValue, args_slice: []const JSValue) !JSValue {
     if (callee != .function) return error.UnsupportedOpcode;
     var inline_args: [4]JSValue = undefined;
     const is_heap = args_slice.len > inline_args.len;
@@ -79,7 +79,7 @@ fn callFallback(allocator: Allocator, callee: JSValue, args_slice: []const JSVal
         if (is_heap) allocator.free(call_args);
     }
     for (call_args, args_slice) |*dest, src| dest.* = src.retain();
-    return try callee.function.value.call(callee.function.value.ctx, allocator, JSValue.UNDEFINED, call_args);
+    return try callee.function.value.call(callee.function.value.ctx, allocator, this_value, call_args);
 }
 
 fn constantKey(block: *const codeblock.CodeBlock, index: u8) ![]const u8 {
@@ -341,6 +341,7 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
             .load_null => try setRegister(frame_regs, op.a, JSValue.NULL),
             .load_true => try setRegister(frame_regs, op.a, JSValue.fromBool(true)),
             .load_false => try setRegister(frame_regs, op.a, JSValue.fromBool(false)),
+            .load_this => try setRegister(frame_regs, op.a, frame.this_value.retain()),
             .move, .load_local => try setRegister(frame_regs, op.a, (try getRegister(frame_regs, op.b)).retain()),
             .store_local => try setRegister(frame_regs, op.a, (try getRegister(frame_regs, op.b)).retain()),
             .load_global => try setRegister(frame_regs, op.a, try loadGlobal(frame.block, frame.closure_env, op.b)),
@@ -411,6 +412,7 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                     }
                 }
 
+                const this_value = if (cache.this_reg) |r| frame_regs[r] else JSValue.UNDEFINED;
                 if (cache.target_block) |callee_block| {
                     if (frame_count >= MAX_FRAMES) return error.StackOverflow;
                     const callee_reg_base = reg_top;
@@ -429,7 +431,7 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                         .block = callee_block,
                         .pc = 0,
                         .reg_base = callee_reg_base,
-                        .this_value = JSValue.UNDEFINED,
+                        .this_value = this_value,
                         .closure_env = if (cache.closure_env) |env| @ptrCast(@alignCast(env)) else null,
                         .return_reg = op.a,
                         .interp = if (cache.interp) |itp| @ptrCast(@alignCast(itp)) else null,
@@ -438,7 +440,7 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                     frame_count += 1;
                     reg_top = new_reg_top;
                 } else {
-                    const result = try callFallback(allocator, callee, frame_regs[start..end]);
+                    const result = try callFallback(allocator, callee, this_value, frame_regs[start..end]);
                     try setRegister(frame_regs, op.a, result);
                 }
             },
