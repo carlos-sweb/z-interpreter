@@ -647,9 +647,13 @@ pub const BytecodeEmitter = struct {
             const item = maybe_item orelse return error.UnsupportedSyntax;
             if (item.data == .spread) return error.UnsupportedSyntax;
             const val_reg = try self.emitExpression(item);
-            const idx_reg = try self.emitConstant(.{ .number = @floatFromInt(index) });
-            try self.emitOp(.{ .opcode = .set_elem, .a = dst, .b = idx_reg, .c = val_reg });
-            self.freeRegister(idx_reg);
+            if (index <= std.math.maxInt(u8)) {
+                try self.emitOp(.{ .opcode = .set_elem_const, .a = dst, .b = @intCast(index), .c = val_reg });
+            } else {
+                const idx_reg = try self.emitConstant(.{ .number = @floatFromInt(index) });
+                try self.emitOp(.{ .opcode = .set_elem, .a = dst, .b = idx_reg, .c = val_reg });
+                self.freeRegister(idx_reg);
+            }
             self.freeRegister(val_reg);
         }
         return dst;
@@ -804,6 +808,7 @@ pub fn disassemble(allocator: Allocator, block: *const codeblock.CodeBlock) ![]u
             .get_elem => try output.print(allocator, " r{d}, r{d}, r{d}", .{ op.a, op.b, op.c }),
             .get_elem_const => try output.print(allocator, " r{d}, r{d}, #{d}", .{ op.a, op.b, op.c }),
             .set_elem => try output.print(allocator, " r{d}, r{d}, r{d}", .{ op.a, op.b, op.c }),
+            .set_elem_const => try output.print(allocator, " r{d}, #{d}, r{d}", .{ op.a, op.b, op.c }),
             .make_closure => try output.print(allocator, " r{d}, #{d}", .{ op.a, op.b }),
             .iter_init => try output.print(allocator, " r{d}, r{d}", .{ op.a, op.b }),
             .iter_next => try output.print(allocator, " r{d}, r{d}, r{d}", .{ op.a, op.b, op.c }),

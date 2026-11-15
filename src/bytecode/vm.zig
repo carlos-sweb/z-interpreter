@@ -317,6 +317,27 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                 const val = try getRegister(frame_regs, op.c);
                 try setElem(allocator, obj, key_val, val);
             },
+            .set_elem_const => {
+                const obj = try getRegister(frame_regs, op.a);
+                const val = try getRegister(frame_regs, op.c);
+                const idx: usize = op.b;
+                if (obj == .array) {
+                    const cur = obj.array.value.length();
+                    if (idx < cur) {
+                        obj.array.value.toSliceMut()[idx].deinit();
+                        obj.array.value.toSliceMut()[idx] = val.retain();
+                    } else {
+                        while (obj.array.value.length() < idx) {
+                            _ = try obj.array.value.push(JSValue.UNDEFINED);
+                        }
+                        _ = try obj.array.value.push(val.retain());
+                    }
+                } else {
+                    var buf: [32]u8 = undefined;
+                    const key = try std.fmt.bufPrint(&buf, "{d}", .{idx});
+                    try setProp(allocator, obj, key, val);
+                }
+            },
             .load_null => try setRegister(frame_regs, op.a, JSValue.NULL),
             .load_true => try setRegister(frame_regs, op.a, JSValue.fromBool(true)),
             .load_false => try setRegister(frame_regs, op.a, JSValue.fromBool(false)),
