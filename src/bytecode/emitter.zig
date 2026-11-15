@@ -396,6 +396,7 @@ pub const BytecodeEmitter = struct {
                 } else return error.UnsupportedSyntax;
             },
             .conditional => |conditional| return self.emitConditional(conditional),
+            .logical => |logical| return self.emitLogical(logical),
             .call => |call| return self.emitCall(call),
             .object_literal => |items| return self.emitObjectLiteral(items),
             .array_literal => |items| return self.emitArrayLiteral(items),
@@ -538,6 +539,27 @@ pub const BytecodeEmitter = struct {
         try self.emitOp(.{ .opcode = .move, .a = destination, .b = alternate });
         self.freeRegister(alternate);
         try self.patchJump(end_jump, self.ops.items.len);
+        return destination;
+    }
+
+    fn emitLogical(self: *BytecodeEmitter, logical: anytype) anyerror!u8 {
+        const destination = try self.allocRegister();
+        const left = try self.emitExpression(logical.left);
+        try self.emitOp(.{ .opcode = .move, .a = destination, .b = left });
+        self.freeRegister(left);
+
+        const jump_opcode: codeblock.Opcode = switch (logical.op) {
+            .and_op => .jump_if_false,
+            .or_op => .jump_if_true,
+            .nullish => .jump_if_not_nullish,
+        };
+        const jump = try self.emitJump(jump_opcode, destination);
+
+        const right = try self.emitExpression(logical.right);
+        try self.emitOp(.{ .opcode = .move, .a = destination, .b = right });
+        self.freeRegister(right);
+
+        try self.patchJump(jump, self.ops.items.len);
         return destination;
     }
 
@@ -828,7 +850,7 @@ pub fn disassemble(allocator: Allocator, block: *const codeblock.CodeBlock) ![]u
             .add, .sub_num, .mul_num, .div_num, .mod_num, .lt_num, .gt_num, .le_num, .ge_num, .eq, .ne => try output.print(allocator, " r{d}, r{d}, r{d}", .{ op.a, op.b, op.c }),
             .add_local_const, .sub_local_const, .lt_local_const, .gt_local_const, .le_local_const, .ge_local_const, .eq_local_const => try output.print(allocator, " r{d}, @{d}, #{d}", .{ op.a, op.b, op.c }),
             .jump => try output.print(allocator, " {d}", .{jumpTarget(op)}),
-            .jump_if_true, .jump_if_false => try output.print(allocator, " r{d}, {d}", .{ op.a, jumpTarget(op) }),
+            .jump_if_true, .jump_if_false, .jump_if_not_nullish => try output.print(allocator, " r{d}, {d}", .{ op.a, jumpTarget(op) }),
             .call => try output.print(allocator, " r{d}, r{d}, [cache:{d}]", .{ op.a, op.b, op.c }),
             .move => try output.print(allocator, " r{d}, r{d}", .{ op.a, op.b }),
             .new_object => try output.print(allocator, " r{d}", .{op.a}),

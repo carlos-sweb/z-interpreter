@@ -384,6 +384,10 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
             .jump_if_false => {
                 if (!try isTruthy(frame_regs, op.a)) frame.pc = try jumpTarget(frame.block, op);
             },
+            .jump_if_not_nullish => {
+                const val = try getRegister(frame_regs, op.a);
+                if (val != .undefined and val != .null) frame.pc = try jumpTarget(frame.block, op);
+            },
             .call => {
                 const callee = try getRegister(frame_regs, op.b);
                 const cache_slice: []codeblock.CallSiteCache = @constCast(frame.block.call_target_cache);
