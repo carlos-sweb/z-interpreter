@@ -260,7 +260,10 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
         switch (op.opcode) {
             .load_const => try setRegister(frame_regs, op.a, try constantValue(allocator, frame.block, op.b)),
             .load_undefined => try setRegister(frame_regs, op.a, JSValue.UNDEFINED),
-            .new_object => try setRegister(frame_regs, op.a, try JSValue.newObject(allocator)),
+            .new_object => {
+                const obj = if (frame.interp) |itp| try itp.ordinaryObject() else try JSValue.newObject(allocator);
+                try setRegister(frame_regs, op.a, obj);
+            },
             .new_array => {
                 const arr = try JSValue.newArray(allocator);
                 if (op.b > 0) {
