@@ -66,6 +66,7 @@ pub const Opcode = enum(u8) {
     ge_local_const,
     eq_local_const,
     get_elem_const,
+    set_elem_const,
 };
 
 pub const Op = packed struct(u32) {
@@ -104,6 +105,7 @@ pub const ExceptionHandler = struct {
 
 pub const CallSiteCache = struct {
     arg_count: u8 = 0,
+    this_reg: ?u8 = null,
     callee: ?JSValue = null,
     target_block: ?*const CodeBlock = null,
     closure_env: ?*anyopaque = null,
