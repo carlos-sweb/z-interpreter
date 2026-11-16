@@ -28,8 +28,88 @@ Estado de auditoría de submódulos `z-*` que están en la cascada del motor. Ob
 
 ## Módulos pendientes de auditoría
 
-*(Pendiente de completar en inventario.)*
+- **Cascada directa (18 pendientes):** `z-array`, `z-bigint`, `z-buffer`, `z-error`, `z-functions`, `z-json`, `z-map`, `z-number`, `z-object`, `z-parser`, `z-regex`, `z-set`, `z-statements`, `z-string`, `z-symbol`, `z-temporal`, `z-urlcode`, `z-value`.
+- **Cascada transitiva (3 pendientes):** `z-equality` (`z-array`, `z-map`), `z-lexer` (`z-parser`), `z-promise` (`z-value`).
+
+## Inventario completo (37 repos)
+
+Categorías: **A** = cascada directa (`z-interpreter/build.zig.zon`), **B** = cascada transitiva, **C** = local fuera de cascada del motor, **D** = GitHub fuera de cascada (sin clonar).
+
+| Repo | Cat | Master SHA | Último tag | Líneas núcleo (`src/*.zig`) | Tests propios | Cluster Test262 | FAIL actuales |
+| :--- | :---: | :--- | :--- | ---: | ---: | :--- | ---: |
+| `z-array` | A | `05466a7` | `v0.2.1` | 732 | 112 | `Array` | 933 |
+| `z-bigint` | A | `3b6c9ff` | `v0.1.1` | 725 | 36 | `BigInt` | 7 |
+| `z-buffer` | A | `e56f43b` | `v0.1.0` | 381 | 23 | `ArrayBuffer`+`TypedArray` | 478 |
+| `z-date` | A | `bd26f9b` | `v0.1.0` | 4,613 | 310 | `Date` | 25 |
+| `z-error` | A | `188058c` | `v0.1.0` | 164 | 8 | `Error`+`NativeErrors` | 86 |
+| `z-functions` | A | `5fa2d8d` | `v0.2.0` | 803 | 47 | `Function` | 198 |
+| `z-json` | A | `53be5fe` | `v0.1.2` | 750 | 24 | `JSON` | 83 |
+| `z-map` | A | `8823f11` | `0.1.0` | 145 | 19 | `Map` | 51 |
+| `z-math` | A | `8821a3b` | `v0.1.0` | 589 | 16 | `Math` | 0 |
+| `z-number` | A | `9fb0c96` | `v0.1.0` | 1,683 | 235 | `Number` | 64 |
+| `z-object` | A | `058dade` | `v0.2.0` | 1,143 | 131 | `Object` | 422 |
+| `z-parser` | A | `57de367` | `v0.1.0` | 1,258 | 59 | `language/expressions` | 2,590 |
+| `z-regex` | A | `2a48ab6` | `v0.9.1` | 5,514 | 737 | `RegExp` | 112 |
+| `z-set` | A | `c61896e` | `0.1.0` | 103 | 9 | `Set` | 162 |
+| `z-statements` | A | `3452296` | `v0.2.0` | 1,124 | 83 | `language/statements` | 1,831 |
+| `z-string` | A | `b42a232` | `v0.4.1` | 96 | 417 | `String` | 33 |
+| `z-symbol` | A | `f01df64` | `v0.1.0` | 323 | 15 | `Symbol` | 25 |
+| `z-temporal` | A | `a3be106` | `v0.2.9` | 6,138 | 227 | `Temporal` | 24 |
+| `z-urlcode` | A | `4a8a876` | `v0.1.0` | 197 | 19 | `encode/decodeURI*` | 10 |
+| `z-value` | A | `9647a39` | `v0.1.2` | 1,351 | 148 | Transversal | — |
+| `z-equality` | B | — | — | — | — | Transversal (`z-array`, `z-map`) | — |
+| `z-lexer` | B | — | — | — | — | Léxico (`z-parser`) | — |
+| `z-promise` | B | — | — | — | — | `Promise` (`z-value`) | — |
+| `z-interpreter` | C | `9a34bf0` | `v0.3.11` | 26,712 | 826 | Motor completo | 9,616 |
+| `z-run` | C | `ac22df8` | `v0.1.2` | 1,634 | 72 | CLI runtime | — |
+| `z-test262` | C | `e13b563` | `none` | 0 | 0 | Harness Test262 | — |
+| `z-args` | C | `ad8ff79` | `v0.1.0` | 1,177 | 51 | Tooling CLI | — |
+| `z-print` | C | `90e650b` | `v0.1.0` | 6,331 | 437 | Tooling | — |
+| `z-server` | C | `7b22270` | `v1.0.0` | 1,288 | 133 | Servidor HTTP | — |
+| `z-toml` | C | `65040c7` | `v0.2.1` | 810 | 23 | Tooling (`z-run`) | — |
+| `z-yaml` | C | `dee91b5` | `v0.2.1` | 837 | 38 | Tooling (`z-run`) | — |
+| `z-crypto` | D | — | — | — | — | Tooling (`z-run`) | — |
+| `z-lexbor` | D | — | — | — | — | HTML bindings | — |
+| `z-libqr` | D | — | — | — | — | QR codes | — |
+| `z-numeral` | D | — | — | — | — | Formateo numérico | — |
+| `z-uuid` | D | — | — | — | — | UUID (`z-run`) | — |
+| `z-voca` | D | — | — | — | — | Strings helper | — |
+
+## Mapa de correlación Test262 → módulo
+
+| Cluster Test262 | Módulo | FAIL | PASS | % pass | Estado de auditoría |
+| :--- | :--- | ---: | ---: | ---: | :--- |
+| `language/expressions` | `z-parser` | 2,590 | 7,922 | 75.3% | Pendiente |
+| `language/statements` | `z-statements` | 1,831 | 7,034 | 79.3% | Pendiente |
+| `Array` | `z-array` | 933 | 2,111 | 69.3% | Pendiente |
+| `ArrayBuffer`+`TypedArray` | `z-buffer` | 478 | 1,181 | 71.2% | Pendiente |
+| `Object` | `z-object` | 422 | 2,978 | 87.6% | Pendiente |
+| `Function` | `z-functions` | 198 | 223 | 53.0% | Pendiente |
+| `Set` | `z-set` | 162 | 220 | 57.6% | Pendiente |
+| `RegExp` | `z-regex` | 112 | 1,766 | 94.0% | Pendiente |
+| `Error`+`NativeErrors` | `z-error` | 86 | 101 | 54.0% | Pendiente |
+| `JSON` | `z-json` | 83 | 82 | 49.7% | Pendiente |
+| `Number` | `z-number` | 64 | 276 | 81.2% | Pendiente |
+| `Map` | `z-map` | 51 | 150 | 73.9% | Pendiente |
+| `String` | `z-string` | 33 | 1,187 | 97.3% | Pendiente |
+| `Date` | `z-date` | 25 | 569 | 95.8% | **Auditado (NO expandir)** |
+| `Symbol` | `z-symbol` | 25 | 71 | 74.0% | Pendiente |
+| `Temporal` | `z-temporal` | 24 | 4,579 | 99.5% | Pendiente |
+| `encode/decodeURI*` | `z-urlcode` | 10 | 161 | 93.1% | Pendiente |
+| `BigInt` | `z-bigint` | 7 | 70 | 90.9% | Pendiente |
+| `Math` | `z-math` | 0 | 327 | 100.0% | **Auditado (NO expandir)** |
+
+## Próximos pasos
+
+Orden sugerido de auditoría profunda por densidad de FAIL Test262 frente a tamaño del núcleo (y menor riesgo de cascada):
+1. `z-parser` (2,590 FAIL / 1,258 líneas) y `z-statements` (1,831 FAIL / 1,124 líneas)
+2. `z-set` (162 FAIL / 103 líneas) y `z-map` (51 FAIL / 145 líneas) — alta densidad FAIL/línea
+3. `z-array` (933 FAIL / 732 líneas) y `z-buffer` (478 FAIL / 381 líneas)
+4. `z-error` (86 FAIL / 164 líneas) y `z-json` (83 FAIL / 750 líneas)
+5. `z-object` (422 FAIL / 1,143 líneas) y `z-functions` (198 FAIL / 803 líneas)
 
 ## Hallazgo colateral
 
 - `date_builtins.zig` define `INVALID_DATE_MS = 9223372036854776000` en lugar de `NaN`. Rompe `year-zero.js` y probablemente tests de rango inválido. Fix local en 1 línea del adapter. Deuda técnica independiente de submódulos.
+- `z-interpreter/build.zig.zon` tiene 3 dependencias transitivas ocultas en su cascada: `z-equality` (usada por `z-array` y `z-map`), `z-lexer` (usada por `z-parser`), y `z-promise` (usada por `z-value`).
+- `z-map` y `z-set` usan tags `0.1.0` (sin prefijo `v`), a diferencia del resto del ecosistema (`v0.x.y`).
