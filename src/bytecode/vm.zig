@@ -3,6 +3,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const zvalue = @import("zvalue");
+const zmath = @import("zmath");
 const JSValue = zvalue.JSValue;
 const Environment = @import("../environment.zig").Environment;
 const codeblock = @import("codeblock.zig");
@@ -355,6 +356,7 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
             .mul_num => try arithmetic(frame_regs, op, .mul),
             .div_num => try arithmetic(frame_regs, op, .div),
             .mod_num => try arithmetic(frame_regs, op, .mod),
+            .pow_num => try arithmetic(frame_regs, op, .pow),
             .lt_num => try comparison(frame_regs, op, .lt),
             .gt_num => try comparison(frame_regs, op, .gt),
             .le_num => try comparison(frame_regs, op, .le),
@@ -579,7 +581,7 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
     return error.MissingReturn;
 }
 
-const Arithmetic = enum { add, sub, mul, div, mod };
+const Arithmetic = enum { add, sub, mul, div, mod, pow };
 const Comparison = enum { lt, gt, le, ge, eq, ne };
 
 const BitwiseOp = enum { bit_and, bit_or, bit_xor, shl, shr, ushr };
@@ -619,6 +621,7 @@ fn arithmetic(registers: []JSValue, op: codeblock.Op, kind: Arithmetic) !void {
         .mul => left.number * right.number,
         .div => left.number / right.number,
         .mod => @mod(left.number, right.number),
+        .pow => zmath.pow(left.number, right.number),
     };
     try setRegister(registers, op.a, JSValue.fromNumber(result));
 }
@@ -679,6 +682,7 @@ fn arithmeticLocalConst(registers: []JSValue, block: *const codeblock.CodeBlock,
             .mul => left.number * c.number,
             .div => left.number / c.number,
             .mod => @mod(left.number, c.number),
+            .pow => zmath.pow(left.number, c.number),
         };
         try setRegister(registers, op.a, JSValue.fromNumber(result));
     } else return error.UnsupportedOpcode;

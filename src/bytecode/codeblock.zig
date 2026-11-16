@@ -76,6 +76,7 @@ pub const Opcode = enum(u8) {
     shr,
     ushr,
     typeof,
+    pow_num,
 };
 
 pub const Op = packed struct(u32) {

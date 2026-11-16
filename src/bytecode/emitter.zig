@@ -174,6 +174,7 @@ pub const BytecodeEmitter = struct {
             .variable => |variable| try self.emitVariable(variable),
             .if_stmt => |item| try self.emitIf(item),
             .while_stmt => |item| try self.emitWhile(item),
+            .do_while => |item| try self.emitDoWhile(item),
             .for_stmt => |item| try self.emitFor(item.head, item.body),
             .function_declaration => |ptr| try self.emitFunctionDeclaration(ptr),
             .try_stmt => |item| try self.emitTry(item),
@@ -227,6 +228,15 @@ pub const BytecodeEmitter = struct {
         const back = try self.emitJump(.jump, 0);
         try self.patchJump(back, start);
         try self.patchJump(end_jump, self.ops.items.len);
+    }
+
+    fn emitDoWhile(self: *BytecodeEmitter, item: anytype) anyerror!void {
+        const start = self.ops.items.len;
+        try self.emitStatement(item.body);
+        const condition = try self.emitExpression(item.test_expr);
+        const back = try self.emitJump(.jump_if_true, condition);
+        self.freeRegister(condition);
+        try self.patchJump(back, start);
     }
 
     fn emitFor(self: *BytecodeEmitter, head: zstatements.ForHead, body: *const zstatements.Statement) anyerror!void {
@@ -342,6 +352,14 @@ pub const BytecodeEmitter = struct {
             .null_literal => return self.emitSimple(.load_null),
             .identifier => |name| return self.emitIdentifier(name),
             .paren => |inner| return self.emitExpression(inner),
+            .sequence => |items| {
+                if (items.len == 0) return self.emitSimple(.load_undefined);
+                for (items[0 .. items.len - 1]) |item| {
+                    const reg = try self.emitExpression(item);
+                    self.freeRegister(reg);
+                }
+                return self.emitExpression(items[items.len - 1]);
+            },
             .unary => |unary| return self.emitUnary(unary),
             .binary => |binary| return self.emitBinary(binary),
             .assignment => |assignment| {
@@ -542,6 +560,7 @@ pub const BytecodeEmitter = struct {
             .mul => .mul_num,
             .div => .div_num,
             .mod => .mod_num,
+            .pow => .pow_num,
             .lt => .lt_num,
             .gt => .gt_num,
             .le => .le_num,
@@ -623,6 +642,7 @@ pub const BytecodeEmitter = struct {
             .mul_num,
             .div_num,
             .mod_num,
+            .pow_num,
             .lt_num,
             .gt_num,
             .le_num,
@@ -895,7 +915,7 @@ pub fn disassemble(allocator: Allocator, block: *const codeblock.CodeBlock) ![]u
             .load_local, .load_global, .load_capture => try output.print(allocator, " r{d}, @{d}", .{ op.a, op.b }),
             .store_local, .store_global, .store_capture => try output.print(allocator, " @{d}, r{d}", .{ op.a, op.b }),
             .neg, .not, .not_bits, .typeof => try output.print(allocator, " r{d}, r{d}", .{ op.a, op.b }),
-            .add, .sub_num, .mul_num, .div_num, .mod_num, .lt_num, .gt_num, .le_num, .ge_num, .eq, .ne, .and_bits, .or_bits, .xor_bits, .shl, .shr, .ushr => try output.print(allocator, " r{d}, r{d}, r{d}", .{ op.a, op.b, op.c }),
+            .add, .sub_num, .mul_num, .div_num, .mod_num, .pow_num, .lt_num, .gt_num, .le_num, .ge_num, .eq, .ne, .and_bits, .or_bits, .xor_bits, .shl, .shr, .ushr => try output.print(allocator, " r{d}, r{d}, r{d}", .{ op.a, op.b, op.c }),
             .add_local_const, .sub_local_const, .lt_local_const, .gt_local_const, .le_local_const, .ge_local_const, .eq_local_const => try output.print(allocator, " r{d}, @{d}, #{d}", .{ op.a, op.b, op.c }),
             .jump => try output.print(allocator, " {d}", .{jumpTarget(op)}),
             .jump_if_true, .jump_if_false, .jump_if_not_nullish => try output.print(allocator, " r{d}, {d}", .{ op.a, jumpTarget(op) }),
