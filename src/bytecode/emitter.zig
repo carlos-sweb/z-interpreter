@@ -462,14 +462,29 @@ pub const BytecodeEmitter = struct {
             .post_inc, .post_dec, .pre_inc, .pre_dec => {
                 if (unary.operand.data != .identifier) return error.UnsupportedSyntax;
                 const name = unary.operand.data.identifier;
+                const is_inc = (unary.op == .post_inc or unary.op == .pre_inc);
+                const is_post = (unary.op == .post_inc or unary.op == .post_dec);
+                if (self.getLocalSlot(unary.operand)) |local_slot| {
+                    const one_idx = try self.addConstant(.{ .number = 1.0 });
+                    const super_op: codeblock.Opcode = if (is_inc) .add_local_const else .sub_local_const;
+                    const dst = try self.allocRegister();
+                    if (is_post) {
+                        try self.emitOp(.{ .opcode = .load_local, .a = dst, .b = local_slot });
+                        try self.emitOp(.{ .opcode = super_op, .a = local_slot, .b = local_slot, .c = one_idx });
+                    } else {
+                        try self.emitOp(.{ .opcode = super_op, .a = local_slot, .b = local_slot, .c = one_idx });
+                        try self.emitOp(.{ .opcode = .load_local, .a = dst, .b = local_slot });
+                    }
+                    return dst;
+                }
                 const old_reg = try self.emitIdentifier(name);
                 const one_reg = try self.emitConstant(.{ .number = 1.0 });
                 const new_reg = try self.allocRegister();
-                const opcode: codeblock.Opcode = if (unary.op == .post_inc or unary.op == .pre_inc) .add_num else .sub_num;
+                const opcode: codeblock.Opcode = if (is_inc) .add_num else .sub_num;
                 try self.emitOp(.{ .opcode = opcode, .a = new_reg, .b = old_reg, .c = one_reg });
                 try self.emitStore(name, new_reg);
                 self.freeRegister(one_reg);
-                const ret = if (unary.op == .post_inc or unary.op == .post_dec) old_reg else new_reg;
+                const ret = if (is_post) old_reg else new_reg;
                 self.freeRegister(if (ret == old_reg) new_reg else old_reg);
                 return ret;
             },
