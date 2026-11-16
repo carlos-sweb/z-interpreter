@@ -26,9 +26,39 @@ Estado de auditoría de submódulos `z-*` que están en la cascada del motor. Ob
 - FAIL Test262 atribuibles: 0 de 0 (`Math` 327/327 PASS, 100%).
 - Veredicto: NO expandir. Ya completo.
 
+## Módulos auditados (turno 2)
+
+### z-parser (v0.1.0, 57de367)
+
+- Cobertura ES2024 §13 Expressions: completa salvo hooks delegados (`class`, `function`, `arrow`, `async`/`yield`) y `tagged-template` (`TRV` raw).
+- Consumidores: `z-statements`, `z-functions`, `z-interpreter` (cascada triple).
+- FAIL `language/expressions` (2,590): `799` `SyntaxError` (600 `dynamic-import` módulos, `class` fields/decorators en `z-functions`, 25 `tagged-template`), `529` `async`, `7` `$262`, `1,255` motor/semántica (`class` 571, `object` 162, `generators` 74, `assignment` 60).
+- Veredicto: NO expandir en paralelo. El grueso es estructural/motor (`class`, módulos, `async`); fix independiente no compensa.
+
+### z-statements (v0.2.0, 3452296)
+
+- Cobertura ES2024 §14 Statements/Declarations: completa salvo `using`/`await using` (Explicit Resource Management), `for-await-of`, y hooks delegados (`class`/`function` en `z-functions`).
+- Consumidores: `z-functions`, `z-interpreter` (cascada doble).
+- FAIL `language/statements` (1,831): `294` `SyntaxError` (`await-using` 65, `using` 45, `for-await-of` 46, `class` fields), `417` `async`, `1,120` motor/semántica (`class` 652, `for-of` 116, `generators` 76, `function` 40).
+- Veredicto: NO expandir. `using`/`for-await-of` son estructurales (requieren runtime `Symbol.dispose`/async iterators); el resto es motor.
+
+### z-array (v0.2.1, 05466a7)
+
+- Cobertura `Array`: almacenamiento denso/holey/sparse (`ZArray(T)`) + métodos base y ES2023 (`toReversed`/`toSorted`/`toSpliced`/`with`).
+- Consumidores: `z-value`, `z-interpreter` (cascada doble).
+- FAIL `built-ins/Array` (933): `93` `fromAsync` (estructural `async`), ~`840` adapter/estructural (`array_builtins.zig`: coerción array-like de `this` en `filter`/`reduce`/`reduceRight`/`splice`/`sort`/`concat`/`map`/`forEach`/`indexOf`, `ToLength`, `Symbol.species`, `own-props` sobre Date/Error).
+- Veredicto: NO expandir `z-array`. El trabajo real está en el adapter `array_builtins.zig`.
+
+### z-buffer (v0.1.0, e56f43b)
+
+- Cobertura: `ArrayBuffer` fijo, `DataView` y `TypedArrayView(T)` (10 tipos). Deliberadamente excluye `resize`/`transfer`/`SharedArrayBuffer`.
+- Consumidores: `z-value`, `z-json`, `z-interpreter` (cascada triple).
+- FAIL clusters buffer (767 total: `TypedArray` 348 + `TypedArrayConstructors` 103 + `DataView` 155 + `ArrayBuffer` 130 + `SharedArrayBuffer` 31): `451` `TypedArray*` (motor `typedarray_builtins.zig`/estructural detached/RAB/species), `155` `DataView` (motor/RAB/Float16), `130` `ArrayBuffer` (96 son `transfer`/`resize`/`immutable` estructurales), `31` `SharedArrayBuffer`.
+- Veredicto: NO expandir `z-buffer` como batalla independiente. `resize`/`transfer` son estructurales (observación cruzada en vistas + `z-value`).
+
 ## Módulos pendientes de auditoría
 
-- **Cascada directa (18 pendientes):** `z-array`, `z-bigint`, `z-buffer`, `z-error`, `z-functions`, `z-json`, `z-map`, `z-number`, `z-object`, `z-parser`, `z-regex`, `z-set`, `z-statements`, `z-string`, `z-symbol`, `z-temporal`, `z-urlcode`, `z-value`.
+- **Cascada directa (11 pendientes):** `z-bigint`, `z-functions`, `z-map`, `z-number`, `z-object`, `z-regex`, `z-string`, `z-symbol`, `z-temporal`, `z-urlcode`, `z-value`. *(Nota: `z-set`, `z-error` y `z-json` fueron clasificados en auditoría separada como 0 FAIL de submódulo / todo adapter).*
 - **Cascada transitiva (3 pendientes):** `z-equality` (`z-array`, `z-map`), `z-lexer` (`z-parser`), `z-promise` (`z-value`).
 
 ## Inventario completo (37 repos)
@@ -79,10 +109,10 @@ Categorías: **A** = cascada directa (`z-interpreter/build.zig.zon`), **B** = ca
 
 | Cluster Test262 | Módulo | FAIL | PASS | % pass | Estado de auditoría |
 | :--- | :--- | ---: | ---: | ---: | :--- |
-| `language/expressions` | `z-parser` | 2,590 | 7,922 | 75.3% | Pendiente |
-| `language/statements` | `z-statements` | 1,831 | 7,034 | 79.3% | Pendiente |
-| `Array` | `z-array` | 933 | 2,111 | 69.3% | Pendiente |
-| `ArrayBuffer`+`TypedArray` | `z-buffer` | 478 | 1,181 | 71.2% | Pendiente |
+| `language/expressions` | `z-parser` | 2,590 | 7,922 | 75.3% | **Auditado (NO expandir)** |
+| `language/statements` | `z-statements` | 1,831 | 7,034 | 79.3% | **Auditado (NO expandir)** |
+| `Array` | `z-array` | 933 | 2,111 | 69.3% | **Auditado (NO expandir)** |
+| `ArrayBuffer`+`TypedArray` | `z-buffer` | 478 | 1,181 | 71.2% | **Auditado (NO expandir)** |
 | `Object` | `z-object` | 422 | 2,978 | 87.6% | Pendiente |
 | `Function` | `z-functions` | 198 | 223 | 53.0% | Pendiente |
 | `Set` | `z-set` | 162 | 220 | 57.6% | Pendiente |
