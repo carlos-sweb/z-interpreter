@@ -447,6 +447,18 @@ pub const BytecodeEmitter = struct {
                 self.freeRegister(operand);
                 return destination;
             },
+            .void_op => {
+                const operand = try self.emitExpression(unary.operand);
+                try self.emitOp(.{ .opcode = .load_undefined, .a = operand });
+                return operand;
+            },
+            .typeof => {
+                const operand = try self.emitExpression(unary.operand);
+                const destination = try self.allocRegister();
+                try self.emitOp(.{ .opcode = .typeof, .a = destination, .b = operand });
+                self.freeRegister(operand);
+                return destination;
+            },
             .post_inc, .post_dec, .pre_inc, .pre_dec => {
                 if (unary.operand.data != .identifier) return error.UnsupportedSyntax;
                 const name = unary.operand.data.identifier;
@@ -590,6 +602,7 @@ pub const BytecodeEmitter = struct {
             .neg,
             .not,
             .not_bits,
+            .typeof,
             .add,
             .sub_num,
             .mul_num,
@@ -866,7 +879,7 @@ pub fn disassemble(allocator: Allocator, block: *const codeblock.CodeBlock) ![]u
             .load_const => try output.print(allocator, " r{d}, #{d}", .{ op.a, op.b }),
             .load_local, .load_global, .load_capture => try output.print(allocator, " r{d}, @{d}", .{ op.a, op.b }),
             .store_local, .store_global, .store_capture => try output.print(allocator, " @{d}, r{d}", .{ op.a, op.b }),
-            .neg, .not, .not_bits => try output.print(allocator, " r{d}, r{d}", .{ op.a, op.b }),
+            .neg, .not, .not_bits, .typeof => try output.print(allocator, " r{d}, r{d}", .{ op.a, op.b }),
             .add, .sub_num, .mul_num, .div_num, .mod_num, .lt_num, .gt_num, .le_num, .ge_num, .eq, .ne, .and_bits, .or_bits, .xor_bits, .shl, .shr, .ushr => try output.print(allocator, " r{d}, r{d}, r{d}", .{ op.a, op.b, op.c }),
             .add_local_const, .sub_local_const, .lt_local_const, .gt_local_const, .le_local_const, .ge_local_const, .eq_local_const => try output.print(allocator, " r{d}, @{d}, #{d}", .{ op.a, op.b, op.c }),
             .jump => try output.print(allocator, " {d}", .{jumpTarget(op)}),

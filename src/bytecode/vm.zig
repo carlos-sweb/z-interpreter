@@ -388,6 +388,11 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                 if (src != .number) return error.UnsupportedOpcode;
                 try setRegister(frame_regs, op.a, JSValue.fromNumber(@floatFromInt(~numberToInt32(src.number))));
             },
+            .typeof => {
+                const src = try getRegister(frame_regs, op.b);
+                const str = try JSValue.newString(allocator, src.typeOf());
+                try setRegister(frame_regs, op.a, str);
+            },
             .jump => frame.pc = try jumpTarget(frame.block, op),
             .jump_if_true => {
                 if (try isTruthy(frame_regs, op.a)) frame.pc = try jumpTarget(frame.block, op);
