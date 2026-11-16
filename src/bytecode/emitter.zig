@@ -440,17 +440,51 @@ pub const BytecodeEmitter = struct {
                 self.freeRegister(operand);
                 return destination;
             },
+            .bitnot => {
+                const operand = try self.emitExpression(unary.operand);
+                const destination = try self.allocRegister();
+                try self.emitOp(.{ .opcode = .not_bits, .a = destination, .b = operand });
+                self.freeRegister(operand);
+                return destination;
+            },
+            .void_op => {
+                const operand = try self.emitExpression(unary.operand);
+                try self.emitOp(.{ .opcode = .load_undefined, .a = operand });
+                return operand;
+            },
+            .typeof => {
+                const operand = try self.emitExpression(unary.operand);
+                const destination = try self.allocRegister();
+                try self.emitOp(.{ .opcode = .typeof, .a = destination, .b = operand });
+                self.freeRegister(operand);
+                return destination;
+            },
             .post_inc, .post_dec, .pre_inc, .pre_dec => {
                 if (unary.operand.data != .identifier) return error.UnsupportedSyntax;
                 const name = unary.operand.data.identifier;
+                const is_inc = (unary.op == .post_inc or unary.op == .pre_inc);
+                const is_post = (unary.op == .post_inc or unary.op == .post_dec);
+                if (self.getLocalSlot(unary.operand)) |local_slot| {
+                    const one_idx = try self.addConstant(.{ .number = 1.0 });
+                    const super_op: codeblock.Opcode = if (is_inc) .add_local_const else .sub_local_const;
+                    const dst = try self.allocRegister();
+                    if (is_post) {
+                        try self.emitOp(.{ .opcode = .load_local, .a = dst, .b = local_slot });
+                        try self.emitOp(.{ .opcode = super_op, .a = local_slot, .b = local_slot, .c = one_idx });
+                    } else {
+                        try self.emitOp(.{ .opcode = super_op, .a = local_slot, .b = local_slot, .c = one_idx });
+                        try self.emitOp(.{ .opcode = .load_local, .a = dst, .b = local_slot });
+                    }
+                    return dst;
+                }
                 const old_reg = try self.emitIdentifier(name);
                 const one_reg = try self.emitConstant(.{ .number = 1.0 });
                 const new_reg = try self.allocRegister();
-                const opcode: codeblock.Opcode = if (unary.op == .post_inc or unary.op == .pre_inc) .add_num else .sub_num;
+                const opcode: codeblock.Opcode = if (is_inc) .add_num else .sub_num;
                 try self.emitOp(.{ .opcode = opcode, .a = new_reg, .b = old_reg, .c = one_reg });
                 try self.emitStore(name, new_reg);
                 self.freeRegister(one_reg);
-                const ret = if (unary.op == .post_inc or unary.op == .post_dec) old_reg else new_reg;
+                const ret = if (is_post) old_reg else new_reg;
                 self.freeRegister(if (ret == old_reg) new_reg else old_reg);
                 return ret;
             },
@@ -514,6 +548,12 @@ pub const BytecodeEmitter = struct {
             .ge => .ge_num,
             .eq, .eqeqeq => .eq,
             .ne, .noteqeq => .ne,
+            .bitand => .and_bits,
+            .bitor => .or_bits,
+            .bitxor => .xor_bits,
+            .shl => .shl,
+            .shr => .shr,
+            .ushr => .ushr,
             else => return error.UnsupportedSyntax,
         };
         const left = try self.emitExpression(binary.left);
@@ -576,6 +616,8 @@ pub const BytecodeEmitter = struct {
             .move,
             .neg,
             .not,
+            .not_bits,
+            .typeof,
             .add,
             .sub_num,
             .mul_num,
@@ -587,6 +629,12 @@ pub const BytecodeEmitter = struct {
             .ge_num,
             .eq,
             .ne,
+            .and_bits,
+            .or_bits,
+            .xor_bits,
+            .shl,
+            .shr,
+            .ushr,
             .call,
             .new_object,
             .new_array,
@@ -846,8 +894,8 @@ pub fn disassemble(allocator: Allocator, block: *const codeblock.CodeBlock) ![]u
             .load_const => try output.print(allocator, " r{d}, #{d}", .{ op.a, op.b }),
             .load_local, .load_global, .load_capture => try output.print(allocator, " r{d}, @{d}", .{ op.a, op.b }),
             .store_local, .store_global, .store_capture => try output.print(allocator, " @{d}, r{d}", .{ op.a, op.b }),
-            .neg, .not => try output.print(allocator, " r{d}, r{d}", .{ op.a, op.b }),
-            .add, .sub_num, .mul_num, .div_num, .mod_num, .lt_num, .gt_num, .le_num, .ge_num, .eq, .ne => try output.print(allocator, " r{d}, r{d}, r{d}", .{ op.a, op.b, op.c }),
+            .neg, .not, .not_bits, .typeof => try output.print(allocator, " r{d}, r{d}", .{ op.a, op.b }),
+            .add, .sub_num, .mul_num, .div_num, .mod_num, .lt_num, .gt_num, .le_num, .ge_num, .eq, .ne, .and_bits, .or_bits, .xor_bits, .shl, .shr, .ushr => try output.print(allocator, " r{d}, r{d}, r{d}", .{ op.a, op.b, op.c }),
             .add_local_const, .sub_local_const, .lt_local_const, .gt_local_const, .le_local_const, .ge_local_const, .eq_local_const => try output.print(allocator, " r{d}, @{d}, #{d}", .{ op.a, op.b, op.c }),
             .jump => try output.print(allocator, " {d}", .{jumpTarget(op)}),
             .jump_if_true, .jump_if_false, .jump_if_not_nullish => try output.print(allocator, " r{d}, {d}", .{ op.a, jumpTarget(op) }),

@@ -361,6 +361,12 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
             .ge_num => try comparison(frame_regs, op, .ge),
             .eq => try comparison(frame_regs, op, .eq),
             .ne => try comparison(frame_regs, op, .ne),
+            .and_bits => try bitwise(frame_regs, op, .bit_and),
+            .or_bits => try bitwise(frame_regs, op, .bit_or),
+            .xor_bits => try bitwise(frame_regs, op, .bit_xor),
+            .shl => try bitwise(frame_regs, op, .shl),
+            .shr => try bitwise(frame_regs, op, .shr),
+            .ushr => try bitwise(frame_regs, op, .ushr),
             .sub_local_const => try arithmeticLocalConst(frame_regs, frame.block, op, .sub),
             .add_local_const => try addLocalConst(frame_regs, allocator, frame.block, op),
             .lt_local_const => try comparisonLocalConst(frame_regs, frame.block, op, .lt),
@@ -376,6 +382,16 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
             .not => {
                 const truthy = try isTruthy(frame_regs, op.b);
                 try setRegister(frame_regs, op.a, JSValue.fromBool(!truthy));
+            },
+            .not_bits => {
+                const src = try getRegister(frame_regs, op.b);
+                if (src != .number) return error.UnsupportedOpcode;
+                try setRegister(frame_regs, op.a, JSValue.fromNumber(@floatFromInt(~numberToInt32(src.number))));
+            },
+            .typeof => {
+                const src = try getRegister(frame_regs, op.b);
+                const str = try JSValue.newString(allocator, src.typeOf());
+                try setRegister(frame_regs, op.a, str);
             },
             .jump => frame.pc = try jumpTarget(frame.block, op),
             .jump_if_true => {
@@ -565,6 +581,33 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
 
 const Arithmetic = enum { add, sub, mul, div, mod };
 const Comparison = enum { lt, gt, le, ge, eq, ne };
+
+const BitwiseOp = enum { bit_and, bit_or, bit_xor, shl, shr, ushr };
+
+fn numberToUint32(n: f64) u32 {
+    if (std.math.isNan(n) or std.math.isInf(n) or n == 0) return 0;
+    const wrapped = @mod(@trunc(n), 4294967296.0);
+    return @intFromFloat(wrapped);
+}
+
+fn numberToInt32(n: f64) i32 {
+    return @bitCast(numberToUint32(n));
+}
+
+fn bitwise(registers: []JSValue, op: codeblock.Op, kind: BitwiseOp) !void {
+    const left = try getRegister(registers, op.b);
+    const right = try getRegister(registers, op.c);
+    if (left != .number or right != .number) return error.UnsupportedOpcode;
+    const result: f64 = switch (kind) {
+        .bit_and => @floatFromInt(numberToInt32(left.number) & numberToInt32(right.number)),
+        .bit_or => @floatFromInt(numberToInt32(left.number) | numberToInt32(right.number)),
+        .bit_xor => @floatFromInt(numberToInt32(left.number) ^ numberToInt32(right.number)),
+        .shl => @floatFromInt(numberToInt32(left.number) << @as(u5, @intCast(numberToUint32(right.number) & 31))),
+        .shr => @floatFromInt(numberToInt32(left.number) >> @as(u5, @intCast(numberToUint32(right.number) & 31))),
+        .ushr => @floatFromInt(numberToUint32(left.number) >> @as(u5, @intCast(numberToUint32(right.number) & 31))),
+    };
+    try setRegister(registers, op.a, JSValue.fromNumber(result));
+}
 
 fn arithmetic(registers: []JSValue, op: codeblock.Op, kind: Arithmetic) !void {
     const left = try getRegister(registers, op.b);
