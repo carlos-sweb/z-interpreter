@@ -342,6 +342,14 @@ pub const BytecodeEmitter = struct {
             .null_literal => return self.emitSimple(.load_null),
             .identifier => |name| return self.emitIdentifier(name),
             .paren => |inner| return self.emitExpression(inner),
+            .sequence => |items| {
+                if (items.len == 0) return self.emitSimple(.load_undefined);
+                for (items[0 .. items.len - 1]) |item| {
+                    const reg = try self.emitExpression(item);
+                    self.freeRegister(reg);
+                }
+                return self.emitExpression(items[items.len - 1]);
+            },
             .unary => |unary| return self.emitUnary(unary),
             .binary => |binary| return self.emitBinary(binary),
             .assignment => |assignment| {
