@@ -440,6 +440,13 @@ pub const BytecodeEmitter = struct {
                 self.freeRegister(operand);
                 return destination;
             },
+            .bitnot => {
+                const operand = try self.emitExpression(unary.operand);
+                const destination = try self.allocRegister();
+                try self.emitOp(.{ .opcode = .not_bits, .a = destination, .b = operand });
+                self.freeRegister(operand);
+                return destination;
+            },
             .post_inc, .post_dec, .pre_inc, .pre_dec => {
                 if (unary.operand.data != .identifier) return error.UnsupportedSyntax;
                 const name = unary.operand.data.identifier;
@@ -514,6 +521,12 @@ pub const BytecodeEmitter = struct {
             .ge => .ge_num,
             .eq, .eqeqeq => .eq,
             .ne, .noteqeq => .ne,
+            .bitand => .and_bits,
+            .bitor => .or_bits,
+            .bitxor => .xor_bits,
+            .shl => .shl,
+            .shr => .shr,
+            .ushr => .ushr,
             else => return error.UnsupportedSyntax,
         };
         const left = try self.emitExpression(binary.left);
@@ -576,6 +589,7 @@ pub const BytecodeEmitter = struct {
             .move,
             .neg,
             .not,
+            .not_bits,
             .add,
             .sub_num,
             .mul_num,
@@ -587,6 +601,12 @@ pub const BytecodeEmitter = struct {
             .ge_num,
             .eq,
             .ne,
+            .and_bits,
+            .or_bits,
+            .xor_bits,
+            .shl,
+            .shr,
+            .ushr,
             .call,
             .new_object,
             .new_array,
@@ -846,8 +866,8 @@ pub fn disassemble(allocator: Allocator, block: *const codeblock.CodeBlock) ![]u
             .load_const => try output.print(allocator, " r{d}, #{d}", .{ op.a, op.b }),
             .load_local, .load_global, .load_capture => try output.print(allocator, " r{d}, @{d}", .{ op.a, op.b }),
             .store_local, .store_global, .store_capture => try output.print(allocator, " @{d}, r{d}", .{ op.a, op.b }),
-            .neg, .not => try output.print(allocator, " r{d}, r{d}", .{ op.a, op.b }),
-            .add, .sub_num, .mul_num, .div_num, .mod_num, .lt_num, .gt_num, .le_num, .ge_num, .eq, .ne => try output.print(allocator, " r{d}, r{d}, r{d}", .{ op.a, op.b, op.c }),
+            .neg, .not, .not_bits => try output.print(allocator, " r{d}, r{d}", .{ op.a, op.b }),
+            .add, .sub_num, .mul_num, .div_num, .mod_num, .lt_num, .gt_num, .le_num, .ge_num, .eq, .ne, .and_bits, .or_bits, .xor_bits, .shl, .shr, .ushr => try output.print(allocator, " r{d}, r{d}, r{d}", .{ op.a, op.b, op.c }),
             .add_local_const, .sub_local_const, .lt_local_const, .gt_local_const, .le_local_const, .ge_local_const, .eq_local_const => try output.print(allocator, " r{d}, @{d}, #{d}", .{ op.a, op.b, op.c }),
             .jump => try output.print(allocator, " {d}", .{jumpTarget(op)}),
             .jump_if_true, .jump_if_false, .jump_if_not_nullish => try output.print(allocator, " r{d}, {d}", .{ op.a, jumpTarget(op) }),
