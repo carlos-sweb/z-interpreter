@@ -50,6 +50,15 @@ pub const error_methods = std.StaticStringMap(MethodSpec).initComptime(.{
     .{ "toString", MethodSpec{ .call = errorToString, .arity = 0 } },
 });
 
+/// ECMA-262 ES2025 Error.isError(arg): returns true iff arg has [[ErrorData]].
+fn errorIsError(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = ctx;
+    _ = allocator;
+    _ = this_value;
+    if (args.len == 0) return JSValue.fromBool(false);
+    return JSValue.fromBool(args[0] == .@"error");
+}
+
 // ===== Error constructors =====
 
 /// Comptime factory: one native per ErrorKind. The message argument is
@@ -90,6 +99,10 @@ pub fn install(self: *Interpreter) !void {
             .call = errorConstructor(entry[1]),
             .constructable = true,
         });
+        if (std.mem.eql(u8, entry[0], "Error")) {
+            const bag = try self.functionStatics(ctor);
+            try builtin_helpers.dneMethod(bag, "isError", try native_helpers.native(self, "isError", 1, errorIsError));
+        }
         try g.define(arena, entry[0], ctor);
     }
 }
