@@ -74,7 +74,7 @@ fn bufferOf(self: *Interpreter, this_value: JSValue, comptime shared: bool, comp
     return &this_value.array_buffer.value;
 }
 
-fn bufferGetter(comptime shared: bool, comptime field: enum { byte_length, max_byte_length, flag_false }, comptime what: []const u8) NativeFn {
+fn bufferGetter(comptime shared: bool, comptime field: enum { byte_length, max_byte_length, flag_false, detached }, comptime what: []const u8) NativeFn {
     return struct {
         fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
             _ = allocator;
@@ -83,6 +83,7 @@ fn bufferGetter(comptime shared: bool, comptime field: enum { byte_length, max_b
             return switch (field) {
                 .byte_length, .max_byte_length => num(buf.byteLength()),
                 .flag_false => JSValue.fromBool(false),
+                .detached => JSValue.fromBool(buf.isDetached()),
             };
         }
     }.call;
@@ -115,11 +116,12 @@ fn typedArrayGetter(comptime field: enum { buffer, byte_length, byte_offset, len
             _ = args;
             if (this_value != .typed_array) return incompatible(interp(ctx), what);
             const ta = &this_value.typed_array.value;
+            const is_detached = builtin_helpers.isTypedArrayDetached(ta);
             return switch (field) {
                 .buffer => ta.owner.retain(),
-                .byte_length => num(ta.len * ta.kind.elemSize()),
-                .byte_offset => num(ta.byte_offset),
-                .length => num(ta.len),
+                .byte_length => num(if (is_detached) 0 else ta.len * ta.kind.elemSize()),
+                .byte_offset => num(if (is_detached) 0 else ta.byte_offset),
+                .length => num(if (is_detached) 0 else ta.len),
             };
         }
     }.call;
@@ -222,7 +224,7 @@ pub fn install(self: *Interpreter) !void {
     try defineAccessor(self, p.array_buffer, "byteLength", "byteLength", bufferGetter(false, .byte_length, "ArrayBuffer.prototype.byteLength"), null);
     try defineAccessor(self, p.array_buffer, "maxByteLength", "maxByteLength", bufferGetter(false, .max_byte_length, "ArrayBuffer.prototype.maxByteLength"), null);
     try defineAccessor(self, p.array_buffer, "resizable", "resizable", bufferGetter(false, .flag_false, "ArrayBuffer.prototype.resizable"), null);
-    try defineAccessor(self, p.array_buffer, "detached", "detached", bufferGetter(false, .flag_false, "ArrayBuffer.prototype.detached"), null);
+    try defineAccessor(self, p.array_buffer, "detached", "detached", bufferGetter(false, .detached, "ArrayBuffer.prototype.detached"), null);
     try defineAccessor(self, p.shared_array_buffer, "byteLength", "byteLength", bufferGetter(true, .byte_length, "SharedArrayBuffer.prototype.byteLength"), null);
     try defineAccessor(self, p.shared_array_buffer, "maxByteLength", "maxByteLength", bufferGetter(true, .max_byte_length, "SharedArrayBuffer.prototype.maxByteLength"), null);
     try defineAccessor(self, p.shared_array_buffer, "growable", "growable", bufferGetter(true, .flag_false, "SharedArrayBuffer.prototype.growable"), null);

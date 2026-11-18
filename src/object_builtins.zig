@@ -141,7 +141,8 @@ pub fn ownEnumerableKeys(ctx: *anyopaque, allocator: Allocator, v: JSValue) anye
                 keys.deinit(allocator);
             }
             var i: usize = 0;
-            while (i < box.value.len) : (i += 1) {
+            const ta_len = if (builtin_helpers.isTypedArrayDetached(&box.value)) 0 else box.value.len;
+            while (i < ta_len) : (i += 1) {
                 try keys.append(allocator, try std.fmt.allocPrint(allocator, "{d}", .{i}));
             }
             if (self.extraProps(v)) |bag| {
@@ -315,7 +316,7 @@ fn objHasOwnProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
             (if (self.regexProps(this_value)) |bag| bag.object.value.hasOwnProperty(key) else false)),
         .temporal => JSValue.fromBool(if (self.temporalProps(this_value)) |bag| bag.object.value.hasOwnProperty(key) else false),
         .typed_array => |box| switch (@import("interpreter_props.zig").canonicalNumericIndex(self.gc_allocator, key, box.value.len)) {
-            .valid_index => JSValue.fromBool(true),
+            .valid_index => JSValue.fromBool(!builtin_helpers.isTypedArrayDetached(&box.value)),
             .invalid_index => JSValue.fromBool(false),
             .not_numeric => JSValue.fromBool(if (self.extraProps(this_value)) |bag| bag.object.value.hasOwnProperty(key) else false),
         },
@@ -339,7 +340,7 @@ fn objPropertyIsEnumerable(ctx: *anyopaque, allocator: Allocator, this_value: JS
             return JSValue.fromBool(idx < box.value.length() and !box.value.isHole(idx));
         },
         .typed_array => |box| switch (@import("interpreter_props.zig").canonicalNumericIndex(self.gc_allocator, key, box.value.len)) {
-            .valid_index => return JSValue.fromBool(true),
+            .valid_index => return JSValue.fromBool(!builtin_helpers.isTypedArrayDetached(&box.value)),
             .invalid_index => return JSValue.fromBool(false),
             .not_numeric => return JSValue.fromBool(if (self.extraProps(this_value)) |bag| bag.object.value.propertyIsEnumerable(key) else false),
         },
@@ -714,6 +715,7 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, thi
         .typed_array => |box| {
             switch (@import("interpreter_props.zig").canonicalNumericIndex(self.gc_allocator, key, box.value.len)) {
                 .valid_index => |idx| {
+                    if (builtin_helpers.isTypedArrayDetached(&box.value)) return JSValue.UNDEFINED;
                     const val = try builtin_helpers.typedElemGet(self, box.value.kind, &box.value.owner.array_buffer.value, box.value.byte_offset, box.value.len, idx);
                     return dataDescObj(self, val, true, true, true);
                 },
@@ -933,7 +935,8 @@ pub fn objectGetOwnPropertyNames(ctx: *anyopaque, allocator: Allocator, this_val
         },
         .typed_array => |box| {
             var i: usize = 0;
-            while (i < box.value.len) : (i += 1) {
+            const ta_len = if (builtin_helpers.isTypedArrayDetached(&box.value)) 0 else box.value.len;
+            while (i < ta_len) : (i += 1) {
                 const idx_str = try std.fmt.allocPrint(allocator, "{d}", .{i});
                 defer allocator.free(idx_str);
                 _ = try result.array.value.push(try interp(ctx).gcNewString(idx_str));

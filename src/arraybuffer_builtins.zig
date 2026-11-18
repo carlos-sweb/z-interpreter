@@ -511,8 +511,15 @@ fn typedArrayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
 // BigInt with refcount 1) -- unlike `liveElem`'s BORROWED array slot, so
 // none of the functions below `.retain()` what `taGet` hands them. =====
 
+fn isTypedArrayDetached(this_value: JSValue) bool {
+    return this_value == .typed_array and builtin_helpers.isTypedArrayDetached(&this_value.typed_array.value);
+}
+
 fn requireTypedArray(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!void {
     _ = try requireTag(ctx, this_value, .typed_array, "Method TypedArray.prototype.{s} called on incompatible receiver", method);
+    if (isTypedArrayDetached(this_value)) {
+        return interp(ctx).throwError(.type_error, "Cannot perform TypedArray.prototype.{s} on a detached ArrayBuffer", .{method});
+    }
 }
 
 fn taLen(this_value: JSValue) usize {
@@ -752,6 +759,7 @@ fn taIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     if (len == 0) return JSValue.fromNumber(-1);
     const target = arg(args, 0);
     const n = if (args.len >= 2) try toNumberStrict(self, args[1]) else 0.0;
+    if (isTypedArrayDetached(this_value)) return JSValue.fromNumber(-1);
     if (std.math.isPositiveInf(n)) return JSValue.fromNumber(-1);
     const start = normIndex(n, len);
     var i: usize = start;
@@ -787,6 +795,7 @@ fn taLastIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     if (len == 0) return JSValue.fromNumber(-1);
     const target = arg(args, 0);
     const n = if (args.len >= 2) try toNumberStrict(self, args[1]) else @as(f64, @floatFromInt(len - 1));
+    if (isTypedArrayDetached(this_value)) return JSValue.fromNumber(-1);
     if (std.math.isNegativeInf(n)) return JSValue.fromNumber(-1);
     const rel = toIntSat(n);
     const k_signed: isize = if (rel >= 0) @min(rel, @as(isize, @intCast(len)) - 1) else @as(isize, @intCast(len)) + rel;
@@ -1385,6 +1394,18 @@ pub fn installHierarchy(self: *Interpreter) !JSValue {
     return ta_statics;
 }
 
+fn hostDetachArrayBuffer(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const self = interp(ctx);
+    const buf = arg(args, 0);
+    if (buf != .array_buffer or buf.array_buffer.value.is_shared) {
+        return self.throwError(.type_error, "detachArrayBuffer requires a non-shared ArrayBuffer", .{});
+    }
+    buf.array_buffer.value.detach();
+    return JSValue.UNDEFINED;
+}
+
 /// Installs `ArrayBuffer`, `DataView`, and the 10 TypedArray constructors.
 pub fn install(self: *Interpreter) !void {
     const arena = self.gc_allocator;
@@ -1429,4 +1450,8 @@ pub fn install(self: *Interpreter) !void {
         });
         try g.define(arena, e[0], ctor);
     }
+
+    const dollar262 = try self.ordinaryObject();
+    try builtin_helpers.dneMethod(dollar262, "detachArrayBuffer", try native(self, "detachArrayBuffer", 1, hostDetachArrayBuffer));
+    try g.define(arena, "$262", dollar262);
 }

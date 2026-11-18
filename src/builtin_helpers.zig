@@ -333,7 +333,12 @@ pub fn typedView(comptime T: type, buffer: *zbuffer.ArrayBuffer, byte_offset: us
 /// invariant violation, not a JS-facing condition, since real spec
 /// out-of-range reads are `undefined` handled entirely at the
 /// getProperty call site, never reaching this far).
+pub fn isTypedArrayDetached(ta: anytype) bool {
+    return ta.owner == .array_buffer and ta.owner.array_buffer.value.isDetached();
+}
+
 pub fn typedElemGet(self: *Interpreter, kind: zvalue.TypedKind, buffer: *zbuffer.ArrayBuffer, byte_offset: usize, len: usize, index: usize) anyerror!JSValue {
+    if (buffer.isDetached()) return JSValue.UNDEFINED;
     return switch (kind) {
         .i8 => JSValue.fromNumber(@floatFromInt(typedView(i8, buffer, byte_offset, len).get(index) catch unreachable)),
         .u8, .u8_clamped => JSValue.fromNumber(@floatFromInt(typedView(u8, buffer, byte_offset, len).get(index) catch unreachable)),

@@ -554,7 +554,7 @@ pub fn evalIn(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
             self.protos.temporalProtoFor(box.value).object.value.has(key)),
         .typed_array => |box| blk: {
             switch (@import("interpreter_props.zig").canonicalNumericIndex(self.gc_allocator, key, box.value.len)) {
-                .valid_index => break :blk JSValue.fromBool(true),
+                .valid_index => break :blk JSValue.fromBool(!@import("builtin_helpers.zig").isTypedArrayDetached(&box.value)),
                 .invalid_index => break :blk JSValue.fromBool(false),
                 .not_numeric => {
                     if (self.extraProps(r)) |bag| {
