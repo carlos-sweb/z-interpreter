@@ -371,6 +371,7 @@ pub fn typedElemSet(self: *Interpreter, kind: zvalue.TypedKind, buffer: *zbuffer
     // the 8 branches.
     if (value == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a {s}", .{if (kind.isBigInt()) "BigInt" else "number"});
     const num_val: JSValue = if (kind.isBigInt()) JSValue.UNDEFINED else JSValue.fromNumber(try toNumberStrict(self, value));
+    if (buffer.isDetached()) return;
     switch (kind) {
         .i8 => {
             const v = try toInt8Wrap(self, num_val);

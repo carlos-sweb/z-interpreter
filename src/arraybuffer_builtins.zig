@@ -204,6 +204,7 @@ fn dataViewGetInt8(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     const self = interp(ctx);
     const dv = try requireDataView(self, this_value, "getInt8");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
+    if (dv.buffer.isDetached()) return self.throwError(.type_error, "Cannot perform DataView operation on a detached ArrayBuffer", .{});
     const v = dv.getInt8(offset) catch |e| return self.bufferErr(e);
     return JSValue.fromNumber(@floatFromInt(v));
 }
@@ -212,6 +213,7 @@ fn dataViewGetUint8(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     const self = interp(ctx);
     const dv = try requireDataView(self, this_value, "getUint8");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
+    if (dv.buffer.isDetached()) return self.throwError(.type_error, "Cannot perform DataView operation on a detached ArrayBuffer", .{});
     const v = dv.getUint8(offset) catch |e| return self.bufferErr(e);
     return JSValue.fromNumber(@floatFromInt(v));
 }
@@ -221,6 +223,7 @@ fn dataViewSetInt8(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     const dv = try requireDataView(self, this_value, "setInt8");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
     const value = try toInt8Wrap(self, arg(args, 1));
+    if (dv.buffer.isDetached()) return self.throwError(.type_error, "Cannot perform DataView operation on a detached ArrayBuffer", .{});
     dv.setInt8(offset, value) catch |e| return self.bufferErr(e);
     return JSValue.UNDEFINED;
 }
@@ -230,6 +233,7 @@ fn dataViewSetUint8(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     const dv = try requireDataView(self, this_value, "setUint8");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
     const value = try toUint8Wrap(self, arg(args, 1));
+    if (dv.buffer.isDetached()) return self.throwError(.type_error, "Cannot perform DataView operation on a detached ArrayBuffer", .{});
     dv.setUint8(offset, value) catch |e| return self.bufferErr(e);
     return JSValue.UNDEFINED;
 }
@@ -893,6 +897,7 @@ fn taFill(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     defer coerced_val.deinit();
     const start = if (arg(args, 1) == .undefined) 0 else normIndex(try toNumberStrict(self, arg(args, 1)), len);
     const end = if (arg(args, 2) == .undefined) len else normIndex(try toNumberStrict(self, arg(args, 2)), len);
+    if (isTypedArrayDetached(this_value)) return self.throwError(.type_error, "Cannot perform TypedArray.prototype.fill on a detached ArrayBuffer", .{});
     var i = start;
     while (i < end) : (i += 1) try taWrite(self, this_value, i, coerced_val);
     return this_value.retain();
@@ -981,6 +986,7 @@ fn taSort(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
         }
         tmp[j] = key;
     }
+    if (isTypedArrayDetached(this_value)) return this_value.retain();
     i = 0;
     while (i < n) : (i += 1) try taWrite(self, this_value, i, tmp[i]);
     return this_value.retain();
@@ -1079,8 +1085,10 @@ fn taSetMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     const offset_raw = if (arg(args, 1) == .undefined) 0.0 else try toNumberStrict(self, arg(args, 1));
     const offset_int: f64 = if (std.math.isNan(offset_raw)) 0.0 else @trunc(offset_raw);
     if (offset_int < 0) return self.throwError(.range_error, "Offset is out of bounds", .{});
+    if (isTypedArrayDetached(this_value)) return self.throwError(.type_error, "Cannot perform TypedArray.prototype.set on a detached ArrayBuffer", .{});
 
     if (source == .typed_array) {
+        if (isTypedArrayDetached(source)) return self.throwError(.type_error, "Cannot perform TypedArray.prototype.set on a detached ArrayBuffer", .{});
         if (source.typed_array.value.kind.isBigInt() != this_value.typed_array.value.kind.isBigInt()) {
             return self.throwError(.type_error, "Cannot mix BigInt and other types, use explicit conversions", .{});
         }
@@ -1160,6 +1168,7 @@ fn taSlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const count = if (end > start) end - start else 0;
     const result = try typedArraySpeciesCreate(self, this_value, count);
     errdefer result.deinit();
+    if (isTypedArrayDetached(this_value)) return self.throwError(.type_error, "Cannot perform TypedArray.prototype.slice on a detached ArrayBuffer", .{});
     if (count > 0) {
         const tmp = try allocator.alloc(JSValue, count);
         defer {
