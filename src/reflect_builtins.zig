@@ -177,6 +177,20 @@ fn reflectSetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
     return JSValue.fromBool(ok);
 }
 
+fn reflectPreventExtensions(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const target = try reflectRequireObject(ctx, "preventExtensions", arg(args, 0));
+    return JSValue.fromBool(try object_builtins.preventExtensionsInternal(interp(ctx), target));
+}
+
+fn reflectIsExtensible(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const target = try reflectRequireObject(ctx, "isExtensible", arg(args, 0));
+    return JSValue.fromBool(try object_builtins.isExtensibleInternal(interp(ctx), target));
+}
+
 /// Installs the `Reflect` namespace (statics-only, no constructor).
 pub fn install(self: *Interpreter) !void {
     const reflect_obj = try installBuiltin(self, .{ .name = "Reflect", .statics = &.{
@@ -189,6 +203,8 @@ pub fn install(self: *Interpreter) !void {
         .{ .name = "setPrototypeOf", .value = .{ .method = .{ .call = reflectSetPrototypeOf, .arity = 2 } } },
         .{ .name = "defineProperty", .value = .{ .method = .{ .call = reflectDefineProperty, .arity = 3 } } },
         .{ .name = "getOwnPropertyDescriptor", .value = .{ .method = .{ .call = reflectGetOwnPropertyDescriptor, .arity = 2 } } },
+        .{ .name = "preventExtensions", .value = .{ .method = .{ .call = reflectPreventExtensions, .arity = 1 } } },
+        .{ .name = "isExtensible", .value = .{ .method = .{ .call = reflectIsExtensible, .arity = 1 } } },
         .{ .name = "apply", .value = .{ .method = .{ .call = reflectApply, .arity = 3 } } },
         .{ .name = "construct", .value = .{ .method = .{ .call = reflectConstruct, .arity = 2 } } },
     } });

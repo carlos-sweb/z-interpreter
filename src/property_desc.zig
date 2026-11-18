@@ -415,7 +415,29 @@ pub fn defineOwnProperty(self: *Interpreter, obj: JSValue, key: []const u8, d: *
                 defer desc_obj.deinit();
                 const result = try trap_fn.function.value.call(trap_fn.function.value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, key_val, desc_obj });
                 defer result.deinit();
-                return coercion.isTruthy(result);
+                if (!coercion.isTruthy(result)) return false;
+                const object_builtins = @import("object_builtins.zig");
+                const target_desc = try object_builtins.objectGetOwnPropertyDescriptor(self, self.gc_allocator, JSValue.UNDEFINED, &.{ box.value.target, key_val });
+                defer target_desc.deinit();
+                const ext = try object_builtins.isExtensibleInternal(self, box.value.target);
+                const setting_config_false = d.has_configurable and !d.configurable;
+                if (target_desc == .undefined) {
+                    if (!ext) {
+                        return self.throwError(.type_error, "'defineProperty' on proxy: trap returned truish for adding property '{s}' to the non-extensible proxy target", .{displayKey(key)});
+                    }
+                    if (setting_config_false) {
+                        return self.throwError(.type_error, "'defineProperty' on proxy: trap returned truish for defining non-configurable property '{s}' which is non-existent in the proxy target", .{displayKey(key)});
+                    }
+                } else if (target_desc == .object) {
+                    const target_cfg = if (target_desc.object.value.get("configurable")) |c| c == .boolean and c.boolean else false;
+                    if (!target_cfg and d.has_configurable and d.configurable) {
+                        return self.throwError(.type_error, "'defineProperty' on proxy: trap returned truish for defining configurable property '{s}' which is non-configurable in the proxy target", .{displayKey(key)});
+                    }
+                    if (target_cfg and setting_config_false) {
+                        return self.throwError(.type_error, "'defineProperty' on proxy: trap returned truish for defining non-configurable property '{s}' which is configurable in the proxy target", .{displayKey(key)});
+                    }
+                }
+                return true;
             }
             return defineOwnProperty(self, box.value.target, key, d);
         },

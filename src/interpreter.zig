@@ -841,6 +841,8 @@ pub const Interpreter = struct {
     /// bag is an edge of its array (not a root), and the entry goes when
     /// the array dies.
     array_props: std.AutoHashMapUnmanaged(usize, JSValue) = .empty,
+    arguments_arrays: std.AutoHashMapUnmanaged(usize, void) = .empty,
+    deleted_arguments_length: std.AutoHashMapUnmanaged(usize, void) = .empty,
     /// Own data/accessor properties of Temporal instances. The native
     /// TemporalValue remains an internal slot; this bag is an edge of its box.
     temporal_props: std.AutoHashMapUnmanaged(usize, JSValue) = .empty,

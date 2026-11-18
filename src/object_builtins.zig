@@ -300,7 +300,7 @@ fn objHasOwnProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
             break :blk JSValue.fromBool(false);
         },
         .array => |box| blk: {
-            if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromBool(true);
+            if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromBool(!self.deleted_arguments_length.contains(@intFromPtr(box)));
             if (self.array_props.get(@intFromPtr(box))) |bag| {
                 if (bag.object.value.hasOwnProperty(key)) break :blk JSValue.fromBool(true);
             }
@@ -701,8 +701,11 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, thi
             return JSValue.UNDEFINED;
         },
         .array => |box| {
-            if (std.mem.eql(u8, key, "length"))
-                return dataDescObj(self, JSValue.fromNumber(@floatFromInt(box.value.length())), box.value.isLengthWritable(), false, false);
+            if (std.mem.eql(u8, key, "length")) {
+                if (self.deleted_arguments_length.contains(@intFromPtr(box))) return JSValue.UNDEFINED;
+                const configurable = self.arguments_arrays.contains(@intFromPtr(box));
+                return dataDescObj(self, JSValue.fromNumber(@floatFromInt(box.value.length())), box.value.isLengthWritable(), false, configurable);
+            }
             const bag_opt = self.array_props.get(@intFromPtr(box));
             if (bag_opt) |bag| {
                 if (bag.object.value.getOwnRecord(key)) |rec| return descFromRecord(self, rec);
@@ -736,7 +739,42 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, thi
                 defer trap_fn.deinit();
                 const key_val = try property_desc.keyToValue(self, key);
                 defer key_val.deinit();
-                return try trap_fn.function.value.call(trap_fn.function.value.ctx, allocator, box.value.handler, &.{ box.value.target, key_val });
+                const trap_result = try trap_fn.function.value.call(trap_fn.function.value.ctx, allocator, box.value.handler, &.{ box.value.target, key_val });
+                errdefer trap_result.deinit();
+                if (trap_result != .undefined and trap_result != .object) {
+                    return self.throwError(.type_error, "'getOwnPropertyDescriptor' on proxy: trap returned neither object nor undefined", .{});
+                }
+                const target_desc = try objectGetOwnPropertyDescriptor(ctx, allocator, this_value, &.{ box.value.target, arg(args, 1) });
+                defer target_desc.deinit();
+                if (trap_result == .undefined) {
+                    if (target_desc == .object) {
+                        const target_cfg = if (target_desc.object.value.get("configurable")) |c| coercion.isTruthy(c) else false;
+                        if (!target_cfg) {
+                            return self.throwError(.type_error, "'getOwnPropertyDescriptor' on proxy: trap returned undefined for property '{s}' which is non-configurable in the proxy target", .{property_desc.displayKey(key)});
+                        }
+                        if (!try isExtensibleInternal(self, box.value.target)) {
+                            return self.throwError(.type_error, "'getOwnPropertyDescriptor' on proxy: trap returned undefined for property '{s}' which exists in the non-extensible proxy target", .{property_desc.displayKey(key)});
+                        }
+                    }
+                    return JSValue.UNDEFINED;
+                }
+                var result_desc = try property_desc.toPropertyDescriptor(self, trap_result);
+                defer result_desc.deinit();
+                const ext = try isExtensibleInternal(self, box.value.target);
+                if (target_desc == .undefined) {
+                    if (!ext) {
+                        return self.throwError(.type_error, "'getOwnPropertyDescriptor' on proxy: trap returned descriptor for property '{s}' that does not exist in the non-extensible proxy target", .{property_desc.displayKey(key)});
+                    }
+                    if (!result_desc.configurable) {
+                        return self.throwError(.type_error, "'getOwnPropertyDescriptor' on proxy: trap returned non-configurable descriptor for property '{s}' that does not exist in the proxy target", .{property_desc.displayKey(key)});
+                    }
+                } else if (target_desc == .object) {
+                    const target_cfg = if (target_desc.object.value.get("configurable")) |c| coercion.isTruthy(c) else false;
+                    if (target_cfg and !result_desc.configurable) {
+                        return self.throwError(.type_error, "'getOwnPropertyDescriptor' on proxy: trap reported non-configurability for property '{s}' which is configurable in the proxy target", .{property_desc.displayKey(key)});
+                    }
+                }
+                return trap_result;
             }
             return objectGetOwnPropertyDescriptor(ctx, allocator, this_value, &.{ box.value.target, arg(args, 1) });
         },
@@ -798,7 +836,7 @@ pub fn proxyOwnPropertyKeys(self: *Interpreter, allocator: Allocator, proxy_val:
     }
 
     const target = box.value.target;
-    const is_extensible = if (extensibilityBag(self, target)) |bag| bag.object.value.is_extensible else (target == .array or target == .function or target == .temporal or target == .typed_array);
+    const is_extensible = try isExtensibleInternal(self, target);
     const target_keys = try ownPropertyKeyList(self, allocator, target);
     defer freeOwnedKeys(allocator, target_keys);
 
@@ -1084,12 +1122,57 @@ fn objectIsSealed(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     return JSValue.fromBool(!(v == .array or v == .function or v == .temporal or v == .typed_array));
 }
 
+pub fn preventExtensionsInternal(self: *Interpreter, obj: JSValue) anyerror!bool {
+    if (obj == .proxy) {
+        const box = obj.proxy;
+        if (try self.proxyTrap(box, "preventExtensions")) |trap_fn| {
+            defer trap_fn.deinit();
+            const res = try trap_fn.function.value.call(trap_fn.function.value.ctx, self.gc_allocator, box.value.handler, &.{box.value.target});
+            defer res.deinit();
+            const boolean_trap_result = coercion.isTruthy(res);
+            if (boolean_trap_result) {
+                if (try isExtensibleInternal(self, box.value.target)) {
+                    return self.throwError(.type_error, "'preventExtensions' on proxy: trap returned truish but the proxy target is extensible", .{});
+                }
+            }
+            return boolean_trap_result;
+        }
+        return preventExtensionsInternal(self, box.value.target);
+    }
+    if (try extensibilityBagForWrite(self, obj)) |bag| bag.object.value.preventExtensions();
+    return true;
+}
+
+pub fn isExtensibleInternal(self: *Interpreter, obj: JSValue) anyerror!bool {
+    if (obj == .proxy) {
+        const box = obj.proxy;
+        if (try self.proxyTrap(box, "isExtensible")) |trap_fn| {
+            defer trap_fn.deinit();
+            const res = try trap_fn.function.value.call(trap_fn.function.value.ctx, self.gc_allocator, box.value.handler, &.{box.value.target});
+            defer res.deinit();
+            const boolean_trap_result = coercion.isTruthy(res);
+            const target_result = try isExtensibleInternal(self, box.value.target);
+            if (boolean_trap_result != target_result) {
+                return self.throwError(.type_error, "'isExtensible' on proxy: trap result does not reflect extensibility of proxy target", .{});
+            }
+            return boolean_trap_result;
+        }
+        return isExtensibleInternal(self, box.value.target);
+    }
+    if (!builtin_helpers.isObjectLike(obj)) return false;
+    if (extensibilityBag(self, obj)) |bag| return bag.object.value.is_extensible;
+    return true;
+}
+
 fn objectPreventExtensions(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
     const v = arg(args, 0);
-    if (try extensibilityBagForWrite(self, v)) |bag| bag.object.value.preventExtensions();
+    if (!builtin_helpers.isObjectLike(v)) return v.retain();
+    if (!try preventExtensionsInternal(self, v)) {
+        return self.throwError(.type_error, "Cannot prevent extensions", .{});
+    }
     return v.retain();
 }
 
@@ -1097,9 +1180,7 @@ fn objectIsExtensible(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
-    const v = arg(args, 0);
-    if (extensibilityBag(self, v)) |bag| return JSValue.fromBool(bag.object.value.is_extensible);
-    return JSValue.fromBool(v == .array or v == .function or v == .temporal or v == .typed_array);
+    return JSValue.fromBool(try isExtensibleInternal(self, arg(args, 0)));
 }
 
 pub fn setPrototypeOfInternal(self: *Interpreter, obj: JSValue, proto: JSValue) anyerror!bool {
@@ -1276,10 +1357,25 @@ pub fn objectGetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: J
         .data_view => self.protos.data_view.retain(),
         .typed_array => |box| self.typedArrayProto(box.value.kind).retain(),
         .temporal => self.temporalPrototype(obj).retain(),
-        // No getPrototypeOf trap dispatch yet (Proxy plan, later phase)
-        // -- delegates transparently to target, correct for the
-        // no-trap case.
-        .proxy => |box| objectGetPrototypeOf(ctx, allocator, this_value, &.{box.value.target}),
+        .proxy => |box| blk: {
+            if (try self.proxyTrap(box, "getPrototypeOf")) |trap_fn| {
+                defer trap_fn.deinit();
+                const handler_proto = try trap_fn.function.value.call(trap_fn.function.value.ctx, allocator, box.value.handler, &.{box.value.target});
+                errdefer handler_proto.deinit();
+                if (!builtin_helpers.isObjectLike(handler_proto) and handler_proto != .null) {
+                    return self.throwError(.type_error, "'getPrototypeOf' on proxy: trap returned neither object nor null", .{});
+                }
+                if (!try isExtensibleInternal(self, box.value.target)) {
+                    const target_proto = try objectGetPrototypeOf(ctx, allocator, this_value, &.{box.value.target});
+                    defer target_proto.deinit();
+                    if (!zvalue.equality.strictEquals(handler_proto, target_proto)) {
+                        return self.throwError(.type_error, "'getPrototypeOf' on proxy: proxy target is not extensible and trap did not return its actual prototype", .{});
+                    }
+                }
+                break :blk handler_proto;
+            }
+            break :blk objectGetPrototypeOf(ctx, allocator, this_value, &.{box.value.target});
+        },
         .undefined, .null => self.throwError(.type_error, "Cannot convert undefined or null to object", .{}),
     };
 }

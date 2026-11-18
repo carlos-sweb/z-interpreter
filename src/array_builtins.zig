@@ -165,6 +165,113 @@ fn arrayLikeElem(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, i: 
 
 const MAX_ARRAY_LIKE_LEN: usize = 9007199254740991; // 2^53 - 1
 
+fn isArrayValue(self: *Interpreter, v: JSValue) anyerror!bool {
+    var cur = v;
+    while (cur == .proxy) {
+        if (cur.proxy.value.handler == .null) {
+            return self.throwError(.type_error, "Cannot perform 'IsArray' on a proxy that has been revoked", .{});
+        }
+        cur = cur.proxy.value.target;
+    }
+    return cur == .array;
+}
+
+fn createDataPropertyOrThrow(self: *Interpreter, obj: JSValue, idx: usize, val: JSValue) anyerror!void {
+    var buf: [32]u8 = undefined;
+    const key = std.fmt.bufPrint(&buf, "{d}", .{idx}) catch unreachable;
+    var d = property_desc.ParsedDesc{
+        .has_value = true,
+        .value = val,
+        .has_writable = true,
+        .writable = true,
+        .has_enumerable = true,
+        .enumerable = true,
+        .has_configurable = true,
+        .configurable = true,
+    };
+    if (!try property_desc.defineOwnProperty(self, obj, key, &d)) {
+        return self.throwError(.type_error, "Cannot define property {s}, object is not extensible", .{key});
+    }
+}
+
+const SpeciesResult = struct {
+    arr: JSValue,
+    is_default: bool,
+};
+
+fn arraySpeciesCreate(self: *Interpreter, allocator: Allocator, original: JSValue, len: usize) anyerror!SpeciesResult {
+    // Fast path for ordinary arrays without own "constructor" or altered prototype/Array[@@species]
+    if (original == .array and self.array_props.get(@intFromPtr(original.array)) == null and self.proto_refs.get(@intFromPtr(original.array)) == null) {
+        if (self.global_env.get("Array")) |array_ctor| {
+            const proto_ctor = self.protos.array.object.value.getOwn("constructor");
+            if (proto_ctor != null and zvalue.equality.strictEquals(proto_ctor.?, array_ctor)) {
+                const skey = try @import("regex_builtins.zig").wellKnownKey(self, "species");
+                defer allocator.free(skey);
+                if (array_ctor == .function) {
+                    if (array_ctor.function.value.statics) |bag| {
+                        if (bag.object.value.getOwnRecord(skey)) |rec| {
+                            if (rec.isAccessor() and rec.getter != null) {
+                                // Check if species getter was overridden? Just fall through if overridden, or check fast.
+                                // Actually calling species only takes 1 check; let's fall through to full path only if needed,
+                                // or check if rec.getter.?.function.value.ctx == @ptrCast(self) (default speciesGetter!).
+                                if (rec.getter.?.function.value.ctx == @as(*anyopaque, @ptrCast(self))) {
+                                    return .{ .arr = try self.gcNewArray(), .is_default = true };
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (!try isArrayValue(self, original)) {
+        return .{ .arr = try self.gcNewArray(), .is_default = true };
+    }
+    var ctor = try self.getProperty(original, "constructor");
+    errdefer ctor.deinit();
+    if (self.isConstructor(ctor)) {
+        // Same-realm check: always same realm in z-interpreter, continue.
+    }
+    if (builtin_helpers.isObjectLike(ctor)) {
+        const skey = try @import("regex_builtins.zig").wellKnownKey(self, "species");
+        defer allocator.free(skey);
+        const s = try self.getProperty(ctor, skey);
+        ctor.deinit();
+        ctor = s;
+        if (ctor == .null) {
+            ctor.deinit();
+            ctor = JSValue.UNDEFINED;
+        }
+    }
+    if (ctor == .undefined) {
+        return .{ .arr = try self.gcNewArray(), .is_default = true };
+    }
+    if (!self.isConstructor(ctor)) {
+        ctor.deinit();
+        return self.throwError(.type_error, "Species is not a constructor", .{});
+    }
+    if (self.global_env.get("Array")) |array_ctor| {
+        if (zvalue.equality.strictEquals(ctor, array_ctor)) {
+            ctor.deinit();
+            return .{ .arr = try self.gcNewArray(), .is_default = true };
+        }
+    }
+    defer ctor.deinit();
+    const len_val = JSValue.fromNumber(@floatFromInt(len));
+    const res = try self.constructValue(ctor, &.{len_val}, "species");
+    return .{ .arr = res, .is_default = false };
+}
+
+fn isConcatSpreadable(self: *Interpreter, allocator: Allocator, val: JSValue) anyerror!bool {
+    if (!builtin_helpers.isObjectLike(val)) return false;
+    const key = try @import("regex_builtins.zig").wellKnownKey(self, "isConcatSpreadable");
+    defer allocator.free(key);
+    const sp = try self.getProperty(val, key);
+    defer sp.deinit();
+    if (sp != .undefined) return coercion.isTruthy(sp);
+    return isArrayValue(self, val);
+}
+
 fn arrayPush(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     if (this_value == .array) {
@@ -345,90 +452,104 @@ fn arrayJoin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
 fn arraySlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const obj = try toArrayLikeObject(ctx, this_value, "slice");
     defer obj.deinit();
-    if (obj == .array) {
-        const start: ?isize = if (arg(args, 0) == .undefined) null else toIntSat(try interp(ctx).toNumberJS(arg(args, 0)));
-        const end: ?isize = if (arg(args, 1) == .undefined) null else toIntSat(try interp(ctx).toNumberJS(arg(args, 1)));
-        var sliced = try obj.array.value.slice(start, end);
-        defer sliced.deinit();
-        var result = try interp(ctx).gcNewArray();
-        var i: usize = 0;
-        while (i < sliced.length()) : (i += 1) {
-            if (sliced.isHole(i)) {
-                try result.array.value.appendHole();
+    const self = interp(ctx);
+    const len = try arrayLikeLength(ctx, obj);
+    const start_raw = if (arg(args, 0) == .undefined) 0 else try self.toNumberJS(arg(args, 0));
+    const end_raw = if (arg(args, 1) == .undefined) @as(f64, @floatFromInt(len)) else try self.toNumberJS(arg(args, 1));
+    const start = normIndex(start_raw, len);
+    const end = @max(start, normIndex(end_raw, len));
+    const count = end - start;
+    const sp = try arraySpeciesCreate(self, allocator, obj, count);
+    var result = sp.arr;
+    errdefer result.deinit();
+    if (sp.is_default) {
+        if (count > 4294967295) return self.throwError(.range_error, "Invalid array length", .{});
+        if (obj == .array and !obj.array.value.isHoley() and !obj.array.value.isSparse()) {
+            const slice_items = obj.array.value.toSlice();
+            const safe_end = @min(end, slice_items.len);
+            const safe_start = @min(start, safe_end);
+            for (slice_items[safe_start..safe_end]) |item| {
+                _ = try result.array.value.push(item.retain());
+            }
+            return result;
+        }
+        var i = start;
+        while (i < end) : (i += 1) {
+            if (try arrayLikeElem(ctx, allocator, obj, i)) |item| {
+                _ = try result.array.value.push(item.retain());
             } else {
-                _ = try result.array.value.push(sliced.get(i).retain());
+                try result.array.value.appendHole();
             }
         }
         return result;
     }
-    const len = try arrayLikeLength(ctx, obj);
-    const start_raw = if (arg(args, 0) == .undefined) 0 else try interp(ctx).toNumberJS(arg(args, 0));
-    const end_raw = if (arg(args, 1) == .undefined) @as(f64, @floatFromInt(len)) else try interp(ctx).toNumberJS(arg(args, 1));
-    const start = normIndex(start_raw, len);
-    const end = @max(start, normIndex(end_raw, len));
-    if (end - start > 4294967295) return interp(ctx).throwError(.range_error, "Invalid array length", .{});
-    var result = try interp(ctx).gcNewArray();
-    var i = start;
-    while (i < end) : (i += 1) {
-        if (try arrayLikeElem(ctx, allocator, obj, i)) |item| {
-            _ = try result.array.value.push(item.retain());
-        } else {
-            try result.array.value.appendHole();
+    var n: usize = 0;
+    var k = start;
+    while (k < end) : (k += 1) {
+        if (try arrayLikeElem(ctx, allocator, obj, k)) |item| {
+            defer item.deinit();
+            try createDataPropertyOrThrow(self, result, n, item);
         }
+        n += 1;
     }
+    try setArrayLikeLength(self, result, n);
     return result;
 }
 
 fn arrayConcat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const obj = try toArrayLikeObject(ctx, this_value, "concat");
     defer obj.deinit();
-    if (obj != .array) {
-        var result = try interp(ctx).gcNewArray();
-        _ = try result.array.value.push(obj.retain());
-        for (args) |a| {
-            if (a == .array) {
-                for (a.array.value.toSlice()) |item| _ = try result.array.value.push(item.retain());
+    const self = interp(ctx);
+    const sp = try arraySpeciesCreate(self, allocator, obj, 0);
+    var result = sp.arr;
+    errdefer result.deinit();
+    var n: usize = 0;
+
+    // Process `obj` followed by each `args` element
+    var idx: usize = 0;
+    while (idx <= args.len) : (idx += 1) {
+        const elem = if (idx == 0) obj else args[idx - 1];
+        if (try isConcatSpreadable(self, allocator, elem)) {
+            if (sp.is_default and elem == .array and !elem.array.value.isHoley() and !elem.array.value.isSparse() and self.array_props.get(@intFromPtr(elem.array)) == null) {
+                const slice_items = elem.array.value.toSlice();
+                if (slice_items.len > MAX_ARRAY_LIKE_LEN or n > MAX_ARRAY_LIKE_LEN - slice_items.len) {
+                    return self.throwError(.type_error, "Invalid array length", .{});
+                }
+                for (slice_items) |it| {
+                    _ = try result.array.value.push(it.retain());
+                }
+                n += slice_items.len;
             } else {
-                _ = try result.array.value.push(a.retain());
+                const elen = try arrayLikeLength(ctx, elem);
+                if (elen > MAX_ARRAY_LIKE_LEN or n > MAX_ARRAY_LIKE_LEN - elen) {
+                    return self.throwError(.type_error, "Invalid array length", .{});
+                }
+                var k: usize = 0;
+                while (k < elen) : (k += 1) {
+                    if (try arrayLikeElem(ctx, allocator, elem, k)) |sub| {
+                        defer sub.deinit();
+                        if (sp.is_default) {
+                            _ = try result.array.value.push(sub.retain());
+                        } else {
+                            try createDataPropertyOrThrow(self, result, n, sub);
+                        }
+                    } else if (sp.is_default) {
+                        try result.array.value.appendHole();
+                    }
+                    n += 1;
+                }
             }
-        }
-        return result;
-    }
-    const Arr = @TypeOf(this_value.array.value);
-
-    // z-array's own concat() only takes arrays to merge; a loose
-    // (non-array) argument needs a throwaway single-element array to fit
-    // that shape -- JS's own concat() accepts a mix of both. `others`
-    // mixes borrowed arrays (from array-typed args, owned by their own
-    // JSValue) with these synthetic ones, so `owned` separately tracks
-    // just the synthetic wrappers for cleanup after the merge.
-    var others: std.ArrayList(Arr) = .empty;
-    defer others.deinit(allocator);
-    var owned: std.ArrayList(Arr) = .empty;
-    defer {
-        for (owned.items) |*o| o.deinit();
-        owned.deinit(allocator);
-    }
-    for (args) |a| {
-        if (a == .array) {
-            try others.append(allocator, a.array.value);
         } else {
-            var one = Arr.init(allocator);
-            _ = try one.push(a);
-            try others.append(allocator, one);
-            try owned.append(allocator, one);
+            if (n >= MAX_ARRAY_LIKE_LEN) return self.throwError(.type_error, "Invalid array length", .{});
+            if (sp.is_default) {
+                _ = try result.array.value.push(elem.retain());
+            } else {
+                try createDataPropertyOrThrow(self, result, n, elem);
+            }
+            n += 1;
         }
     }
-
-    // z-array's own concat() does the bulk merge (this array's elements,
-    // then each of `others` in order); it just copies raw JSValue bytes
-    // without retaining (doesn't know T might be refcounted), so retain
-    // each element of the merged result on the way into the GC-tracked
-    // array.
-    var merged = try this_value.array.value.concat(others.items);
-    defer merged.deinit();
-    var result = try interp(ctx).gcNewArray();
-    for (merged.toSlice()) |item| _ = try result.array.value.push(item.retain());
+    if (!sp.is_default) try setArrayLikeLength(self, result, n);
     return result;
 }
 
@@ -506,17 +627,25 @@ fn liveElem(ctx: *anyopaque, allocator: Allocator, array: JSValue, i: usize) any
 fn arrayMap(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const obj = try toArrayLikeObject(ctx, this_value, "map");
     defer obj.deinit();
+    const self = interp(ctx);
     const len = try arrayLikeLength(ctx, obj);
     const cb = try requireCallback(ctx, args);
     const this_arg = if (args.len > 1) args[1] else JSValue.UNDEFINED;
-    if (len > 4294967295) return interp(ctx).throwError(.range_error, "Invalid array length", .{});
-    var result = try interp(ctx).gcNewArray();
+    if (len > 4294967295) return self.throwError(.range_error, "Invalid array length", .{});
+    const sp = try arraySpeciesCreate(self, allocator, obj, len);
+    var result = sp.arr;
+    errdefer result.deinit();
     var i: usize = 0;
     while (i < len) : (i += 1) {
         if (try arrayLikeElem(ctx, allocator, obj, i)) |item| {
             const v = try callCallbackWithThis(cb, allocator, this_arg, item, i, obj);
-            _ = try result.array.value.push(v);
-        } else {
+            if (sp.is_default) {
+                _ = try result.array.value.push(v);
+            } else {
+                defer v.deinit();
+                try createDataPropertyOrThrow(self, result, i, v);
+            }
+        } else if (sp.is_default) {
             try result.array.value.appendHole();
         }
     }
@@ -526,15 +655,24 @@ fn arrayMap(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
 fn arrayFilter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const obj = try toArrayLikeObject(ctx, this_value, "filter");
     defer obj.deinit();
+    const self = interp(ctx);
     const len = try arrayLikeLength(ctx, obj);
     const cb = try requireCallback(ctx, args);
     const this_arg = if (args.len > 1) args[1] else JSValue.UNDEFINED;
-    var result = try interp(ctx).gcNewArray();
+    const sp = try arraySpeciesCreate(self, allocator, obj, 0);
+    var result = sp.arr;
+    errdefer result.deinit();
+    var to: usize = 0;
     var i: usize = 0;
     while (i < len) : (i += 1) {
         const item = try arrayLikeElem(ctx, allocator, obj, i) orelse continue;
         if (coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, item, i, obj))) {
-            _ = try result.array.value.push(item.retain());
+            if (sp.is_default) {
+                _ = try result.array.value.push(item.retain());
+            } else {
+                try createDataPropertyOrThrow(self, result, to, item);
+                to += 1;
+            }
         }
     }
     return result;
@@ -621,10 +759,9 @@ fn arrayEvery(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 }
 
 fn arrayIsArray(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
     _ = allocator;
     _ = this_value;
-    return JSValue.fromBool(arg(args, 0) == .array);
+    return JSValue.fromBool(try isArrayValue(interp(ctx), arg(args, 0)));
 }
 
 // ===== Array / Function constructors and statics =====
@@ -827,18 +964,38 @@ fn arrayReduceRight(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
 fn arrayFlatMap(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const obj = try toArrayLikeObject(ctx, this_value, "flatMap");
     defer obj.deinit();
+    const self = interp(ctx);
     const len = try arrayLikeLength(ctx, obj);
     const cb = try requireCallback(ctx, args);
     const this_arg = if (args.len > 1) args[1] else JSValue.UNDEFINED;
-    var result = try interp(ctx).gcNewArray();
+    const sp = try arraySpeciesCreate(self, allocator, obj, 0);
+    var result = sp.arr;
+    errdefer result.deinit();
+    var target_idx: usize = 0;
     var i: usize = 0;
     while (i < len) : (i += 1) {
         const item = try arrayLikeElem(ctx, allocator, obj, i) orelse continue;
         const v = try callCallbackWithThis(cb, allocator, this_arg, item, i, obj);
-        if (v == .array) {
-            for (v.array.value.toSlice()) |sub| _ = try result.array.value.push(sub.retain());
+        if (try isArrayValue(self, v)) {
+            const vlen = try arrayLikeLength(ctx, v);
+            var j: usize = 0;
+            while (j < vlen) : (j += 1) {
+                const sub = try arrayLikeElem(ctx, allocator, v, j) orelse continue;
+                defer sub.deinit();
+                if (sp.is_default) {
+                    _ = try result.array.value.push(sub.retain());
+                } else {
+                    try createDataPropertyOrThrow(self, result, target_idx, sub);
+                }
+                target_idx += 1;
+            }
         } else {
-            _ = try result.array.value.push(v.retain());
+            if (sp.is_default) {
+                _ = try result.array.value.push(v.retain());
+            } else {
+                try createDataPropertyOrThrow(self, result, target_idx, v);
+            }
+            target_idx += 1;
         }
     }
     return result;
@@ -984,21 +1141,37 @@ fn flattenInto(result: *JSValue, allocator: Allocator, arr_val: JSValue, depth: 
 fn arrayFlat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const obj = try toArrayLikeObject(ctx, this_value, "flat");
     defer obj.deinit();
-    const depth: i64 = if (arg(args, 0) == .undefined) 1 else toIntSat(try interp(ctx).toNumberJS(arg(args, 0)));
-    var result = try interp(ctx).gcNewArray();
-    if (obj == .array) {
+    const self = interp(ctx);
+    const depth: i64 = if (arg(args, 0) == .undefined) 1 else toIntSat(try self.toNumberJS(arg(args, 0)));
+    const sp = try arraySpeciesCreate(self, allocator, obj, 0);
+    var result = sp.arr;
+    errdefer result.deinit();
+    if (sp.is_default and obj == .array) {
         try flattenInto(&result, allocator, obj, depth);
         return result;
     }
-    const len = try arrayLikeLength(ctx, obj);
-    var i: usize = 0;
-    while (i < len) : (i += 1) {
-        const item = try arrayLikeElem(ctx, allocator, obj, i) orelse continue;
-        defer item.deinit();
-        if (depth > 0 and item == .array) {
-            try flattenInto(&result, allocator, item, depth - 1);
+    var tmp = try self.gcNewArray();
+    defer tmp.deinit();
+    if (obj == .array) {
+        try flattenInto(&tmp, allocator, obj, depth);
+    } else {
+        const len = try arrayLikeLength(ctx, obj);
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            const item = try arrayLikeElem(ctx, allocator, obj, i) orelse continue;
+            defer item.deinit();
+            if (depth > 0 and item == .array) {
+                try flattenInto(&tmp, allocator, item, depth - 1);
+            } else {
+                _ = try tmp.array.value.push(item.retain());
+            }
+        }
+    }
+    for (tmp.array.value.toSlice(), 0..) |it, idx| {
+        if (sp.is_default) {
+            _ = try result.array.value.push(it.retain());
         } else {
-            _ = try result.array.value.push(item.retain());
+            try createDataPropertyOrThrow(self, result, idx, it);
         }
     }
     return result;
@@ -1137,8 +1310,20 @@ fn arraySplice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
 
         var deleted = try arr.splice(start, delete_count, inserts);
         defer deleted.deinit();
-        var removed = try interp(ctx).gcNewArray();
-        for (deleted.toSlice()) |item| _ = try removed.array.value.push(item);
+        const self = interp(ctx);
+        const del_slice = deleted.toSlice();
+        const sp = try arraySpeciesCreate(self, allocator, this_value, del_slice.len);
+        var removed = sp.arr;
+        errdefer removed.deinit();
+        if (sp.is_default) {
+            for (del_slice) |item| _ = try removed.array.value.push(item);
+        } else {
+            for (del_slice, 0..) |item, idx| {
+                defer item.deinit();
+                try createDataPropertyOrThrow(self, removed, idx, item);
+            }
+            try setArrayLikeLength(self, removed, del_slice.len);
+        }
         return removed;
     }
     const obj = try toArrayLikeObject(ctx, this_value, "splice");

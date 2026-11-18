@@ -813,6 +813,7 @@ pub fn invokeFunctionNode(
     if (functionNeedsArguments(self, fnode)) {
         var arguments = try self.gcNewArray();
         for (args) |a| _ = try arguments.array.value.push(a.retain());
+        try self.arguments_arrays.put(self.gc_allocator, @intFromPtr(arguments.array), {});
         try call_env.define(allocator, "arguments", arguments);
     } else if (fnode.kind != .arrow) {
         try call_env.retainLazyArguments(allocator, args);

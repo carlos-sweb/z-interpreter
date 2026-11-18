@@ -335,6 +335,8 @@ pub fn deinit(self: *Interpreter) void {
     self.object_slots.deinit(self.gc_allocator);
     self.proto_refs.deinit(self.gc_allocator);
     self.array_props.deinit(self.gc_allocator);
+    self.arguments_arrays.deinit(self.gc_allocator);
+    self.deleted_arguments_length.deinit(self.gc_allocator);
     self.temporal_props.deinit(self.gc_allocator);
     self.temporal_protos.deinit(self.gc_allocator);
     self.function_needs_arguments.deinit(self.gc_allocator);
@@ -868,6 +870,8 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
             }
             // Out of the table before destroy(), as with proto_refs below.
             if (self.array_props.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
+            _ = self.arguments_arrays.remove(@intFromPtr(box));
+            _ = self.deleted_arguments_length.remove(@intFromPtr(box));
             if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             box.value.deinit();
             box.destroy();
@@ -890,6 +894,8 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
             for (box.value.keys()) |*key| sweeper.value(key.*);
             for (box.value.values()) |*val| sweeper.value(val.*);
             if (self.array_props.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
+            _ = self.arguments_arrays.remove(@intFromPtr(box));
+            _ = self.deleted_arguments_length.remove(@intFromPtr(box));
             if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             box.value.deinit();
             box.destroy();
@@ -897,6 +903,8 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
         .set => |box| {
             for (box.value.values()) |*val| sweeper.value(val.*);
             if (self.array_props.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
+            _ = self.arguments_arrays.remove(@intFromPtr(box));
+            _ = self.deleted_arguments_length.remove(@intFromPtr(box));
             if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             box.value.deinit();
             box.destroy();
@@ -904,6 +912,8 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
         .@"error" => |box| {
             if (box.value.errors) |errs| for (errs) |*e| sweeper.value(e.*);
             if (self.array_props.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
+            _ = self.arguments_arrays.remove(@intFromPtr(box));
+            _ = self.deleted_arguments_length.remove(@intFromPtr(box));
             if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             box.value.deinit();
             box.destroy();
@@ -933,6 +943,8 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
                 if (reaction.derived) |d| sweeper.value(d);
             }
             if (self.array_props.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
+            _ = self.arguments_arrays.remove(@intFromPtr(box));
+            _ = self.deleted_arguments_length.remove(@intFromPtr(box));
             if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             box.value.deinit(box.allocator);
             box.destroy();
@@ -943,6 +955,8 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
         },
         .regex => |box| {
             if (self.array_props.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
+            _ = self.arguments_arrays.remove(@intFromPtr(box));
+            _ = self.deleted_arguments_length.remove(@intFromPtr(box));
             if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             box.value.deinit();
             box.destroy();
@@ -956,6 +970,8 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
             // only the box itself needs freeing (matches
             // JSValue.deinit()'s own `.date` arm).
             if (self.array_props.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
+            _ = self.arguments_arrays.remove(@intFromPtr(box));
+            _ = self.deleted_arguments_length.remove(@intFromPtr(box));
             if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             box.destroy();
         },
@@ -975,6 +991,8 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
         },
         .array_buffer => |box| {
             if (self.array_props.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
+            _ = self.arguments_arrays.remove(@intFromPtr(box));
+            _ = self.deleted_arguments_length.remove(@intFromPtr(box));
             if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             box.value.deinit();
             box.destroy();
@@ -982,12 +1000,16 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
         .data_view => |box| {
             sweeper.value(box.value.owner);
             if (self.array_props.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
+            _ = self.arguments_arrays.remove(@intFromPtr(box));
+            _ = self.deleted_arguments_length.remove(@intFromPtr(box));
             if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             box.destroy();
         },
         .typed_array => |box| {
             sweeper.value(box.value.owner);
             if (self.array_props.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
+            _ = self.arguments_arrays.remove(@intFromPtr(box));
+            _ = self.deleted_arguments_length.remove(@intFromPtr(box));
             if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             box.destroy();
         },

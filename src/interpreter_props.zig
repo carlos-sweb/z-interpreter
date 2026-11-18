@@ -135,7 +135,7 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             break :blk JSValue.UNDEFINED;
         },
         .array => |box| blk: {
-            if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.length()));
+            if (std.mem.eql(u8, key, "length") and !self.deleted_arguments_length.contains(@intFromPtr(box))) break :blk JSValue.fromNumber(@floatFromInt(box.value.length()));
             if (self.array_props.get(@intFromPtr(box))) |bag| {
                 if (bag.object.value.getOwnRecord(key)) |rec| {
                     if (!rec.isAccessor()) break :blk rec.value.retain();
@@ -895,7 +895,13 @@ pub fn deletePropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8) 
     // actually consult that bag's configurability, not vacuously
     // succeed. No bag yet means nothing was ever defined there.
     if (obj == .array) {
-        if (std.mem.eql(u8, key, "length")) return false;
+        if (std.mem.eql(u8, key, "length")) {
+            if (self.arguments_arrays.contains(@intFromPtr(obj.array))) {
+                try self.deleted_arguments_length.put(self.gc_allocator, @intFromPtr(obj.array), {});
+                return true;
+            }
+            return false;
+        }
         const bag_opt = self.array_props.get(@intFromPtr(obj.array));
         if (zarray.CanonicalNumericIndexString(key)) |idx| {
             if (bag_opt) |bag| {
