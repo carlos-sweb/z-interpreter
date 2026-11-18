@@ -680,6 +680,7 @@ pub const BytecodeEmitter = struct {
         if (call.optional) return error.UnsupportedSyntax;
         var this_reg: ?u8 = null;
         const unwrapped = unwrapParen(call.callee);
+        var global_call_name: ?[]const u8 = null;
         const callee = if (unwrapped.data == .member) blk: {
             const m = unwrapped.data.member;
             if (m.optional) return error.UnsupportedSyntax;
@@ -705,6 +706,13 @@ pub const BytecodeEmitter = struct {
                 self.freeRegister(key_reg);
             }
             break :blk dst;
+        } else if (unwrapped.data == .identifier) blk: {
+            const name = unwrapped.data.identifier;
+            if (self.scope.localSlot(name) == null or self.scope.capturesLocal(name)) {
+                global_call_name = name;
+                break :blk try self.allocRegister();
+            }
+            break :blk try self.emitExpression(call.callee);
         } else try self.emitExpression(call.callee);
         if (self.next_register != @as(u16, callee) + 1) return error.UnsupportedSyntax;
         const argument_slots: u16 = std.math.cast(u16, call.args.len) orelse return error.TooManyRegisters;
@@ -729,8 +737,9 @@ pub const BytecodeEmitter = struct {
         for (0..argument_slots) |i| self.freeRegister(@intCast(arg_base + argument_slots - 1 - i));
         const destination = callee;
         const slot = std.math.cast(u8, self.call_sites.items.len) orelse return error.UnsupportedSyntax;
-        try self.call_sites.append(self.allocator, .{ .arg_count = arg_count, .this_reg = this_reg });
-        try self.emitOp(.{ .opcode = .call, .a = destination, .b = callee, .c = slot });
+        try self.call_sites.append(self.allocator, .{ .arg_count = arg_count, .this_reg = this_reg, .global_name = global_call_name });
+        const call_op: codeblock.Opcode = if (global_call_name != null) .call_global else .call;
+        try self.emitOp(.{ .opcode = call_op, .a = destination, .b = callee, .c = slot });
         if (this_reg) |r| self.freeRegister(r);
         return destination;
     }
@@ -919,7 +928,7 @@ pub fn disassemble(allocator: Allocator, block: *const codeblock.CodeBlock) ![]u
             .add_local_const, .sub_local_const, .lt_local_const, .gt_local_const, .le_local_const, .ge_local_const, .eq_local_const => try output.print(allocator, " r{d}, @{d}, #{d}", .{ op.a, op.b, op.c }),
             .jump => try output.print(allocator, " {d}", .{jumpTarget(op)}),
             .jump_if_true, .jump_if_false, .jump_if_not_nullish => try output.print(allocator, " r{d}, {d}", .{ op.a, jumpTarget(op) }),
-            .call => try output.print(allocator, " r{d}, r{d}, [cache:{d}]", .{ op.a, op.b, op.c }),
+            .call, .call_global => try output.print(allocator, " r{d}, r{d}, [cache:{d}]", .{ op.a, op.b, op.c }),
             .move => try output.print(allocator, " r{d}, r{d}", .{ op.a, op.b }),
             .new_object => try output.print(allocator, " r{d}", .{op.a}),
             .new_array => try output.print(allocator, " r{d}, {d}", .{ op.a, op.b }),

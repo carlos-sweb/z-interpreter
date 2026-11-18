@@ -41,6 +41,7 @@ pub const Opcode = enum(u8) {
     jump_if_true,
     jump_if_false,
     call,
+    call_global,
     call_method,
     new_value,
     get_prop,
@@ -120,6 +121,8 @@ pub const CallSiteCache = struct {
     target_block: ?*const CodeBlock = null,
     closure_env: ?*anyopaque = null,
     interp: ?*anyopaque = null,
+    global_name: ?[]const u8 = null,
+    global_version: u64 = 0,
 };
 
 /// Immutable representation emitted by a later compiler pass.

@@ -26,8 +26,8 @@
             .hash = "zfunctions-0.2.0-vB_Ir6wqAQAhOBkN68uQb-L0w9X3X1yzGpNkw5Ng6ylZ",
         },
         .zvalue = .{
-            .url = "https://github.com/carlos-sweb/z-value/archive/refs/tags/v0.1.5.tar.gz",
-            .hash = "zvalue-0.1.0-DI9AtcjRAQAcm4B2G8gJ22u0Ts5M9u-fSw8i7LKH5ET_",
+            .url = "git+https://github.com/carlos-sweb/z-value?ref=v0.1.6#93e085be14472520fb9876326fc55bd14224d6b1",
+            .hash = "zvalue-0.1.0-DI9AteDRAQBa5KLH2gcljxJMHW5yXQ6gOC9NemQMpXOT",
         },
         .zregex = .{
             .url = "https://github.com/carlos-sweb/z-regex/archive/refs/tags/v0.9.1.tar.gz",
@@ -42,8 +42,8 @@
             .hash = "zmath-0.1.0-Jp7-TqptAABCbOk5rAylx9riLtEhDwrRJOaIIAL5kqrN",
         },
         .zjson = .{
-            .url = "https://github.com/carlos-sweb/z-json/archive/refs/tags/v0.1.5.tar.gz",
-            .hash = "zjson-0.1.0-HTnR7ym_AAC_6jtuuK18eXE9PW09bjoXE6stkb4QE3V8",
+            .url = "git+https://github.com/carlos-sweb/z-json?ref=v0.1.6#ced62c530c78981757dd45fb3f807154e8f10d40",
+            .hash = "zjson-0.1.0-HTnR70G_AAAlf03CyWxbXrYt-9JebA37JJiDOr0VAzVb",
         },
         .zstring = .{
             .url = "https://github.com/carlos-sweb/z-string/archive/refs/tags/v0.4.1.tar.gz",
@@ -58,8 +58,8 @@
             .hash = "zarray-0.1.0--NF-nUl8AgCKhSY_uLLLV-5GQG1vfsAoId5djzA34tzo",
         },
         .zobject = .{
-            .url = "https://github.com/carlos-sweb/z-object/archive/refs/tags/v0.2.1.tar.gz",
-            .hash = "zobject-0.1.0-dBSRhNAbAgCRnN3V3ZHBrEKmlJ9YzDS_XNCpG71r11qc",
+            .url = "git+https://github.com/carlos-sweb/z-object?ref=v0.2.2#eef4418eb95553fa1334a3ba69084f16534604b3",
+            .hash = "zobject-0.1.0-dBSRhLYvAgBS7rgbY6J1hHjZc2cwZI1vWAC81YqAwGFn",
         },
         .zmap = .{
             .url = "https://github.com/carlos-sweb/z-map/archive/refs/tags/0.1.0.tar.gz",

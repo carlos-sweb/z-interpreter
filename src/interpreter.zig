@@ -843,6 +843,7 @@ pub const Interpreter = struct {
     array_props: std.AutoHashMapUnmanaged(usize, JSValue) = .empty,
     arguments_arrays: std.AutoHashMapUnmanaged(usize, void) = .empty,
     deleted_arguments_length: std.AutoHashMapUnmanaged(usize, void) = .empty,
+    interned_prop_keys: std.StringHashMapUnmanaged([]const u8) = .empty,
     /// Own data/accessor properties of Temporal instances. The native
     /// TemporalValue remains an internal slot; this bag is an edge of its box.
     temporal_props: std.AutoHashMapUnmanaged(usize, JSValue) = .empty,
@@ -896,6 +897,13 @@ pub const Interpreter = struct {
     // interpreter_runtime.zig's resumeFiber can reach it as
     // `Interpreter.fiber_stack_margin`.
     pub const fiber_stack_margin: usize = 1024 * 1024;
+
+    pub fn internPropKey(self: *Interpreter, key: []const u8) ![]const u8 {
+        if (self.interned_prop_keys.get(key)) |interned| return interned;
+        const duped = try self.arena_state.allocator().dupe(u8, key);
+        try self.interned_prop_keys.put(self.gc_allocator, duped, duped);
+        return duped;
+    }
 
     pub const init = interpreter_gc.init;
     pub const deinit = interpreter_gc.deinit;
