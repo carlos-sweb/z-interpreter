@@ -604,7 +604,7 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
         // F.myProp = 1 -- the old "functions have no property bag"
         // gap is gone).
         if (std.mem.eql(u8, key, "prototype") and obj.function.value.constructable) {
-            if (@import("temporal_builtins.zig").isIntrinsicConstructor(obj)) return self.throwError(.type_error, "Cannot assign to read only Temporal prototype", .{});
+            if (obj.function.value.ctx == @as(*anyopaque, @ptrCast(self))) return self.throwError(.type_error, "Cannot assign to read only property 'prototype' of function '{s}'", .{obj.function.value.name});
             if (obj.function.value.statics) |bag| {
                 if (bag.object.value.getOwnRecord("prototype")) |rec| {
                     if (!rec.isAccessor() and !rec.descriptor.writable) {
@@ -662,7 +662,15 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
     }
     if (obj == .array) return self.setArrayProperty(obj, key, value);
     if (obj == .typed_array) return self.setTypedArrayProperty(obj, key, value);
-    if (obj == .array_buffer or obj == .data_view) {
+    if (obj == .array_buffer or obj == .data_view or obj == .date or obj == .promise or obj == .map or obj == .set or obj == .@"error") {
+        if (obj == .@"error" and std.mem.eql(u8, key, "message") and self.extraProps(obj) == null) {
+            const s = try self.toDisplayStringJS(self.gc_allocator, value);
+            defer self.gc_allocator.free(s);
+            const box = obj.@"error";
+            box.value.allocator.free(box.value.message);
+            box.value.message = try box.value.allocator.dupe(u8, s);
+            return;
+        }
         if (self.extraProps(obj)) |bag| {
             if (bag.object.value.getOwnRecord(key)) |rec| {
                 if (rec.isAccessor()) {
@@ -674,7 +682,16 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
                 return self.setObjectProperty(bag, key, value);
             }
         }
-        const proto = if (obj == .array_buffer) self.arrayBufferProto(obj.array_buffer.value.is_shared) else self.protos.data_view;
+        const proto = switch (obj) {
+            .array_buffer => |box| self.arrayBufferProto(box.value.is_shared),
+            .data_view => self.protos.data_view,
+            .date => self.protos.date,
+            .promise => self.protos.promise,
+            .map => self.protos.map,
+            .set => self.protos.set,
+            .@"error" => self.protos.@"error",
+            else => unreachable,
+        };
         if (proto == .object) {
             var current: ?*const @TypeOf(proto.object.value) = &proto.object.value;
             while (current) |p| : (current = p.getPrototype()) {
@@ -691,17 +708,6 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
         }
         const bag = try self.extraPropsObject(obj);
         return self.setObjectProperty(bag, key, value);
-    }
-    if (obj == .@"error") {
-        if (std.mem.eql(u8, key, "message")) {
-            const s = try self.toDisplayStringJS(self.gc_allocator, value);
-            defer self.gc_allocator.free(s);
-            const box = obj.@"error";
-            box.value.allocator.free(box.value.message);
-            box.value.message = try box.value.allocator.dupe(u8, s);
-            return;
-        }
-        return self.throwError(.type_error, "Cannot add property {s} to an Error object: not supported yet", .{key});
     }
     if (obj == .regex) {
         if (std.mem.eql(u8, key, "lastIndex")) {
@@ -763,9 +769,7 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
         // No trap: set directly on target, matching the narrow set
         // of receiver kinds this function already special-cases
         // above (function/array/regex/object).
-        if (box.value.target == .object) return self.setObjectProperty(box.value.target, key, value);
-        if (box.value.target == .array) return self.setArrayProperty(box.value.target, key, value);
-        return self.throwError(.type_error, "Cannot set property {s} through a Proxy whose target is a {s}: not supported yet", .{ key, @tagName(box.value.target) });
+        return self.setPropertyOnValue(box.value.target, key, value);
     }
     if (obj != .object) return self.throwError(.type_error, "Cannot add property {s} to a {s}: not supported yet", .{ key, @tagName(obj) });
     // Writing a property on `globalThis` creates/updates a global
@@ -891,7 +895,24 @@ pub fn deletePropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8) 
     // actually consult that bag's configurability, not vacuously
     // succeed. No bag yet means nothing was ever defined there.
     if (obj == .array) {
-        if (self.array_props.get(@intFromPtr(obj.array))) |bag| return self.deleteObjectProperty(bag, key);
+        if (std.mem.eql(u8, key, "length")) return false;
+        const bag_opt = self.array_props.get(@intFromPtr(obj.array));
+        if (zarray.CanonicalNumericIndexString(key)) |idx| {
+            if (bag_opt) |bag| {
+                if (bag.object.value.getOwnRecord(key)) |rec| {
+                    if (!rec.descriptor.configurable) return false;
+                    _ = try self.deleteObjectProperty(bag, key);
+                } else if (bag.object.value.is_frozen or bag.object.value.is_sealed) {
+                    if (idx < obj.array.value.length() and !obj.array.value.isHole(idx)) return false;
+                }
+            }
+            if (idx < obj.array.value.length() and !obj.array.value.isHole(idx)) {
+                if (obj.array.value.getOpt(idx)) |old| old.deinit();
+                obj.array.value.delete(idx);
+            }
+            return true;
+        }
+        if (bag_opt) |bag| return self.deleteObjectProperty(bag, key);
         return true;
     }
     // A RegExp: `lastIndex` is non-configurable; anything else lives in

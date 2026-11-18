@@ -581,9 +581,18 @@ pub fn evalIn(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
             self.arrayBufferProto(box.value.is_shared).object.value.has(key)),
         .data_view => JSValue.fromBool((if (self.extraProps(r)) |bag| bag.object.value.hasOwnProperty(key) else false) or
             self.protos.data_view.object.value.has(key)),
-        // A BigInt is a primitive: the real TypeError.
+        .@"error" => JSValue.fromBool(std.mem.eql(u8, key, "name") or
+            std.mem.eql(u8, key, "message") or
+            std.mem.eql(u8, key, "constructor") or
+            (if (self.extraProps(r)) |bag| bag.object.value.hasOwnProperty(key) else false) or
+            self.protos.@"error".object.value.has(key)),
+        .date => JSValue.fromBool((if (self.extraProps(r)) |bag| bag.object.value.hasOwnProperty(key) else false) or self.protos.date.object.value.has(key)),
+        .promise => JSValue.fromBool((if (self.extraProps(r)) |bag| bag.object.value.hasOwnProperty(key) else false) or self.protos.promise.object.value.has(key)),
+        .map => JSValue.fromBool((if (self.extraProps(r)) |bag| bag.object.value.hasOwnProperty(key) else false) or self.protos.map.object.value.has(key)),
+        .set => JSValue.fromBool((if (self.extraProps(r)) |bag| bag.object.value.hasOwnProperty(key) else false) or self.protos.set.object.value.has(key)),
+        // Symbol / BigInt are primitives: real TypeError.
+        .symbol => self.throwError(.type_error, "Cannot use 'in' operator to search for '{s}' in a Symbol", .{key}),
         .bigint => self.throwError(.type_error, "Cannot use 'in' operator to search for '{s}' in a BigInt", .{key}),
-        .symbol, .map, .set, .@"error", .date, .promise => self.throwError(.type_error, "The 'in' operator on a {s} is not supported yet", .{@tagName(r)}),
     };
 }
 

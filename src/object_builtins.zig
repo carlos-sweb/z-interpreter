@@ -693,8 +693,10 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, thi
             if (std.mem.eql(u8, key, "name"))
                 return if (deleted.name) JSValue.UNDEFINED else dataDescObj(self, try interp(ctx).gcNewString(box.value.name), false, false, true);
             if (std.mem.eql(u8, key, "prototype")) {
-                if (!isProxyConstructor(self, obj) and function_builtins.boundContext(obj) == null and (box.value.prototype != null or box.value.constructable))
-                    return dataDescObj(self, (try self.functionPrototype(obj)).retain(), !temporal_builtins.isIntrinsicConstructor(obj), false, false);
+                if (!isProxyConstructor(self, obj) and function_builtins.boundContext(obj) == null and (box.value.prototype != null or box.value.constructable)) {
+                    const is_builtin = box.value.constructable and box.value.ctx == @as(*anyopaque, @ptrCast(self));
+                    return dataDescObj(self, (try self.functionPrototype(obj)).retain(), !is_builtin, false, false);
+                }
             }
             return JSValue.UNDEFINED;
         },

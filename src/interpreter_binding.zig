@@ -754,15 +754,75 @@ pub fn evalForIn(self: *Interpreter, env: *Environment, head: anytype, body: *zs
             }
         },
         .array => |box| {
+            var seen: std.StringHashMapUnmanaged(void) = .empty;
+            defer seen.deinit(arena);
+            var keys_list: std.ArrayList([]const u8) = .empty;
+            defer keys_list.deinit(arena);
+            var owned_idx_keys: std.ArrayList([]const u8) = .empty;
+            defer {
+                for (owned_idx_keys.items) |s| arena.free(s);
+                owned_idx_keys.deinit(arena);
+            }
+            const bag_opt = self.array_props.get(@intFromPtr(box));
             const len = box.value.length();
             var i: usize = 0;
             while (i < len) : (i += 1) {
+                if (box.value.isHole(i)) continue;
                 const key_str = try std.fmt.allocPrint(arena, "{d}", .{i});
-                defer arena.free(key_str);
-                const kv = try self.gcNewString(key_str);
+                try owned_idx_keys.append(arena, key_str);
+                if (bag_opt) |bag| {
+                    if (bag.object.value.getOwnRecord(key_str)) |rec| {
+                        if (!rec.descriptor.enumerable) {
+                            try seen.put(arena, key_str, {});
+                            continue;
+                        }
+                    }
+                }
+                try seen.put(arena, key_str, {});
+                try keys_list.append(arena, key_str);
+            }
+            if (bag_opt) |bag| {
+                const ks = try bag.object.value.keys(arena);
+                defer arena.free(ks);
+                for (ks) |k| {
+                    if (Interpreter.isSymbolKey(k)) continue;
+                    if (!seen.contains(k)) {
+                        try seen.put(arena, k, {});
+                        try keys_list.append(arena, k);
+                    }
+                }
+            }
+            var current: ?*const @TypeOf(self.protos.array.object.value) = &self.protos.array.object.value;
+            while (current) |o| : (current = o.getPrototype()) {
+                const ks = try o.keys(arena);
+                defer arena.free(ks);
+                for (ks) |k| {
+                    if (Interpreter.isSymbolKey(k)) continue;
+                    if (!seen.contains(k)) {
+                        try seen.put(arena, k, {});
+                        try keys_list.append(arena, k);
+                    }
+                }
+            }
+            for (keys_list.items) |k| {
+                const kv = try self.gcNewString(k);
                 const step = try self.forIterationStep(env, head.binding, kv, body, labels);
                 kv.deinit();
                 if (step) |c| return c;
+            }
+        },
+        .date, .promise, .map, .set, .@"error", .regex, .array_buffer, .data_view => {
+            const bag_opt = if (target == .regex) self.regexProps(target) else self.extraProps(target);
+            if (bag_opt) |bag| {
+                const ks = try bag.object.value.keys(arena);
+                defer arena.free(ks);
+                for (ks) |k| {
+                    if (Interpreter.isSymbolKey(k)) continue;
+                    const kv = try self.gcNewString(k);
+                    const step = try self.forIterationStep(env, head.binding, kv, body, labels);
+                    kv.deinit();
+                    if (step) |c| return c;
+                }
             }
         },
         .string => |box| {

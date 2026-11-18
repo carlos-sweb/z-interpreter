@@ -220,7 +220,5 @@ test "console.log renders a caught error legibly" {
 // ===== Feature gaps are catchable TypeErrors =====
 
 test "a JS catch receives interpreter feature gaps as TypeErrors" {
-    // Assigning an arbitrary property on a Date object is not
-    // supported yet: a TypeError the script can catch, not an abort of the whole run.
-    try helpers.expectStdout("try { var d = new Date(0); d.foo = 2; } catch (x) { console.log(x.name); }", "TypeError\n");
+    try helpers.expectStdout("try { ({ ...[1, 2] }); } catch (x) { console.log(x.name); }", "TypeError\n");
 }

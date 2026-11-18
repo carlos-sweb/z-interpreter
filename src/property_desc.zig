@@ -118,6 +118,49 @@ pub fn hasProperty(self: *Interpreter, v: JSValue, key: []const u8) anyerror!boo
                 cur.deinit();
                 cur = next;
             },
+            .regex => {
+                if (std.mem.eql(u8, key, "lastIndex")) return true;
+                if (self.regexProps(cur)) |bag| {
+                    if (bag.object.value.hasOwnProperty(key)) return true;
+                }
+                const next = self.protos.regex.retain();
+                cur.deinit();
+                cur = next;
+            },
+            .temporal => |box| {
+                if (self.temporalProps(cur)) |bag| {
+                    if (bag.object.value.hasOwnProperty(key)) return true;
+                }
+                const next = self.protos.temporalProtoFor(box.value).retain();
+                cur.deinit();
+                cur = next;
+            },
+            .@"error" => {
+                if (std.mem.eql(u8, key, "name") or std.mem.eql(u8, key, "message") or std.mem.eql(u8, key, "constructor")) return true;
+                if (self.extraProps(cur)) |bag| {
+                    if (bag.object.value.hasOwnProperty(key)) return true;
+                }
+                const next = self.protos.@"error".retain();
+                cur.deinit();
+                cur = next;
+            },
+            .date, .map, .set, .promise, .array_buffer, .data_view => {
+                if (self.extraProps(cur)) |bag| {
+                    if (bag.object.value.hasOwnProperty(key)) return true;
+                }
+                const proto = switch (cur) {
+                    .date => self.protos.date,
+                    .map => self.protos.map,
+                    .set => self.protos.set,
+                    .promise => self.protos.promise,
+                    .array_buffer => |box| self.arrayBufferProto(box.value.is_shared),
+                    .data_view => self.protos.data_view,
+                    else => unreachable,
+                };
+                const next = proto.retain();
+                cur.deinit();
+                cur = next;
+            },
             .typed_array => |box| {
                 switch (@import("interpreter_props.zig").canonicalNumericIndex(self.gc_allocator, key, box.value.len)) {
                     .valid_index => return true,
@@ -321,7 +364,8 @@ pub fn materializeFnVirtual(self: *Interpreter, f: JSValue, key: []const u8) any
     } else if (std.mem.eql(u8, key, "prototype")) {
         if (isProxyConstructor(self, f) or function_builtins.boundContext(f) != null or !(box.value.prototype != null or box.value.constructable)) return;
         const p = (try self.functionPrototype(f)).retain();
-        try bagInsertRaw(bag, key, p, .{ .writable = !temporal_builtins.isIntrinsicConstructor(f), .enumerable = false, .configurable = false });
+        const is_builtin = f.function.value.constructable and f.function.value.ctx == @as(*anyopaque, @ptrCast(self));
+        try bagInsertRaw(bag, key, p, .{ .writable = !is_builtin, .enumerable = false, .configurable = false });
     }
 }
 
@@ -339,7 +383,7 @@ pub fn defineOwnProperty(self: *Interpreter, obj: JSValue, key: []const u8, d: *
     switch (obj) {
         .object => return validateAndApply(self, obj, key, d),
         .function => {
-            if (std.mem.eql(u8, key, "prototype") and temporal_builtins.isIntrinsicConstructor(obj)) {
+            if (std.mem.eql(u8, key, "prototype") and obj.function.value.constructable and obj.function.value.ctx == @as(*anyopaque, @ptrCast(self))) {
                 const proto = try self.functionPrototype(obj);
                 return virtualDataAllows(d, proto, false, false, false);
             }

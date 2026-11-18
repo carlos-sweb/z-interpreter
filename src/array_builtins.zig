@@ -291,14 +291,19 @@ fn arrayIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 }
 
 fn arrayIncludes(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
     const obj = try toArrayLikeObject(ctx, this_value, "includes");
     defer obj.deinit();
     const target = arg(args, 0);
     if (obj == .array and !obj.array.value.isHoley() and !obj.array.value.isSparse()) return JSValue.fromBool(obj.array.value.includes(target, null));
+    const self = interp(ctx);
     const len = try arrayLikeLength(ctx, obj);
-    var i: usize = if (arg(args, 1) == .undefined) 0 else normIndex(try interp(ctx).toNumberJS(arg(args, 1)), len);
+    var buf: [32]u8 = undefined;
+    var i: usize = if (arg(args, 1) == .undefined) 0 else normIndex(try self.toNumberJS(arg(args, 1)), len);
     while (i < len) : (i += 1) {
-        const item = (try arrayLikeElem(ctx, allocator, obj, i)) orelse JSValue.UNDEFINED;
+        const key = std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
+        const item = try self.getProperty(obj, key);
+        defer item.deinit();
         if (zvalue.equality.sameValueZero(item, target)) return JSValue.fromBool(true);
     }
     return JSValue.fromBool(false);
