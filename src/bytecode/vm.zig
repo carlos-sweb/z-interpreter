@@ -481,6 +481,10 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                             if (ic.slot_idx < box.value.properties.count()) {
                                 const rec = &box.value.properties.entries.items(.value)[ic.slot_idx];
                                 if (!rec.isAccessor() and rec.descriptor.writable and !box.value.is_frozen) {
+                                    if (!needsDeinit(rec.value) and !needsDeinit(val)) {
+                                        rec.value = val;
+                                        continue;
+                                    }
                                     const old = rec.value;
                                     rec.value = val.retain();
                                     old.deinit();
@@ -488,11 +492,11 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                                 }
                             }
                         } else if (ic.interned_key.len > 0) {
-                            const retained = val.retain();
-                            if (box.value.putBorrowedTransition(ic.interned_key, retained, ic.slot_idx, ic.next_shape) catch false) {
+                            const val_to_store = if (needsDeinit(val)) val.retain() else val;
+                            if (box.value.putBorrowedTransition(ic.interned_key, val_to_store, ic.slot_idx, ic.next_shape) catch false) {
                                 continue;
-                            } else {
-                                retained.deinit();
+                            } else if (needsDeinit(val)) {
+                                val_to_store.deinit();
                             }
                         }
                     }
@@ -505,9 +509,16 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                                 ic.interned_key
                             else
                                 try itp.internPropKey(key);
-                            box.value.setBorrowedKey(interned, val.retain()) catch |err| switch (err) {
-                                error.ObjectIsFrozen, error.ObjectNotExtensible, error.PropertyNotWritable => return error.UnsupportedOpcode,
-                                else => return err,
+                            const val_to_store = if (needsDeinit(val)) val.retain() else val;
+                            box.value.setBorrowedKey(interned, val_to_store) catch |err| switch (err) {
+                                error.ObjectIsFrozen, error.ObjectNotExtensible, error.PropertyNotWritable => {
+                                    if (needsDeinit(val)) val_to_store.deinit();
+                                    return error.UnsupportedOpcode;
+                                },
+                                else => {
+                                    if (needsDeinit(val)) val_to_store.deinit();
+                                    return err;
+                                },
                             };
                             ic.* = .{
                                 .block = frame.block,
@@ -668,13 +679,47 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
             .shl => try bitwise(frame_regs, op, .shl),
             .shr => try bitwise(frame_regs, op, .shr),
             .ushr => try bitwise(frame_regs, op, .ushr),
-            .sub_local_const => try arithmeticLocalConst(frame_regs, frame.block, op, .sub),
-            .add_local_const => try addLocalConst(frame_regs, allocator, frame.block, op),
-            .lt_local_const => try comparisonLocalConst(frame_regs, frame.block, op, .lt),
+            .sub_local_const => {
+                const left = try getRegister(frame_regs, op.b);
+                if (op.c < frame.block.constants.len) {
+                    const c = frame.block.constants[op.c];
+                    if (left == .number and c == .number) {
+                        try setRegPrimitive(frame_regs, op.a, JSValue.fromNumber(left.number - c.number));
+                    } else return error.UnsupportedOpcode;
+                } else return error.InvalidConstant;
+            },
+            .add_local_const => {
+                const left = try getRegister(frame_regs, op.b);
+                if (op.c < frame.block.constants.len) {
+                    const c = frame.block.constants[op.c];
+                    if (left == .number and c == .number) {
+                        try setRegPrimitive(frame_regs, op.a, JSValue.fromNumber(left.number + c.number));
+                    } else {
+                        try addLocalConst(frame_regs, allocator, frame.block, op);
+                    }
+                } else return error.InvalidConstant;
+            },
+            .lt_local_const => {
+                const left = try getRegister(frame_regs, op.b);
+                if (op.c < frame.block.constants.len) {
+                    const c = frame.block.constants[op.c];
+                    if (left == .number and c == .number) {
+                        try setRegPrimitive(frame_regs, op.a, JSValue.fromBool(left.number < c.number));
+                    } else return error.UnsupportedOpcode;
+                } else return error.InvalidConstant;
+            },
             .gt_local_const => try comparisonLocalConst(frame_regs, frame.block, op, .gt),
             .le_local_const => try comparisonLocalConst(frame_regs, frame.block, op, .le),
             .ge_local_const => try comparisonLocalConst(frame_regs, frame.block, op, .ge),
-            .eq_local_const => try comparisonLocalConst(frame_regs, frame.block, op, .eq),
+            .eq_local_const => {
+                const left = try getRegister(frame_regs, op.b);
+                if (op.c < frame.block.constants.len) {
+                    const c = frame.block.constants[op.c];
+                    if (left == .number and c == .number) {
+                        try setRegPrimitive(frame_regs, op.a, JSValue.fromBool(left.number == c.number));
+                    } else return error.UnsupportedOpcode;
+                } else return error.InvalidConstant;
+            },
             .neg => {
                 const src = try getRegister(frame_regs, op.b);
                 if (src != .number) return error.UnsupportedOpcode;
@@ -696,10 +741,14 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
             },
             .jump => frame.pc = @intCast(try jumpTarget(frame.block, op)),
             .jump_if_true => {
-                if (try isTruthy(frame_regs, op.a)) frame.pc = @intCast(try jumpTarget(frame.block, op));
+                const val = try getRegister(frame_regs, op.a);
+                const truthy = if (val == .boolean) val.boolean else try isTruthy(frame_regs, op.a);
+                if (truthy) frame.pc = @intCast(try jumpTarget(frame.block, op));
             },
             .jump_if_false => {
-                if (!try isTruthy(frame_regs, op.a)) frame.pc = @intCast(try jumpTarget(frame.block, op));
+                const val = try getRegister(frame_regs, op.a);
+                const truthy = if (val == .boolean) val.boolean else try isTruthy(frame_regs, op.a);
+                if (!truthy) frame.pc = @intCast(try jumpTarget(frame.block, op));
             },
             .jump_if_not_nullish => {
                 const val = try getRegister(frame_regs, op.a);
@@ -746,10 +795,20 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                     }
                     var callee_has_rc = false;
                     const param_count = @min(arg_count, callee_block.param_count);
-                    for (0..param_count) |i| {
-                        const v = frame_regs[start + i].retain();
-                        registers[callee_reg_base + i] = v;
-                        if (needsDeinit(v)) callee_has_rc = true;
+                    if (param_count == 1) {
+                        const v = frame_regs[start];
+                        if (!needsDeinit(v)) {
+                            registers[callee_reg_base] = v;
+                        } else {
+                            registers[callee_reg_base] = v.retain();
+                            callee_has_rc = true;
+                        }
+                    } else {
+                        for (0..param_count) |i| {
+                            const v = frame_regs[start + i].retain();
+                            registers[callee_reg_base + i] = v;
+                            if (needsDeinit(v)) callee_has_rc = true;
+                        }
                     }
 
                     frames[frame_count] = CallFrame{
@@ -811,10 +870,20 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                     }
                     var callee_has_rc = false;
                     const param_count = @min(arg_count, callee_block.param_count);
-                    for (0..param_count) |i| {
-                        const v = frame_regs[start + i].retain();
-                        registers[callee_reg_base + i] = v;
-                        if (needsDeinit(v)) callee_has_rc = true;
+                    if (param_count == 1) {
+                        const v = frame_regs[start];
+                        if (!needsDeinit(v)) {
+                            registers[callee_reg_base] = v;
+                        } else {
+                            registers[callee_reg_base] = v.retain();
+                            callee_has_rc = true;
+                        }
+                    } else {
+                        for (0..param_count) |i| {
+                            const v = frame_regs[start + i].retain();
+                            registers[callee_reg_base + i] = v;
+                            if (needsDeinit(v)) callee_has_rc = true;
+                        }
                     }
 
                     frames[frame_count] = CallFrame{
@@ -835,7 +904,9 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                 }
             },
             .return_value => {
-                const val = (try getRegister(frame_regs, op.a)).retain();
+                const raw_val = try getRegister(frame_regs, op.a);
+                const is_prim = !needsDeinit(raw_val);
+                const val = if (is_prim) raw_val else raw_val.retain();
                 if (frame.has_rc) {
                     for (registers[frame.reg_base..reg_top]) |*slot| {
                         if (needsDeinit(slot.*)) deinitSlot(slot);
@@ -851,7 +922,7 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                 }
                 const caller_frame = &frames[frame_count - 1];
                 const caller_regs = registers[caller_frame.reg_base .. caller_frame.reg_base + caller_frame.block.register_count];
-                if (!needsDeinit(val)) {
+                if (is_prim) {
                     try setRegPrimitive(caller_regs, frame.return_reg, val);
                 } else {
                     try setRegValue(caller_frame, caller_regs, frame.return_reg, val);
