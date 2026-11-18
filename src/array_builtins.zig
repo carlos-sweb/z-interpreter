@@ -18,6 +18,7 @@ const coercion = @import("coercion.zig");
 const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
 const object_builtins = @import("object_builtins.zig");
+const property_desc = @import("property_desc.zig");
 
 pub const NativeFn = native_helpers.NativeFn;
 const MethodSpec = native_helpers.MethodSpec;
@@ -113,6 +114,32 @@ fn requireArrayLike(ctx: *anyopaque, this_value: JSValue, method: []const u8) an
     }
 }
 
+fn toArrayLikeObject(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {
+    if (this_value == .undefined or this_value == .null) {
+        return interp(ctx).throwError(.type_error, "Array.prototype.{s} called on null or undefined", .{method});
+    }
+    if (this_value == .array) return this_value.retain();
+    return try property_desc.toObject(interp(ctx), this_value);
+}
+
+fn setArrayLikeIndex(self: *Interpreter, obj: JSValue, i: usize, val: JSValue) anyerror!void {
+    var buf: [32]u8 = undefined;
+    const key = std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
+    try self.setPropertyOnValue(obj, key, val);
+}
+
+fn deleteArrayLikeIndexOrThrow(self: *Interpreter, obj: JSValue, i: usize) anyerror!void {
+    var buf: [32]u8 = undefined;
+    const key = std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
+    if (!try self.deletePropertyOnValue(obj, key)) {
+        return self.throwError(.type_error, "Cannot delete property '{s}'", .{key});
+    }
+}
+
+fn setArrayLikeLength(self: *Interpreter, obj: JSValue, len: usize) anyerror!void {
+    try self.setPropertyOnValue(obj, "length", JSValue.fromNumber(@floatFromInt(len)));
+}
+
 /// Generic array-like length (ECMA-262 LengthOfArrayLike): a real
 /// `.array` keeps the existing fast path; anything else does
 /// Get(obj, "length") + ToLength.
@@ -124,119 +151,171 @@ fn arrayLikeLength(ctx: *anyopaque, this_value: JSValue) anyerror!usize {
     return toLength(self, len_v);
 }
 
-/// Generic array-like element read at index `k`: a real `.array` uses
-/// the existing `liveElem` fast path (null past the CURRENT length --
-/// e.g. shrunk mid-callback); anything else does a direct
-/// Get(obj, ToString(k)) with no prior HasProperty check, same
-/// simplification `liveElem` already makes for real arrays (this
-/// engine has no sparse-hole concept at all). Always returns Some for
-/// a non-`.array` receiver (a missing property reads as `undefined`
-/// via `getProperty`'s own prototype-chain miss, not "absent").
+/// Generic array-like element read at index `i`: a real `.array` uses
+/// the existing `liveElem` fast path; anything else checks `HasProperty`
+/// first and returns `null` for missing properties, then `Get(obj, i)`.
 fn arrayLikeElem(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, i: usize) anyerror!?JSValue {
     if (this_value == .array) return liveElem(ctx, allocator, this_value, i);
     const self = interp(ctx);
     var buf: [32]u8 = undefined;
     const key = std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
+    if (!try property_desc.hasProperty(self, this_value, key)) return null;
     return try self.getProperty(this_value, key);
 }
 
+const MAX_ARRAY_LIKE_LEN: usize = 9007199254740991; // 2^53 - 1
+
 fn arrayPush(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
-    try requireArray(ctx, this_value, "push");
-    for (args) |a| _ = try this_value.array.value.push(a.retain());
-    return JSValue.fromNumber(@floatFromInt(this_value.array.value.length()));
+    if (this_value == .array) {
+        for (args) |a| _ = try this_value.array.value.push(a.retain());
+        return JSValue.fromNumber(@floatFromInt(this_value.array.value.length()));
+    }
+    const obj = try toArrayLikeObject(ctx, this_value, "push");
+    defer obj.deinit();
+    const self = interp(ctx);
+    var len = try arrayLikeLength(ctx, obj);
+    if (args.len > MAX_ARRAY_LIKE_LEN or len > MAX_ARRAY_LIKE_LEN - args.len) {
+        return self.throwError(.type_error, "Invalid array length", .{});
+    }
+    for (args) |a| {
+        try setArrayLikeIndex(self, obj, len, a);
+        len += 1;
+    }
+    try setArrayLikeLength(self, obj, len);
+    return JSValue.fromNumber(@floatFromInt(len));
 }
 
 fn arrayPop(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
     _ = args;
-    try requireArray(ctx, this_value, "pop");
-    return this_value.array.value.pop() orelse JSValue.UNDEFINED;
+    if (this_value == .array) {
+        return this_value.array.value.pop() orelse JSValue.UNDEFINED;
+    }
+    const obj = try toArrayLikeObject(ctx, this_value, "pop");
+    defer obj.deinit();
+    const self = interp(ctx);
+    const len = try arrayLikeLength(ctx, obj);
+    if (len == 0) {
+        try setArrayLikeLength(self, obj, 0);
+        return JSValue.UNDEFINED;
+    }
+    const new_len = len - 1;
+    const element = (try arrayLikeElem(ctx, allocator, obj, new_len)) orelse JSValue.UNDEFINED;
+    errdefer element.deinit();
+    try deleteArrayLikeIndexOrThrow(self, obj, new_len);
+    try setArrayLikeLength(self, obj, new_len);
+    return element;
 }
 
 fn arrayShift(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
     _ = args;
-    try requireArray(ctx, this_value, "shift");
-    return this_value.array.value.shift() orelse JSValue.UNDEFINED;
+    if (this_value == .array) {
+        return this_value.array.value.shift() orelse JSValue.UNDEFINED;
+    }
+    const obj = try toArrayLikeObject(ctx, this_value, "shift");
+    defer obj.deinit();
+    const self = interp(ctx);
+    const len = try arrayLikeLength(ctx, obj);
+    if (len == 0) {
+        try setArrayLikeLength(self, obj, 0);
+        return JSValue.UNDEFINED;
+    }
+    const first = (try arrayLikeElem(ctx, allocator, obj, 0)) orelse JSValue.UNDEFINED;
+    errdefer first.deinit();
+    var k: usize = 1;
+    while (k < len) : (k += 1) {
+        if (try arrayLikeElem(ctx, allocator, obj, k)) |from_val| {
+            defer from_val.deinit();
+            try setArrayLikeIndex(self, obj, k - 1, from_val);
+        } else {
+            try deleteArrayLikeIndexOrThrow(self, obj, k - 1);
+        }
+    }
+    try deleteArrayLikeIndexOrThrow(self, obj, len - 1);
+    try setArrayLikeLength(self, obj, len - 1);
+    return first;
 }
 
 fn arrayUnshift(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    try requireArray(ctx, this_value, "unshift");
-    // Insert in reverse so the args end up in order at the front.
-    var i = args.len;
-    while (i > 0) {
-        i -= 1;
-        _ = try this_value.array.value.unshift(args[i].retain());
+    if (this_value == .array) {
+        // Insert in reverse so the args end up in order at the front.
+        var i = args.len;
+        while (i > 0) {
+            i -= 1;
+            _ = try this_value.array.value.unshift(args[i].retain());
+        }
+        return JSValue.fromNumber(@floatFromInt(this_value.array.value.length()));
     }
-    return JSValue.fromNumber(@floatFromInt(this_value.array.value.length()));
+    const obj = try toArrayLikeObject(ctx, this_value, "unshift");
+    defer obj.deinit();
+    const self = interp(ctx);
+    const len = try arrayLikeLength(ctx, obj);
+    const arg_count = args.len;
+    if (arg_count > 0) {
+        if (arg_count > MAX_ARRAY_LIKE_LEN or len > MAX_ARRAY_LIKE_LEN - arg_count) {
+            return self.throwError(.type_error, "Invalid array length", .{});
+        }
+        var k = len;
+        while (k > 0) {
+            k -= 1;
+            if (try arrayLikeElem(ctx, allocator, obj, k)) |from_val| {
+                defer from_val.deinit();
+                try setArrayLikeIndex(self, obj, k + arg_count, from_val);
+            } else {
+                try deleteArrayLikeIndexOrThrow(self, obj, k + arg_count);
+            }
+        }
+        for (args, 0..) |a, j| {
+            try setArrayLikeIndex(self, obj, j, a);
+        }
+    }
+    try setArrayLikeLength(self, obj, len + arg_count);
+    return JSValue.fromNumber(@floatFromInt(len + arg_count));
 }
 
 fn arrayIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    try requireArrayLike(ctx, this_value, "indexOf");
+    const obj = try toArrayLikeObject(ctx, this_value, "indexOf");
+    defer obj.deinit();
     const target = arg(args, 0);
-    if (this_value == .array and !this_value.array.value.isHoley() and !this_value.array.value.isSparse()) {
-        const idx = this_value.array.value.indexOf(target, null) orelse return JSValue.fromNumber(-1);
+    if (obj == .array and !obj.array.value.isHoley() and !obj.array.value.isSparse()) {
+        const idx = obj.array.value.indexOf(target, null) orelse return JSValue.fromNumber(-1);
         return JSValue.fromNumber(@floatFromInt(idx));
     }
-    const len = try arrayLikeLength(ctx, this_value);
-    // Real spec DOES honor a `fromIndex` second argument here (this
-    // engine's own real-`.array` fast path above narrowly doesn't --
-    // pre-existing, not something this conversion adds or fixes). For
-    // a generic array-like it's not optional: a huge sparse `length`
-    // (test262 uses Number.MAX_SAFE_INTEGER) combined with a `fromIndex`
-    // near the end must not degrade into a from-zero scan of the
-    // entire range, or this times out long before reaching a real
-    // limit. `normIndex`'s existing negative-index/clamping arithmetic
-    // (shared with slice/copyWithin/fill) is exactly this computation.
+    const len = try arrayLikeLength(ctx, obj);
     var i: usize = if (arg(args, 1) == .undefined) 0 else normIndex(try interp(ctx).toNumberJS(arg(args, 1)), len);
     while (i < len) : (i += 1) {
-        const item = try arrayLikeElem(ctx, allocator, this_value, i) orelse continue;
+        const item = try arrayLikeElem(ctx, allocator, obj, i) orelse continue;
         if (zvalue.equality.strictEquals(item, target)) return JSValue.fromNumber(@floatFromInt(i));
     }
     return JSValue.fromNumber(-1);
 }
 
 fn arrayIncludes(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    try requireArrayLike(ctx, this_value, "includes");
+    const obj = try toArrayLikeObject(ctx, this_value, "includes");
+    defer obj.deinit();
     const target = arg(args, 0);
-    if (this_value == .array and !this_value.array.value.isHoley() and !this_value.array.value.isSparse()) return JSValue.fromBool(this_value.array.value.includes(target, null));
-    const len = try arrayLikeLength(ctx, this_value);
-    // Same `fromIndex` note as arrayIndexOf above.
+    if (obj == .array and !obj.array.value.isHoley() and !obj.array.value.isSparse()) return JSValue.fromBool(obj.array.value.includes(target, null));
+    const len = try arrayLikeLength(ctx, obj);
     var i: usize = if (arg(args, 1) == .undefined) 0 else normIndex(try interp(ctx).toNumberJS(arg(args, 1)), len);
     while (i < len) : (i += 1) {
-        const item = try arrayLikeElem(ctx, allocator, this_value, i) orelse continue;
+        const item = (try arrayLikeElem(ctx, allocator, obj, i)) orelse JSValue.UNDEFINED;
         if (zvalue.equality.sameValueZero(item, target)) return JSValue.fromBool(true);
     }
     return JSValue.fromBool(false);
 }
 
 fn arrayJoin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    try requireArrayLike(ctx, this_value, "join");
+    const obj = try toArrayLikeObject(ctx, this_value, "join");
+    defer obj.deinit();
     const self = interp(ctx);
-    // Real spec: `undefined` (including not passed) means the default
-    // ",", but any OTHER separator -- a number, `null`, an object with
-    // a custom toString() -- goes through real ToString, same as every
-    // other argument in this file (confirmed against Node:
-    // `[1,2].join(null)` joins with the literal string "null", not ",").
     const sep_arg = arg(args, 0);
     const owned_sep: ?[]const u8 = if (sep_arg == .undefined) null else try self.toDisplayStringJS(allocator, sep_arg);
     defer if (owned_sep) |s| allocator.free(s);
     const sep = owned_sep orelse ",";
-    if (this_value == .array) {
-        // Not z-array's joinWith(): that's a generic container with no
-        // zstring dependency, so it can't merge a WTF-8 surrogate pair
-        // split across a separator/element boundary (z-string-surrogate-
-        // charat.md). Same loop by hand instead, via appendWtf8Merged.
-        // joinElementToStringJS supplies the per-element stringify policy
-        // (holes become "", same rule as toDisplayString's own `.array`
-        // case, but real ToPrimitive-aware unlike the pure coercion.zig
-        // version -- see ~/.plans/builtins-consolidation-analysis.md and
-        // ~/.plans/pendientes/toprimitive-coercion.md).
+    if (obj == .array) {
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(allocator);
-        for (this_value.array.value.toSlice(), 0..) |item, i| {
+        for (obj.array.value.toSlice(), 0..) |item, i| {
             if (i > 0) try appendWtf8Merged(&buf, allocator, sep);
             const piece = try Interpreter.joinElementToStringJS(self, item, allocator);
             defer allocator.free(piece);
@@ -244,15 +323,13 @@ fn arrayJoin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
         }
         return self.gcNewString(buf.items);
     }
-    // No ZArray to call joinWith() on -- same loop by hand, same
-    // per-element stringify policy.
-    const len = try arrayLikeLength(ctx, this_value);
+    const len = try arrayLikeLength(ctx, obj);
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     var i: usize = 0;
     while (i < len) : (i += 1) {
         if (i > 0) try appendWtf8Merged(&buf, allocator, sep);
-        const item = (try arrayLikeElem(ctx, allocator, this_value, i)) orelse JSValue.UNDEFINED;
+        const item = (try arrayLikeElem(ctx, allocator, obj, i)) orelse JSValue.UNDEFINED;
         const piece = try Interpreter.joinElementToStringJS(self, item, allocator);
         defer allocator.free(piece);
         try appendWtf8Merged(&buf, allocator, piece);
@@ -261,15 +338,12 @@ fn arrayJoin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
 }
 
 fn arraySlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    try requireArrayLike(ctx, this_value, "slice");
-    if (this_value == .array) {
+    const obj = try toArrayLikeObject(ctx, this_value, "slice");
+    defer obj.deinit();
+    if (obj == .array) {
         const start: ?isize = if (arg(args, 0) == .undefined) null else toIntSat(try interp(ctx).toNumberJS(arg(args, 0)));
         const end: ?isize = if (arg(args, 1) == .undefined) null else toIntSat(try interp(ctx).toNumberJS(arg(args, 1)));
-        // z-array's own slice() does the negative-index/clamping arithmetic
-        // (same rules ECMA-262 wants); it just copies the raw JSValue bytes
-        // without retaining (it doesn't know T might be refcounted), so we
-        // retain each element ourselves on the way into the GC-tracked result.
-        var sliced = try this_value.array.value.slice(start, end);
+        var sliced = try obj.array.value.slice(start, end);
         defer sliced.deinit();
         var result = try interp(ctx).gcNewArray();
         var i: usize = 0;
@@ -282,23 +356,16 @@ fn arraySlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
         }
         return result;
     }
-    // No ZArray to call slice() on -- same negative-index/clamping
-    // arithmetic (normIndex, already shared with copyWithin/fill), then
-    // a manual per-index Get loop over the normalized range.
-    const len = try arrayLikeLength(ctx, this_value);
+    const len = try arrayLikeLength(ctx, obj);
     const start_raw = if (arg(args, 0) == .undefined) 0 else try interp(ctx).toNumberJS(arg(args, 0));
     const end_raw = if (arg(args, 1) == .undefined) @as(f64, @floatFromInt(len)) else try interp(ctx).toNumberJS(arg(args, 1));
     const start = normIndex(start_raw, len);
     const end = @max(start, normIndex(end_raw, len));
-    // ArraySpeciesCreate(A, count) -- real spec throws a RangeError
-    // here when the RESULT length exceeds 2^32-1, not the source
-    // `len` (confirmed against Node: slicing a huge-length array-like
-    // down to a small `count` succeeds; only a huge `count` throws).
     if (end - start > 4294967295) return interp(ctx).throwError(.range_error, "Invalid array length", .{});
     var result = try interp(ctx).gcNewArray();
     var i = start;
     while (i < end) : (i += 1) {
-        if (try arrayLikeElem(ctx, allocator, this_value, i)) |item| {
+        if (try arrayLikeElem(ctx, allocator, obj, i)) |item| {
             _ = try result.array.value.push(item.retain());
         } else {
             try result.array.value.appendHole();
@@ -308,18 +375,11 @@ fn arraySlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 }
 
 fn arrayConcat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    try requireArrayLike(ctx, this_value, "concat");
-    if (this_value != .array) {
-        // No ZArray to call .concat() on. Real spec's IsConcatSpreadable
-        // is false for anything that isn't literally an array (no
-        // Symbol.isConcatSpreadable support here, pre-existing, not
-        // something this conversion adds) -- confirmed against Node:
-        // `Array.prototype.concat.call({length:1,0:'x'}, [1,2])` is
-        // `[{length:1,0:'x'}, 1, 2]`, the array-like pushed whole, NOT
-        // spread. So `this_value` is just the first pushed element,
-        // same rule already applied to each `arg` below.
+    const obj = try toArrayLikeObject(ctx, this_value, "concat");
+    defer obj.deinit();
+    if (obj != .array) {
         var result = try interp(ctx).gcNewArray();
-        _ = try result.array.value.push(this_value.retain());
+        _ = try result.array.value.push(obj.retain());
         for (args) |a| {
             if (a == .array) {
                 for (a.array.value.toSlice()) |item| _ = try result.array.value.push(item.retain());
@@ -368,32 +428,55 @@ fn arrayConcat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
 }
 
 fn arrayReverse(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
     _ = args;
-    try requireArray(ctx, this_value, "reverse");
-    if (!this_value.array.value.isHoley() and !this_value.array.value.isSparse()) {
-        this_value.array.value.reverse();
+    if (this_value == .array) {
+        if (!this_value.array.value.isHoley() and !this_value.array.value.isSparse()) {
+            this_value.array.value.reverse();
+            return this_value.retain();
+        }
+        const arr = &this_value.array.value;
+        const len = arr.length();
+        var lower: usize = 0;
+        while (lower < len / 2) : (lower += 1) {
+            const upper = len - lower - 1;
+            const lower_val = arr.getOpt(lower);
+            const upper_val = arr.getOpt(upper);
+            if (lower_val != null and upper_val != null) {
+                try arr.set(lower, upper_val.?);
+                try arr.set(upper, lower_val.?);
+            } else if (lower_val != null and upper_val == null) {
+                try arr.set(upper, lower_val.?);
+                arr.delete(lower);
+            } else if (lower_val == null and upper_val != null) {
+                try arr.set(lower, upper_val.?);
+                arr.delete(upper);
+            }
+        }
         return this_value.retain();
     }
-    const arr = &this_value.array.value;
-    const len = arr.length();
+    const obj = try toArrayLikeObject(ctx, this_value, "reverse");
+    defer obj.deinit();
+    const self = interp(ctx);
+    const len = try arrayLikeLength(ctx, obj);
     var lower: usize = 0;
     while (lower < len / 2) : (lower += 1) {
         const upper = len - lower - 1;
-        const lower_val = arr.getOpt(lower);
-        const upper_val = arr.getOpt(upper);
+        const lower_val = try arrayLikeElem(ctx, allocator, obj, lower);
+        defer if (lower_val) |v| v.deinit();
+        const upper_val = try arrayLikeElem(ctx, allocator, obj, upper);
+        defer if (upper_val) |v| v.deinit();
         if (lower_val != null and upper_val != null) {
-            try arr.set(lower, upper_val.?);
-            try arr.set(upper, lower_val.?);
-        } else if (lower_val != null and upper_val == null) {
-            try arr.set(upper, lower_val.?);
-            arr.delete(lower);
+            try setArrayLikeIndex(self, obj, lower, upper_val.?);
+            try setArrayLikeIndex(self, obj, upper, lower_val.?);
         } else if (lower_val == null and upper_val != null) {
-            try arr.set(lower, upper_val.?);
-            arr.delete(upper);
+            try setArrayLikeIndex(self, obj, lower, upper_val.?);
+            try deleteArrayLikeIndexOrThrow(self, obj, upper);
+        } else if (lower_val != null and upper_val == null) {
+            try deleteArrayLikeIndexOrThrow(self, obj, lower);
+            try setArrayLikeIndex(self, obj, upper, lower_val.?);
         }
     }
-    return this_value.retain();
+    return obj.retain();
 }
 
 /// Live element at `i`, retained so it stays valid across a callback that
@@ -416,16 +499,17 @@ fn liveElem(ctx: *anyopaque, allocator: Allocator, array: JSValue, i: usize) any
 }
 
 fn arrayMap(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    try requireArrayLike(ctx, this_value, "map");
-    const len = try arrayLikeLength(ctx, this_value);
+    const obj = try toArrayLikeObject(ctx, this_value, "map");
+    defer obj.deinit();
+    const len = try arrayLikeLength(ctx, obj);
     const cb = try requireCallback(ctx, args);
     const this_arg = if (args.len > 1) args[1] else JSValue.UNDEFINED;
     if (len > 4294967295) return interp(ctx).throwError(.range_error, "Invalid array length", .{});
     var result = try interp(ctx).gcNewArray();
     var i: usize = 0;
     while (i < len) : (i += 1) {
-        if (try arrayLikeElem(ctx, allocator, this_value, i)) |item| {
-            const v = try callCallbackWithThis(cb, allocator, this_arg, item, i, this_value);
+        if (try arrayLikeElem(ctx, allocator, obj, i)) |item| {
+            const v = try callCallbackWithThis(cb, allocator, this_arg, item, i, obj);
             _ = try result.array.value.push(v);
         } else {
             try result.array.value.appendHole();
@@ -435,15 +519,16 @@ fn arrayMap(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
 }
 
 fn arrayFilter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    try requireArrayLike(ctx, this_value, "filter");
-    const len = try arrayLikeLength(ctx, this_value);
+    const obj = try toArrayLikeObject(ctx, this_value, "filter");
+    defer obj.deinit();
+    const len = try arrayLikeLength(ctx, obj);
     const cb = try requireCallback(ctx, args);
     const this_arg = if (args.len > 1) args[1] else JSValue.UNDEFINED;
     var result = try interp(ctx).gcNewArray();
     var i: usize = 0;
     while (i < len) : (i += 1) {
-        const item = try arrayLikeElem(ctx, allocator, this_value, i) orelse continue;
-        if (coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, item, i, this_value))) {
+        const item = try arrayLikeElem(ctx, allocator, obj, i) orelse continue;
+        if (coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, item, i, obj))) {
             _ = try result.array.value.push(item.retain());
         }
     }
@@ -451,37 +536,37 @@ fn arrayFilter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
 }
 
 fn arrayForEach(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    try requireArrayLike(ctx, this_value, "forEach");
-    const len = try arrayLikeLength(ctx, this_value);
+    const obj = try toArrayLikeObject(ctx, this_value, "forEach");
+    defer obj.deinit();
+    const len = try arrayLikeLength(ctx, obj);
     const cb = try requireCallback(ctx, args);
     const this_arg = if (args.len > 1) args[1] else JSValue.UNDEFINED;
     var i: usize = 0;
     while (i < len) : (i += 1) {
-        const item = try arrayLikeElem(ctx, allocator, this_value, i) orelse continue;
-        _ = try callCallbackWithThis(cb, allocator, this_arg, item, i, this_value);
+        const item = try arrayLikeElem(ctx, allocator, obj, i) orelse continue;
+        _ = try callCallbackWithThis(cb, allocator, this_arg, item, i, obj);
     }
     return JSValue.UNDEFINED;
 }
 
 fn arrayReduce(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    try requireArrayLike(ctx, this_value, "reduce");
-    const len = try arrayLikeLength(ctx, this_value);
+    const obj = try toArrayLikeObject(ctx, this_value, "reduce");
+    defer obj.deinit();
+    const len = try arrayLikeLength(ctx, obj);
     const cb = try requireCallback(ctx, args);
     var acc: JSValue = undefined;
     var have = args.len > 1;
-    // Retain initial value: if the loop does 0 iterations, returning acc transfers
-    // an owned reference so caller deinit of call_args does not double-free it.
     if (have) acc = args[1].retain();
     var i: usize = 0;
     while (i < len) : (i += 1) {
-        const item = try arrayLikeElem(ctx, allocator, this_value, i) orelse continue;
+        const item = try arrayLikeElem(ctx, allocator, obj, i) orelse continue;
         if (!have) {
             acc = item;
             have = true;
             continue;
         }
         acc = try cb.function.value.call(cb.function.value.ctx, allocator, JSValue.UNDEFINED, &.{
-            acc, item, JSValue.fromNumber(@floatFromInt(i)), this_value,
+            acc, item, JSValue.fromNumber(@floatFromInt(i)), obj,
         });
     }
     if (!have) return interp(ctx).throwError(.type_error, "Reduce of empty array with no initial value", .{});
@@ -489,40 +574,43 @@ fn arrayReduce(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
 }
 
 fn arrayFind(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    try requireArrayLike(ctx, this_value, "find");
-    const len = try arrayLikeLength(ctx, this_value);
+    const obj = try toArrayLikeObject(ctx, this_value, "find");
+    defer obj.deinit();
+    const len = try arrayLikeLength(ctx, obj);
     const cb = try requireCallback(ctx, args);
     const this_arg = if (args.len > 1) args[1] else JSValue.UNDEFINED;
     var i: usize = 0;
     while (i < len) : (i += 1) {
-        const item = (try arrayLikeElem(ctx, allocator, this_value, i)) orelse JSValue.UNDEFINED;
-        if (coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, item, i, this_value))) return item.retain();
+        const item = (try arrayLikeElem(ctx, allocator, obj, i)) orelse JSValue.UNDEFINED;
+        if (coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, item, i, obj))) return item.retain();
     }
     return JSValue.UNDEFINED;
 }
 
 fn arraySome(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    try requireArrayLike(ctx, this_value, "some");
-    const len = try arrayLikeLength(ctx, this_value);
+    const obj = try toArrayLikeObject(ctx, this_value, "some");
+    defer obj.deinit();
+    const len = try arrayLikeLength(ctx, obj);
     const cb = try requireCallback(ctx, args);
     const this_arg = if (args.len > 1) args[1] else JSValue.UNDEFINED;
     var i: usize = 0;
     while (i < len) : (i += 1) {
-        const item = try arrayLikeElem(ctx, allocator, this_value, i) orelse continue;
-        if (coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, item, i, this_value))) return JSValue.fromBool(true);
+        const item = try arrayLikeElem(ctx, allocator, obj, i) orelse continue;
+        if (coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, item, i, obj))) return JSValue.fromBool(true);
     }
     return JSValue.fromBool(false);
 }
 
 fn arrayEvery(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    try requireArrayLike(ctx, this_value, "every");
-    const len = try arrayLikeLength(ctx, this_value);
+    const obj = try toArrayLikeObject(ctx, this_value, "every");
+    defer obj.deinit();
+    const len = try arrayLikeLength(ctx, obj);
     const cb = try requireCallback(ctx, args);
     const this_arg = if (args.len > 1) args[1] else JSValue.UNDEFINED;
     var i: usize = 0;
     while (i < len) : (i += 1) {
-        const item = try arrayLikeElem(ctx, allocator, this_value, i) orelse continue;
-        if (!coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, item, i, this_value))) return JSValue.fromBool(false);
+        const item = try arrayLikeElem(ctx, allocator, obj, i) orelse continue;
+        if (!coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, item, i, obj))) return JSValue.fromBool(false);
     }
     return JSValue.fromBool(true);
 }
@@ -658,86 +746,90 @@ pub fn normIndex(raw: f64, len: usize) usize {
 }
 
 fn arrayAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    try requireArrayLike(ctx, this_value, "at");
-    const len: isize = @intCast(try arrayLikeLength(ctx, this_value));
+    const obj = try toArrayLikeObject(ctx, this_value, "at");
+    defer obj.deinit();
+    const len: isize = @intCast(try arrayLikeLength(ctx, obj));
     const rel = toIntSat(try interp(ctx).toNumberJS(arg(args, 0)));
     const idx = if (rel < 0) len + rel else rel;
     if (idx < 0 or idx >= len) return JSValue.UNDEFINED;
-    return (try arrayLikeElem(ctx, allocator, this_value, @intCast(idx))) orelse JSValue.UNDEFINED;
+    return (try arrayLikeElem(ctx, allocator, obj, @intCast(idx))) orelse JSValue.UNDEFINED;
 }
 
 fn arrayFindIndex(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    try requireArrayLike(ctx, this_value, "findIndex");
-    const len = try arrayLikeLength(ctx, this_value);
+    const obj = try toArrayLikeObject(ctx, this_value, "findIndex");
+    defer obj.deinit();
+    const len = try arrayLikeLength(ctx, obj);
     const cb = try requireCallback(ctx, args);
     const this_arg = if (args.len > 1) args[1] else JSValue.UNDEFINED;
     var i: usize = 0;
     while (i < len) : (i += 1) {
-        const item = (try arrayLikeElem(ctx, allocator, this_value, i)) orelse JSValue.UNDEFINED;
-        if (coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, item, i, this_value))) return JSValue.fromNumber(@floatFromInt(i));
+        const item = (try arrayLikeElem(ctx, allocator, obj, i)) orelse JSValue.UNDEFINED;
+        if (coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, item, i, obj))) return JSValue.fromNumber(@floatFromInt(i));
     }
     return JSValue.fromNumber(-1);
 }
 
 fn arrayFindLast(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    try requireArrayLike(ctx, this_value, "findLast");
-    var i = try arrayLikeLength(ctx, this_value);
+    const obj = try toArrayLikeObject(ctx, this_value, "findLast");
+    defer obj.deinit();
+    var i = try arrayLikeLength(ctx, obj);
     const cb = try requireCallback(ctx, args);
     const this_arg = if (args.len > 1) args[1] else JSValue.UNDEFINED;
     while (i > 0) {
         i -= 1;
-        const item = (try arrayLikeElem(ctx, allocator, this_value, i)) orelse JSValue.UNDEFINED;
-        if (coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, item, i, this_value))) return item.retain();
+        const item = (try arrayLikeElem(ctx, allocator, obj, i)) orelse JSValue.UNDEFINED;
+        if (coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, item, i, obj))) return item.retain();
     }
     return JSValue.UNDEFINED;
 }
 
 fn arrayFindLastIndex(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    try requireArrayLike(ctx, this_value, "findLastIndex");
-    var i = try arrayLikeLength(ctx, this_value);
+    const obj = try toArrayLikeObject(ctx, this_value, "findLastIndex");
+    defer obj.deinit();
+    var i = try arrayLikeLength(ctx, obj);
     const cb = try requireCallback(ctx, args);
     const this_arg = if (args.len > 1) args[1] else JSValue.UNDEFINED;
     while (i > 0) {
         i -= 1;
-        const item = (try arrayLikeElem(ctx, allocator, this_value, i)) orelse JSValue.UNDEFINED;
-        if (coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, item, i, this_value))) return JSValue.fromNumber(@floatFromInt(i));
+        const item = (try arrayLikeElem(ctx, allocator, obj, i)) orelse JSValue.UNDEFINED;
+        if (coercion.isTruthy(try callCallbackWithThis(cb, allocator, this_arg, item, i, obj))) return JSValue.fromNumber(@floatFromInt(i));
     }
     return JSValue.fromNumber(-1);
 }
 
 fn arrayReduceRight(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    try requireArrayLike(ctx, this_value, "reduceRight");
-    var i: usize = try arrayLikeLength(ctx, this_value);
+    const obj = try toArrayLikeObject(ctx, this_value, "reduceRight");
+    defer obj.deinit();
+    var i: usize = try arrayLikeLength(ctx, obj);
     const cb = try requireCallback(ctx, args);
     var acc: JSValue = undefined;
     var have = args.len > 1;
-    // Retain initial value: if the loop does 0 iterations, returning acc transfers
-    // an owned reference so caller deinit of call_args does not double-free it.
     if (have) acc = args[1].retain();
     while (i > 0) {
         i -= 1;
-        const item = try arrayLikeElem(ctx, allocator, this_value, i) orelse continue;
+        const item = try arrayLikeElem(ctx, allocator, obj, i) orelse continue;
         if (!have) {
             acc = item;
             have = true;
             continue;
         }
-        acc = try cb.function.value.call(cb.function.value.ctx, allocator, JSValue.UNDEFINED, &.{ acc, item, JSValue.fromNumber(@floatFromInt(i)), this_value });
+        acc = try cb.function.value.call(cb.function.value.ctx, allocator, JSValue.UNDEFINED, &.{ acc, item, JSValue.fromNumber(@floatFromInt(i)), obj });
     }
     if (!have) return interp(ctx).throwError(.type_error, "Reduce of empty array with no initial value", .{});
     return acc;
 }
 
 fn arrayFlatMap(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    try requireArrayLike(ctx, this_value, "flatMap");
-    const len = try arrayLikeLength(ctx, this_value);
+    const obj = try toArrayLikeObject(ctx, this_value, "flatMap");
+    defer obj.deinit();
+    const len = try arrayLikeLength(ctx, obj);
     const cb = try requireCallback(ctx, args);
     const this_arg = if (args.len > 1) args[1] else JSValue.UNDEFINED;
     var result = try interp(ctx).gcNewArray();
     var i: usize = 0;
     while (i < len) : (i += 1) {
-        const item = try arrayLikeElem(ctx, allocator, this_value, i) orelse continue;
-        const v = try callCallbackWithThis(cb, allocator, this_arg, item, i, this_value);
+        const item = try arrayLikeElem(ctx, allocator, obj, i) orelse continue;
+        const v = try callCallbackWithThis(cb, allocator, this_arg, item, i, obj);
         if (v == .array) {
             for (v.array.value.toSlice()) |sub| _ = try result.array.value.push(sub.retain());
         } else {
@@ -748,21 +840,39 @@ fn arrayFlatMap(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 }
 
 fn arrayLastIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    try requireArrayLike(ctx, this_value, "lastIndexOf");
+    const obj = try toArrayLikeObject(ctx, this_value, "lastIndexOf");
+    defer obj.deinit();
     const target = arg(args, 0);
-    if (this_value == .array and !this_value.array.value.isHoley() and !this_value.array.value.isSparse()) {
-        const slice = this_value.array.value.toSlice();
-        var i = slice.len;
+    const len = try arrayLikeLength(ctx, obj);
+    if (len == 0) return JSValue.fromNumber(-1);
+    const self = interp(ctx);
+    const n: f64 = if (args.len > 1) blk: {
+        const raw = try self.toNumberJS(args[1]);
+        if (std.math.isNan(raw) or raw == 0) break :blk 0;
+        break :blk @trunc(raw);
+    } else @as(f64, @floatFromInt(len - 1));
+    if (std.math.isNegativeInf(n)) return JSValue.fromNumber(-1);
+    const k: usize = if (n >= 0) blk: {
+        const max_k: f64 = @floatFromInt(len - 1);
+        break :blk if (n >= max_k) len - 1 else @intFromFloat(n);
+    } else blk: {
+        const kf = @as(f64, @floatFromInt(len)) + n;
+        if (kf < 0) return JSValue.fromNumber(-1);
+        break :blk @intFromFloat(kf);
+    };
+    if (obj == .array and !obj.array.value.isHoley() and !obj.array.value.isSparse()) {
+        const slice = obj.array.value.toSlice();
+        var i = @min(k + 1, slice.len);
         while (i > 0) {
             i -= 1;
             if (zvalue.equality.strictEquals(slice[i], target)) return JSValue.fromNumber(@floatFromInt(i));
         }
         return JSValue.fromNumber(-1);
     }
-    var i = try arrayLikeLength(ctx, this_value);
+    var i = k + 1;
     while (i > 0) {
         i -= 1;
-        const item = try arrayLikeElem(ctx, allocator, this_value, i) orelse continue;
+        const item = try arrayLikeElem(ctx, allocator, obj, i) orelse continue;
         if (zvalue.equality.strictEquals(item, target)) return JSValue.fromNumber(@floatFromInt(i));
     }
     return JSValue.fromNumber(-1);
@@ -770,69 +880,84 @@ fn arrayLastIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
 
 fn arrayFill(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
-    try requireArray(ctx, this_value, "fill");
-    const arr = &this_value.array.value;
+    if (this_value == .array) {
+        const arr = &this_value.array.value;
+        const val = arg(args, 0);
+        const start: ?isize = if (arg(args, 1) == .undefined) null else toIntSat(try interp(ctx).toNumberJS(arg(args, 1)));
+        const end: ?isize = if (arg(args, 2) == .undefined) null else toIntSat(try interp(ctx).toNumberJS(arg(args, 2)));
+        var touched = try arr.slice(start, end);
+        defer touched.deinit();
+        for (touched.toSlice()) |v| v.deinit();
+        for (touched.toSlice()) |_| _ = val.retain();
+        arr.fill(val, start, end);
+        return this_value.retain();
+    }
+    const obj = try toArrayLikeObject(ctx, this_value, "fill");
+    defer obj.deinit();
+    const self = interp(ctx);
+    const len = try arrayLikeLength(ctx, obj);
     const val = arg(args, 0);
-    const start: ?isize = if (arg(args, 1) == .undefined) null else toIntSat(try interp(ctx).toNumberJS(arg(args, 1)));
-    const end: ?isize = if (arg(args, 2) == .undefined) null else toIntSat(try interp(ctx).toNumberJS(arg(args, 2)));
-    // z-array's fill() copies `val`'s raw bytes into every touched slot
-    // without retaining (doesn't know T is refcounted) and without
-    // releasing what was there before. Use slice() as a read-only probe
-    // over the SAME index math fill() will use internally, purely to
-    // find out which slots are about to be touched: release what's
-    // there now, retain `val` once per slot, then let fill() do the
-    // actual write.
-    var touched = try arr.slice(start, end);
-    defer touched.deinit();
-    for (touched.toSlice()) |v| v.deinit();
-    for (touched.toSlice()) |_| _ = val.retain();
-    arr.fill(val, start, end);
-    return this_value.retain();
+    const start = if (arg(args, 1) == .undefined) 0 else normIndex(try self.toNumberJS(arg(args, 1)), len);
+    const end = if (arg(args, 2) == .undefined) len else normIndex(try self.toNumberJS(arg(args, 2)), len);
+    var k = start;
+    while (k < end) : (k += 1) {
+        try setArrayLikeIndex(self, obj, k, val);
+    }
+    return obj.retain();
 }
 
 fn arrayCopyWithin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    try requireArray(ctx, this_value, "copyWithin");
-    const arr = &this_value.array.value;
-    const len = arr.length();
-    const target = normIndex(try interp(ctx).toNumberJS(arg(args, 0)), len);
-    const start = if (arg(args, 1) == .undefined) 0 else normIndex(try interp(ctx).toNumberJS(arg(args, 1)), len);
-    const end = if (arg(args, 2) == .undefined) len else normIndex(try interp(ctx).toNumberJS(arg(args, 2)), len);
-    if (start >= end or start == target) return this_value.retain();
-    // Matches z-array's own copyWithin()'s clamp: the shifted range
-    // can't run past the end of the array.
-    const count = @min(end - start, len - target);
-    if (count == 0) return this_value.retain();
-
-    // z-array's own copyWithin() does the overlap-safe byte-level shift
-    // (memmove via a temp buffer / direction-aware element copy, same
-    // rules ECMA-262 wants); it just moves raw JSValue bytes without any
-    // retain/release of its own (it doesn't know T might be refcounted).
-    //
-    // Retain the whole SOURCE range first, before releasing anything in
-    // the destination range, rather than interleaving one slot's
-    // release/retain at a time (what the previous hand-rolled version
-    // did). If the two ranges overlap, a per-slot interleaved order can
-    // release a destination slot whose value is ALSO still-unread source
-    // data before that source has been retained anywhere else -- in a
-    // strict immediate-free-at-zero Rc (which is what JSValue.deinit()
-    // actually is, see zvalue.zig) that's a real use-after-free the
-    // instant refcount hits zero; in practice this engine's normal
-    // literal/declaration paths leave every such value with an extra,
-    // never-explicitly-released "+1" (the same baseline-2 quirk
-    // documented in refcount_test.zig), which happens to keep it above
-    // zero and mask the bug for ordinary values, so it wasn't
-    // reproducible here as an observable crash -- but relying on that
-    // incidental floor would be fragile, and the two-phase order below
-    // is correct regardless of whether the floor is present. Retaining
-    // the full source range up front, then releasing the full
-    // destination range only afterward, keeps every index's
-    // retain-then-release pair ordered correctly regardless of overlap
-    // direction.
-    for (arr.toSlice()[start..][0..count]) |v| _ = v.retain();
-    for (arr.toSlice()[target..][0..count]) |v| v.deinit();
-    arr.copyWithin(@intCast(target), @intCast(start), @intCast(end));
-    return this_value.retain();
+    if (this_value == .array) {
+        const arr = &this_value.array.value;
+        const len = arr.length();
+        const target = normIndex(try interp(ctx).toNumberJS(arg(args, 0)), len);
+        const start = if (arg(args, 1) == .undefined) 0 else normIndex(try interp(ctx).toNumberJS(arg(args, 1)), len);
+        const end = if (arg(args, 2) == .undefined) len else normIndex(try interp(ctx).toNumberJS(arg(args, 2)), len);
+        if (start >= end or start == target) return this_value.retain();
+        const count = @min(end - start, len - target);
+        if (count == 0) return this_value.retain();
+        for (arr.toSlice()[start..][0..count]) |v| _ = v.retain();
+        for (arr.toSlice()[target..][0..count]) |v| v.deinit();
+        arr.copyWithin(@intCast(target), @intCast(start), @intCast(end));
+        return this_value.retain();
+    }
+    const obj = try toArrayLikeObject(ctx, this_value, "copyWithin");
+    defer obj.deinit();
+    const self = interp(ctx);
+    const len = try arrayLikeLength(ctx, obj);
+    const to = normIndex(try self.toNumberJS(arg(args, 0)), len);
+    const from = if (arg(args, 1) == .undefined) 0 else normIndex(try self.toNumberJS(arg(args, 1)), len);
+    const final = if (arg(args, 2) == .undefined) len else normIndex(try self.toNumberJS(arg(args, 2)), len);
+    if (from >= final or to >= len) return obj.retain();
+    const count = @min(final - from, len - to);
+    if (count == 0) return obj.retain();
+    if (from < to and to < from + count) {
+        var rem = count;
+        while (rem > 0) {
+            rem -= 1;
+            const from_idx = from + rem;
+            const to_idx = to + rem;
+            if (try arrayLikeElem(ctx, allocator, obj, from_idx)) |v| {
+                defer v.deinit();
+                try setArrayLikeIndex(self, obj, to_idx, v);
+            } else {
+                try deleteArrayLikeIndexOrThrow(self, obj, to_idx);
+            }
+        }
+    } else {
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            const from_idx = from + i;
+            const to_idx = to + i;
+            if (try arrayLikeElem(ctx, allocator, obj, from_idx)) |v| {
+                defer v.deinit();
+                try setArrayLikeIndex(self, obj, to_idx, v);
+            } else {
+                try deleteArrayLikeIndexOrThrow(self, obj, to_idx);
+            }
+        }
+    }
+    return obj.retain();
 }
 
 fn flattenInto(result: *JSValue, allocator: Allocator, arr_val: JSValue, depth: i64) anyerror!void {
@@ -852,19 +977,19 @@ fn flattenInto(result: *JSValue, allocator: Allocator, arr_val: JSValue, depth: 
 }
 
 fn arrayFlat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    try requireArrayLike(ctx, this_value, "flat");
+    const obj = try toArrayLikeObject(ctx, this_value, "flat");
+    defer obj.deinit();
     const depth: i64 = if (arg(args, 0) == .undefined) 1 else toIntSat(try interp(ctx).toNumberJS(arg(args, 0)));
     var result = try interp(ctx).gcNewArray();
-    if (this_value == .array) {
-        try flattenInto(&result, allocator, this_value, depth);
+    if (obj == .array) {
+        try flattenInto(&result, allocator, obj, depth);
         return result;
     }
-    const items = try arrayLikeToList(interp(ctx), allocator, this_value);
-    defer {
-        for (items) |it| it.deinit();
-        allocator.free(items);
-    }
-    for (items) |item| {
+    const len = try arrayLikeLength(ctx, obj);
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        const item = try arrayLikeElem(ctx, allocator, obj, i) orelse continue;
+        defer item.deinit();
         if (depth > 0 and item == .array) {
             try flattenInto(&result, allocator, item, depth - 1);
         } else {
@@ -876,31 +1001,33 @@ fn arrayFlat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
 
 fn arrayToReversed(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
-    try requireArrayLike(ctx, this_value, "toReversed");
-    const len = try arrayLikeLength(ctx, this_value);
+    const obj = try toArrayLikeObject(ctx, this_value, "toReversed");
+    defer obj.deinit();
+    const len = try arrayLikeLength(ctx, obj);
     if (len > 4294967295) return interp(ctx).throwError(.range_error, "Invalid array length", .{});
     var result = try interp(ctx).gcNewArray();
     var i: usize = len;
     while (i > 0) {
         i -= 1;
-        const item = (try arrayLikeElem(ctx, allocator, this_value, i)) orelse JSValue.UNDEFINED;
+        const item = (try arrayLikeElem(ctx, allocator, obj, i)) orelse JSValue.UNDEFINED;
         _ = try result.array.value.push(item.retain());
     }
     return result;
 }
 
 fn arrayToSorted(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    try requireArrayLike(ctx, this_value, "toSorted");
+    const obj = try toArrayLikeObject(ctx, this_value, "toSorted");
+    defer obj.deinit();
     const cmp = arg(args, 0);
     const self = interp(ctx);
     if (cmp != .undefined and cmp != .function) return self.throwError(.type_error, "The comparison function must be either a function or undefined", .{});
-    const len = try arrayLikeLength(ctx, this_value);
+    const len = try arrayLikeLength(ctx, obj);
     if (len > 4294967295) return interp(ctx).throwError(.range_error, "Invalid array length", .{});
     const items = try allocator.alloc(JSValue, len);
     defer allocator.free(items);
     var i: usize = 0;
     while (i < len) : (i += 1) {
-        items[i] = (try arrayLikeElem(ctx, allocator, this_value, i)) orelse JSValue.UNDEFINED;
+        items[i] = (try arrayLikeElem(ctx, allocator, obj, i)) orelse JSValue.UNDEFINED;
     }
     var idx: usize = 1;
     while (idx < len) : (idx += 1) {
@@ -920,8 +1047,9 @@ fn arrayToSorted(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
 }
 
 fn arrayToSpliced(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    try requireArrayLike(ctx, this_value, "toSpliced");
-    const len = try arrayLikeLength(ctx, this_value);
+    const obj = try toArrayLikeObject(ctx, this_value, "toSpliced");
+    defer obj.deinit();
+    const len = try arrayLikeLength(ctx, obj);
     const start_raw = if (args.len == 0) 0 else try interp(ctx).toNumberJS(arg(args, 0));
     const start_int = toIntSat(start_raw);
     const actual_start: usize = if (start_int < 0) blk: {
@@ -944,21 +1072,22 @@ fn arrayToSpliced(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     var result = try interp(ctx).gcNewArray();
     var i: usize = 0;
     while (i < actual_start) : (i += 1) {
-        const item = (try arrayLikeElem(ctx, allocator, this_value, i)) orelse JSValue.UNDEFINED;
+        const item = (try arrayLikeElem(ctx, allocator, obj, i)) orelse JSValue.UNDEFINED;
         _ = try result.array.value.push(item.retain());
     }
     for (raw_inserts) |ins| _ = try result.array.value.push(ins.retain());
     i = actual_start + delete_count;
     while (i < len) : (i += 1) {
-        const item = (try arrayLikeElem(ctx, allocator, this_value, i)) orelse JSValue.UNDEFINED;
+        const item = (try arrayLikeElem(ctx, allocator, obj, i)) orelse JSValue.UNDEFINED;
         _ = try result.array.value.push(item.retain());
     }
     return result;
 }
 
 fn arrayWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    try requireArrayLike(ctx, this_value, "with");
-    const len = try arrayLikeLength(ctx, this_value);
+    const obj = try toArrayLikeObject(ctx, this_value, "with");
+    defer obj.deinit();
+    const len = try arrayLikeLength(ctx, obj);
     const raw_index = try interp(ctx).toNumberJS(arg(args, 0));
     const actual_index = toIntSat(raw_index);
     const idx: usize = if (actual_index < 0) blk: {
@@ -976,7 +1105,7 @@ fn arrayWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
         if (i == idx) {
             _ = try result.array.value.push(value.retain());
         } else {
-            const item = (try arrayLikeElem(ctx, allocator, this_value, i)) orelse JSValue.UNDEFINED;
+            const item = (try arrayLikeElem(ctx, allocator, obj, i)) orelse JSValue.UNDEFINED;
             _ = try result.array.value.push(item.retain());
         }
     }
@@ -984,65 +1113,149 @@ fn arrayWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
 }
 
 fn arraySplice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    try requireArray(ctx, this_value, "splice");
-    const arr = &this_value.array.value;
-    const start: isize = if (args.len == 0) 0 else toIntSat(try interp(ctx).toNumberJS(arg(args, 0)));
-    // Spec nuance z-array's own `null` default doesn't capture: with
-    // ZERO arguments at all, deleteCount is 0 (not "delete the rest");
-    // with exactly one argument (start only, no deleteCount), it IS
-    // "delete the rest" -- z-array's `null` already means that.
-    const delete_count: ?usize = if (args.len == 0)
+    if (this_value == .array) {
+        const arr = &this_value.array.value;
+        const start: isize = if (args.len == 0) 0 else toIntSat(try interp(ctx).toNumberJS(arg(args, 0)));
+        const delete_count: ?usize = if (args.len == 0)
+            0
+        else if (args.len == 1)
+            null
+        else blk: {
+            const dc = try interp(ctx).toNumberJS(arg(args, 1));
+            if (dc <= 0) break :blk 0;
+            break :blk @intCast(toIntSat(dc));
+        };
+        const raw_inserts = if (args.len > 2) args[2..] else &[_]JSValue{};
+        const inserts = try allocator.alloc(JSValue, raw_inserts.len);
+        defer allocator.free(inserts);
+        for (raw_inserts, 0..) |item, i| inserts[i] = item.retain();
+
+        var deleted = try arr.splice(start, delete_count, inserts);
+        defer deleted.deinit();
+        var removed = try interp(ctx).gcNewArray();
+        for (deleted.toSlice()) |item| _ = try removed.array.value.push(item);
+        return removed;
+    }
+    const obj = try toArrayLikeObject(ctx, this_value, "splice");
+    defer obj.deinit();
+    const self = interp(ctx);
+    const len = try arrayLikeLength(ctx, obj);
+    const actual_start = if (args.len == 0) 0 else normIndex(try self.toNumberJS(args[0]), len);
+    const actual_delete_count: usize = if (args.len == 0)
         0
     else if (args.len == 1)
-        null
+        len - actual_start
     else blk: {
-        const dc = try interp(ctx).toNumberJS(arg(args, 1));
+        const dc = try self.toNumberJS(args[1]);
         if (dc <= 0) break :blk 0;
-        break :blk @intCast(toIntSat(dc));
+        break :blk @min(@as(usize, @intCast(toIntSat(dc))), len - actual_start);
     };
-    // Retain each inserted value once (the array gains a reference,
-    // separate from whatever the caller still holds) -- z-array's own
-    // splice() copies raw bytes in, no retain of its own.
-    const raw_inserts = if (args.len > 2) args[2..] else &[_]JSValue{};
-    const inserts = try allocator.alloc(JSValue, raw_inserts.len);
-    defer allocator.free(inserts);
-    for (raw_inserts, 0..) |item, i| inserts[i] = item.retain();
-
-    var deleted = try arr.splice(start, delete_count, inserts);
-    defer deleted.deinit();
-    // z-array's splice() already physically removed these from `arr`
-    // (self.items.replaceRange), so `deleted` is the sole owner of that
-    // reference -- moving it into the GC-tracked result is NOT a retain,
-    // same "shallow move" contract as everywhere else this file talks to
-    // z-array's raw ZArray(T).
-    var removed = try interp(ctx).gcNewArray();
-    for (deleted.toSlice()) |item| _ = try removed.array.value.push(item);
+    const items = if (args.len > 2) args[2..] else &[_]JSValue{};
+    if (len - actual_delete_count > MAX_ARRAY_LIKE_LEN - items.len) {
+        return self.throwError(.type_error, "Invalid array length", .{});
+    }
+    var removed = try self.gcNewArray();
+    var k: usize = 0;
+    while (k < actual_delete_count) : (k += 1) {
+        if (try arrayLikeElem(ctx, allocator, obj, actual_start + k)) |v| {
+            _ = try removed.array.value.push(v);
+        } else {
+            try removed.array.value.appendHole();
+        }
+    }
+    if (items.len < actual_delete_count) {
+        var from = actual_start + actual_delete_count;
+        while (from < len) : (from += 1) {
+            const to = from - actual_delete_count + items.len;
+            if (try arrayLikeElem(ctx, allocator, obj, from)) |v| {
+                defer v.deinit();
+                try setArrayLikeIndex(self, obj, to, v);
+            } else {
+                try deleteArrayLikeIndexOrThrow(self, obj, to);
+            }
+        }
+        var d = len;
+        const target_len = len - actual_delete_count + items.len;
+        while (d > target_len) {
+            d -= 1;
+            try deleteArrayLikeIndexOrThrow(self, obj, d);
+        }
+    } else if (items.len > actual_delete_count) {
+        var from = len;
+        while (from > actual_start + actual_delete_count) {
+            from -= 1;
+            const to = from - actual_delete_count + items.len;
+            if (try arrayLikeElem(ctx, allocator, obj, from)) |v| {
+                defer v.deinit();
+                try setArrayLikeIndex(self, obj, to, v);
+            } else {
+                try deleteArrayLikeIndexOrThrow(self, obj, to);
+            }
+        }
+    }
+    for (items, 0..) |ins, j| {
+        try setArrayLikeIndex(self, obj, actual_start + j, ins);
+    }
+    try setArrayLikeLength(self, obj, len - actual_delete_count + items.len);
     return removed;
 }
 
 fn arraySort(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    try requireArray(ctx, this_value, "sort");
     const self = interp(ctx);
     const cmp = arg(args, 0);
     if (cmp != .undefined and cmp != .function) return self.throwError(.type_error, "The comparison function must be either a function or undefined", .{});
-    const arr = &this_value.array.value;
-    const n = arr.length();
-    // Insertion sort over the live backing (stable; O(n^2) is fine for
-    // the sizes involved and lets us call a JS comparator per compare).
+    if (this_value == .array) {
+        const arr = &this_value.array.value;
+        const n = arr.length();
+        var i: usize = 1;
+        const mut = arr.toSliceMut();
+        while (i < n) : (i += 1) {
+            const key = mut[i];
+            var j = i;
+            while (j > 0) {
+                const before = try sortLess(self, allocator, cmp, key, mut[j - 1]);
+                if (!before) break;
+                mut[j] = mut[j - 1];
+                j -= 1;
+            }
+            mut[j] = key;
+        }
+        return this_value.retain();
+    }
+    const obj = try toArrayLikeObject(ctx, this_value, "sort");
+    defer obj.deinit();
+    const len = try arrayLikeLength(ctx, obj);
+    var items: std.ArrayList(JSValue) = .empty;
+    defer {
+        for (items.items) |it| it.deinit();
+        items.deinit(allocator);
+    }
+    var idx: usize = 0;
+    while (idx < len) : (idx += 1) {
+        if (try arrayLikeElem(ctx, allocator, obj, idx)) |v| {
+            try items.append(allocator, v);
+        }
+    }
     var i: usize = 1;
-    const mut = arr.toSliceMut();
-    while (i < n) : (i += 1) {
-        const key = mut[i];
+    while (i < items.items.len) : (i += 1) {
+        const key = items.items[i];
         var j = i;
         while (j > 0) {
-            const before = try sortLess(self, allocator, cmp, key, mut[j - 1]);
+            const before = try sortLess(self, allocator, cmp, key, items.items[j - 1]);
             if (!before) break;
-            mut[j] = mut[j - 1];
+            items.items[j] = items.items[j - 1];
             j -= 1;
         }
-        mut[j] = key;
+        items.items[j] = key;
     }
-    return this_value.retain();
+    for (items.items, 0..) |it, j| {
+        try setArrayLikeIndex(self, obj, j, it);
+    }
+    var d = items.items.len;
+    while (d < len) : (d += 1) {
+        try deleteArrayLikeIndexOrThrow(self, obj, d);
+    }
+    return obj.retain();
 }
 
 /// Whether `a` should sort before `b` (comparator < 0, or default string
@@ -1063,17 +1276,13 @@ fn sortLess(self: *Interpreter, allocator: Allocator, cmp: JSValue, a: JSValue, 
 
 fn arrayToStringMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
-    try requireArrayLike(ctx, this_value, "toString");
+    const obj = try toArrayLikeObject(ctx, this_value, "toString");
+    defer obj.deinit();
     const self = interp(ctx);
-    // Array.prototype.toString() === Array.prototype.join(",") per spec --
-    // same delegation coercion.toDisplayString's own `.array` case uses,
-    // but real ToPrimitive-aware (see arrayJoin/joinElementToStringJS).
-    if (this_value == .array) {
-        // See arrayJoin: bypasses z-array's joinWith() for the same
-        // WTF-8 surrogate-boundary-merge reason.
+    if (obj == .array) {
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(allocator);
-        for (this_value.array.value.toSlice(), 0..) |item, i| {
+        for (obj.array.value.toSlice(), 0..) |item, i| {
             if (i > 0) try appendWtf8Merged(&buf, allocator, ",");
             const piece = try Interpreter.joinElementToStringJS(self, item, allocator);
             defer allocator.free(piece);
@@ -1081,39 +1290,33 @@ fn arrayToStringMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
         }
         return self.gcNewString(buf.items);
     }
-    // Real spec: Get(O, "join"); if that's not callable, fall back to
-    // the %Object.prototype.toString% intrinsic instead of joining at
-    // all -- confirmed against Node: a plain array-like with nothing
-    // inherited at "join" (e.g. `{length:0}`, whose prototype is
-    // Object.prototype) gives "[object Object]", not "". The fallback
-    // is the FIXED intrinsic (a direct Zig call), not a live
-    // Get(Object.prototype, "toString") -- test262 exercises exactly
-    // this by deleting Object.prototype.toString first and expecting
-    // the fallback to still work.
-    const join_fn = try self.getProperty(this_value, "join");
+    const join_fn = try self.getProperty(obj, "join");
     defer join_fn.deinit();
     if (join_fn == .function) {
-        return try join_fn.function.value.call(join_fn.function.value.ctx, allocator, this_value, &.{});
+        return try join_fn.function.value.call(join_fn.function.value.ctx, allocator, obj, &.{});
     }
-    return object_builtins.objToString(ctx, allocator, this_value, &.{});
+    return object_builtins.objToString(ctx, allocator, obj, &.{});
 }
 
 fn arrayKeys(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
-    try requireArray(ctx, this_value, "keys");
-    return makeArrayIterator(interp(ctx), allocator, this_value, .keys);
+    const obj = try toArrayLikeObject(ctx, this_value, "keys");
+    defer obj.deinit();
+    return makeArrayIterator(interp(ctx), allocator, obj, .keys);
 }
 
 fn arrayValues(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
-    try requireArray(ctx, this_value, "values");
-    return makeArrayIterator(interp(ctx), allocator, this_value, .values);
+    const obj = try toArrayLikeObject(ctx, this_value, "values");
+    defer obj.deinit();
+    return makeArrayIterator(interp(ctx), allocator, obj, .values);
 }
 
 fn arrayEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
-    try requireArray(ctx, this_value, "entries");
-    return makeArrayIterator(interp(ctx), allocator, this_value, .entries);
+    const obj = try toArrayLikeObject(ctx, this_value, "entries");
+    defer obj.deinit();
+    return makeArrayIterator(interp(ctx), allocator, obj, .entries);
 }
 
 /// Installs the `Array` constructor + statics.

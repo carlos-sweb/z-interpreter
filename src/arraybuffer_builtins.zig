@@ -1168,8 +1168,8 @@ fn taSlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const count = if (end > start) end - start else 0;
     const result = try typedArraySpeciesCreate(self, this_value, count);
     errdefer result.deinit();
-    if (isTypedArrayDetached(this_value)) return self.throwError(.type_error, "Cannot perform TypedArray.prototype.slice on a detached ArrayBuffer", .{});
     if (count > 0) {
+        if (isTypedArrayDetached(this_value)) return self.throwError(.type_error, "Cannot perform TypedArray.prototype.slice on a detached ArrayBuffer", .{});
         const tmp = try allocator.alloc(JSValue, count);
         defer {
             for (tmp) |v| v.deinit();

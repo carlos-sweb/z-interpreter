@@ -118,6 +118,27 @@ pub fn hasProperty(self: *Interpreter, v: JSValue, key: []const u8) anyerror!boo
                 cur.deinit();
                 cur = next;
             },
+            .typed_array => |box| {
+                switch (@import("interpreter_props.zig").canonicalNumericIndex(self.gc_allocator, key, box.value.len)) {
+                    .valid_index => return true,
+                    .invalid_index => return false,
+                    .not_numeric => {},
+                }
+                if (self.extraProps(cur)) |bag| {
+                    if (bag.object.value.hasOwnProperty(key)) return true;
+                }
+                const next = self.typedArrayProto(box.value.kind).retain();
+                cur.deinit();
+                cur = next;
+            },
+            .function => {
+                if (cur.function.value.statics) |bag| {
+                    if (bag.object.value.hasOwnProperty(key)) return true;
+                }
+                const next = self.protos.function.retain();
+                cur.deinit();
+                cur = next;
+            },
             else => return false,
         }
     }

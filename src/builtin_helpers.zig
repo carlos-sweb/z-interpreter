@@ -530,9 +530,25 @@ pub fn arrayIterNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
 }
 
 pub fn makeArrayIterator(self: *Interpreter, allocator: Allocator, this_value: JSValue, kind: @FieldType(ArrayIterCtx, "kind")) anyerror!JSValue {
-    const src = this_value.array.value.toSlice();
-    const snapshot = try allocator.alloc(JSValue, src.len);
-    for (src, 0..) |item, i| snapshot[i] = item.retain();
+    const snapshot: []JSValue = if (this_value == .array) blk: {
+        const src = this_value.array.value.toSlice();
+        const s = try allocator.alloc(JSValue, src.len);
+        for (src, 0..) |item, i| s[i] = item.retain();
+        break :blk s;
+    } else blk: {
+        const len_v = try self.getProperty(this_value, "length");
+        defer len_v.deinit();
+        const len = try toLength(self, len_v);
+        if (len > 4294967295) return self.throwError(.range_error, "Invalid array length", .{});
+        const s = try allocator.alloc(JSValue, len);
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            var buf: [32]u8 = undefined;
+            const key = std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
+            s[i] = try self.getProperty(this_value, key);
+        }
+        break :blk s;
+    };
     const ic = try allocator.create(ArrayIterCtx);
     ic.* = .{ .interp = self, .items = snapshot, .kind = kind };
     try self.gcTrackArrayIterCtx(ic);
