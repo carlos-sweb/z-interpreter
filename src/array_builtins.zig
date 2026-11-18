@@ -228,10 +228,7 @@ fn arraySpeciesCreate(self: *Interpreter, allocator: Allocator, original: JSValu
         return .{ .arr = try self.gcNewArray(), .is_default = true };
     }
     var ctor = try self.getProperty(original, "constructor");
-    errdefer ctor.deinit();
-    if (self.isConstructor(ctor)) {
-        // Same-realm check: always same realm in z-interpreter, continue.
-    }
+    defer ctor.deinit();
     if (builtin_helpers.isObjectLike(ctor)) {
         const skey = try @import("regex_builtins.zig").wellKnownKey(self, "species");
         defer allocator.free(skey);
@@ -247,16 +244,13 @@ fn arraySpeciesCreate(self: *Interpreter, allocator: Allocator, original: JSValu
         return .{ .arr = try self.gcNewArray(), .is_default = true };
     }
     if (!self.isConstructor(ctor)) {
-        ctor.deinit();
         return self.throwError(.type_error, "Species is not a constructor", .{});
     }
     if (self.global_env.get("Array")) |array_ctor| {
         if (zvalue.equality.strictEquals(ctor, array_ctor)) {
-            ctor.deinit();
             return .{ .arr = try self.gcNewArray(), .is_default = true };
         }
     }
-    defer ctor.deinit();
     const len_val = JSValue.fromNumber(@floatFromInt(len));
     const res = try self.constructValue(ctor, &.{len_val}, "species");
     return .{ .arr = res, .is_default = false };
