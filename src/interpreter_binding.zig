@@ -539,7 +539,7 @@ pub fn forIterationStep(self: *Interpreter, env: *Environment, binding: zstateme
     }
 }
 
-fn closeIterator(self: *Interpreter, iterator: JSValue) anyerror!void {
+pub fn closeIterator(self: *Interpreter, iterator: JSValue) anyerror!void {
     const ret = try self.getProperty(iterator, "return");
     defer ret.deinit();
     if (ret == .undefined or ret == .null) return;

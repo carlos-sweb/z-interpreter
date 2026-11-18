@@ -51,6 +51,10 @@ pub const object_methods = std.StaticStringMap(MethodSpec).initComptime(.{
     .{ "toString", MethodSpec{ .call = objToString, .arity = 0 } },
     .{ "valueOf", MethodSpec{ .call = objValueOf, .arity = 0 } },
     .{ "isPrototypeOf", MethodSpec{ .call = objIsPrototypeOf, .arity = 1 } },
+    .{ "__defineGetter__", MethodSpec{ .call = objDefineGetter, .arity = 2 } },
+    .{ "__defineSetter__", MethodSpec{ .call = objDefineSetter, .arity = 2 } },
+    .{ "__lookupGetter__", MethodSpec{ .call = objLookupGetter, .arity = 1 } },
+    .{ "__lookupSetter__", MethodSpec{ .call = objLookupSetter, .arity = 1 } },
 });
 
 // ===== Object statics =====
@@ -1302,28 +1306,215 @@ fn objectHasOwn(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     return objHasOwnProperty(ctx, allocator, o, if (args.len > 1) args[1..] else &.{});
 }
 
+fn objDefineAccessor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue, is_setter: bool) anyerror!JSValue {
+    const self = interp(ctx);
+    const obj = try property_desc.toObject(self, this_value);
+    defer obj.deinit();
+    const fn_val = arg(args, 1);
+    if (fn_val != .function) {
+        return self.throwError(.type_error, "Object.prototype.__define{s}__: Expecting function", .{if (is_setter) "Setter" else "Getter"});
+    }
+    const key = try self.encodeKey(arg(args, 0));
+    defer allocator.free(key);
+    var d = property_desc.ParsedDesc{
+        .has_get = !is_setter,
+        .get = if (!is_setter) fn_val else JSValue.UNDEFINED,
+        .has_set = is_setter,
+        .set = if (is_setter) fn_val else JSValue.UNDEFINED,
+        .has_enumerable = true,
+        .enumerable = true,
+        .has_configurable = true,
+        .configurable = true,
+    };
+    if (!try property_desc.defineOwnProperty(self, obj, key, &d)) {
+        return self.throwError(.type_error, "Cannot redefine property: {s}", .{property_desc.displayKey(key)});
+    }
+    return JSValue.UNDEFINED;
+}
+
+fn objDefineGetter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    return objDefineAccessor(ctx, allocator, this_value, args, false);
+}
+
+fn objDefineSetter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    return objDefineAccessor(ctx, allocator, this_value, args, true);
+}
+
+fn objLookupAccessor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue, field: []const u8) anyerror!JSValue {
+    const self = interp(ctx);
+    var cur = try property_desc.toObject(self, this_value);
+    defer cur.deinit();
+    const key_val = arg(args, 0);
+    // ToPropertyKey(P) once upfront per spec
+    const key_str = try self.encodeKey(key_val);
+    allocator.free(key_str);
+    while (true) {
+        const desc = try objectGetOwnPropertyDescriptor(ctx, allocator, JSValue.UNDEFINED, &.{ cur, key_val });
+        defer desc.deinit();
+        if (desc == .object) {
+            if (desc.object.value.getOwn(field)) |f| return f.retain();
+            return JSValue.UNDEFINED;
+        }
+        const next = try objectGetPrototypeOf(ctx, allocator, JSValue.UNDEFINED, &.{cur});
+        if (next == .null or next == .undefined) {
+            next.deinit();
+            return JSValue.UNDEFINED;
+        }
+        cur.deinit();
+        cur = next;
+    }
+}
+
+fn objLookupGetter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    return objLookupAccessor(ctx, allocator, this_value, args, "get");
+}
+
+fn objLookupSetter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    return objLookupAccessor(ctx, allocator, this_value, args, "set");
+}
+
 /// Object.fromEntries(iterable) -- builds an object from [key, value] pairs.
-/// Narrowed to an array of pair-arrays (the common case); other iterables
-/// are a documented gap.
 fn objectFromEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
     _ = this_value;
     const self = interp(ctx);
     const src = arg(args, 0);
-    if (src != .array) return self.throwError(.type_error, "Object.fromEntries requires an iterable of entries", .{});
+    if (src == .undefined or src == .null) return self.throwError(.type_error, "Cannot convert undefined or null to object", .{});
+    const binding = @import("interpreter_binding.zig");
     var result = try self.ordinaryObject();
-    for (src.array.value.toSlice()) |pair| {
-        if (pair != .array) return self.throwError(.type_error, "Iterator value is not an entry object", .{});
-        const p = &pair.array.value;
-        const k = if (p.length() > 0) p.get(0) else JSValue.UNDEFINED;
-        const v = if (p.length() > 1) p.get(1) else JSValue.UNDEFINED;
-        // Real spec: the entry's key goes through ToPropertyKey (a Symbol
-        // pair-key stays a real symbol-keyed property), not plain ToString.
-        const ks = try self.encodeKey(k);
-        defer self.gc_allocator.free(ks);
+    errdefer result.deinit();
+    if (src == .array) {
+        for (src.array.value.toSlice()) |pair| {
+            if (!builtin_helpers.isObjectLike(pair)) return self.throwError(.type_error, "Iterator value is not an entry object", .{});
+            const k = try self.getProperty(pair, "0");
+            defer k.deinit();
+            const v = try self.getProperty(pair, "1");
+            defer v.deinit();
+            const ks = try self.encodeKey(k);
+            defer self.gc_allocator.free(ks);
+            try result.objectSet(ks, v.retain());
+        }
+        return result;
+    }
+    if (src == .map) {
+        const ks = src.map.value.keys();
+        const vs = src.map.value.values();
+        for (ks, vs) |k, v| {
+            const kstr = try self.encodeKey(k);
+            defer self.gc_allocator.free(kstr);
+            try result.objectSet(kstr, v.retain());
+        }
+        return result;
+    }
+    if (!builtin_helpers.isObjectLike(src)) return self.throwError(.type_error, "Object.fromEntries requires an iterable of entries", .{});
+    const iter = try binding.resolveIterator(self, src);
+    defer iter.deinit();
+    while (true) {
+        const next_fn = try self.getProperty(iter, "next");
+        defer next_fn.deinit();
+        const step = try self.callValue(next_fn, iter, &.{}, "next");
+        defer step.deinit();
+        if (!builtin_helpers.isObjectLike(step)) return self.throwError(.type_error, "Iterator result is not an object", .{});
+        const done = try self.getProperty(step, "done");
+        defer done.deinit();
+        if (coercion.isTruthy(done)) break;
+        const pair = try self.getProperty(step, "value");
+        defer pair.deinit();
+        if (!builtin_helpers.isObjectLike(pair)) {
+            binding.closeIterator(self, iter) catch {};
+            return self.throwError(.type_error, "Iterator value is not an entry object", .{});
+        }
+        const k = self.getProperty(pair, "0") catch |err| {
+            binding.closeIterator(self, iter) catch {};
+            return err;
+        };
+        defer k.deinit();
+        const v = self.getProperty(pair, "1") catch |err| {
+            binding.closeIterator(self, iter) catch {};
+            return err;
+        };
+        defer v.deinit();
+        const ks = self.encodeKey(k) catch |err| {
+            binding.closeIterator(self, iter) catch {};
+            return err;
+        };
+        defer allocator.free(ks);
         try result.objectSet(ks, v.retain());
     }
     return result;
+}
+
+fn objectGroupBy(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const items = arg(args, 0);
+    const cb = arg(args, 1);
+    if (items == .undefined or items == .null) return self.throwError(.type_error, "Cannot convert undefined or null to object", .{});
+    if (cb != .function) return self.throwError(.type_error, "Object.groupBy requires a callable callback", .{});
+    const binding = @import("interpreter_binding.zig");
+    var result = try self.gcNewObject(); // [[Prototype]] = null
+    errdefer result.deinit();
+
+    const addGroup = struct {
+        fn go(s: *Interpreter, alloc: Allocator, res: *JSValue, cb_fn: JSValue, val: JSValue, k_idx: usize) anyerror!void {
+            const key_val = try cb_fn.function.value.call(cb_fn.function.value.ctx, alloc, JSValue.UNDEFINED, &.{ val, JSValue.fromNumber(@floatFromInt(k_idx)) });
+            defer key_val.deinit();
+            const key = try s.encodeKey(key_val);
+            defer s.gc_allocator.free(key);
+            if (res.object.value.getOwn(key)) |existing| {
+                _ = try existing.array.value.push(val.retain());
+            } else {
+                var arr = try s.gcNewArray();
+                _ = try arr.array.value.push(val.retain());
+                try res.object.value.defineProperty(key, arr, .{ .writable = true, .enumerable = true, .configurable = true });
+            }
+        }
+    }.go;
+
+    if (items == .array) {
+        for (items.array.value.toSlice(), 0..) |val, k_idx| {
+            try addGroup(self, allocator, &result, cb, val, k_idx);
+        }
+        return result;
+    }
+    if (items == .string) {
+        var it = std.unicode.Utf8Iterator{ .bytes = items.string.value.data, .i = 0 };
+        var k_idx: usize = 0;
+        while (it.nextCodepointSlice()) |cp| : (k_idx += 1) {
+            const s = try self.gcNewString(cp);
+            defer s.deinit();
+            try addGroup(self, allocator, &result, cb, s, k_idx);
+        }
+        return result;
+    }
+    if (items == .set) {
+        for (items.set.value.values(), 0..) |val, k_idx| {
+            try addGroup(self, allocator, &result, cb, val, k_idx);
+        }
+        return result;
+    }
+    if (items == .object) {
+        const iter = try binding.resolveIterator(self, items);
+        defer iter.deinit();
+        var k_idx: usize = 0;
+        while (true) : (k_idx += 1) {
+            const next_fn = try self.getProperty(iter, "next");
+            defer next_fn.deinit();
+            const step = try self.callValue(next_fn, iter, &.{}, "next");
+            defer step.deinit();
+            if (!builtin_helpers.isObjectLike(step)) return self.throwError(.type_error, "Iterator result is not an object", .{});
+            const done = try self.getProperty(step, "done");
+            defer done.deinit();
+            if (coercion.isTruthy(done)) break;
+            const val = try self.getProperty(step, "value");
+            defer val.deinit();
+            addGroup(self, allocator, &result, cb, val, k_idx) catch |err| {
+                binding.closeIterator(self, iter) catch {};
+                return err;
+            };
+        }
+        return result;
+    }
+    return self.throwError(.type_error, "{s} is not iterable", .{items.typeOf()});
 }
 
 pub fn objectGetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1410,6 +1601,7 @@ pub fn install(self: *Interpreter) !void {
         .{ "isExtensible", 1, objectIsExtensible },                           .{ "setPrototypeOf", 2, objectSetPrototypeOf },
         .{ "getPrototypeOf", 1, objectGetPrototypeOf },                       .{ "is", 2, objectIs },
         .{ "hasOwn", 2, objectHasOwn },                                       .{ "fromEntries", 1, objectFromEntries },
+        .{ "groupBy", 2, objectGroupBy },
     }) |entry| {
         try dneMethod(object_statics, entry[0], try native(self, entry[0], entry[1], entry[2]));
     }

@@ -268,7 +268,7 @@ fn isConcatSpreadable(self: *Interpreter, allocator: Allocator, val: JSValue) an
 
 fn arrayPush(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
-    if (this_value == .array) {
+    if (this_value == .array and !this_value.array.value.isHoley() and !this_value.array.value.isSparse() and !this_value.array.value.hasElementDescriptors()) {
         for (args) |a| _ = try this_value.array.value.push(a.retain());
         return JSValue.fromNumber(@floatFromInt(this_value.array.value.length()));
     }
@@ -289,7 +289,7 @@ fn arrayPush(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
 
 fn arrayPop(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
-    if (this_value == .array) {
+    if (this_value == .array and !this_value.array.value.isHoley() and !this_value.array.value.isSparse() and !this_value.array.value.hasElementDescriptors()) {
         return this_value.array.value.pop() orelse JSValue.UNDEFINED;
     }
     const obj = try toArrayLikeObject(ctx, this_value, "pop");
@@ -310,7 +310,7 @@ fn arrayPop(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
 
 fn arrayShift(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
-    if (this_value == .array) {
+    if (this_value == .array and !this_value.array.value.isHoley() and !this_value.array.value.isSparse() and !this_value.array.value.hasElementDescriptors()) {
         return this_value.array.value.shift() orelse JSValue.UNDEFINED;
     }
     const obj = try toArrayLikeObject(ctx, this_value, "shift");
@@ -338,7 +338,7 @@ fn arrayShift(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 }
 
 fn arrayUnshift(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    if (this_value == .array) {
+    if (this_value == .array and !this_value.array.value.isHoley() and !this_value.array.value.isSparse() and !this_value.array.value.hasElementDescriptors()) {
         // Insert in reverse so the args end up in order at the front.
         var i = args.len;
         while (i > 0) {
@@ -549,7 +549,7 @@ fn arrayConcat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
 
 fn arrayReverse(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
-    if (this_value == .array) {
+    if (this_value == .array and !this_value.array.value.isHoley() and !this_value.array.value.isSparse() and !this_value.array.value.hasElementDescriptors()) {
         if (!this_value.array.value.isHoley() and !this_value.array.value.isSparse()) {
             this_value.array.value.reverse();
             return this_value.retain();
@@ -607,15 +607,28 @@ fn arrayReverse(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 /// reclaimed with the run's arena; callers needn't release it.
 fn liveElem(ctx: *anyopaque, allocator: Allocator, array: JSValue, i: usize) anyerror!?JSValue {
     _ = allocator;
-    if (i >= array.array.value.length()) return null;
-    if (array.array.value.isHole(i)) {
-        const self = interp(ctx);
-        var buf: [32]u8 = undefined;
-        const key = std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
+    const arr = &array.array.value;
+    if (i >= arr.length()) return null;
+    if (!arr.isHole(i) and !arr.hasElementDescriptors()) {
+        return arr.get(i).retain();
+    }
+    const self = interp(ctx);
+    var buf: [32]u8 = undefined;
+    const key = std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
+    if (arr.hasElementDescriptors()) {
+        if (self.array_props.get(@intFromPtr(array.array))) |bag| {
+            if (bag.object.value.getOwnRecord(key)) |rec| {
+                if (!rec.isAccessor()) return rec.value.retain();
+                const g = rec.getter orelse return JSValue.UNDEFINED;
+                return try g.function.value.call(g.function.value.ctx, self.gc_allocator, array, &.{});
+            }
+        }
+    }
+    if (arr.isHole(i)) {
         if (try self.getFromProto(array, self.protos.array, key)) |v| return v;
         return null;
     }
-    return array.array.value.get(i).retain();
+    return arr.get(i).retain();
 }
 
 fn arrayMap(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1036,7 +1049,7 @@ fn arrayLastIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
 
 fn arrayFill(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
-    if (this_value == .array) {
+    if (this_value == .array and !this_value.array.value.isHoley() and !this_value.array.value.isSparse() and !this_value.array.value.hasElementDescriptors()) {
         const arr = &this_value.array.value;
         const val = arg(args, 0);
         const start: ?isize = if (arg(args, 1) == .undefined) null else toIntSat(try interp(ctx).toNumberJS(arg(args, 1)));
@@ -1063,7 +1076,7 @@ fn arrayFill(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
 }
 
 fn arrayCopyWithin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    if (this_value == .array) {
+    if (this_value == .array and !this_value.array.value.isHoley() and !this_value.array.value.isSparse() and !this_value.array.value.hasElementDescriptors()) {
         const arr = &this_value.array.value;
         const len = arr.length();
         const target = normIndex(try interp(ctx).toNumberJS(arg(args, 0)), len);
@@ -1285,7 +1298,7 @@ fn arrayWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
 }
 
 fn arraySplice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    if (this_value == .array) {
+    if (this_value == .array and !this_value.array.value.isHoley() and !this_value.array.value.isSparse() and !this_value.array.value.hasElementDescriptors()) {
         const arr = &this_value.array.value;
         const start: isize = if (args.len == 0) 0 else toIntSat(try interp(ctx).toNumberJS(arg(args, 0)));
         const delete_count: ?usize = if (args.len == 0)
@@ -1388,7 +1401,7 @@ fn arraySort(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     const self = interp(ctx);
     const cmp = arg(args, 0);
     if (cmp != .undefined and cmp != .function) return self.throwError(.type_error, "The comparison function must be either a function or undefined", .{});
-    if (this_value == .array) {
+    if (this_value == .array and !this_value.array.value.isHoley() and !this_value.array.value.isSparse() and !this_value.array.value.hasElementDescriptors()) {
         const arr = &this_value.array.value;
         const n = arr.length();
         var i: usize = 1;

@@ -446,16 +446,7 @@ pub fn evalStatement(self: *Interpreter, env: *Environment, stmt: *zstatements.S
             }
             return c;
         },
-        .function_declaration => |ptr| {
-            const fnode = zfunctions.asFunctionNode(ptr);
-            const value = try self.makeClosure(env, fnode);
-            const name = switch (fnode.kind) {
-                .function_decl => |d| d.name,
-                else => unreachable, // z-functions always produces .function_decl at statement position
-            };
-            try env.define(arena, name, value);
-            return .{};
-        },
+        .function_declaration => return .{},
         .class_declaration => |ptr| {
             const cnode = zfunctions.asClassNode(ptr);
             const value = try self.evalClass(env, cnode);
