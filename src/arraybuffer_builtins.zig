@@ -756,7 +756,8 @@ fn taIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     const start = normIndex(n, len);
     var i: usize = start;
     while (i < len) : (i += 1) {
-        if (zvalue.equality.strictEquals(try taGet(self, this_value, i), target)) return JSValue.fromNumber(@floatFromInt(i));
+        const elem = try taGet(self, this_value, i);
+        if (elem != .undefined and zvalue.equality.strictEquals(elem, target)) return JSValue.fromNumber(@floatFromInt(i));
     }
     return JSValue.fromNumber(-1);
 }
@@ -793,7 +794,8 @@ fn taLastIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     var i: usize = @as(usize, @intCast(k_signed)) + 1;
     while (i > 0) {
         i -= 1;
-        if (zvalue.equality.strictEquals(try taGet(self, this_value, i), target)) return JSValue.fromNumber(@floatFromInt(i));
+        const elem = try taGet(self, this_value, i);
+        if (elem != .undefined and zvalue.equality.strictEquals(elem, target)) return JSValue.fromNumber(@floatFromInt(i));
     }
     return JSValue.fromNumber(-1);
 }
