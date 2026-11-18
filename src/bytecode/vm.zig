@@ -109,6 +109,17 @@ fn deinitSlot(v: *JSValue) void {
         .undefined, .null, .boolean, .number => {},
         .object => |box| {
             if (box._count == 1 and obj_pool_len < 32 and !box.value.is_frozen and box.value.is_extensible and box.value.properties.capacity() <= 16) {
+                if (box.value.canPreserveShape()) {
+                    for (box.value.properties.entries.items(.value)) |*prop| {
+                        if (needsDeinit(prop.value)) prop.value.deinit();
+                        prop.value = JSValue.UNDEFINED;
+                    }
+                    box.value.recyclePreserveShape();
+                    obj_pool[obj_pool_len] = box;
+                    obj_pool_len += 1;
+                    v.* = JSValue.UNDEFINED;
+                    return;
+                }
                 var has_accessor = false;
                 for (box.value.properties.entries.items(.value)) |*prop| {
                     if (prop.isAccessor()) {
@@ -132,10 +143,19 @@ fn deinitSlot(v: *JSValue) void {
         },
         .array => |box| {
             if (box._count == 1 and arr_pool_len < 32 and box.value.holey == null and box.value.items.capacity <= 16) {
-                for (box.value.items.items) |*el| {
-                    if (needsDeinit(el.*)) el.deinit();
+                var has_rc = false;
+                for (box.value.items.items) |el| {
+                    if (needsDeinit(el)) {
+                        has_rc = true;
+                        break;
+                    }
                 }
-                box.value.clear();
+                if (has_rc) {
+                    for (box.value.items.items) |*el| {
+                        if (needsDeinit(el.*)) el.deinit();
+                    }
+                }
+                box.value.items.items.len = 0;
                 arr_pool[arr_pool_len] = box;
                 arr_pool_len += 1;
                 v.* = JSValue.UNDEFINED;
