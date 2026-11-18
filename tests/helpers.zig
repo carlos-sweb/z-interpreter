@@ -58,9 +58,21 @@ pub fn expectUncaught(source: []const u8, kind: zvalue.ErrorKind, message: []con
     defer interp.deinit();
     try testing.expectError(error.UncaughtException, interp.run(source));
     const ex = interp.pending_exception.?;
-    try testing.expect(ex == .@"error");
-    try testing.expectEqual(kind, ex.@"error".value.kind);
-    try testing.expectEqualStrings(message, ex.@"error".value.message);
+    if (ex == .@"error") {
+        try testing.expectEqual(kind, ex.@"error".value.kind);
+        try testing.expectEqualStrings(message, ex.@"error".value.message);
+    } else if (ex == .object and ex.object.value.is_error_data) {
+        const name_v = try interp.getProperty(ex, "name");
+        defer name_v.deinit();
+        try testing.expect(name_v == .string);
+        try testing.expectEqualStrings(kind.name(), name_v.string.value.data);
+        const msg_v = try interp.getProperty(ex, "message");
+        defer msg_v.deinit();
+        try testing.expect(msg_v == .string);
+        try testing.expectEqualStrings(message, msg_v.string.value.data);
+    } else {
+        return error.TestUnexpectedResult;
+    }
 }
 
 /// Like expectUncaught but for `throw <non-error value>` -- hands the raw

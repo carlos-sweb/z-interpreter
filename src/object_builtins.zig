@@ -433,6 +433,7 @@ pub fn objToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
                 owned_tag = try self.getProperty(this_value, tag_key);
                 if (owned_tag == .string) break :blk owned_tag.string.value.data;
             }
+            if (this_value.object.value.is_error_data) break :blk "Error";
             break :blk "Object";
         },
         else => "Object",
