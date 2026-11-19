@@ -61,6 +61,7 @@ pub const BytecodeEmitter = struct {
         errdefer self.constants.deinit(allocator);
 
         try self.emitBody(function.body);
+        try self.fuseCmpJumps();
         const ops = try self.ops.toOwnedSlice(allocator);
         errdefer allocator.free(ops);
         const constants = try self.constants.toOwnedSlice(allocator);
@@ -114,6 +115,7 @@ pub const BytecodeEmitter = struct {
             try self.emitOp(.{ .opcode = .return_undefined });
         }
 
+        try self.fuseCmpJumps();
         const ops = try self.ops.toOwnedSlice(allocator);
         errdefer allocator.free(ops);
         const constants = try self.constants.toOwnedSlice(allocator);
@@ -845,6 +847,94 @@ pub const BytecodeEmitter = struct {
         self.ops.items[instruction].c = @intCast(target);
     }
 
+    fn fusedCmpOpcode(op: codeblock.Opcode) ?codeblock.Opcode {
+        return switch (op) {
+            .eq_local_const => .jeq_local_const_false,
+            .lt_local_const => .jlt_local_const_false,
+            .le_local_const => .jle_local_const_false,
+            .gt_local_const => .jgt_local_const_false,
+            .ge_local_const => .jge_local_const_false,
+            else => null,
+        };
+    }
+
+    fn isJumpWithTarget(op: codeblock.Opcode) bool {
+        return switch (op) {
+            .jump, .jump_if_true, .jump_if_false, .jump_if_not_nullish, .setup_catch => true,
+            else => false,
+        };
+    }
+
+    fn fuseCmpJumps(self: *BytecodeEmitter) !void {
+        const len = self.ops.items.len;
+        if (len < 2) return;
+
+        const is_target = try self.allocator.alloc(bool, len + 1);
+        defer self.allocator.free(is_target);
+        @memset(is_target, false);
+        for (self.ops.items) |op| {
+            if (isJumpWithTarget(op.opcode)) {
+                const t = jumpTarget(op);
+                if (t <= len) is_target[t] = true;
+            }
+        }
+
+        const pc_map = try self.allocator.alloc(u16, len + 1);
+        defer self.allocator.free(pc_map);
+
+        var new_len: u16 = 0;
+        var i: usize = 0;
+        while (i < len) {
+            pc_map[i] = new_len;
+            if (i + 1 < len and !is_target[i + 1] and self.ops.items[i + 1].opcode == .jump_if_false and self.ops.items[i + 1].a == self.ops.items[i].a and fusedCmpOpcode(self.ops.items[i].opcode) != null) {
+                const target = jumpTarget(self.ops.items[i + 1]);
+                if (target > i + 1 and target - i <= 255) {
+                    pc_map[i + 1] = new_len + 1;
+                    new_len += 1;
+                    i += 2;
+                    continue;
+                }
+            }
+            new_len += 1;
+            i += 1;
+        }
+        pc_map[len] = new_len;
+        if (new_len == len) return;
+
+        var r: usize = 0;
+        var w: usize = 0;
+        while (r < len) {
+            if (r + 1 < len and !is_target[r + 1] and self.ops.items[r + 1].opcode == .jump_if_false and self.ops.items[r + 1].a == self.ops.items[r].a) {
+                if (fusedCmpOpcode(self.ops.items[r].opcode)) |fused_op| {
+                    const target = jumpTarget(self.ops.items[r + 1]);
+                    if (target > r + 1 and target - r <= 255) {
+                        const new_target = pc_map[target];
+                        const old_op = self.ops.items[r];
+                        self.ops.items[w] = .{
+                            .opcode = fused_op,
+                            .a = old_op.b,
+                            .b = old_op.c,
+                            .c = @intCast(new_target - w),
+                        };
+                        w += 1;
+                        r += 2;
+                        continue;
+                    }
+                }
+            }
+            var op = self.ops.items[r];
+            if (isJumpWithTarget(op.opcode)) {
+                const new_target = pc_map[jumpTarget(op)];
+                op.b = @intCast(new_target >> 8);
+                op.c = @intCast(new_target & 0xFF);
+            }
+            self.ops.items[w] = op;
+            w += 1;
+            r += 1;
+        }
+        self.ops.items.len = w;
+    }
+
     fn allocRegister(self: *BytecodeEmitter) !u8 {
         if (self.free_registers.items.len > 0) {
             var min_idx: usize = 0;
@@ -926,6 +1016,7 @@ pub fn disassemble(allocator: Allocator, block: *const codeblock.CodeBlock) ![]u
             .neg, .not, .not_bits, .typeof => try output.print(allocator, " r{d}, r{d}", .{ op.a, op.b }),
             .add, .sub_num, .mul_num, .div_num, .mod_num, .pow_num, .lt_num, .gt_num, .le_num, .ge_num, .eq, .ne, .and_bits, .or_bits, .xor_bits, .shl, .shr, .ushr => try output.print(allocator, " r{d}, r{d}, r{d}", .{ op.a, op.b, op.c }),
             .add_local_const, .sub_local_const, .lt_local_const, .gt_local_const, .le_local_const, .ge_local_const, .eq_local_const => try output.print(allocator, " r{d}, @{d}, #{d}", .{ op.a, op.b, op.c }),
+            .jeq_local_const_false, .jlt_local_const_false, .jle_local_const_false, .jgt_local_const_false, .jge_local_const_false => try output.print(allocator, " @{d}, #{d}, +{d}", .{ op.a, op.b, op.c }),
             .jump => try output.print(allocator, " {d}", .{jumpTarget(op)}),
             .jump_if_true, .jump_if_false, .jump_if_not_nullish => try output.print(allocator, " r{d}, {d}", .{ op.a, jumpTarget(op) }),
             .call, .call_global => try output.print(allocator, " r{d}, r{d}, [cache:{d}]", .{ op.a, op.b, op.c }),
