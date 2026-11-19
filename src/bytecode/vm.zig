@@ -101,7 +101,7 @@ fn calleeMatches(cached: JSValue, current: JSValue) bool {
     return cached.asFunction() == current.asFunction() or (cached.asFunction().value.ctx == current.asFunction().value.ctx and cached.asFunction().value.call == current.asFunction().value.call);
 }
 
-fn deinitSlot(v: *JSValue) void {
+noinline fn deinitSlot(v: *JSValue) void {
     if (!v.needsDeinit()) return;
     if (v.isObject()) {
         const box = v.asObject();
@@ -268,7 +268,7 @@ fn setProp(allocator: Allocator, obj: JSValue, key: []const u8, val: JSValue) !v
     } else return error.UnsupportedOpcode;
 }
 
-fn getElem(allocator: Allocator, obj: JSValue, key_val: JSValue) !JSValue {
+noinline fn getElem(allocator: Allocator, obj: JSValue, key_val: JSValue) !JSValue {
     if (obj.isArray() and key_val.isNumber()) {
         const n = key_val.asNumber();
         if (n >= 0 and !std.math.isNan(n) and !std.math.isInf(n)) {
@@ -284,7 +284,7 @@ fn getElem(allocator: Allocator, obj: JSValue, key_val: JSValue) !JSValue {
     return try getProp(allocator, obj, key);
 }
 
-fn setElem(allocator: Allocator, obj: JSValue, key_val: JSValue, val: JSValue) !void {
+noinline fn setElem(allocator: Allocator, obj: JSValue, key_val: JSValue, val: JSValue) !void {
     if (obj.isArray() and key_val.isNumber()) {
         const n = key_val.asNumber();
         if (n >= 0 and !std.math.isNan(n) and !std.math.isInf(n)) {
@@ -638,6 +638,25 @@ noinline fn jcmpLocalConstSlow(frame_regs: []const JSValue, constants: []const c
         };
     }
     return error.UnsupportedOpcode;
+}
+
+noinline fn setupCatchOp(
+    catch_stack: []CatchHandler,
+    catch_top: *usize,
+    frame_count: usize,
+    reg_top: usize,
+    block: *const codeblock.CodeBlock,
+    op: codeblock.Op,
+) !void {
+    @branchHint(.cold);
+    if (catch_top.* >= MAX_CATCH_HANDLERS) return error.UnsupportedOpcode;
+    catch_stack[catch_top.*] = .{
+        .frame_idx = @intCast(frame_count - 1),
+        .error_reg = op.a,
+        .target_pc = @intCast(try jumpTarget(block, op)),
+        .reg_top = @intCast(reg_top),
+    };
+    catch_top.* += 1;
 }
 
 pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_env: ?*Environment, args: []const JSValue, interp: ?*interpreter_mod.Interpreter) !JSValue {
@@ -1459,15 +1478,7 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
             continue :dispatch code[ip].opcode;
         },
         .setup_catch => {
-            const op = code[ip];
-            if (catch_top >= MAX_CATCH_HANDLERS) return error.UnsupportedOpcode;
-            catch_stack[catch_top] = .{
-                .frame_idx = @intCast(frame_count - 1),
-                .error_reg = op.a,
-                .target_pc = @intCast(try jumpTarget(frame.block, op)),
-                .reg_top = @intCast(reg_top),
-            };
-            catch_top += 1;
+            try setupCatchOp(&catch_stack, &catch_top, frame_count, reg_top, frame.block, code[ip]);
             ip += 1;
             if (ip >= code.len) return error.MissingReturn;
             continue :dispatch code[ip].opcode;
@@ -1505,7 +1516,7 @@ fn numberToInt32(n: f64) i32 {
     return @bitCast(numberToUint32(n));
 }
 
-fn bitwise(registers: []JSValue, op: codeblock.Op, kind: BitwiseOp) !void {
+noinline fn bitwise(registers: []JSValue, op: codeblock.Op, kind: BitwiseOp) !void {
     const left = try getRegister(registers, op.b);
     const right = try getRegister(registers, op.c);
     if (!left.isNumber() or !right.isNumber()) return error.UnsupportedOpcode;
@@ -1702,7 +1713,7 @@ pub fn clearGlobalCache() void {
     global_version +%= 1;
 }
 
-fn loadGlobalFast(block: *const codeblock.CodeBlock, closure_env: ?*Environment, index: u8, op_pc: u32) !JSValue {
+noinline fn loadGlobalFast(block: *const codeblock.CodeBlock, closure_env: ?*Environment, index: u8, op_pc: u32) !JSValue {
     const env = closure_env orelse return error.UnsupportedOpcode;
     if (index >= block.constants.len) return error.InvalidConstant;
     const name = switch (block.constants[index]) {
@@ -1724,7 +1735,7 @@ fn loadGlobalFast(block: *const codeblock.CodeBlock, closure_env: ?*Environment,
     return val.retain();
 }
 
-fn storeGlobal(allocator: Allocator, block: *const codeblock.CodeBlock, closure_env: ?*Environment, index: u8, val: JSValue) !void {
+noinline fn storeGlobal(allocator: Allocator, block: *const codeblock.CodeBlock, closure_env: ?*Environment, index: u8, val: JSValue) !void {
     const env = closure_env orelse return error.UnsupportedOpcode;
     if (index >= block.constants.len) return error.InvalidConstant;
     const name = switch (block.constants[index]) {
