@@ -101,7 +101,29 @@ fn calleeMatches(cached: JSValue, current: JSValue) bool {
     return cached.asFunction() == current.asFunction() or (cached.asFunction().value.ctx == current.asFunction().value.ctx and cached.asFunction().value.call == current.asFunction().value.call);
 }
 
-fn deinitSlot(v: *JSValue) void {
+inline fn deinitSlot(v: *JSValue) void {
+    const val = v.*;
+    if (!val.needsDeinit()) return;
+    if (val.isObject()) {
+        const box = val.asObject();
+        if (box._count > 1) {
+            box._count -= 1;
+            v.* = JSValue.UNDEFINED;
+            return;
+        }
+    } else if (val.isArray()) {
+        const box = val.asArray();
+        if (box._count > 1) {
+            box._count -= 1;
+            v.* = JSValue.UNDEFINED;
+            return;
+        }
+    }
+    deinitSlotSlow(v);
+}
+
+noinline fn deinitSlotSlow(v: *JSValue) void {
+    @branchHint(.cold);
     if (!v.needsDeinit()) return;
     if (v.isObject()) {
         const box = v.asObject();
@@ -268,7 +290,7 @@ fn setProp(allocator: Allocator, obj: JSValue, key: []const u8, val: JSValue) !v
     } else return error.UnsupportedOpcode;
 }
 
-fn getElem(allocator: Allocator, obj: JSValue, key_val: JSValue) !JSValue {
+noinline fn getElem(allocator: Allocator, obj: JSValue, key_val: JSValue) !JSValue {
     if (obj.isArray() and key_val.isNumber()) {
         const n = key_val.asNumber();
         if (n >= 0 and !std.math.isNan(n) and !std.math.isInf(n)) {
@@ -284,7 +306,7 @@ fn getElem(allocator: Allocator, obj: JSValue, key_val: JSValue) !JSValue {
     return try getProp(allocator, obj, key);
 }
 
-fn setElem(allocator: Allocator, obj: JSValue, key_val: JSValue, val: JSValue) !void {
+noinline fn setElem(allocator: Allocator, obj: JSValue, key_val: JSValue, val: JSValue) !void {
     if (obj.isArray() and key_val.isNumber()) {
         const n = key_val.asNumber();
         if (n >= 0 and !std.math.isNan(n) and !std.math.isInf(n)) {
@@ -640,6 +662,41 @@ noinline fn jcmpLocalConstSlow(frame_regs: []const JSValue, constants: []const c
     return error.UnsupportedOpcode;
 }
 
+noinline fn setupCatchOp(
+    catch_stack: []CatchHandler,
+    catch_top: *usize,
+    frame_count: usize,
+    reg_top: usize,
+    block: *const codeblock.CodeBlock,
+    op: codeblock.Op,
+) !void {
+    @branchHint(.cold);
+    if (catch_top.* >= MAX_CATCH_HANDLERS) return error.UnsupportedOpcode;
+    catch_stack[catch_top.*] = .{
+        .frame_idx = @intCast(frame_count - 1),
+        .error_reg = op.a,
+        .target_pc = @intCast(try jumpTarget(block, op)),
+        .reg_top = @intCast(reg_top),
+    };
+    catch_top.* += 1;
+}
+
+noinline fn vmCallCleanup(registers: []JSValue, reg_top: usize, prev_obj_pool_len: usize, prev_arr_pool_len: usize) void {
+    for (registers[0..reg_top]) |*register| deinitSlot(register);
+    while (obj_pool_len > prev_obj_pool_len) {
+        obj_pool_len -= 1;
+        const b = obj_pool[obj_pool_len];
+        b.value.deinit();
+        b.destroy();
+    }
+    while (arr_pool_len > prev_arr_pool_len) {
+        arr_pool_len -= 1;
+        const b = arr_pool[arr_pool_len];
+        b.value.deinit();
+        b.destroy();
+    }
+}
+
 pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_env: ?*Environment, args: []const JSValue, interp: ?*interpreter_mod.Interpreter) !JSValue {
     clearGlobalCache();
     defer clearGlobalCache();
@@ -649,6 +706,24 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
     const registers = try allocator.alloc(JSValue, MAX_REGISTERS);
     defer allocator.free(registers);
 
+    var reg_top: usize = 0;
+    const prev_obj_pool_len = obj_pool_len;
+    const prev_arr_pool_len = arr_pool_len;
+    defer vmCallCleanup(registers, reg_top, prev_obj_pool_len, prev_arr_pool_len);
+
+    return vmCallDispatch(allocator, block, closure_env, args, interp, frames, registers, &reg_top);
+}
+
+noinline fn vmCallDispatch(
+    allocator: Allocator,
+    block: *const codeblock.CodeBlock,
+    closure_env: ?*Environment,
+    args: []const JSValue,
+    interp: ?*interpreter_mod.Interpreter,
+    frames: []CallFrame,
+    registers: []JSValue,
+    reg_top_out: *usize,
+) !JSValue {
     var catch_stack: [MAX_CATCH_HANDLERS]CatchHandler = undefined;
     var catch_top: usize = 0;
     var prop_ic: [256]PropIC = @splat(.{});
@@ -657,27 +732,10 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
     var reg_top: usize = 0;
     var max_reg_water_mark: usize = 0;
 
-    const prev_obj_pool_len = obj_pool_len;
-    const prev_arr_pool_len = arr_pool_len;
-    defer {
-        for (registers[0..reg_top]) |*register| deinitSlot(register);
-        while (obj_pool_len > prev_obj_pool_len) {
-            obj_pool_len -= 1;
-            const b = obj_pool[obj_pool_len];
-            b.value.deinit();
-            b.destroy();
-        }
-        while (arr_pool_len > prev_arr_pool_len) {
-            arr_pool_len -= 1;
-            const b = arr_pool[arr_pool_len];
-            b.value.deinit();
-            b.destroy();
-        }
-    }
-
     if (block.register_count > MAX_REGISTERS) return error.OutOfMemory;
 
     reg_top = block.register_count;
+    reg_top_out.* = reg_top;
     max_reg_water_mark = reg_top;
 
     var init_has_rc = false;
@@ -762,7 +820,7 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                 const box = arr_pool[arr_pool_len];
                 box._count = 1;
                 const cap = @max(@as(usize, op.b), 4);
-                try box.value.reserve(cap);
+                if (box.value.items.capacity < cap) try box.value.reserve(cap);
                 try setRegValue(frame, frame_regs, op.a, JSValue.fromArray(box));
             } else {
                 try newArraySlow(allocator, frame, frame_regs, op);
@@ -1312,6 +1370,7 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                 frame = &frames[frame_count];
                 frame_count += 1;
                 reg_top = new_reg_top;
+                reg_top_out.* = new_reg_top;
                 code = callee_block.ops;
                 ip = 0;
                 frame_regs = registers[callee_reg_base .. callee_reg_base + callee_block.register_count];
@@ -1382,6 +1441,7 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                 frame = &frames[frame_count];
                 frame_count += 1;
                 reg_top = new_reg_top;
+                reg_top_out.* = new_reg_top;
                 code = callee_block.ops;
                 ip = 0;
                 frame_regs = registers[callee_reg_base .. callee_reg_base + callee_block.register_count];
@@ -1400,6 +1460,7 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
             const val = if (is_prim) raw_val else raw_val.retain();
             if (frame.has_rc) deinitFrameRegs(registers[frame.reg_base..reg_top]);
             reg_top = frame.reg_base;
+            reg_top_out.* = reg_top;
             if (catch_top > 0) {
                 while (catch_top > 0 and catch_stack[catch_top - 1].frame_idx >= frame_count - 1) catch_top -= 1;
             }
@@ -1421,6 +1482,7 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
         .return_undefined => {
             if (frame.has_rc) deinitFrameRegs(registers[frame.reg_base..reg_top]);
             reg_top = frame.reg_base;
+            reg_top_out.* = reg_top;
             if (catch_top > 0) {
                 while (catch_top > 0 and catch_stack[catch_top - 1].frame_idx >= frame_count - 1) catch_top -= 1;
             }
@@ -1459,15 +1521,7 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
             continue :dispatch code[ip].opcode;
         },
         .setup_catch => {
-            const op = code[ip];
-            if (catch_top >= MAX_CATCH_HANDLERS) return error.UnsupportedOpcode;
-            catch_stack[catch_top] = .{
-                .frame_idx = @intCast(frame_count - 1),
-                .error_reg = op.a,
-                .target_pc = @intCast(try jumpTarget(frame.block, op)),
-                .reg_top = @intCast(reg_top),
-            };
-            catch_top += 1;
+            try setupCatchOp(&catch_stack, &catch_top, frame_count, reg_top, frame.block, code[ip]);
             ip += 1;
             if (ip >= code.len) return error.MissingReturn;
             continue :dispatch code[ip].opcode;
@@ -1480,6 +1534,7 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
         },
         .throw_value => {
             frame = try throwValueOp(frames, &frame_count, registers, &reg_top, &catch_stack, &catch_top, frame_regs, code[ip]);
+            reg_top_out.* = reg_top;
             code = frame.block.ops;
             ip = frame.pc;
             frame_regs = registers[frame.reg_base .. frame.reg_base + frame.block.register_count];
@@ -1505,7 +1560,7 @@ fn numberToInt32(n: f64) i32 {
     return @bitCast(numberToUint32(n));
 }
 
-fn bitwise(registers: []JSValue, op: codeblock.Op, kind: BitwiseOp) !void {
+noinline fn bitwise(registers: []JSValue, op: codeblock.Op, kind: BitwiseOp) !void {
     const left = try getRegister(registers, op.b);
     const right = try getRegister(registers, op.c);
     if (!left.isNumber() or !right.isNumber()) return error.UnsupportedOpcode;
