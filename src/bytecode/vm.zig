@@ -128,29 +128,28 @@ noinline fn deinitSlotSlow(v: *JSValue) void {
     if (v.isObject()) {
         const box = v.asObject();
         if (box._count == 1 and obj_pool_len < 32 and !box.value.is_frozen and box.value.is_extensible and box.value.properties.capacity() <= 16) {
-            if (box.value.canPreserveShape()) {
-                for (box.value.properties.entries.items(.value)) |*prop| {
-                    if (prop.value.needsDeinit()) prop.value.deinit();
-                    prop.value = JSValue.UNDEFINED;
-                }
-                box.value.recyclePreserveShape();
-                obj_pool[obj_pool_len] = box;
-                obj_pool_len += 1;
-                v.* = JSValue.UNDEFINED;
-                return;
-            }
+            const props = box.value.properties.entries.items(.value);
+            var can_preserve = props.len > 0 and props.len <= 8;
             var has_accessor = false;
-            for (box.value.properties.entries.items(.value)) |*prop| {
+            for (props) |*prop| {
                 if (prop.isAccessor()) {
                     has_accessor = true;
+                    can_preserve = false;
                     break;
                 }
+                const d = prop.descriptor;
+                if (!d.borrowed_key or !d.writable or !d.enumerable or !d.configurable) {
+                    can_preserve = false;
+                }
+                if (prop.value.needsDeinit()) prop.value.deinit();
+                prop.value = JSValue.UNDEFINED;
             }
             if (!has_accessor) {
-                for (box.value.properties.entries.items(.value)) |*prop| {
-                    if (prop.value.needsDeinit()) prop.value.deinit();
+                if (can_preserve) {
+                    box.value.recyclePreserveShape();
+                } else {
+                    box.value.clearRetainingCapacity();
                 }
-                box.value.clearRetainingCapacity();
                 obj_pool[obj_pool_len] = box;
                 obj_pool_len += 1;
                 v.* = JSValue.UNDEFINED;
@@ -162,17 +161,8 @@ noinline fn deinitSlotSlow(v: *JSValue) void {
     } else if (v.isArray()) {
         const box = v.asArray();
         if (box._count == 1 and arr_pool_len < 32 and box.value.holey == null and box.value.items.capacity <= 16) {
-            var has_rc = false;
-            for (box.value.items.items) |el| {
-                if (el.needsDeinit()) {
-                    has_rc = true;
-                    break;
-                }
-            }
-            if (has_rc) {
-                for (box.value.items.items) |*el| {
-                    if (el.needsDeinit()) el.deinit();
-                }
+            for (box.value.items.items) |*el| {
+                if (el.needsDeinit()) el.deinit();
             }
             box.value.items.items.len = 0;
             arr_pool[arr_pool_len] = box;
@@ -905,22 +895,25 @@ noinline fn vmCallDispatch(
                 const c = frame.block.constants[op.c];
                 if (c == .number) {
                     const idx: usize = @intFromFloat(c.number);
-                    if (idx < obj.asArray().value.length()) {
-                        const elem = obj.asArray().value.get(idx);
-                        if (!needsDeinit(elem)) {
-                            try setRegPrimitive(frame_regs, op.a, elem);
+                    const arr = &obj.asArray().value;
+                    if (arr.holey == null) {
+                        if (idx < arr.items.items.len) {
+                            const elem = arr.items.items[idx];
+                            if (!needsDeinit(elem)) {
+                                try setRegPrimitive(frame_regs, op.a, elem);
+                            } else {
+                                try setRegValue(frame, frame_regs, op.a, elem.retain());
+                            }
                         } else {
-                            try setRegValue(frame, frame_regs, op.a, elem.retain());
+                            try setRegPrimitive(frame_regs, op.a, JSValue.UNDEFINED);
                         }
-                    } else {
-                        try setRegPrimitive(frame_regs, op.a, JSValue.UNDEFINED);
+                        ip += 1;
+                        if (ip >= code.len) return error.MissingReturn;
+                        continue :dispatch code[ip].opcode;
                     }
-                } else {
-                    try getElemConstSlow(allocator, frame, frame_regs, op, obj);
                 }
-            } else {
-                try getElemConstSlow(allocator, frame, frame_regs, op, obj);
             }
+            try getElemConstSlow(allocator, frame, frame_regs, op, obj);
             ip += 1;
             if (ip >= code.len) return error.MissingReturn;
             continue :dispatch code[ip].opcode;

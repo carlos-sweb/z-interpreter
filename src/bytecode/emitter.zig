@@ -164,14 +164,13 @@ pub const BytecodeEmitter = struct {
             .block => |items| for (items) |item| try self.emitStatement(item),
             .return_stmt => |value| {
                 if (value) |expression| {
-                    const register = try self.emitExpression(expression);
+                    const register = try self.emitReadOperand(expression);
                     try self.emitOp(.{ .opcode = .return_value, .a = register });
                     self.freeRegister(register);
                 } else try self.emitOp(.{ .opcode = .return_undefined });
             },
             .expr_stmt => |expression| {
-                const reg = try self.emitExpression(expression);
-                self.freeRegister(reg);
+                try self.emitEffectExpression(expression);
             },
             .variable => |variable| try self.emitVariable(variable),
             .if_stmt => |item| try self.emitIf(item),
@@ -260,8 +259,7 @@ pub const BytecodeEmitter = struct {
                 }
                 try self.emitStatement(body);
                 if (c_style.update) |update| {
-                    const reg = try self.emitExpression(update);
-                    self.freeRegister(reg);
+                    try self.emitEffectExpression(update);
                 }
                 const back = try self.emitJump(.jump, 0);
                 try self.patchJump(back, start);
@@ -396,9 +394,6 @@ pub const BytecodeEmitter = struct {
                 } else if (assignment.op == .add or assignment.op == .sub or assignment.op == .mul or assignment.op == .div or assignment.op == .mod) {
                     if (assignment.target.data == .identifier) {
                         const name = assignment.target.data.identifier;
-                        const old_val = try self.emitIdentifier(name);
-                        const right_val = try self.emitExpression(assignment.value);
-                        const res_reg = try self.allocRegister();
                         const opcode: codeblock.Opcode = switch (assignment.op) {
                             .add => .add,
                             .sub => .sub_num,
@@ -407,6 +402,17 @@ pub const BytecodeEmitter = struct {
                             .mod => .mod_num,
                             else => unreachable,
                         };
+                        if (self.getLocalSlot(assignment.target)) |local_slot| {
+                            if (!exprMayMutateLocal(assignment.value)) {
+                                const right_val = try self.emitReadOperand(assignment.value);
+                                try self.emitOp(.{ .opcode = opcode, .a = local_slot, .b = local_slot, .c = right_val });
+                                self.freeRegister(right_val);
+                                return local_slot;
+                            }
+                        }
+                        const old_val = try self.emitIdentifier(name);
+                        const right_val = try self.emitReadOperand(assignment.value);
+                        const res_reg = try self.allocRegister();
                         try self.emitOp(.{ .opcode = opcode, .a = res_reg, .b = old_val, .c = right_val });
                         self.freeRegister(right_val);
                         self.freeRegister(old_val);
@@ -444,24 +450,47 @@ pub const BytecodeEmitter = struct {
         return destination;
     }
 
+    fn emitEffectExpression(self: *BytecodeEmitter, expression: *const zparser.Node) anyerror!void {
+        const cur = unwrapParen(expression);
+        if (cur.data == .unary) {
+            const unary = cur.data.unary;
+            if (unary.op == .post_inc or unary.op == .post_dec or unary.op == .pre_inc or unary.op == .pre_dec) {
+                if (self.getLocalSlot(unary.operand)) |local_slot| {
+                    const one_idx = try self.addConstant(.{ .number = 1.0 });
+                    const is_inc = (unary.op == .post_inc or unary.op == .pre_inc);
+                    const super_op: codeblock.Opcode = if (is_inc) .add_local_const else .sub_local_const;
+                    try self.emitOp(.{ .opcode = super_op, .a = local_slot, .b = local_slot, .c = one_idx });
+                    return;
+                }
+            }
+        }
+        const reg = try self.emitExpression(expression);
+        self.freeRegister(reg);
+    }
+
+    fn emitReadOperand(self: *BytecodeEmitter, node: *const zparser.Node) anyerror!u8 {
+        if (self.getLocalSlot(node)) |slot| return slot;
+        return self.emitExpression(node);
+    }
+
     fn emitUnary(self: *BytecodeEmitter, unary: anytype) anyerror!u8 {
         switch (unary.op) {
             .minus => {
-                const operand = try self.emitExpression(unary.operand);
+                const operand = try self.emitReadOperand(unary.operand);
                 const destination = try self.allocRegister();
                 try self.emitOp(.{ .opcode = .neg, .a = destination, .b = operand });
                 self.freeRegister(operand);
                 return destination;
             },
             .not => {
-                const operand = try self.emitExpression(unary.operand);
+                const operand = try self.emitReadOperand(unary.operand);
                 const destination = try self.allocRegister();
                 try self.emitOp(.{ .opcode = .not, .a = destination, .b = operand });
                 self.freeRegister(operand);
                 return destination;
             },
             .bitnot => {
-                const operand = try self.emitExpression(unary.operand);
+                const operand = try self.emitReadOperand(unary.operand);
                 const destination = try self.allocRegister();
                 try self.emitOp(.{ .opcode = .not_bits, .a = destination, .b = operand });
                 self.freeRegister(operand);
@@ -473,7 +502,7 @@ pub const BytecodeEmitter = struct {
                 return operand;
             },
             .typeof => {
-                const operand = try self.emitExpression(unary.operand);
+                const operand = try self.emitReadOperand(unary.operand);
                 const destination = try self.allocRegister();
                 try self.emitOp(.{ .opcode = .typeof, .a = destination, .b = operand });
                 self.freeRegister(operand);
@@ -577,8 +606,17 @@ pub const BytecodeEmitter = struct {
             .ushr => .ushr,
             else => return error.UnsupportedSyntax,
         };
-        const left = try self.emitExpression(binary.left);
-        const right = try self.emitExpression(binary.right);
+        const rhs_mutates = exprMayMutateLocal(binary.right);
+        var left = if (!rhs_mutates)
+            try self.emitReadOperand(binary.left)
+        else
+            try self.emitExpression(binary.left);
+        if (rhs_mutates and left < self.scope.local_count) {
+            const tmp = try self.allocRegister();
+            try self.emitOp(.{ .opcode = .load_local, .a = tmp, .b = left });
+            left = tmp;
+        }
+        const right = try self.emitReadOperand(binary.right);
         const destination = try self.allocRegister();
         try self.emitOp(.{ .opcode = opcode, .a = destination, .b = left, .c = right });
         self.freeRegister(right);
@@ -728,7 +766,7 @@ pub const BytecodeEmitter = struct {
             const value = try self.emitExpression(argument);
             if (value == target_slot) {
                 // Already in target slot
-            } else if (self.ops.items.len > 0 and self.ops.items[self.ops.items.len - 1].a == value and isRegisterDefOpcode(self.ops.items[self.ops.items.len - 1].opcode)) {
+            } else if (value >= self.scope.local_count and self.ops.items.len > 0 and self.ops.items[self.ops.items.len - 1].a == value and isRegisterDefOpcode(self.ops.items[self.ops.items.len - 1].opcode)) {
                 self.ops.items[self.ops.items.len - 1].a = target_slot;
                 self.freeRegister(value);
             } else {
@@ -759,7 +797,7 @@ pub const BytecodeEmitter = struct {
                         .string_literal => |s| s,
                         else => return error.UnsupportedSyntax,
                     };
-                    const val_reg = try self.emitExpression(prop.value);
+                    const val_reg = try self.emitReadOperand(prop.value);
                     const key_const = try self.addConstant(.{ .property_key = key_name });
                     try self.emitOp(.{ .opcode = .set_prop, .a = dst, .b = key_const, .c = val_reg });
                     self.freeRegister(val_reg);
@@ -777,7 +815,7 @@ pub const BytecodeEmitter = struct {
         for (items, 0..) |maybe_item, index| {
             const item = maybe_item orelse return error.UnsupportedSyntax;
             if (item.data == .spread) return error.UnsupportedSyntax;
-            const val_reg = try self.emitExpression(item);
+            const val_reg = try self.emitReadOperand(item);
             if (index <= std.math.maxInt(u8)) {
                 try self.emitOp(.{ .opcode = .set_elem_const, .a = dst, .b = @intCast(index), .c = val_reg });
             } else {
@@ -792,7 +830,16 @@ pub const BytecodeEmitter = struct {
 
     fn emitMember(self: *BytecodeEmitter, member: anytype) anyerror!u8 {
         if (member.optional) return error.UnsupportedSyntax;
-        const obj_reg = try self.emitExpression(member.object);
+        const prop_safe = !member.computed or asIntegerIndex(member.property) != null or !exprMayMutateLocal(member.property);
+        var obj_reg = if (prop_safe)
+            try self.emitReadOperand(member.object)
+        else
+            try self.emitExpression(member.object);
+        if (!prop_safe and obj_reg < self.scope.local_count) {
+            const tmp = try self.allocRegister();
+            try self.emitOp(.{ .opcode = .load_local, .a = tmp, .b = obj_reg });
+            obj_reg = tmp;
+        }
         const dst = try self.allocRegister();
         if (!member.computed) {
             if (member.property.data != .identifier) return error.UnsupportedSyntax;
@@ -803,12 +850,12 @@ pub const BytecodeEmitter = struct {
                 const const_idx = try self.addConstant(.{ .number = num });
                 try self.emitOp(.{ .opcode = .get_elem_const, .a = dst, .b = obj_reg, .c = const_idx });
             } else {
-                const key_reg = try self.emitExpression(member.property);
+                const key_reg = try self.emitReadOperand(member.property);
                 try self.emitOp(.{ .opcode = .get_elem, .a = dst, .b = obj_reg, .c = key_reg });
                 self.freeRegister(key_reg);
             }
         } else {
-            const key_reg = try self.emitExpression(member.property);
+            const key_reg = try self.emitReadOperand(member.property);
             try self.emitOp(.{ .opcode = .get_elem, .a = dst, .b = obj_reg, .c = key_reg });
             self.freeRegister(key_reg);
         }
@@ -970,6 +1017,43 @@ pub const BytecodeEmitter = struct {
     }
 };
 
+fn exprMayMutateLocal(node: *const zparser.Node) bool {
+    const cur = unwrapParen(node);
+    return switch (cur.data) {
+        .number_literal, .string_literal, .boolean_literal, .null_literal, .identifier, .this_expr, .function_like => false,
+        .assignment, .yield_expr, .await_expr => true,
+        .unary => |u| switch (u.op) {
+            .post_inc, .post_dec, .pre_inc, .pre_dec => true,
+            else => exprMayMutateLocal(u.operand),
+        },
+        .binary => |b| exprMayMutateLocal(b.left) or exprMayMutateLocal(b.right),
+        .logical => |l| exprMayMutateLocal(l.left) or exprMayMutateLocal(l.right),
+        .conditional => |c| exprMayMutateLocal(c.test_expr) or exprMayMutateLocal(c.consequent) or exprMayMutateLocal(c.alternate),
+        .member => |m| exprMayMutateLocal(m.object) or (m.computed and exprMayMutateLocal(m.property)),
+        .sequence => |items| blk: {
+            for (items) |it| if (exprMayMutateLocal(it)) break :blk true;
+            break :blk false;
+        },
+        .array_literal => |items| blk: {
+            for (items) |maybe_it| if (maybe_it) |it| if (exprMayMutateLocal(it)) break :blk true;
+            break :blk false;
+        },
+        .object_literal => |items| blk: {
+            for (items) |it| switch (it) {
+                .spread => |s| if (exprMayMutateLocal(s)) break :blk true,
+                .property => |p| if ((p.computed and exprMayMutateLocal(p.key)) or exprMayMutateLocal(p.value)) break :blk true,
+            };
+            break :blk false;
+        },
+        .call => |c| blk: {
+            if (exprMayMutateLocal(c.callee)) break :blk true;
+            for (c.args) |arg| if (exprMayMutateLocal(arg)) break :blk true;
+            break :blk false;
+        },
+        else => true,
+    };
+}
+
 fn unwrapParen(node: *const zparser.Node) *const zparser.Node {
     var cur = node;
     while (cur.data == .paren) {
@@ -1060,10 +1144,8 @@ test "emitter disassembles an add function" {
     const text = try disassemble(std.testing.allocator, &compiled.block);
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings(
-        "0000 load_local r2, @0\n" ++
-            "0001 load_local r3, @1\n" ++
-            "0002 add r4, r2, r3\n" ++
-            "0003 return_value r4\n",
+        "0000 add r2, r0, r1\n" ++
+            "0001 return_value r2\n",
         text,
     );
 }
