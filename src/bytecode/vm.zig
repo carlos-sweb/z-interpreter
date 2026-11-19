@@ -312,6 +312,300 @@ fn setElem(allocator: Allocator, obj: JSValue, key_val: JSValue, val: JSValue) !
 /// Executes a CodeBlock without consulting the AST. The caller owns the
 /// returned value. Every register owns its value for the duration of the
 /// call, including values copied from arguments and locals.
+noinline fn deinitFrameRegs(slots: []JSValue) void {
+    @branchHint(.cold);
+    for (slots) |*slot| {
+        if (needsDeinit(slot.*)) deinitSlot(slot);
+    }
+}
+
+noinline fn loadConstSlow(allocator: Allocator, frame: *CallFrame, frame_regs: []JSValue, op: codeblock.Op) !void {
+    @branchHint(.cold);
+    const v = try constantValue(allocator, frame.block, op.b);
+    try setRegValue(frame, frame_regs, op.a, v);
+}
+
+noinline fn newObjectSlow(allocator: Allocator, frame: *CallFrame, frame_regs: []JSValue, op: codeblock.Op) !void {
+    @branchHint(.cold);
+    const obj = if (frame.interp) |itp| try itp.ordinaryObject() else try JSValue.newObject(allocator);
+    try setRegValue(frame, frame_regs, op.a, obj);
+}
+
+noinline fn newArraySlow(allocator: Allocator, frame: *CallFrame, frame_regs: []JSValue, op: codeblock.Op) !void {
+    @branchHint(.cold);
+    const arr = try JSValue.newArray(allocator);
+    const cap = @max(@as(usize, op.b), 4);
+    try arr.asArray().value.reserve(cap);
+    try setRegValue(frame, frame_regs, op.a, arr);
+}
+
+noinline fn getPropSlow(allocator: Allocator, frame: *CallFrame, frame_regs: []JSValue, op: codeblock.Op, op_pc: u32, obj: JSValue, key: []const u8, ic: *PropIC) !void {
+    @branchHint(.cold);
+    if (obj.isObject()) {
+        const box = obj.asObject();
+        if (box.value.properties.getIndex(key)) |slot_idx| {
+            const rec = &box.value.properties.entries.items(.value)[slot_idx];
+            if (!rec.isAccessor()) {
+                ic.* = .{
+                    .block = frame.block,
+                    .pc = op_pc,
+                    .shape_id = box.value.shape_id,
+                    .slot_idx = @intCast(slot_idx),
+                    .key_ptr = key.ptr,
+                };
+                if (!needsDeinit(rec.value)) {
+                    try setRegPrimitive(frame_regs, op.a, rec.value);
+                } else {
+                    try setRegValue(frame, frame_regs, op.a, rec.value.retain());
+                }
+                return;
+            }
+        }
+    }
+    const result = try getProp(allocator, obj, key);
+    if (!needsDeinit(result)) {
+        try setRegPrimitive(frame_regs, op.a, result);
+    } else {
+        try setRegValue(frame, frame_regs, op.a, result);
+    }
+}
+
+noinline fn setPropSlow(allocator: Allocator, frame: *CallFrame, op: codeblock.Op, op_pc: u32, obj: JSValue, key: []const u8, val: JSValue, ic: *PropIC) !void {
+    @branchHint(.cold);
+    _ = op;
+    if (obj.isObject()) {
+        const box = obj.asObject();
+        if (ic.block == frame.block and ic.pc == op_pc and ic.shape_id == box.value.shape_id and ic.key_ptr == key.ptr) {
+            if (ic.next_shape != 0 and ic.interned_key.len > 0) {
+                const val_to_store = if (needsDeinit(val)) val.retain() else val;
+                if (box.value.putBorrowedTransition(ic.interned_key, val_to_store, ic.slot_idx, ic.next_shape) catch false) {
+                    return;
+                } else if (needsDeinit(val)) {
+                    val_to_store.deinit();
+                }
+            }
+        }
+        if (frame.interp) |itp| {
+            const proto_is_obj_proto = if (box.value.prototype) |p| (itp.protos.object.isObject() and p == &itp.protos.object.asObject().value) else true;
+            if (box.value.properties.getIndex(key) == null and proto_is_obj_proto) {
+                const prev_shape = box.value.shape_id;
+                const prev_count = box.value.properties.count();
+                const interned = if (ic.block == frame.block and ic.pc == op_pc and ic.key_ptr == key.ptr and ic.interned_key.len > 0)
+                    ic.interned_key
+                else
+                    try itp.internPropKey(key);
+                const val_to_store = if (needsDeinit(val)) val.retain() else val;
+                box.value.setBorrowedKey(interned, val_to_store) catch |err| switch (err) {
+                    error.ObjectIsFrozen, error.ObjectNotExtensible, error.PropertyNotWritable => {
+                        if (needsDeinit(val)) val_to_store.deinit();
+                        return error.UnsupportedOpcode;
+                    },
+                    else => {
+                        if (needsDeinit(val)) val_to_store.deinit();
+                        return err;
+                    },
+                };
+                ic.* = .{
+                    .block = frame.block,
+                    .pc = op_pc,
+                    .shape_id = prev_shape,
+                    .next_shape = box.value.shape_id,
+                    .slot_idx = @intCast(prev_count),
+                    .key_ptr = key.ptr,
+                    .interned_key = interned,
+                };
+                return;
+            }
+        }
+        try setProp(allocator, obj, key, val);
+        if (box.value.properties.getIndex(key)) |slot_idx| {
+            const rec = &box.value.properties.entries.items(.value)[slot_idx];
+            if (!rec.isAccessor() and rec.descriptor.writable and !box.value.is_frozen) {
+                ic.* = .{
+                    .block = frame.block,
+                    .pc = op_pc,
+                    .shape_id = box.value.shape_id,
+                    .next_shape = 0,
+                    .slot_idx = @intCast(slot_idx),
+                    .key_ptr = key.ptr,
+                };
+            }
+        }
+    } else {
+        try setProp(allocator, obj, key, val);
+    }
+}
+
+noinline fn getElemConstSlow(allocator: Allocator, frame: *CallFrame, frame_regs: []JSValue, op: codeblock.Op, obj: JSValue) !void {
+    @branchHint(.cold);
+    const key_val = try constantValue(allocator, frame.block, op.c);
+    defer key_val.deinit();
+    const result = try getElem(allocator, obj, key_val);
+    if (!needsDeinit(result)) {
+        try setRegPrimitive(frame_regs, op.a, result);
+    } else {
+        try setRegValue(frame, frame_regs, op.a, result);
+    }
+}
+
+noinline fn setElemConstSlow(allocator: Allocator, obj: JSValue, idx: usize, val: JSValue) !void {
+    @branchHint(.cold);
+    if (obj.isArray()) {
+        const arr = &obj.asArray().value;
+        const val_to_store = if (needsDeinit(val)) val.retain() else val;
+        const cur = arr.length();
+        if (idx < cur) {
+            const old = arr.toSliceMut()[idx];
+            arr.toSliceMut()[idx] = val_to_store;
+            if (needsDeinit(old)) old.deinit();
+        } else {
+            while (arr.length() < idx) {
+                _ = try arr.push(JSValue.UNDEFINED);
+            }
+            _ = try arr.push(val_to_store);
+        }
+    } else {
+        var buf: [32]u8 = undefined;
+        const key = try std.fmt.bufPrint(&buf, "{d}", .{idx});
+        try setProp(allocator, obj, key, val);
+    }
+}
+
+noinline fn resolveCallCache(cache: *codeblock.CallSiteCache, callee: JSValue) void {
+    @branchHint(.cold);
+    if (cache.callee) |old| {
+        var v = old;
+        v.deinit();
+    }
+    cache.callee = callee.retain();
+    if (getBytecodeTarget(callee)) |target| {
+        cache.target_block = target.block;
+        cache.closure_env = target.closure_env;
+        cache.interp = target.interp;
+    } else {
+        cache.target_block = null;
+        cache.closure_env = null;
+        cache.interp = null;
+    }
+}
+
+noinline fn resolveCallGlobalCache(cache: *codeblock.CallSiteCache, env: *Environment, gname: []const u8) !void {
+    @branchHint(.cold);
+    const callee = env.get(gname) orelse return error.UnsupportedOpcode;
+    if (cache.callee) |old| {
+        var v = old;
+        v.deinit();
+    }
+    cache.callee = callee.retain();
+    cache.global_version = global_version;
+    if (getBytecodeTarget(callee)) |target| {
+        cache.target_block = target.block;
+        cache.closure_env = target.closure_env;
+        cache.interp = target.interp;
+    } else {
+        cache.target_block = null;
+        cache.closure_env = null;
+        cache.interp = null;
+    }
+}
+
+noinline fn callNativeFallback(allocator: Allocator, frame: *CallFrame, frame_regs: []JSValue, op_a: u8, callee: JSValue, this_value: JSValue, args_slice: []const JSValue) !void {
+    @branchHint(.cold);
+    const result = try callFallback(allocator, callee, this_value, args_slice);
+    try setRegValue(frame, frame_regs, op_a, result);
+}
+
+noinline fn makeClosureOp(frame: *CallFrame, frame_regs: []JSValue, op: codeblock.Op) !void {
+    @branchHint(.cold);
+    const vm_interp = frame.interp orelse return error.UnsupportedOpcode;
+    const env = frame.closure_env orelse return error.UnsupportedOpcode;
+    if (op.b >= frame.block.constants.len) return error.InvalidConstant;
+    const fnode = switch (frame.block.constants[op.b]) {
+        .function_node => |fn_node| fn_node,
+        else => return error.InvalidConstant,
+    };
+    const closure = try interpreter_class.makeClosure(vm_interp, env, fnode);
+    try setRegTracked(frame, frame_regs, op.a, closure);
+}
+
+noinline fn iterInitOp(allocator: Allocator, frame: *CallFrame, frame_regs: []JSValue, op: codeblock.Op) !void {
+    @branchHint(.cold);
+    const iterable = try getRegister(frame_regs, op.b);
+    if (!iterable.isArray() and !iterable.isString()) return error.UnsupportedOpcode;
+    const it = try JSValue.newArray(allocator);
+    _ = try it.asArray().value.push(iterable.retain());
+    _ = try it.asArray().value.push(JSValue.fromNumber(0));
+    try setRegTracked(frame, frame_regs, op.a, it);
+}
+
+noinline fn iterNextOp(allocator: Allocator, frame: *CallFrame, frame_regs: []JSValue, op: codeblock.Op) !void {
+    @branchHint(.cold);
+    const it = try getRegister(frame_regs, op.c);
+    if (!it.isArray() or it.asArray().value.length() < 2) return error.UnsupportedOpcode;
+    const target = it.asArray().value.get(0);
+    const idx_val = it.asArray().value.get(1);
+    if (!idx_val.isNumber()) return error.UnsupportedOpcode;
+    const idx: usize = @intFromFloat(idx_val.asNumber());
+    if (target.isArray()) {
+        if (idx < target.asArray().value.length()) {
+            const val = target.asArray().value.get(idx).retain();
+            it.asArray().value.toSliceMut()[1] = JSValue.fromNumber(@floatFromInt(idx + 1));
+            try setRegTracked(frame, frame_regs, op.a, val);
+            try setRegister(frame_regs, op.b, JSValue.fromBool(false));
+        } else {
+            try setRegister(frame_regs, op.a, JSValue.UNDEFINED);
+            try setRegister(frame_regs, op.b, JSValue.fromBool(true));
+        }
+    } else if (target.isString()) {
+        if (idx < target.asString().value.data.len) {
+            const ch = try JSValue.newString(allocator, target.asString().value.data[idx .. idx + 1]);
+            it.asArray().value.toSliceMut()[1] = JSValue.fromNumber(@floatFromInt(idx + 1));
+            try setRegTracked(frame, frame_regs, op.a, ch);
+            try setRegister(frame_regs, op.b, JSValue.fromBool(false));
+        } else {
+            try setRegister(frame_regs, op.a, JSValue.UNDEFINED);
+            try setRegister(frame_regs, op.b, JSValue.fromBool(true));
+        }
+    } else return error.UnsupportedOpcode;
+}
+
+noinline fn throwValueOp(
+    frames: []CallFrame,
+    frame_count: *usize,
+    registers: []JSValue,
+    reg_top: *usize,
+    catch_stack: []CatchHandler,
+    catch_top: *usize,
+    frame_regs: []JSValue,
+    op: codeblock.Op,
+) !*CallFrame {
+    @branchHint(.cold);
+    const thrown = (try getRegister(frame_regs, op.a)).retain();
+    if (catch_top.* > 0) {
+        catch_top.* -= 1;
+        const handler = catch_stack[catch_top.*];
+        const target_frame_idx = @as(usize, handler.frame_idx);
+        while (frame_count.* > target_frame_idx + 1) {
+            const cur_frame = &frames[frame_count.* - 1];
+            for (registers[cur_frame.reg_base..reg_top.*]) |*r| deinitSlot(r);
+            reg_top.* = cur_frame.reg_base;
+            frame_count.* -= 1;
+        }
+        const cur_frame = &frames[target_frame_idx];
+        for (registers[handler.reg_top..reg_top.*]) |*r| deinitSlot(r);
+        reg_top.* = handler.reg_top;
+        cur_frame.pc = handler.target_pc;
+        const hregs = registers[cur_frame.reg_base .. cur_frame.reg_base + cur_frame.block.register_count];
+        try setRegTracked(cur_frame, hregs, handler.error_reg, thrown);
+        return cur_frame;
+    }
+    for (registers[0..reg_top.*]) |*r| deinitSlot(r);
+    reg_top.* = 0;
+    frame_count.* = 0;
+    thrown.deinit();
+    return error.UnsupportedOpcode;
+}
+
 pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_env: ?*Environment, args: []const JSValue, interp: ?*interpreter_mod.Interpreter) !JSValue {
     clearGlobalCache();
     defer clearGlobalCache();
@@ -373,686 +667,738 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
     };
     frame_count = 1;
 
-    while (frame_count > 0) {
-        const frame = &frames[frame_count - 1];
-        if (frame.pc >= frame.block.ops.len) return error.MissingReturn;
-        const op_pc = frame.pc;
-        const op = frame.block.ops[op_pc];
-        frame.pc = op_pc + 1;
-        const frame_regs = registers[frame.reg_base .. frame.reg_base + frame.block.register_count];
-        switch (op.opcode) {
-            .load_const => {
-                if (op.b >= frame.block.constants.len) return error.InvalidConstant;
-                const c = frame.block.constants[op.b];
-                switch (c) {
-                    .number => |n| try setRegPrimitive(frame_regs, op.a, JSValue.fromNumber(n)),
-                    .boolean => |b| try setRegPrimitive(frame_regs, op.a, JSValue.fromBool(b)),
-                    else => {
-                        const v = try constantValue(allocator, frame.block, op.b);
-                        try setRegValue(frame, frame_regs, op.a, v);
-                    },
-                }
-            },
-            .load_undefined => try setRegPrimitive(frame_regs, op.a, JSValue.UNDEFINED),
-            .new_object => {
-                if (obj_pool_len > 0) {
-                    obj_pool_len -= 1;
-                    const box = obj_pool[obj_pool_len];
-                    box._count = 1;
-                    if (frame.interp) |itp| {
-                        if (itp.protos.object.isObject()) {
-                            box.value.prototype = &itp.protos.object.asObject().value;
-                        } else {
-                            box.value.prototype = null;
-                        }
+    var frame: *CallFrame = &frames[0];
+    var code: []const codeblock.Op = block.ops;
+    var ip: usize = 0;
+    var frame_regs: []JSValue = registers[0..block.register_count];
+    if (ip >= code.len) return error.MissingReturn;
+
+    dispatch: switch (code[ip].opcode) {
+        .nop => {
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .load_const => {
+            const op = code[ip];
+            if (op.b >= frame.block.constants.len) return error.InvalidConstant;
+            const c = frame.block.constants[op.b];
+            switch (c) {
+                .number => |n| try setRegPrimitive(frame_regs, op.a, JSValue.fromNumber(n)),
+                .boolean => |b| try setRegPrimitive(frame_regs, op.a, JSValue.fromBool(b)),
+                else => try loadConstSlow(allocator, frame, frame_regs, op),
+            }
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .load_undefined => {
+            try setRegPrimitive(frame_regs, code[ip].a, JSValue.UNDEFINED);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .new_object => {
+            const op = code[ip];
+            if (obj_pool_len > 0) {
+                obj_pool_len -= 1;
+                const box = obj_pool[obj_pool_len];
+                box._count = 1;
+                if (frame.interp) |itp| {
+                    if (itp.protos.object.isObject()) {
+                        box.value.prototype = &itp.protos.object.asObject().value;
                     } else {
                         box.value.prototype = null;
                     }
-                    try setRegValue(frame, frame_regs, op.a, JSValue.fromObject(box));
                 } else {
-                    const obj = if (frame.interp) |itp| try itp.ordinaryObject() else try JSValue.newObject(allocator);
-                    try setRegValue(frame, frame_regs, op.a, obj);
+                    box.value.prototype = null;
                 }
-            },
-            .new_array => {
-                if (arr_pool_len > 0) {
-                    arr_pool_len -= 1;
-                    const box = arr_pool[arr_pool_len];
-                    box._count = 1;
-                    const cap = @max(@as(usize, op.b), 4);
-                    try box.value.reserve(cap);
-                    try setRegValue(frame, frame_regs, op.a, JSValue.fromArray(box));
-                } else {
-                    const arr = try JSValue.newArray(allocator);
-                    const cap = @max(@as(usize, op.b), 4);
-                    try arr.asArray().value.reserve(cap);
-                    try setRegValue(frame, frame_regs, op.a, arr);
-                }
-            },
-            .get_prop => {
-                const obj = try getRegister(frame_regs, op.b);
-                const key = try constantKey(frame.block, op.c);
-                if (obj.isObject()) {
-                    const box = obj.asObject();
-                    const ic_idx = ((@intFromPtr(frame.block) >> 4) +% op_pc) & 255;
-                    const ic = &prop_ic[ic_idx];
-                    if (ic.block == frame.block and ic.pc == op_pc and ic.shape_id == box.value.shape_id and ic.key_ptr == key.ptr and ic.slot_idx < box.value.properties.count()) {
-                        const rec = &box.value.properties.entries.items(.value)[ic.slot_idx];
-                        if (!rec.isAccessor()) {
-                            if (!needsDeinit(rec.value)) {
-                                try setRegPrimitive(frame_regs, op.a, rec.value);
-                            } else {
-                                try setRegValue(frame, frame_regs, op.a, rec.value.retain());
-                            }
-                            continue;
-                        }
-                    }
-                    if (box.value.properties.getIndex(key)) |slot_idx| {
-                        const rec = &box.value.properties.entries.items(.value)[slot_idx];
-                        if (!rec.isAccessor()) {
-                            ic.* = .{
-                                .block = frame.block,
-                                .pc = op_pc,
-                                .shape_id = box.value.shape_id,
-                                .slot_idx = @intCast(slot_idx),
-                                .key_ptr = key.ptr,
-                            };
-                            if (!needsDeinit(rec.value)) {
-                                try setRegPrimitive(frame_regs, op.a, rec.value);
-                            } else {
-                                try setRegValue(frame, frame_regs, op.a, rec.value.retain());
-                            }
-                            continue;
-                        }
-                    }
-                    const result = try getProp(allocator, obj, key);
-                    if (!needsDeinit(result)) {
-                        try setRegPrimitive(frame_regs, op.a, result);
-                    } else {
-                        try setRegValue(frame, frame_regs, op.a, result);
-                    }
-                } else {
-                    const result = try getProp(allocator, obj, key);
-                    if (!needsDeinit(result)) {
-                        try setRegPrimitive(frame_regs, op.a, result);
-                    } else {
-                        try setRegValue(frame, frame_regs, op.a, result);
-                    }
-                }
-            },
-            .set_prop => {
-                const obj = try getRegister(frame_regs, op.a);
-                const key = try constantKey(frame.block, op.b);
-                const val = try getRegister(frame_regs, op.c);
-                if (obj.isObject()) {
-                    const box = obj.asObject();
-                    const ic_idx = ((@intFromPtr(frame.block) >> 4) +% op_pc) & 255;
-                    const ic = &prop_ic[ic_idx];
-                    if (ic.block == frame.block and ic.pc == op_pc and ic.shape_id == box.value.shape_id and ic.key_ptr == key.ptr) {
-                        if (ic.next_shape == 0) {
-                            if (ic.slot_idx < box.value.properties.count()) {
-                                const rec = &box.value.properties.entries.items(.value)[ic.slot_idx];
-                                if (!rec.isAccessor() and rec.descriptor.writable and !box.value.is_frozen) {
-                                    if (!needsDeinit(rec.value) and !needsDeinit(val)) {
-                                        rec.value = val;
-                                        continue;
-                                    }
-                                    const old = rec.value;
-                                    rec.value = val.retain();
-                                    old.deinit();
-                                    continue;
-                                }
-                            }
-                        } else if (ic.interned_key.len > 0) {
-                            const val_to_store = if (needsDeinit(val)) val.retain() else val;
-                            if (box.value.putBorrowedTransition(ic.interned_key, val_to_store, ic.slot_idx, ic.next_shape) catch false) {
-                                continue;
-                            } else if (needsDeinit(val)) {
-                                val_to_store.deinit();
-                            }
-                        }
-                    }
-                    if (frame.interp) |itp| {
-                        const proto_is_obj_proto = if (box.value.prototype) |p| (itp.protos.object.isObject() and p == &itp.protos.object.asObject().value) else true;
-                        if (box.value.properties.getIndex(key) == null and proto_is_obj_proto) {
-                            const prev_shape = box.value.shape_id;
-                            const prev_count = box.value.properties.count();
-                            const interned = if (ic.block == frame.block and ic.pc == op_pc and ic.key_ptr == key.ptr and ic.interned_key.len > 0)
-                                ic.interned_key
-                            else
-                                try itp.internPropKey(key);
-                            const val_to_store = if (needsDeinit(val)) val.retain() else val;
-                            box.value.setBorrowedKey(interned, val_to_store) catch |err| switch (err) {
-                                error.ObjectIsFrozen, error.ObjectNotExtensible, error.PropertyNotWritable => {
-                                    if (needsDeinit(val)) val_to_store.deinit();
-                                    return error.UnsupportedOpcode;
-                                },
-                                else => {
-                                    if (needsDeinit(val)) val_to_store.deinit();
-                                    return err;
-                                },
-                            };
-                            ic.* = .{
-                                .block = frame.block,
-                                .pc = op_pc,
-                                .shape_id = prev_shape,
-                                .next_shape = box.value.shape_id,
-                                .slot_idx = @intCast(prev_count),
-                                .key_ptr = key.ptr,
-                                .interned_key = interned,
-                            };
-                            continue;
-                        }
-                    }
-                    try setProp(allocator, obj, key, val);
-                    if (box.value.properties.getIndex(key)) |slot_idx| {
-                        const rec = &box.value.properties.entries.items(.value)[slot_idx];
-                        if (!rec.isAccessor() and rec.descriptor.writable and !box.value.is_frozen) {
-                            ic.* = .{
-                                .block = frame.block,
-                                .pc = op_pc,
-                                .shape_id = box.value.shape_id,
-                                .next_shape = 0,
-                                .slot_idx = @intCast(slot_idx),
-                                .key_ptr = key.ptr,
-                            };
-                        }
-                    }
-                } else {
-                    try setProp(allocator, obj, key, val);
-                }
-            },
-            .get_elem => {
-                const obj = try getRegister(frame_regs, op.b);
-                const key_val = try getRegister(frame_regs, op.c);
-                const result = try getElem(allocator, obj, key_val);
-                try setRegTracked(frame, frame_regs, op.a, result);
-            },
-            .get_elem_const => {
-                const obj = try getRegister(frame_regs, op.b);
-                if (obj.isArray() and op.c < frame.block.constants.len) {
-                    const c = frame.block.constants[op.c];
-                    if (c == .number) {
-                        const idx: usize = @intFromFloat(c.number);
-                        if (idx < obj.asArray().value.length()) {
-                            const elem = obj.asArray().value.get(idx);
-                            if (!needsDeinit(elem)) {
-                                try setRegPrimitive(frame_regs, op.a, elem);
-                            } else {
-                                try setRegValue(frame, frame_regs, op.a, elem.retain());
-                            }
+                try setRegValue(frame, frame_regs, op.a, JSValue.fromObject(box));
+            } else {
+                try newObjectSlow(allocator, frame, frame_regs, op);
+            }
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .new_array => {
+            const op = code[ip];
+            if (arr_pool_len > 0) {
+                arr_pool_len -= 1;
+                const box = arr_pool[arr_pool_len];
+                box._count = 1;
+                const cap = @max(@as(usize, op.b), 4);
+                try box.value.reserve(cap);
+                try setRegValue(frame, frame_regs, op.a, JSValue.fromArray(box));
+            } else {
+                try newArraySlow(allocator, frame, frame_regs, op);
+            }
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .get_prop => {
+            const op_pc: u32 = @intCast(ip);
+            const op = code[ip];
+            const obj = try getRegister(frame_regs, op.b);
+            const key = try constantKey(frame.block, op.c);
+            const ic_idx = ((@intFromPtr(frame.block) >> 4) +% op_pc) & 255;
+            const ic = &prop_ic[ic_idx];
+            if (obj.isObject()) {
+                const box = obj.asObject();
+                if (ic.block == frame.block and ic.pc == op_pc and ic.shape_id == box.value.shape_id and ic.key_ptr == key.ptr and ic.slot_idx < box.value.properties.count()) {
+                    const rec = &box.value.properties.entries.items(.value)[ic.slot_idx];
+                    if (!rec.isAccessor()) {
+                        if (!needsDeinit(rec.value)) {
+                            try setRegPrimitive(frame_regs, op.a, rec.value);
                         } else {
-                            try setRegPrimitive(frame_regs, op.a, JSValue.UNDEFINED);
+                            try setRegValue(frame, frame_regs, op.a, rec.value.retain());
                         }
-                    } else {
-                        const key_val = try constantValue(allocator, frame.block, op.c);
-                        defer key_val.deinit();
-                        const result = try getElem(allocator, obj, key_val);
-                        if (!needsDeinit(result)) {
-                            try setRegPrimitive(frame_regs, op.a, result);
+                        ip += 1;
+                        if (ip >= code.len) return error.MissingReturn;
+                        continue :dispatch code[ip].opcode;
+                    }
+                }
+            }
+            try getPropSlow(allocator, frame, frame_regs, op, op_pc, obj, key, ic);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .set_prop => {
+            const op_pc: u32 = @intCast(ip);
+            const op = code[ip];
+            const obj = try getRegister(frame_regs, op.a);
+            const key = try constantKey(frame.block, op.b);
+            const val = try getRegister(frame_regs, op.c);
+            const ic_idx = ((@intFromPtr(frame.block) >> 4) +% op_pc) & 255;
+            const ic = &prop_ic[ic_idx];
+            if (obj.isObject()) {
+                const box = obj.asObject();
+                if (ic.block == frame.block and ic.pc == op_pc and ic.shape_id == box.value.shape_id and ic.key_ptr == key.ptr and ic.next_shape == 0 and ic.slot_idx < box.value.properties.count()) {
+                    const rec = &box.value.properties.entries.items(.value)[ic.slot_idx];
+                    if (!rec.isAccessor() and rec.descriptor.writable and !box.value.is_frozen) {
+                        if (!needsDeinit(rec.value) and !needsDeinit(val)) {
+                            rec.value = val;
                         } else {
-                            try setRegValue(frame, frame_regs, op.a, result);
+                            const old = rec.value;
+                            rec.value = val.retain();
+                            old.deinit();
                         }
-                    }
-                } else {
-                    const key_val = try constantValue(allocator, frame.block, op.c);
-                    defer key_val.deinit();
-                    const result = try getElem(allocator, obj, key_val);
-                    if (!needsDeinit(result)) {
-                        try setRegPrimitive(frame_regs, op.a, result);
-                    } else {
-                        try setRegValue(frame, frame_regs, op.a, result);
+                        ip += 1;
+                        if (ip >= code.len) return error.MissingReturn;
+                        continue :dispatch code[ip].opcode;
                     }
                 }
-            },
-            .set_elem => {
-                const obj = try getRegister(frame_regs, op.a);
-                const key_val = try getRegister(frame_regs, op.b);
-                const val = try getRegister(frame_regs, op.c);
-                try setElem(allocator, obj, key_val, val);
-            },
-            .set_elem_const => {
-                const obj = try getRegister(frame_regs, op.a);
-                const val = try getRegister(frame_regs, op.c);
-                const idx: usize = op.b;
-                if (obj.isArray()) {
-                    const arr = &obj.asArray().value;
-                    const val_to_store = if (needsDeinit(val)) val.retain() else val;
-                    if (arr.holey == null and idx == arr.items.items.len) {
-                        try arr.items.append(arr.allocator, val_to_store);
-                    } else {
-                        const cur = arr.length();
-                        if (idx < cur) {
-                            const old = arr.toSliceMut()[idx];
-                            arr.toSliceMut()[idx] = val_to_store;
-                            if (needsDeinit(old)) old.deinit();
+            }
+            try setPropSlow(allocator, frame, op, op_pc, obj, key, val, ic);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .get_elem => {
+            const op = code[ip];
+            const obj = try getRegister(frame_regs, op.b);
+            const key_val = try getRegister(frame_regs, op.c);
+            const result = try getElem(allocator, obj, key_val);
+            try setRegTracked(frame, frame_regs, op.a, result);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .get_elem_const => {
+            const op = code[ip];
+            const obj = try getRegister(frame_regs, op.b);
+            if (obj.isArray() and op.c < frame.block.constants.len) {
+                const c = frame.block.constants[op.c];
+                if (c == .number) {
+                    const idx: usize = @intFromFloat(c.number);
+                    if (idx < obj.asArray().value.length()) {
+                        const elem = obj.asArray().value.get(idx);
+                        if (!needsDeinit(elem)) {
+                            try setRegPrimitive(frame_regs, op.a, elem);
                         } else {
-                            while (arr.length() < idx) {
-                                _ = try arr.push(JSValue.UNDEFINED);
-                            }
-                            _ = try arr.push(val_to_store);
-                        }
-                    }
-                } else {
-                    var buf: [32]u8 = undefined;
-                    const key = try std.fmt.bufPrint(&buf, "{d}", .{idx});
-                    try setProp(allocator, obj, key, val);
-                }
-            },
-            .load_null => try setRegPrimitive(frame_regs, op.a, JSValue.NULL),
-            .load_true => try setRegPrimitive(frame_regs, op.a, JSValue.fromBool(true)),
-            .load_false => try setRegPrimitive(frame_regs, op.a, JSValue.fromBool(false)),
-            .load_this => try setRegValue(frame, frame_regs, op.a, frame.this_value.retain()),
-            .move, .load_local => {
-                const v = try getRegister(frame_regs, op.b);
-                if (!needsDeinit(v)) {
-                    try setRegPrimitive(frame_regs, op.a, v);
-                } else {
-                    try setRegValue(frame, frame_regs, op.a, v.retain());
-                }
-            },
-            .store_local => {
-                const v = try getRegister(frame_regs, op.b);
-                if (!needsDeinit(v)) {
-                    try setRegPrimitive(frame_regs, op.a, v);
-                } else {
-                    try setRegValue(frame, frame_regs, op.a, v.retain());
-                }
-            },
-            .load_global => try setRegValue(frame, frame_regs, op.a, try loadGlobalFast(frame.block, frame.closure_env, op.b, op_pc)),
-            .store_global => {
-                const val = try getRegister(frame_regs, op.b);
-                try storeGlobal(allocator, frame.block, frame.closure_env, op.a, val);
-            },
-            .add => {
-                const left = try getRegister(frame_regs, op.b);
-                const right = try getRegister(frame_regs, op.c);
-                if (left.isNumber() and right.isNumber()) {
-                    try setRegPrimitive(frame_regs, op.a, JSValue.fromNumberFast(left.asNumber() + right.asNumber()));
-                } else {
-                    try addOp(frame, frame_regs, allocator, op);
-                }
-            },
-            .add_num => try arithmetic(frame_regs, op, .add),
-            .sub_num => try arithmetic(frame_regs, op, .sub),
-            .mul_num => try arithmetic(frame_regs, op, .mul),
-            .div_num => try arithmetic(frame_regs, op, .div),
-            .mod_num => try arithmetic(frame_regs, op, .mod),
-            .pow_num => try arithmetic(frame_regs, op, .pow),
-            .lt_num => try comparison(frame_regs, op, .lt),
-            .gt_num => try comparison(frame_regs, op, .gt),
-            .le_num => try comparison(frame_regs, op, .le),
-            .ge_num => try comparison(frame_regs, op, .ge),
-            .eq => try comparison(frame_regs, op, .eq),
-            .ne => try comparison(frame_regs, op, .ne),
-            .and_bits => try bitwise(frame_regs, op, .bit_and),
-            .or_bits => try bitwise(frame_regs, op, .bit_or),
-            .xor_bits => try bitwise(frame_regs, op, .bit_xor),
-            .shl => try bitwise(frame_regs, op, .shl),
-            .shr => try bitwise(frame_regs, op, .shr),
-            .ushr => try bitwise(frame_regs, op, .ushr),
-            .sub_local_const => {
-                const left = try getRegister(frame_regs, op.b);
-                if (op.c < frame.block.constants.len) {
-                    const c = frame.block.constants[op.c];
-                    if (left.isNumber() and c == .number) {
-                        try setRegPrimitive(frame_regs, op.a, JSValue.fromNumberFast(left.asNumber() - c.number));
-                    } else return error.UnsupportedOpcode;
-                } else return error.InvalidConstant;
-            },
-            .add_local_const => {
-                const left = try getRegister(frame_regs, op.b);
-                if (op.c < frame.block.constants.len) {
-                    const c = frame.block.constants[op.c];
-                    if (left.isNumber() and c == .number) {
-                        try setRegPrimitive(frame_regs, op.a, JSValue.fromNumberFast(left.asNumber() + c.number));
-                    } else {
-                        try addLocalConst(frame_regs, allocator, frame.block, op);
-                    }
-                } else return error.InvalidConstant;
-            },
-            .lt_local_const => {
-                const left = try getRegister(frame_regs, op.b);
-                if (op.c < frame.block.constants.len) {
-                    const c = frame.block.constants[op.c];
-                    if (left.isNumber() and c == .number) {
-                        try setRegPrimitive(frame_regs, op.a, JSValue.fromBool(left.asNumber() < c.number));
-                    } else return error.UnsupportedOpcode;
-                } else return error.InvalidConstant;
-            },
-            .gt_local_const => try comparisonLocalConst(frame_regs, frame.block, op, .gt),
-            .le_local_const => try comparisonLocalConst(frame_regs, frame.block, op, .le),
-            .ge_local_const => try comparisonLocalConst(frame_regs, frame.block, op, .ge),
-            .eq_local_const => {
-                const left = try getRegister(frame_regs, op.b);
-                if (op.c < frame.block.constants.len) {
-                    const c = frame.block.constants[op.c];
-                    if (left.isNumber() and c == .number) {
-                        try setRegPrimitive(frame_regs, op.a, JSValue.fromBool(left.asNumber() == c.number));
-                    } else return error.UnsupportedOpcode;
-                } else return error.InvalidConstant;
-            },
-            .neg => {
-                const src = try getRegister(frame_regs, op.b);
-                if (!src.isNumber()) return error.UnsupportedOpcode;
-                try setRegPrimitive(frame_regs, op.a, JSValue.fromNumber(-src.asNumber()));
-            },
-            .not => {
-                const truthy = try isTruthy(frame_regs, op.b);
-                try setRegPrimitive(frame_regs, op.a, JSValue.fromBool(!truthy));
-            },
-            .not_bits => {
-                const src = try getRegister(frame_regs, op.b);
-                if (!src.isNumber()) return error.UnsupportedOpcode;
-                try setRegPrimitive(frame_regs, op.a, JSValue.fromNumber(@floatFromInt(~numberToInt32(src.asNumber()))));
-            },
-            .typeof => {
-                const src = try getRegister(frame_regs, op.b);
-                const str = try JSValue.newString(allocator, src.typeOf());
-                try setRegTracked(frame, frame_regs, op.a, str);
-            },
-            .jump => frame.pc = @intCast(try jumpTarget(frame.block, op)),
-            .jump_if_true => {
-                const val = try getRegister(frame_regs, op.a);
-                const truthy = if (val.isBool()) val.asBool() else try isTruthy(frame_regs, op.a);
-                if (truthy) frame.pc = @intCast(try jumpTarget(frame.block, op));
-            },
-            .jump_if_false => {
-                const val = try getRegister(frame_regs, op.a);
-                const truthy = if (val.isBool()) val.asBool() else try isTruthy(frame_regs, op.a);
-                if (!truthy) frame.pc = @intCast(try jumpTarget(frame.block, op));
-            },
-            .jump_if_not_nullish => {
-                const val = try getRegister(frame_regs, op.a);
-                if (!val.isUndefined() and !val.isNull()) frame.pc = @intCast(try jumpTarget(frame.block, op));
-            },
-            .call => {
-                const callee = try getRegister(frame_regs, op.b);
-                const cache_slice: []codeblock.CallSiteCache = @constCast(frame.block.call_target_cache);
-                if (op.c >= cache_slice.len) return error.InvalidRegister;
-                const cache = &cache_slice[op.c];
-                const arg_count = cache.arg_count;
-                const start = @as(usize, op.b) + 1;
-                const end = start + arg_count;
-                if (end > frame_regs.len) return error.InvalidRegister;
-
-                const hit = if (cache.callee) |cached| calleeMatches(cached, callee) else false;
-                if (!hit) {
-                    if (cache.callee) |old| {
-                        var v = old;
-                        v.deinit();
-                    }
-                    cache.callee = callee.retain();
-                    if (getBytecodeTarget(callee)) |target| {
-                        cache.target_block = target.block;
-                        cache.closure_env = target.closure_env;
-                        cache.interp = target.interp;
-                    } else {
-                        cache.target_block = null;
-                        cache.closure_env = null;
-                        cache.interp = null;
-                    }
-                }
-
-                const this_value = if (cache.this_reg) |r| frame_regs[r] else JSValue.UNDEFINED;
-                if (cache.target_block) |callee_block| {
-                    if (frame_count >= MAX_FRAMES) return error.StackOverflow;
-                    const callee_reg_base = reg_top;
-                    const new_reg_top = callee_reg_base + callee_block.register_count;
-                    if (new_reg_top > MAX_REGISTERS) return error.OutOfMemory;
-
-                    if (new_reg_top > max_reg_water_mark) {
-                        @memset(registers[max_reg_water_mark..new_reg_top], JSValue.UNDEFINED);
-                        max_reg_water_mark = new_reg_top;
-                    }
-                    var callee_has_rc = false;
-                    const param_count = @min(arg_count, callee_block.param_count);
-                    if (param_count == 1) {
-                        const v = frame_regs[start];
-                        if (!needsDeinit(v)) {
-                            registers[callee_reg_base] = v;
-                        } else {
-                            registers[callee_reg_base] = v.retain();
-                            callee_has_rc = true;
+                            try setRegValue(frame, frame_regs, op.a, elem.retain());
                         }
                     } else {
-                        for (0..param_count) |i| {
-                            const v = frame_regs[start + i].retain();
-                            registers[callee_reg_base + i] = v;
-                            if (needsDeinit(v)) callee_has_rc = true;
-                        }
+                        try setRegPrimitive(frame_regs, op.a, JSValue.UNDEFINED);
                     }
-
-                    frames[frame_count] = CallFrame{
-                        .block = callee_block,
-                        .pc = 0,
-                        .reg_base = @intCast(callee_reg_base),
-                        .this_value = this_value,
-                        .closure_env = if (cache.closure_env) |env| @ptrCast(@alignCast(env)) else null,
-                        .has_rc = callee_has_rc,
-                        .return_reg = op.a,
-                        .interp = if (cache.interp) |itp| @ptrCast(@alignCast(itp)) else null,
-                    };
-                    frame_count += 1;
-                    reg_top = new_reg_top;
                 } else {
-                    const result = try callFallback(allocator, callee, this_value, frame_regs[start..end]);
-                    try setRegValue(frame, frame_regs, op.a, result);
+                    try getElemConstSlow(allocator, frame, frame_regs, op, obj);
                 }
-            },
-            .call_global => {
-                const cache_slice: []codeblock.CallSiteCache = @constCast(frame.block.call_target_cache);
-                if (op.c >= cache_slice.len) return error.InvalidRegister;
-                const cache = &cache_slice[op.c];
-                const arg_count = cache.arg_count;
-                const start = @as(usize, op.b) + 1;
-                const end = start + arg_count;
-                if (end > frame_regs.len) return error.InvalidRegister;
-
-                const gname = cache.global_name orelse return error.InvalidConstant;
-                const env = frame.closure_env orelse return error.UnsupportedOpcode;
-                if (cache.callee == null or cache.global_version != global_version) {
-                    const callee = env.get(gname) orelse return error.UnsupportedOpcode;
-                    if (cache.callee) |old| {
-                        var v = old;
-                        v.deinit();
-                    }
-                    cache.callee = callee.retain();
-                    cache.global_version = global_version;
-                    if (getBytecodeTarget(callee)) |target| {
-                        cache.target_block = target.block;
-                        cache.closure_env = target.closure_env;
-                        cache.interp = target.interp;
-                    } else {
-                        cache.target_block = null;
-                        cache.closure_env = null;
-                        cache.interp = null;
-                    }
-                }
-                const callee = cache.callee.?;
-                if (cache.target_block) |callee_block| {
-                    if (frame_count >= MAX_FRAMES) return error.StackOverflow;
-                    const callee_reg_base = reg_top;
-                    const new_reg_top = callee_reg_base + callee_block.register_count;
-                    if (new_reg_top > MAX_REGISTERS) return error.OutOfMemory;
-
-                    if (new_reg_top > max_reg_water_mark) {
-                        @memset(registers[max_reg_water_mark..new_reg_top], JSValue.UNDEFINED);
-                        max_reg_water_mark = new_reg_top;
-                    }
-                    var callee_has_rc = false;
-                    const param_count = @min(arg_count, callee_block.param_count);
-                    if (param_count == 1) {
-                        const v = frame_regs[start];
-                        if (!needsDeinit(v)) {
-                            registers[callee_reg_base] = v;
-                        } else {
-                            registers[callee_reg_base] = v.retain();
-                            callee_has_rc = true;
-                        }
-                    } else {
-                        for (0..param_count) |i| {
-                            const v = frame_regs[start + i].retain();
-                            registers[callee_reg_base + i] = v;
-                            if (needsDeinit(v)) callee_has_rc = true;
-                        }
-                    }
-
-                    frames[frame_count] = CallFrame{
-                        .block = callee_block,
-                        .pc = 0,
-                        .reg_base = @intCast(callee_reg_base),
-                        .this_value = JSValue.UNDEFINED,
-                        .closure_env = if (cache.closure_env) |cenv| @ptrCast(@alignCast(cenv)) else null,
-                        .has_rc = callee_has_rc,
-                        .return_reg = op.a,
-                        .interp = if (cache.interp) |itp| @ptrCast(@alignCast(itp)) else null,
-                    };
-                    frame_count += 1;
-                    reg_top = new_reg_top;
-                } else {
-                    const result = try callFallback(allocator, callee, JSValue.UNDEFINED, frame_regs[start..end]);
-                    try setRegValue(frame, frame_regs, op.a, result);
-                }
-            },
-            .return_value => {
-                const raw_val = try getRegister(frame_regs, op.a);
-                const is_prim = !needsDeinit(raw_val);
-                const val = if (is_prim) raw_val else raw_val.retain();
-                if (frame.has_rc) {
-                    for (registers[frame.reg_base..reg_top]) |*slot| {
-                        if (needsDeinit(slot.*)) deinitSlot(slot);
-                    }
-                }
-                reg_top = frame.reg_base;
-                if (catch_top > 0) {
-                    while (catch_top > 0 and catch_stack[catch_top - 1].frame_idx >= frame_count - 1) catch_top -= 1;
-                }
-                frame_count -= 1;
-                if (frame_count == 0) {
-                    return val;
-                }
-                const caller_frame = &frames[frame_count - 1];
-                const caller_regs = registers[caller_frame.reg_base .. caller_frame.reg_base + caller_frame.block.register_count];
-                if (is_prim) {
-                    try setRegPrimitive(caller_regs, frame.return_reg, val);
-                } else {
-                    try setRegValue(caller_frame, caller_regs, frame.return_reg, val);
-                }
-            },
-            .return_undefined => {
-                if (frame.has_rc) {
-                    for (registers[frame.reg_base..reg_top]) |*slot| {
-                        if (needsDeinit(slot.*)) deinitSlot(slot);
-                    }
-                }
-                reg_top = frame.reg_base;
-                if (catch_top > 0) {
-                    while (catch_top > 0 and catch_stack[catch_top - 1].frame_idx >= frame_count - 1) catch_top -= 1;
-                }
-                frame_count -= 1;
-                if (frame_count == 0) {
-                    return JSValue.UNDEFINED;
-                }
-                const caller_frame = &frames[frame_count - 1];
-                const caller_regs = registers[caller_frame.reg_base .. caller_frame.reg_base + caller_frame.block.register_count];
-                try setRegPrimitive(caller_regs, frame.return_reg, JSValue.UNDEFINED);
-            },
-            .make_closure => {
-                const vm_interp = frame.interp orelse return error.UnsupportedOpcode;
-                const env = frame.closure_env orelse return error.UnsupportedOpcode;
-                if (op.b >= frame.block.constants.len) return error.InvalidConstant;
-                const fnode = switch (frame.block.constants[op.b]) {
-                    .function_node => |fn_node| fn_node,
-                    else => return error.InvalidConstant,
-                };
-                const closure = try interpreter_class.makeClosure(vm_interp, env, fnode);
-                try setRegTracked(frame, frame_regs, op.a, closure);
-            },
-            .iter_init => {
-                const iterable = try getRegister(frame_regs, op.b);
-                if (!iterable.isArray() and !iterable.isString()) return error.UnsupportedOpcode;
-                const it = try JSValue.newArray(allocator);
-                _ = try it.asArray().value.push(iterable.retain());
-                _ = try it.asArray().value.push(JSValue.fromNumber(0));
-                try setRegTracked(frame, frame_regs, op.a, it);
-            },
-            .iter_next => {
-                const it = try getRegister(frame_regs, op.c);
-                if (!it.isArray() or it.asArray().value.length() < 2) return error.UnsupportedOpcode;
-                const target = it.asArray().value.get(0);
-                const idx_val = it.asArray().value.get(1);
-                if (!idx_val.isNumber()) return error.UnsupportedOpcode;
-                const idx: usize = @intFromFloat(idx_val.asNumber());
-                if (target.isArray()) {
-                    if (idx < target.asArray().value.length()) {
-                        const val = target.asArray().value.get(idx).retain();
-                        it.asArray().value.toSliceMut()[1] = JSValue.fromNumber(@floatFromInt(idx + 1));
-                        try setRegTracked(frame, frame_regs, op.a, val);
-                        try setRegister(frame_regs, op.b, JSValue.fromBool(false));
-                    } else {
-                        try setRegister(frame_regs, op.a, JSValue.UNDEFINED);
-                        try setRegister(frame_regs, op.b, JSValue.fromBool(true));
-                    }
-                } else if (target.isString()) {
-                    if (idx < target.asString().value.data.len) {
-                        const ch = try JSValue.newString(allocator, target.asString().value.data[idx .. idx + 1]);
-                        it.asArray().value.toSliceMut()[1] = JSValue.fromNumber(@floatFromInt(idx + 1));
-                        try setRegTracked(frame, frame_regs, op.a, ch);
-                        try setRegister(frame_regs, op.b, JSValue.fromBool(false));
-                    } else {
-                        try setRegister(frame_regs, op.a, JSValue.UNDEFINED);
-                        try setRegister(frame_regs, op.b, JSValue.fromBool(true));
-                    }
+            } else {
+                try getElemConstSlow(allocator, frame, frame_regs, op, obj);
+            }
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .set_elem => {
+            const op = code[ip];
+            const obj = try getRegister(frame_regs, op.a);
+            const key_val = try getRegister(frame_regs, op.b);
+            const val = try getRegister(frame_regs, op.c);
+            try setElem(allocator, obj, key_val, val);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .set_elem_const => {
+            const op = code[ip];
+            const obj = try getRegister(frame_regs, op.a);
+            const val = try getRegister(frame_regs, op.c);
+            const idx: usize = op.b;
+            if (obj.isArray() and obj.asArray().value.holey == null and idx == obj.asArray().value.items.items.len) {
+                const arr = &obj.asArray().value;
+                const val_to_store = if (needsDeinit(val)) val.retain() else val;
+                try arr.items.append(arr.allocator, val_to_store);
+            } else {
+                try setElemConstSlow(allocator, obj, idx, val);
+            }
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .load_null => {
+            try setRegPrimitive(frame_regs, code[ip].a, JSValue.NULL);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .load_true => {
+            try setRegPrimitive(frame_regs, code[ip].a, JSValue.fromBool(true));
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .load_false => {
+            try setRegPrimitive(frame_regs, code[ip].a, JSValue.fromBool(false));
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .load_this => {
+            try setRegValue(frame, frame_regs, code[ip].a, frame.this_value.retain());
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .move, .load_local, .store_local => {
+            const op = code[ip];
+            const v = try getRegister(frame_regs, op.b);
+            if (!needsDeinit(v)) {
+                try setRegPrimitive(frame_regs, op.a, v);
+            } else {
+                try setRegValue(frame, frame_regs, op.a, v.retain());
+            }
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .load_global => {
+            const op_pc: u32 = @intCast(ip);
+            try setRegValue(frame, frame_regs, code[ip].a, try loadGlobalFast(frame.block, frame.closure_env, code[ip].b, op_pc));
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .store_global => {
+            const op = code[ip];
+            const val = try getRegister(frame_regs, op.b);
+            try storeGlobal(allocator, frame.block, frame.closure_env, op.a, val);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .add => {
+            const op = code[ip];
+            const left = try getRegister(frame_regs, op.b);
+            const right = try getRegister(frame_regs, op.c);
+            if (left.isNumber() and right.isNumber()) {
+                try setRegPrimitive(frame_regs, op.a, JSValue.fromNumberFast(left.asNumber() + right.asNumber()));
+            } else {
+                try addOp(frame, frame_regs, allocator, op);
+            }
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .add_num => {
+            try arithmetic(frame_regs, code[ip], .add);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .sub_num => {
+            try arithmetic(frame_regs, code[ip], .sub);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .mul_num => {
+            try arithmetic(frame_regs, code[ip], .mul);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .div_num => {
+            try arithmetic(frame_regs, code[ip], .div);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .mod_num => {
+            try arithmetic(frame_regs, code[ip], .mod);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .pow_num => {
+            try arithmetic(frame_regs, code[ip], .pow);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .lt_num => {
+            try comparison(frame_regs, code[ip], .lt);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .gt_num => {
+            try comparison(frame_regs, code[ip], .gt);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .le_num => {
+            try comparison(frame_regs, code[ip], .le);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .ge_num => {
+            try comparison(frame_regs, code[ip], .ge);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .eq => {
+            try comparison(frame_regs, code[ip], .eq);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .ne => {
+            try comparison(frame_regs, code[ip], .ne);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .and_bits => {
+            try bitwise(frame_regs, code[ip], .bit_and);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .or_bits => {
+            try bitwise(frame_regs, code[ip], .bit_or);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .xor_bits => {
+            try bitwise(frame_regs, code[ip], .bit_xor);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .shl => {
+            try bitwise(frame_regs, code[ip], .shl);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .shr => {
+            try bitwise(frame_regs, code[ip], .shr);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .ushr => {
+            try bitwise(frame_regs, code[ip], .ushr);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .sub_local_const => {
+            const op = code[ip];
+            const left = try getRegister(frame_regs, op.b);
+            if (op.c < frame.block.constants.len) {
+                const c = frame.block.constants[op.c];
+                if (left.isNumber() and c == .number) {
+                    try setRegPrimitive(frame_regs, op.a, JSValue.fromNumberFast(left.asNumber() - c.number));
                 } else return error.UnsupportedOpcode;
-            },
-            .iter_end => {},
-            .setup_catch => {
-                if (catch_top >= MAX_CATCH_HANDLERS) return error.UnsupportedOpcode;
-                catch_stack[catch_top] = .{
-                    .frame_idx = @intCast(frame_count - 1),
-                    .error_reg = op.a,
-                    .target_pc = @intCast(try jumpTarget(frame.block, op)),
-                    .reg_top = @intCast(reg_top),
-                };
-                catch_top += 1;
-            },
-            .end_catch => {
-                if (catch_top > 0 and catch_stack[catch_top - 1].frame_idx == frame_count - 1) catch_top -= 1;
-            },
-            .throw_value => {
-                const thrown = (try getRegister(frame_regs, op.a)).retain();
-                var handled = false;
-                if (catch_top > 0) {
-                    catch_top -= 1;
-                    const handler = catch_stack[catch_top];
-                    const target_frame_idx = @as(usize, handler.frame_idx);
-                    while (frame_count > target_frame_idx + 1) {
-                        const cur_frame = &frames[frame_count - 1];
-                        for (registers[cur_frame.reg_base..reg_top]) |*r| deinitSlot(r);
-                        reg_top = cur_frame.reg_base;
-                        frame_count -= 1;
+            } else return error.InvalidConstant;
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .add_local_const => {
+            const op = code[ip];
+            const left = try getRegister(frame_regs, op.b);
+            if (op.c < frame.block.constants.len) {
+                const c = frame.block.constants[op.c];
+                if (left.isNumber() and c == .number) {
+                    try setRegPrimitive(frame_regs, op.a, JSValue.fromNumberFast(left.asNumber() + c.number));
+                } else {
+                    try addLocalConst(frame_regs, allocator, frame.block, op);
+                }
+            } else return error.InvalidConstant;
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .lt_local_const => {
+            const op = code[ip];
+            const left = try getRegister(frame_regs, op.b);
+            if (op.c < frame.block.constants.len) {
+                const c = frame.block.constants[op.c];
+                if (left.isNumber() and c == .number) {
+                    try setRegPrimitive(frame_regs, op.a, JSValue.fromBool(left.asNumber() < c.number));
+                } else return error.UnsupportedOpcode;
+            } else return error.InvalidConstant;
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .gt_local_const => {
+            try comparisonLocalConst(frame_regs, frame.block, code[ip], .gt);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .le_local_const => {
+            try comparisonLocalConst(frame_regs, frame.block, code[ip], .le);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .ge_local_const => {
+            try comparisonLocalConst(frame_regs, frame.block, code[ip], .ge);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .eq_local_const => {
+            const op = code[ip];
+            const left = try getRegister(frame_regs, op.b);
+            if (op.c < frame.block.constants.len) {
+                const c = frame.block.constants[op.c];
+                if (left.isNumber() and c == .number) {
+                    try setRegPrimitive(frame_regs, op.a, JSValue.fromBool(left.asNumber() == c.number));
+                } else return error.UnsupportedOpcode;
+            } else return error.InvalidConstant;
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .neg => {
+            const op = code[ip];
+            const src = try getRegister(frame_regs, op.b);
+            if (!src.isNumber()) return error.UnsupportedOpcode;
+            try setRegPrimitive(frame_regs, op.a, JSValue.fromNumber(-src.asNumber()));
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .not => {
+            const op = code[ip];
+            const truthy = try isTruthy(frame_regs, op.b);
+            try setRegPrimitive(frame_regs, op.a, JSValue.fromBool(!truthy));
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .not_bits => {
+            const op = code[ip];
+            const src = try getRegister(frame_regs, op.b);
+            if (!src.isNumber()) return error.UnsupportedOpcode;
+            try setRegPrimitive(frame_regs, op.a, JSValue.fromNumber(@floatFromInt(~numberToInt32(src.asNumber()))));
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .typeof => {
+            const op = code[ip];
+            const src = try getRegister(frame_regs, op.b);
+            const str = try JSValue.newString(allocator, src.typeOf());
+            try setRegTracked(frame, frame_regs, op.a, str);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .jump => {
+            ip = @intCast(try jumpTarget(frame.block, code[ip]));
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .jump_if_true => {
+            const op = code[ip];
+            const val = try getRegister(frame_regs, op.a);
+            const truthy = if (val.isBool()) val.asBool() else try isTruthy(frame_regs, op.a);
+            ip = if (truthy) @intCast(try jumpTarget(frame.block, op)) else ip + 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .jump_if_false => {
+            const op = code[ip];
+            const val = try getRegister(frame_regs, op.a);
+            const truthy = if (val.isBool()) val.asBool() else try isTruthy(frame_regs, op.a);
+            ip = if (!truthy) @intCast(try jumpTarget(frame.block, op)) else ip + 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .jump_if_not_nullish => {
+            const op = code[ip];
+            const val = try getRegister(frame_regs, op.a);
+            ip = if (!val.isUndefined() and !val.isNull()) @intCast(try jumpTarget(frame.block, op)) else ip + 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .call => {
+            const op = code[ip];
+            const callee = try getRegister(frame_regs, op.b);
+            const cache_slice: []codeblock.CallSiteCache = @constCast(frame.block.call_target_cache);
+            if (op.c >= cache_slice.len) return error.InvalidRegister;
+            const cache = &cache_slice[op.c];
+            const arg_count = cache.arg_count;
+            const start = @as(usize, op.b) + 1;
+            const end = start + arg_count;
+            if (end > frame_regs.len) return error.InvalidRegister;
+
+            const hit = if (cache.callee) |cached| calleeMatches(cached, callee) else false;
+            if (!hit) resolveCallCache(cache, callee);
+
+            const this_value = if (cache.this_reg) |r| frame_regs[r] else JSValue.UNDEFINED;
+            if (cache.target_block) |callee_block| {
+                if (frame_count >= MAX_FRAMES) return error.StackOverflow;
+                const callee_reg_base = reg_top;
+                const new_reg_top = callee_reg_base + callee_block.register_count;
+                if (new_reg_top > MAX_REGISTERS) return error.OutOfMemory;
+
+                if (new_reg_top > max_reg_water_mark) {
+                    @memset(registers[max_reg_water_mark..new_reg_top], JSValue.UNDEFINED);
+                    max_reg_water_mark = new_reg_top;
+                }
+                var callee_has_rc = false;
+                const param_count = @min(arg_count, callee_block.param_count);
+                if (param_count == 1) {
+                    const v = frame_regs[start];
+                    if (!needsDeinit(v)) {
+                        registers[callee_reg_base] = v;
+                    } else {
+                        registers[callee_reg_base] = v.retain();
+                        callee_has_rc = true;
                     }
-                    const cur_frame = &frames[target_frame_idx];
-                    for (registers[handler.reg_top..reg_top]) |*r| deinitSlot(r);
-                    reg_top = handler.reg_top;
-                    cur_frame.pc = handler.target_pc;
-                    const hregs = registers[cur_frame.reg_base .. cur_frame.reg_base + cur_frame.block.register_count];
-                    try setRegTracked(cur_frame, hregs, handler.error_reg, thrown);
-                    handled = true;
+                } else {
+                    for (0..param_count) |i| {
+                        const v = frame_regs[start + i].retain();
+                        registers[callee_reg_base + i] = v;
+                        if (needsDeinit(v)) callee_has_rc = true;
+                    }
                 }
-                if (!handled) {
-                    for (registers[0..reg_top]) |*r| deinitSlot(r);
-                    reg_top = 0;
-                    frame_count = 0;
-                    thrown.deinit();
-                    return error.UnsupportedOpcode;
+
+                frame.pc = @intCast(ip + 1);
+                frames[frame_count] = CallFrame{
+                    .block = callee_block,
+                    .pc = 0,
+                    .reg_base = @intCast(callee_reg_base),
+                    .this_value = this_value,
+                    .closure_env = if (cache.closure_env) |env| @ptrCast(@alignCast(env)) else null,
+                    .has_rc = callee_has_rc,
+                    .return_reg = op.a,
+                    .interp = if (cache.interp) |itp| @ptrCast(@alignCast(itp)) else null,
+                };
+                frame = &frames[frame_count];
+                frame_count += 1;
+                reg_top = new_reg_top;
+                code = callee_block.ops;
+                ip = 0;
+                frame_regs = registers[callee_reg_base .. callee_reg_base + callee_block.register_count];
+                if (ip >= code.len) return error.MissingReturn;
+                continue :dispatch code[0].opcode;
+            } else {
+                try callNativeFallback(allocator, frame, frame_regs, op.a, callee, this_value, frame_regs[start..end]);
+                ip += 1;
+                if (ip >= code.len) return error.MissingReturn;
+                continue :dispatch code[ip].opcode;
+            }
+        },
+        .call_global => {
+            const op = code[ip];
+            const cache_slice: []codeblock.CallSiteCache = @constCast(frame.block.call_target_cache);
+            if (op.c >= cache_slice.len) return error.InvalidRegister;
+            const cache = &cache_slice[op.c];
+            const arg_count = cache.arg_count;
+            const start = @as(usize, op.b) + 1;
+            const end = start + arg_count;
+            if (end > frame_regs.len) return error.InvalidRegister;
+
+            const gname = cache.global_name orelse return error.InvalidConstant;
+            const env = frame.closure_env orelse return error.UnsupportedOpcode;
+            if (cache.callee == null or cache.global_version != global_version) {
+                try resolveCallGlobalCache(cache, env, gname);
+            }
+            const callee = cache.callee.?;
+            if (cache.target_block) |callee_block| {
+                if (frame_count >= MAX_FRAMES) return error.StackOverflow;
+                const callee_reg_base = reg_top;
+                const new_reg_top = callee_reg_base + callee_block.register_count;
+                if (new_reg_top > MAX_REGISTERS) return error.OutOfMemory;
+
+                if (new_reg_top > max_reg_water_mark) {
+                    @memset(registers[max_reg_water_mark..new_reg_top], JSValue.UNDEFINED);
+                    max_reg_water_mark = new_reg_top;
                 }
-            },
-            else => return error.UnsupportedOpcode,
-        }
+                var callee_has_rc = false;
+                const param_count = @min(arg_count, callee_block.param_count);
+                if (param_count == 1) {
+                    const v = frame_regs[start];
+                    if (!needsDeinit(v)) {
+                        registers[callee_reg_base] = v;
+                    } else {
+                        registers[callee_reg_base] = v.retain();
+                        callee_has_rc = true;
+                    }
+                } else {
+                    for (0..param_count) |i| {
+                        const v = frame_regs[start + i].retain();
+                        registers[callee_reg_base + i] = v;
+                        if (needsDeinit(v)) callee_has_rc = true;
+                    }
+                }
+
+                frame.pc = @intCast(ip + 1);
+                frames[frame_count] = CallFrame{
+                    .block = callee_block,
+                    .pc = 0,
+                    .reg_base = @intCast(callee_reg_base),
+                    .this_value = JSValue.UNDEFINED,
+                    .closure_env = if (cache.closure_env) |cenv| @ptrCast(@alignCast(cenv)) else null,
+                    .has_rc = callee_has_rc,
+                    .return_reg = op.a,
+                    .interp = if (cache.interp) |itp| @ptrCast(@alignCast(itp)) else null,
+                };
+                frame = &frames[frame_count];
+                frame_count += 1;
+                reg_top = new_reg_top;
+                code = callee_block.ops;
+                ip = 0;
+                frame_regs = registers[callee_reg_base .. callee_reg_base + callee_block.register_count];
+                if (ip >= code.len) return error.MissingReturn;
+                continue :dispatch code[0].opcode;
+            } else {
+                try callNativeFallback(allocator, frame, frame_regs, op.a, callee, JSValue.UNDEFINED, frame_regs[start..end]);
+                ip += 1;
+                if (ip >= code.len) return error.MissingReturn;
+                continue :dispatch code[ip].opcode;
+            }
+        },
+        .return_value => {
+            const raw_val = try getRegister(frame_regs, code[ip].a);
+            const is_prim = !needsDeinit(raw_val);
+            const val = if (is_prim) raw_val else raw_val.retain();
+            if (frame.has_rc) deinitFrameRegs(registers[frame.reg_base..reg_top]);
+            reg_top = frame.reg_base;
+            if (catch_top > 0) {
+                while (catch_top > 0 and catch_stack[catch_top - 1].frame_idx >= frame_count - 1) catch_top -= 1;
+            }
+            const return_reg = frame.return_reg;
+            frame_count -= 1;
+            if (frame_count == 0) return val;
+            frame = &frames[frame_count - 1];
+            code = frame.block.ops;
+            ip = frame.pc;
+            frame_regs = registers[frame.reg_base .. frame.reg_base + frame.block.register_count];
+            if (is_prim) {
+                try setRegPrimitive(frame_regs, return_reg, val);
+            } else {
+                try setRegValue(frame, frame_regs, return_reg, val);
+            }
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .return_undefined => {
+            if (frame.has_rc) deinitFrameRegs(registers[frame.reg_base..reg_top]);
+            reg_top = frame.reg_base;
+            if (catch_top > 0) {
+                while (catch_top > 0 and catch_stack[catch_top - 1].frame_idx >= frame_count - 1) catch_top -= 1;
+            }
+            const return_reg = frame.return_reg;
+            frame_count -= 1;
+            if (frame_count == 0) return JSValue.UNDEFINED;
+            frame = &frames[frame_count - 1];
+            code = frame.block.ops;
+            ip = frame.pc;
+            frame_regs = registers[frame.reg_base .. frame.reg_base + frame.block.register_count];
+            try setRegPrimitive(frame_regs, return_reg, JSValue.UNDEFINED);
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .make_closure => {
+            try makeClosureOp(frame, frame_regs, code[ip]);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .iter_init => {
+            try iterInitOp(allocator, frame, frame_regs, code[ip]);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .iter_next => {
+            try iterNextOp(allocator, frame, frame_regs, code[ip]);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .iter_end => {
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .setup_catch => {
+            const op = code[ip];
+            if (catch_top >= MAX_CATCH_HANDLERS) return error.UnsupportedOpcode;
+            catch_stack[catch_top] = .{
+                .frame_idx = @intCast(frame_count - 1),
+                .error_reg = op.a,
+                .target_pc = @intCast(try jumpTarget(frame.block, op)),
+                .reg_top = @intCast(reg_top),
+            };
+            catch_top += 1;
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .end_catch => {
+            if (catch_top > 0 and catch_stack[catch_top - 1].frame_idx == frame_count - 1) catch_top -= 1;
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .throw_value => {
+            frame = try throwValueOp(frames, &frame_count, registers, &reg_top, &catch_stack, &catch_top, frame_regs, code[ip]);
+            code = frame.block.ops;
+            ip = frame.pc;
+            frame_regs = registers[frame.reg_base .. frame.reg_base + frame.block.register_count];
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        else => return error.UnsupportedOpcode,
     }
-    return error.MissingReturn;
 }
 
 const Arithmetic = enum { add, sub, mul, div, mod, pow };
@@ -1130,7 +1476,8 @@ fn comparison(registers: []JSValue, op: codeblock.Op, kind: Comparison) !void {
     } else return error.UnsupportedOpcode;
 }
 
-fn addOp(frame: *CallFrame, registers: []JSValue, allocator: Allocator, op: codeblock.Op) !void {
+noinline fn addOp(frame: *CallFrame, registers: []JSValue, allocator: Allocator, op: codeblock.Op) !void {
+    @branchHint(.cold);
     const left = try getRegister(registers, op.b);
     const right = try getRegister(registers, op.c);
     if (left.isNumber() and right.isNumber()) {
@@ -1203,7 +1550,8 @@ fn comparisonLocalConst(registers: []JSValue, block: *const codeblock.CodeBlock,
     } else return error.UnsupportedOpcode;
 }
 
-fn addLocalConst(registers: []JSValue, allocator: Allocator, block: *const codeblock.CodeBlock, op: codeblock.Op) !void {
+noinline fn addLocalConst(registers: []JSValue, allocator: Allocator, block: *const codeblock.CodeBlock, op: codeblock.Op) !void {
+    @branchHint(.cold);
     const left = try getRegister(registers, op.b);
     if (op.c >= block.constants.len) return error.InvalidConstant;
     const c = block.constants[op.c];
