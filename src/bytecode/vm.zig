@@ -668,7 +668,7 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                 const left = try getRegister(frame_regs, op.b);
                 const right = try getRegister(frame_regs, op.c);
                 if (left.isNumber() and right.isNumber()) {
-                    try setRegPrimitive(frame_regs, op.a, JSValue.fromNumber(left.asNumber() + right.asNumber()));
+                    try setRegPrimitive(frame_regs, op.a, JSValue.fromNumberFast(left.asNumber() + right.asNumber()));
                 } else {
                     try addOp(frame, frame_regs, allocator, op);
                 }
@@ -696,7 +696,7 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                 if (op.c < frame.block.constants.len) {
                     const c = frame.block.constants[op.c];
                     if (left.isNumber() and c == .number) {
-                        try setRegPrimitive(frame_regs, op.a, JSValue.fromNumber(left.asNumber() - c.number));
+                        try setRegPrimitive(frame_regs, op.a, JSValue.fromNumberFast(left.asNumber() - c.number));
                     } else return error.UnsupportedOpcode;
                 } else return error.InvalidConstant;
             },
@@ -705,7 +705,7 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                 if (op.c < frame.block.constants.len) {
                     const c = frame.block.constants[op.c];
                     if (left.isNumber() and c == .number) {
-                        try setRegPrimitive(frame_regs, op.a, JSValue.fromNumber(left.asNumber() + c.number));
+                        try setRegPrimitive(frame_regs, op.a, JSValue.fromNumberFast(left.asNumber() + c.number));
                     } else {
                         try addLocalConst(frame_regs, allocator, frame.block, op);
                     }
@@ -1084,7 +1084,7 @@ fn bitwise(registers: []JSValue, op: codeblock.Op, kind: BitwiseOp) !void {
         .shr => @floatFromInt(numberToInt32(lnum) >> @as(u5, @intCast(numberToUint32(rnum) & 31))),
         .ushr => @floatFromInt(numberToUint32(lnum) >> @as(u5, @intCast(numberToUint32(rnum) & 31))),
     };
-    try setRegister(registers, op.a, JSValue.fromNumber(result));
+    try setRegister(registers, op.a, JSValue.fromNumberFast(result));
 }
 
 fn arithmetic(registers: []JSValue, op: codeblock.Op, kind: Arithmetic) !void {
@@ -1101,7 +1101,7 @@ fn arithmetic(registers: []JSValue, op: codeblock.Op, kind: Arithmetic) !void {
         .mod => @mod(lnum, rnum),
         .pow => zmath.pow(lnum, rnum),
     };
-    try setRegister(registers, op.a, JSValue.fromNumber(result));
+    try setRegister(registers, op.a, JSValue.fromNumberFast(result));
 }
 
 fn comparison(registers: []JSValue, op: codeblock.Op, kind: Comparison) !void {
@@ -1134,7 +1134,7 @@ fn addOp(frame: *CallFrame, registers: []JSValue, allocator: Allocator, op: code
     const left = try getRegister(registers, op.b);
     const right = try getRegister(registers, op.c);
     if (left.isNumber() and right.isNumber()) {
-        try setRegister(registers, op.a, JSValue.fromNumber(left.asNumber() + right.asNumber()));
+        try setRegister(registers, op.a, JSValue.fromNumberFast(left.asNumber() + right.asNumber()));
         return;
     }
     if (left.isString() or right.isString()) {
@@ -1165,7 +1165,7 @@ fn arithmeticLocalConst(registers: []JSValue, block: *const codeblock.CodeBlock,
             .mod => @mod(lnum, c.number),
             .pow => zmath.pow(lnum, c.number),
         };
-        try setRegister(registers, op.a, JSValue.fromNumber(result));
+        try setRegister(registers, op.a, JSValue.fromNumberFast(result));
     } else return error.UnsupportedOpcode;
 }
 
@@ -1208,7 +1208,7 @@ fn addLocalConst(registers: []JSValue, allocator: Allocator, block: *const codeb
     if (op.c >= block.constants.len) return error.InvalidConstant;
     const c = block.constants[op.c];
     if (left.isNumber() and c == .number) {
-        try setRegister(registers, op.a, JSValue.fromNumber(left.asNumber() + c.number));
+        try setRegister(registers, op.a, JSValue.fromNumberFast(left.asNumber() + c.number));
         return;
     }
     const right = try constantValue(allocator, block, op.c);
@@ -1245,6 +1245,7 @@ fn isTruthy(registers: []const JSValue, index: u8) !bool {
         return n != 0 and !std.math.isNan(n);
     }
     if (value.isString()) return value.asString().value.data.len > 0;
+    if (value.isBigInt()) return !value.asBigInt().value.isZero();
     return error.UnsupportedOpcode;
 }
 
