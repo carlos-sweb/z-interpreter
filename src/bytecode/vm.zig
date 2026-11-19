@@ -606,6 +606,36 @@ noinline fn throwValueOp(
     return error.UnsupportedOpcode;
 }
 
+noinline fn cmpLocalConstSlow(left: JSValue, c: codeblock.Constant, kind: Comparison) !bool {
+    @branchHint(.cold);
+    if (left.isNumber() and c == .number) {
+        const lnum = left.asNumber();
+        return switch (kind) {
+            .lt => lnum < c.number,
+            .gt => lnum > c.number,
+            .le => lnum <= c.number,
+            .ge => lnum >= c.number,
+            .eq => lnum == c.number,
+            .ne => lnum != c.number,
+        };
+    } else if (left.isString() and c == .string) {
+        const eq = std.mem.eql(u8, left.asString().value.data, c.string);
+        return switch (kind) {
+            .eq => eq,
+            .ne => !eq,
+            else => error.UnsupportedOpcode,
+        };
+    } else if (left.isBool() and c == .boolean) {
+        const eq = (left.asBool() == c.boolean);
+        return switch (kind) {
+            .eq => eq,
+            .ne => !eq,
+            else => error.UnsupportedOpcode,
+        };
+    }
+    return error.UnsupportedOpcode;
+}
+
 pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_env: ?*Environment, args: []const JSValue, interp: ?*interpreter_mod.Interpreter) !JSValue {
     clearGlobalCache();
     defer clearGlobalCache();
@@ -1100,6 +1130,71 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                 } else return error.UnsupportedOpcode;
             } else return error.InvalidConstant;
             ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .jeq_local_const_false => {
+            const op = code[ip];
+            const left = try getRegister(frame_regs, op.a);
+            if (op.b >= frame.block.constants.len) return error.InvalidConstant;
+            const c = frame.block.constants[op.b];
+            const cond = if (left.isNumber() and c == .number)
+                left.asNumber() == c.number
+            else
+                try cmpLocalConstSlow(left, c, .eq);
+            ip += if (cond) 1 else op.c;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .jlt_local_const_false => {
+            const op = code[ip];
+            const left = try getRegister(frame_regs, op.a);
+            if (op.b >= frame.block.constants.len) return error.InvalidConstant;
+            const c = frame.block.constants[op.b];
+            const cond = if (left.isNumber() and c == .number)
+                left.asNumber() < c.number
+            else
+                try cmpLocalConstSlow(left, c, .lt);
+            ip += if (cond) 1 else op.c;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .jle_local_const_false => {
+            const op = code[ip];
+            const left = try getRegister(frame_regs, op.a);
+            if (op.b >= frame.block.constants.len) return error.InvalidConstant;
+            const c = frame.block.constants[op.b];
+            const cond = if (left.isNumber() and c == .number)
+                left.asNumber() <= c.number
+            else
+                try cmpLocalConstSlow(left, c, .le);
+            ip += if (cond) 1 else op.c;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .jgt_local_const_false => {
+            const op = code[ip];
+            const left = try getRegister(frame_regs, op.a);
+            if (op.b >= frame.block.constants.len) return error.InvalidConstant;
+            const c = frame.block.constants[op.b];
+            const cond = if (left.isNumber() and c == .number)
+                left.asNumber() > c.number
+            else
+                try cmpLocalConstSlow(left, c, .gt);
+            ip += if (cond) 1 else op.c;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .jge_local_const_false => {
+            const op = code[ip];
+            const left = try getRegister(frame_regs, op.a);
+            if (op.b >= frame.block.constants.len) return error.InvalidConstant;
+            const c = frame.block.constants[op.b];
+            const cond = if (left.isNumber() and c == .number)
+                left.asNumber() >= c.number
+            else
+                try cmpLocalConstSlow(left, c, .ge);
+            ip += if (cond) 1 else op.c;
             if (ip >= code.len) return error.MissingReturn;
             continue :dispatch code[ip].opcode;
         },

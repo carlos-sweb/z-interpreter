@@ -78,6 +78,11 @@ pub const Opcode = enum(u8) {
     ushr,
     typeof,
     pow_num,
+    jeq_local_const_false,
+    jlt_local_const_false,
+    jle_local_const_false,
+    jgt_local_const_false,
+    jge_local_const_false,
 };
 
 pub const Op = packed struct(u32) {
