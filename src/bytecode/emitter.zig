@@ -198,6 +198,17 @@ pub const BytecodeEmitter = struct {
         for (variable.declarators) |declarator| {
             if (declarator.pattern.* != .identifier) return error.UnsupportedSyntax;
             const name = declarator.pattern.identifier.name;
+            if (self.scope.localSlot(name)) |slot| {
+                if (!self.scope.capturesLocal(name)) {
+                    const local_slot = try small(slot);
+                    if (declarator.init) |init| {
+                        try self.emitExprInto(init, local_slot, name);
+                    } else {
+                        try self.emitOp(.{ .opcode = .load_undefined, .a = local_slot });
+                    }
+                    continue;
+                }
+            }
             const val_reg = if (declarator.init) |init|
                 try self.emitExpression(init)
             else
@@ -205,6 +216,27 @@ pub const BytecodeEmitter = struct {
             try self.emitStore(name, val_reg);
             self.freeRegister(val_reg);
         }
+    }
+
+    fn emitExprInto(self: *BytecodeEmitter, expression: *const zparser.Node, target_slot: u8, target_name: []const u8) anyerror!void {
+        const cur = unwrapParen(expression);
+        if (cur.data == .object_literal and !exprReferencesIdent(cur, target_name)) {
+            try self.emitObjectLiteralInto(cur.data.object_literal, target_slot);
+            return;
+        }
+        if (cur.data == .array_literal and !exprReferencesIdent(cur, target_name)) {
+            try self.emitArrayLiteralInto(cur.data.array_literal, target_slot);
+            return;
+        }
+        const val_reg = try self.emitExpression(cur);
+        if (val_reg == target_slot) return;
+        if (isSingleDefExpr(cur) and val_reg >= self.scope.local_count and self.ops.items.len > 0 and self.ops.items[self.ops.items.len - 1].a == val_reg and isRegisterDefOpcode(self.ops.items[self.ops.items.len - 1].opcode)) {
+            self.ops.items[self.ops.items.len - 1].a = target_slot;
+            self.freeRegister(val_reg);
+            return;
+        }
+        try self.emitOp(.{ .opcode = .store_local, .a = target_slot, .b = val_reg });
+        self.freeRegister(val_reg);
     }
 
     fn emitIf(self: *BytecodeEmitter, item: anytype) anyerror!void {
@@ -696,6 +728,7 @@ pub const BytecodeEmitter = struct {
             .shr,
             .ushr,
             .call,
+            .call_global,
             .new_object,
             .new_array,
             .get_prop,
@@ -786,6 +819,11 @@ pub const BytecodeEmitter = struct {
 
     fn emitObjectLiteral(self: *BytecodeEmitter, items: anytype) anyerror!u8 {
         const dst = try self.allocRegister();
+        try self.emitObjectLiteralInto(items, dst);
+        return dst;
+    }
+
+    fn emitObjectLiteralInto(self: *BytecodeEmitter, items: anytype, dst: u8) anyerror!void {
         try self.emitOp(.{ .opcode = .new_object, .a = dst });
         for (items) |item| {
             switch (item) {
@@ -804,12 +842,17 @@ pub const BytecodeEmitter = struct {
                 },
             }
         }
-        return dst;
     }
 
     fn emitArrayLiteral(self: *BytecodeEmitter, items: anytype) anyerror!u8 {
         if (items.len > std.math.maxInt(u8)) return error.UnsupportedSyntax;
         const dst = try self.allocRegister();
+        try self.emitArrayLiteralInto(items, dst);
+        return dst;
+    }
+
+    fn emitArrayLiteralInto(self: *BytecodeEmitter, items: anytype, dst: u8) anyerror!void {
+        if (items.len > std.math.maxInt(u8)) return error.UnsupportedSyntax;
         const len: u8 = @intCast(items.len);
         try self.emitOp(.{ .opcode = .new_array, .a = dst, .b = len });
         for (items, 0..) |maybe_item, index| {
@@ -825,7 +868,6 @@ pub const BytecodeEmitter = struct {
             }
             self.freeRegister(val_reg);
         }
-        return dst;
     }
 
     fn emitMember(self: *BytecodeEmitter, member: anytype) anyerror!u8 {
@@ -1048,6 +1090,63 @@ fn exprMayMutateLocal(node: *const zparser.Node) bool {
         .call => |c| blk: {
             if (exprMayMutateLocal(c.callee)) break :blk true;
             for (c.args) |arg| if (exprMayMutateLocal(arg)) break :blk true;
+            break :blk false;
+        },
+        else => true,
+    };
+}
+
+fn isSingleDefExpr(node: *const zparser.Node) bool {
+    const cur = unwrapParen(node);
+    return switch (cur.data) {
+        .number_literal,
+        .string_literal,
+        .boolean_literal,
+        .null_literal,
+        .this_expr,
+        .function_like,
+        .identifier,
+        .binary,
+        .member,
+        .call,
+        => true,
+        .unary => |u| switch (u.op) {
+            .minus, .not, .bitnot, .typeof => true,
+            else => false,
+        },
+        else => false,
+    };
+}
+
+fn exprReferencesIdent(node: *const zparser.Node, target_name: []const u8) bool {
+    const cur = unwrapParen(node);
+    return switch (cur.data) {
+        .number_literal, .string_literal, .boolean_literal, .null_literal, .this_expr, .function_like => false,
+        .identifier => |name| std.mem.eql(u8, name, target_name),
+        .unary => |u| exprReferencesIdent(u.operand, target_name),
+        .binary => |b| exprReferencesIdent(b.left, target_name) or exprReferencesIdent(b.right, target_name),
+        .logical => |l| exprReferencesIdent(l.left, target_name) or exprReferencesIdent(l.right, target_name),
+        .conditional => |c| exprReferencesIdent(c.test_expr, target_name) or exprReferencesIdent(c.consequent, target_name) or exprReferencesIdent(c.alternate, target_name),
+        .member => |m| exprReferencesIdent(m.object, target_name) or (m.computed and exprReferencesIdent(m.property, target_name)),
+        .assignment => |a| exprReferencesIdent(a.target, target_name) or exprReferencesIdent(a.value, target_name),
+        .sequence => |items| blk: {
+            for (items) |it| if (exprReferencesIdent(it, target_name)) break :blk true;
+            break :blk false;
+        },
+        .array_literal => |items| blk: {
+            for (items) |maybe_it| if (maybe_it) |it| if (exprReferencesIdent(it, target_name)) break :blk true;
+            break :blk false;
+        },
+        .object_literal => |items| blk: {
+            for (items) |it| switch (it) {
+                .spread => |s| if (exprReferencesIdent(s, target_name)) break :blk true,
+                .property => |p| if ((p.computed and exprReferencesIdent(p.key, target_name)) or exprReferencesIdent(p.value, target_name)) break :blk true,
+            };
+            break :blk false;
+        },
+        .call => |c| blk: {
+            if (exprReferencesIdent(c.callee, target_name)) break :blk true;
+            for (c.args) |arg| if (exprReferencesIdent(arg, target_name)) break :blk true;
             break :blk false;
         },
         else => true,

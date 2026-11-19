@@ -543,6 +543,7 @@ noinline fn resolveCallGlobalCache(cache: *codeblock.CallSiteCache, env: *Enviro
 
 noinline fn callNativeFallback(allocator: Allocator, frame: *CallFrame, frame_regs: []JSValue, op_a: u8, callee: JSValue, this_value: JSValue, args_slice: []const JSValue) !void {
     @branchHint(.cold);
+    defer clearGlobalCache();
     const result = try callFallback(allocator, callee, this_value, args_slice);
     try setRegValue(frame, frame_regs, op_a, result);
 }
@@ -802,6 +803,9 @@ noinline fn vmCallDispatch(
         },
         .new_object => {
             const op = code[ip];
+            if (op.a >= frame_regs.len) return error.InvalidRegister;
+            const slot = &frame_regs[op.a];
+            if (needsDeinit(slot.*)) deinitSlot(slot);
             if (obj_pool_len > 0) {
                 obj_pool_len -= 1;
                 const box = obj_pool[obj_pool_len];
@@ -815,7 +819,8 @@ noinline fn vmCallDispatch(
                 } else {
                     box.value.prototype = null;
                 }
-                try setRegValue(frame, frame_regs, op.a, JSValue.fromObject(box));
+                slot.* = JSValue.fromObject(box);
+                frame.has_rc = true;
             } else {
                 try newObjectSlow(allocator, frame, frame_regs, op);
             }
@@ -825,13 +830,17 @@ noinline fn vmCallDispatch(
         },
         .new_array => {
             const op = code[ip];
+            if (op.a >= frame_regs.len) return error.InvalidRegister;
+            const slot = &frame_regs[op.a];
+            if (needsDeinit(slot.*)) deinitSlot(slot);
             if (arr_pool_len > 0) {
                 arr_pool_len -= 1;
                 const box = arr_pool[arr_pool_len];
                 box._count = 1;
                 const cap = @max(@as(usize, op.b), 4);
                 if (box.value.items.capacity < cap) try box.value.reserve(cap);
-                try setRegValue(frame, frame_regs, op.a, JSValue.fromArray(box));
+                slot.* = JSValue.fromArray(box);
+                frame.has_rc = true;
             } else {
                 try newArraySlow(allocator, frame, frame_regs, op);
             }
@@ -1042,16 +1051,45 @@ noinline fn vmCallDispatch(
             continue :dispatch code[ip].opcode;
         },
         .load_global => {
-            const op_pc: u32 = @intCast(ip);
-            try setRegValue(frame, frame_regs, code[ip].a, try loadGlobalFast(frame.block, frame.closure_env, code[ip].b, op_pc));
+            const op = code[ip];
+            const env = frame.closure_env orelse return error.UnsupportedOpcode;
+            const name = try constantKey(frame.block, op.b);
+            const slot_idx = ((@intFromPtr(env) >> 4) +% (@intFromPtr(name.ptr) >> 3)) & 31;
+            const entry = &global_cache[slot_idx];
+            if (entry.env == env and entry.name_ptr == name.ptr and entry.binding_idx < entry.target_env.bindings.items.len) {
+                const v = entry.target_env.bindings.items[entry.binding_idx].value;
+                if (!needsDeinit(v)) {
+                    try setRegPrimitive(frame_regs, op.a, v);
+                } else {
+                    try setRegValue(frame, frame_regs, op.a, v.retain());
+                }
+            } else {
+                try loadGlobalSlow(frame, frame_regs, op, env, name, entry);
+            }
             ip += 1;
             if (ip >= code.len) return error.MissingReturn;
             continue :dispatch code[ip].opcode;
         },
         .store_global => {
             const op = code[ip];
+            const env = frame.closure_env orelse return error.UnsupportedOpcode;
+            const name = try constantKey(frame.block, op.a);
             const val = try getRegister(frame_regs, op.b);
-            try storeGlobal(allocator, frame.block, frame.closure_env, op.a, val);
+            const slot_idx = ((@intFromPtr(env) >> 4) +% (@intFromPtr(name.ptr) >> 3)) & 31;
+            const entry = &global_cache[slot_idx];
+            if (entry.env == env and entry.name_ptr == name.ptr and entry.is_mutable and entry.binding_idx < entry.target_env.bindings.items.len) {
+                global_version +%= 1;
+                const slot = &entry.target_env.bindings.items[entry.binding_idx].value;
+                if (!needsDeinit(slot.*) and !needsDeinit(val)) {
+                    slot.* = val;
+                } else {
+                    const old = slot.*;
+                    slot.* = val.retain();
+                    old.deinit();
+                }
+            } else {
+                try storeGlobalSlow(allocator, env, name, val, entry);
+            }
             ip += 1;
             if (ip >= code.len) return error.MissingReturn;
             continue :dispatch code[ip].opcode;
@@ -1796,68 +1834,92 @@ fn isTruthy(registers: []const JSValue, index: u8) !bool {
 }
 
 const GlobalCacheEntry = struct {
-    name: []const u8,
-    env: *const Environment,
-    value: JSValue,
+    env: ?*Environment = null,
+    target_env: *Environment = undefined,
+    name_ptr: [*]const u8 = undefined,
+    binding_idx: u32 = 0,
+    is_mutable: bool = false,
 };
 
-var global_cache: [16]?GlobalCacheEntry = @splat(null);
-var global_cache_next: usize = 0;
+var global_cache: [32]GlobalCacheEntry = @splat(.{});
 var global_version: u64 = 1;
 
 pub fn clearGlobalCache() void {
-    for (&global_cache) |*slot| slot.* = null;
-    global_cache_next = 0;
+    @memset(&global_cache, .{});
     global_version +%= 1;
 }
 
-fn loadGlobalFast(block: *const codeblock.CodeBlock, closure_env: ?*Environment, index: u8, op_pc: u32) !JSValue {
-    const env = closure_env orelse return error.UnsupportedOpcode;
-    if (index >= block.constants.len) return error.InvalidConstant;
-    const name = switch (block.constants[index]) {
-        .string, .property_key => |text| text,
-        else => return error.InvalidConstant,
-    };
-    const slot_idx = ((@intFromPtr(block) >> 4) +% op_pc) & 15;
-    if (global_cache[slot_idx]) |entry| {
-        if (entry.env == env and (entry.name.ptr == name.ptr or std.mem.eql(u8, entry.name, name))) {
-            return entry.value.retain();
-        }
-    }
-    const val = env.get(name) orelse return error.UnsupportedOpcode;
-    global_cache[slot_idx] = .{
-        .name = name,
-        .env = env,
-        .value = val,
-    };
-    return val.retain();
-}
-
-fn storeGlobal(allocator: Allocator, block: *const codeblock.CodeBlock, closure_env: ?*Environment, index: u8, val: JSValue) !void {
-    const env = closure_env orelse return error.UnsupportedOpcode;
-    if (index >= block.constants.len) return error.InvalidConstant;
-    const name = switch (block.constants[index]) {
-        .string, .property_key => |text| text,
-        else => return error.InvalidConstant,
-    };
-    global_version +%= 1;
-    for (&global_cache) |*slot| {
-        if (slot.*) |entry| {
-            if (entry.name.ptr == name.ptr or std.mem.eql(u8, entry.name, name)) {
-                slot.* = null;
+noinline fn loadGlobalSlow(
+    frame: *CallFrame,
+    frame_regs: []JSValue,
+    op: codeblock.Op,
+    env: *Environment,
+    name: []const u8,
+    entry: *GlobalCacheEntry,
+) !void {
+    @branchHint(.cold);
+    var cur: ?*Environment = env;
+    while (cur) |e| : (cur = e.parent) {
+        if (e.tdz.contains(name)) return error.UnsupportedOpcode;
+        if (e.bindingIndex(name)) |idx| {
+            const v = e.bindings.items[idx].value;
+            entry.* = .{
+                .env = env,
+                .target_env = e,
+                .name_ptr = name.ptr,
+                .binding_idx = @intCast(idx),
+                .is_mutable = !e.consts.contains(name),
+            };
+            if (!needsDeinit(v)) {
+                try setRegPrimitive(frame_regs, op.a, v);
+            } else {
+                try setRegValue(frame, frame_regs, op.a, v.retain());
             }
+            return;
         }
     }
-    const retained = val.retain();
-    env.assign(name, retained) catch |err| switch (err) {
-        error.ReferenceError => {
-            try env.define(allocator, name, retained);
-        },
-        else => {
-            retained.deinit();
-            return error.UnsupportedOpcode;
-        },
-    };
+    return error.UnsupportedOpcode;
+}
+
+noinline fn storeGlobalSlow(
+    allocator: Allocator,
+    env: *Environment,
+    name: []const u8,
+    val: JSValue,
+    entry: *GlobalCacheEntry,
+) !void {
+    @branchHint(.cold);
+    global_version +%= 1;
+    var cur: ?*Environment = env;
+    while (cur) |e| : (cur = e.parent) {
+        if (e.tdz.contains(name)) return error.UnsupportedOpcode;
+        if (e.bindingIndex(name)) |idx| {
+            if (e.consts.contains(name)) return error.UnsupportedOpcode;
+            const slot = &e.bindings.items[idx].value;
+            const old = slot.*;
+            slot.* = val.retain();
+            old.deinit();
+            entry.* = .{
+                .env = env,
+                .target_env = e,
+                .name_ptr = name.ptr,
+                .binding_idx = @intCast(idx),
+                .is_mutable = true,
+            };
+            return;
+        }
+    }
+    clearGlobalCache();
+    try env.define(allocator, name, val.retain());
+    if (env.bindingIndex(name)) |idx| {
+        entry.* = .{
+            .env = env,
+            .target_env = env,
+            .name_ptr = name.ptr,
+            .binding_idx = @intCast(idx),
+            .is_mutable = !env.consts.contains(name),
+        };
+    }
 }
 
 fn jumpTarget(block: *const codeblock.CodeBlock, op: codeblock.Op) !usize {
