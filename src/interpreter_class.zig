@@ -92,8 +92,8 @@ fn isAnonClassNode(node: *const zparser.Node) bool {
 /// this kind of permanent-but-not-GC-traced string.
 pub fn maybeNameAnonymousValue(self: *Interpreter, init_node: *const zparser.Node, value: JSValue, name: []const u8) anyerror!void {
     if (!isAnonFnNode(init_node) and !isAnonClassNode(init_node)) return;
-    if (value != .function or value.function.value.name.len != 0) return;
-    value.function.value.name = try self.arena_state.allocator().dupe(u8, name);
+    if (!value.isFunction() or value.asFunction().value.name.len != 0) return;
+    value.asFunction().value.name = try self.arena_state.allocator().dupe(u8, name);
 }
 
 /// Recovers a class-field key's readable source name for NamedEvaluation:
@@ -334,7 +334,7 @@ pub fn makeClosure(self: *Interpreter, env: *Environment, fnode: *zfunctions.Fun
 /// ClosureCtx as the ctx of the closures it creates.
 pub fn makeMethodClosure(self: *Interpreter, env: *Environment, fnode: *zfunctions.FunctionNode, super_proto: ?JSValue, private_ctx: ?*anyopaque) anyerror!JSValue {
     const v = try self.makeClosure(env, fnode);
-    const cc: *ClosureCtx = @ptrCast(@alignCast(v.function.value.ctx));
+    const cc: *ClosureCtx = @ptrCast(@alignCast(v.asFunction().value.ctx));
     // Etapa 2 de uniform-ownership-contract.md: ClosureCtx lives as
     // long as the function value itself, same "no dedicated release"
     // shape as Environment's this_value/super_proto -- needs its own
@@ -353,7 +353,7 @@ pub fn makeMethodClosure(self: *Interpreter, env: *Environment, fnode: *zfunctio
 /// enclosing object-literal evaluation.
 pub fn makeObjectMethodClosure(self: *Interpreter, env: *Environment, fnode: *zfunctions.FunctionNode, home: JSValue) anyerror!JSValue {
     const v = try self.makeClosure(env, fnode);
-    const cc: *ClosureCtx = @ptrCast(@alignCast(v.function.value.ctx));
+    const cc: *ClosureCtx = @ptrCast(@alignCast(v.asFunction().value.ctx));
     cc.home_object = home.retain();
     return v;
 }
@@ -378,7 +378,7 @@ pub fn encodePrivateKey(self: *Interpreter, class_id: *anyopaque, name: []const 
 /// the object itself, or a function's statics bag (`C.#staticField`).
 /// Null for primitives (they can never carry a brand).
 pub fn privateHolder(self: *Interpreter, obj: JSValue) !?JSValue {
-    return switch (obj) {
+    return switch (obj.unpack()) {
         .object => obj,
         .function => try self.functionStatics(obj),
         .typed_array, .array_buffer, .data_view => try self.extraPropsObject(obj),
@@ -395,13 +395,13 @@ pub fn privateGet(self: *Interpreter, env: *Environment, obj: JSValue, name: []c
         return self.throwError(.type_error, "Cannot read private member {s} from an object whose class did not declare it", .{name});
     // Own->chain record walk with accessor dispatch (instance fields
     // are own props; private methods/accessors live on the prototype).
-    var current: ?*const @TypeOf(holder.object.value) = &holder.object.value;
+    var current: ?*const @TypeOf(holder.asObject().value) = &holder.asObject().value;
     while (current) |o| : (current = o.getPrototype()) {
         const rec = o.getOwnRecord(key) orelse continue;
         if (rec.isAccessor()) {
             const g = rec.getter orelse
                 return self.throwError(.type_error, "'{s}' was defined without a getter", .{name});
-            return try g.function.value.call(g.function.value.ctx, self.gc_allocator, obj, &.{});
+            return try g.asFunction().value.call(g.asFunction().value.ctx, self.gc_allocator, obj, &.{});
         }
         return rec.value.retain();
     }
@@ -415,12 +415,12 @@ pub fn privateSet(self: *Interpreter, env: *Environment, obj: JSValue, name: []c
     defer self.gc_allocator.free(key);
     const holder = (try self.privateHolder(obj)) orelse
         return self.throwError(.type_error, "Cannot write private member {s} to an object whose class did not declare it", .{name});
-    const hv = &holder.object.value;
+    const hv = &holder.asObject().value;
     if (hv.getOwnRecord(key)) |rec| {
         if (rec.isAccessor()) {
             const s = rec.setter orelse
                 return self.throwError(.type_error, "'{s}' was defined without a setter", .{name});
-            _ = try s.function.value.call(s.function.value.ctx, self.gc_allocator, obj, &.{value});
+            _ = try s.asFunction().value.call(s.asFunction().value.ctx, self.gc_allocator, obj, &.{value});
             return;
         }
         // A brand-checked private FIELD write updates in place.
@@ -438,7 +438,7 @@ pub fn privateSet(self: *Interpreter, env: *Environment, obj: JSValue, name: []c
         if (rec.isAccessor()) {
             const s = rec.setter orelse
                 return self.throwError(.type_error, "'{s}' was defined without a setter", .{name});
-            _ = try s.function.value.call(s.function.value.ctx, self.gc_allocator, obj, &.{value});
+            _ = try s.asFunction().value.call(s.asFunction().value.ctx, self.gc_allocator, obj, &.{value});
             return;
         }
         return self.throwError(.type_error, "Cannot assign to private method {s}", .{name});
@@ -454,7 +454,7 @@ pub fn privateHas(self: *Interpreter, env: *Environment, obj: JSValue, name: []c
     const key = try self.encodePrivateKey(ctx, name);
     defer self.gc_allocator.free(key);
     const holder = (try self.privateHolder(obj)) orelse return false;
-    var current: ?*const @TypeOf(holder.object.value) = &holder.object.value;
+    var current: ?*const @TypeOf(holder.asObject().value) = &holder.asObject().value;
     while (current) |o| : (current = o.getPrototype()) {
         if (o.getOwnRecord(key) != null) return true;
     }
@@ -467,7 +467,7 @@ pub fn privateHas(self: *Interpreter, env: *Environment, obj: JSValue, name: []c
 /// `super()` returns for derived ones.
 pub fn runInstanceFields(self: *Interpreter, cctx: *ClassCtx, instance: JSValue) anyerror!void {
     if (cctx.instance_fields.len == 0) return;
-    if (instance != .object and instance != .typed_array and instance != .array_buffer and instance != .data_view) return; // exotic `this` -- nothing to define on
+    if (!instance.isObject() and !instance.isTypedArray() and !instance.isArrayBuffer() and !instance.isDataView()) return; // exotic `this` -- nothing to define on
     const field_env = try self.gcChildEnv(cctx.closure_env);
     // Etapa 2 de uniform-ownership-contract.md: Environment.this_value/
     // super_proto are plain JSValue fields with no release mechanism of
@@ -489,8 +489,8 @@ pub fn runInstanceFields(self: *Interpreter, cctx: *ClassCtx, instance: JSValue)
         // internal `\x00P<hex>|#x` encoding, per real spec.
         if (fd.value) |vexpr| try self.maybeNameAnonymousValue(vexpr, v, fieldDisplayName(fd.key));
         const is_private = fd.key.len > 0 and fd.key[0] == 0;
-        const target_obj = if (instance == .object) instance else try self.extraPropsObject(instance);
-        const target = &target_obj.object.value;
+        const target_obj = if (instance.isObject()) instance else try self.extraPropsObject(instance);
+        const target = &target_obj.asObject().value;
         target.set(fd.key, v) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             // A constructor can freeze/preventExtensions `this` BEFORE
@@ -537,7 +537,7 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
     var super_proto: ?JSValue = null;
     if (cnode.superclass) |sc_expr| {
         const sc = try self.evalExpression(env, sc_expr);
-        if (sc != .function or !sc.function.value.constructable) {
+        if (!sc.isFunction() or !sc.asFunction().value.constructable) {
             defer sc.deinit();
             const shown = try coercion.toDisplayString(arena, sc);
             defer arena.free(shown);
@@ -546,7 +546,7 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
         super_ctor = sc;
         const parent_proto = try self.getProperty(sc, "prototype");
         defer parent_proto.deinit();
-        if (parent_proto != .object) {
+        if (!parent_proto.isObject()) {
             return self.throwError(.type_error, "Class extends value does not have a valid prototype property", .{});
         }
         super_proto = parent_proto;
@@ -561,8 +561,8 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
     // references, not only by the ClassCtx (which only the collector frees).
     if (super_proto) |sp|
         try self.setOwnedPrototype(proto, sp)
-    else if (self.protos.object == .object)
-        try proto.object.value.setPrototype(&self.protos.object.object.value);
+    else if (self.protos.object.isObject())
+        try proto.asObject().value.setPrototype(&self.protos.object.asObject().value);
 
     var ctor_fnode: ?*zfunctions.FunctionNode = null;
     for (cnode.elements) |el| {
@@ -593,8 +593,8 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
     });
     // Real spec (MakeConstructor): `constructor` is installed with
     // [[Enumerable]]: false, same as every class method/accessor below.
-    try proto.object.value.defineProperty("constructor", class_fn.retain(), .{ .writable = true, .enumerable = false, .configurable = true });
-    class_fn.function.value.prototype = proto;
+    try proto.asObject().value.defineProperty("constructor", class_fn.retain(), .{ .writable = true, .enumerable = false, .configurable = true });
+    class_fn.asFunction().value.prototype = proto;
 
     // A derived class always gets a statics bag chained to the
     // parent's (forcing the parent's into existence) so static
@@ -707,14 +707,14 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
         switch (el.kind) {
             .method => try target.objectDefine(key, m, method_attrs),
             .get => {
-                try target.object.value.defineAccessor(key, m, null, JSValue.UNDEFINED);
-                const rec = target.object.value.getOwnRecordMut(key).?;
+                try target.asObject().value.defineAccessor(key, m, null, JSValue.UNDEFINED);
+                const rec = target.asObject().value.getOwnRecordMut(key).?;
                 rec.descriptor.enumerable = false;
                 rec.descriptor.configurable = true;
             },
             .set => {
-                try target.object.value.defineAccessor(key, null, m, JSValue.UNDEFINED);
-                const rec = target.object.value.getOwnRecordMut(key).?;
+                try target.asObject().value.defineAccessor(key, null, m, JSValue.UNDEFINED);
+                const rec = target.asObject().value.getOwnRecordMut(key).?;
                 rec.descriptor.enumerable = false;
                 rec.descriptor.configurable = true;
             },
@@ -812,8 +812,8 @@ pub fn invokeFunctionNode(
     // BEFORE params so a parameter/rest named `arguments` shadows it.
     if (functionNeedsArguments(self, fnode)) {
         var arguments = try self.gcNewArray();
-        for (args) |a| _ = try arguments.array.value.push(a.retain());
-        try self.arguments_arrays.put(self.gc_allocator, @intFromPtr(arguments.array), {});
+        for (args) |a| _ = try arguments.asArray().value.push(a.retain());
+        try self.arguments_arrays.put(self.gc_allocator, @intFromPtr(arguments.asArray()), {});
         try call_env.define(allocator, "arguments", arguments);
     } else if (fnode.kind != .arrow) {
         try call_env.retainLazyArguments(allocator, args);
@@ -826,7 +826,7 @@ pub fn invokeFunctionNode(
         // released here.
         var from_default = false;
         defer if (from_default) value.deinit();
-        if (value == .undefined) {
+        if (value.isUndefined()) {
             if (param.default) |def| {
                 value = try self.evalExpression(call_env, def);
                 from_default = true;
@@ -844,7 +844,7 @@ pub fn invokeFunctionNode(
         defer rest_arr.deinit();
         const start = fnode.params.items.len;
         if (start < args.len) {
-            for (args[start..]) |a| _ = try rest_arr.array.value.push(a.retain());
+            for (args[start..]) |a| _ = try rest_arr.asArray().value.push(a.retain());
         }
         // Real spec: a rest parameter can be a destructuring pattern
         // (`function f(...[a, b]) {}`), not just a plain identifier --
@@ -915,7 +915,7 @@ fn classConstructorCall(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
                 self.adopted_super_this = prev_adopted;
             }
             const result = try invokeFunctionNode(self, fnode, cctx.closure_env, allocator, this_value, cctx.super_proto, cctx.super_ctor, cctx, args, null);
-            if (result == .undefined) {
+            if (result.isUndefined()) {
                 if (self.pending_field_init != null) {
                     return self.throwError(.reference_error, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor", .{});
                 }
@@ -932,10 +932,10 @@ fn classConstructorCall(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     // parent (`constructor(...args) { super(...args) }`) and then runs its
     // own field initializers; a base class is a no-op.
     if (cctx.super_ctor) |parent| {
-        self.construct_target = parent.function.value.ctx;
+        self.construct_target = parent.asFunction().value.ctx;
         defer self.construct_target = null;
-        const parent_result = try parent.function.value.call(parent.function.value.ctx, allocator, this_value, args);
-        if ((parent_result == .temporal and self.temporal_protos.contains(@intFromPtr(parent_result.temporal))) or parent_result == .typed_array or parent_result == .array_buffer or parent_result == .data_view) {
+        const parent_result = try parent.asFunction().value.call(parent.asFunction().value.ctx, allocator, this_value, args);
+        if ((parent_result.isTemporal() and self.temporal_protos.contains(@intFromPtr(parent_result.asTemporal()))) or parent_result.isTypedArray() or parent_result.isArrayBuffer() or parent_result.isDataView()) {
             errdefer parent_result.deinit();
             try self.runInstanceFields(cctx, parent_result);
             return parent_result;

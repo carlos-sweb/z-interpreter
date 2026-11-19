@@ -33,13 +33,13 @@ fn dummyNativeCall(ctx: *anyopaque, allocator: std.mem.Allocator, this_value: JS
 /// like real production code would create it (via `gcNew*`/`makeRegex`, not
 /// a raw `zvalue.JSValue.new*` that would bypass the registry). No `else`
 /// branch -- see the file doc comment.
-fn makeOneOf(interp: *zinterpreter.Interpreter, comptime tag: std.meta.Tag(JSValue)) !JSValue {
+fn makeOneOf(interp: *zinterpreter.Interpreter, comptime tag: JSValue.Tag) !JSValue {
     var dummy_ctx: u8 = 0;
     return switch (tag) {
         .undefined => JSValue.UNDEFINED,
         .null => JSValue.NULL,
-        .boolean => JSValue{ .boolean = true },
-        .number => JSValue{ .number = 1 },
+        .boolean => JSValue.TRUE,
+        .number => JSValue.fromNumber(1),
         .string => try interp.gcNewString("x"),
         .array => try interp.gcNewArray(),
         .object => try interp.gcNewObject(),
@@ -76,8 +76,7 @@ test "gcTrack covers every JSValue variant without leaking" {
     var interp = try zinterpreter.Interpreter.init(testing.allocator, &allocating.writer);
     defer interp.deinit();
 
-    inline for (@typeInfo(JSValue).@"union".field_names) |name| {
-        const tag: std.meta.Tag(JSValue) = @field(std.meta.Tag(JSValue), name);
+    inline for (std.enums.values(JSValue.Tag)) |tag| {
         const v = try makeOneOf(&interp, tag);
         v.deinit();
     }

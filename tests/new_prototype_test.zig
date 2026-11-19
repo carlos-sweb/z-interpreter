@@ -31,7 +31,7 @@ test "two instances share the same prototype method (identity)" {
         {},
         struct {
             fn check(_: void, r: helpers.Result) !void {
-                try testing.expect(r.value.boolean == true);
+                try testing.expect(r.value.asBool() == true);
             }
         }.check,
     );
@@ -40,7 +40,7 @@ test "two instances share the same prototype method (identity)" {
 test "F.prototype.constructor === F" {
     try helpers.runAndCheck("function F() {} F.prototype.constructor === F;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expect(r.value.boolean == true);
+            try testing.expect(r.value.asBool() == true);
         }
     }.check);
 }
@@ -66,7 +66,7 @@ test "new Foo without parens equals new Foo()" {
 test "new on an arrow function is a TypeError" {
     try helpers.runAndCheck("var A = () => {}; var r; try { new A(); } catch (e) { r = e.name; } r;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expectEqualStrings("TypeError", r.value.string.value.data);
+            try testing.expectEqualStrings("TypeError", r.value.asString().value.data);
         }
     }.check);
 }
@@ -74,12 +74,12 @@ test "new on an arrow function is a TypeError" {
 test "new on a non-function and on a native are TypeErrors" {
     try helpers.runAndCheck("var x = 5; var r; try { new x(); } catch (e) { r = e.message; } r;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expectEqualStrings("x is not a constructor", r.value.string.value.data);
+            try testing.expectEqualStrings("x is not a constructor", r.value.asString().value.data);
         }
     }.check);
     try helpers.runAndCheck("var r; try { new console.log(); } catch (e) { r = e.name; } r;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expectEqualStrings("TypeError", r.value.string.value.data);
+            try testing.expectEqualStrings("TypeError", r.value.asString().value.data);
         }
     }.check);
 }
@@ -90,10 +90,10 @@ test "instanceof: true for instances, false for plain objects and primitives" {
         {},
         struct {
             fn check(_: void, r: helpers.Result) !void {
-                const items = r.value.array.value.toSlice();
-                try testing.expect(items[0].boolean == true);
-                try testing.expect(items[1].boolean == false);
-                try testing.expect(items[2].boolean == false);
+                const items = r.value.asArray().value.toSlice();
+                try testing.expect(items[0].asBool() == true);
+                try testing.expect(items[1].asBool() == false);
+                try testing.expect(items[2].asBool() == false);
             }
         }.check,
     );
@@ -102,7 +102,7 @@ test "instanceof: true for instances, false for plain objects and primitives" {
 test "instanceof against a function whose prototype was never touched" {
     try helpers.runAndCheck("function P() {} var p = new P(); function Q() {} p instanceof Q;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expect(r.value.boolean == false);
+            try testing.expect(r.value.asBool() == false);
         }
     }.check);
 }
@@ -110,7 +110,7 @@ test "instanceof against a function whose prototype was never touched" {
 test "instanceof with a non-callable RHS is a catchable TypeError" {
     try helpers.runAndCheck("var r; try { ({}) instanceof 5; } catch (e) { r = e.name; } r;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expectEqualStrings("TypeError", r.value.string.value.data);
+            try testing.expectEqualStrings("TypeError", r.value.asString().value.data);
         }
     }.check);
 }
@@ -125,10 +125,10 @@ test "in: own, inherited, and missing properties" {
         {},
         struct {
             fn check(_: void, r: helpers.Result) !void {
-                const items = r.value.array.value.toSlice();
-                try testing.expect(items[0].boolean == true);
-                try testing.expect(items[1].boolean == true);
-                try testing.expect(items[2].boolean == false);
+                const items = r.value.asArray().value.toSlice();
+                try testing.expect(items[0].asBool() == true);
+                try testing.expect(items[1].asBool() == true);
+                try testing.expect(items[2].asBool() == false);
             }
         }.check,
     );
@@ -137,10 +137,10 @@ test "in: own, inherited, and missing properties" {
 test "in on arrays: indices and length" {
     try helpers.runAndCheck("[0 in [1, 2], 5 in [1, 2], 'length' in [1]];", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            const items = r.value.array.value.toSlice();
-            try testing.expect(items[0].boolean == true);
-            try testing.expect(items[1].boolean == false);
-            try testing.expect(items[2].boolean == true);
+            const items = r.value.asArray().value.toSlice();
+            try testing.expect(items[0].asBool() == true);
+            try testing.expect(items[1].asBool() == false);
+            try testing.expect(items[2].asBool() == true);
         }
     }.check);
 }
@@ -148,7 +148,7 @@ test "in on arrays: indices and length" {
 test "in on null is a catchable TypeError" {
     try helpers.runAndCheck("var r; try { 'a' in null; } catch (e) { r = e.name; } r;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expectEqualStrings("TypeError", r.value.string.value.data);
+            try testing.expectEqualStrings("TypeError", r.value.asString().value.data);
         }
     }.check);
 }
@@ -156,7 +156,7 @@ test "in on null is a catchable TypeError" {
 test "F.name and F.length" {
     try helpers.runAndCheck("function foo(a, b) {} foo.name + ':' + foo.length;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expectEqualStrings("foo:2", r.value.string.value.data);
+            try testing.expectEqualStrings("foo:2", r.value.asString().value.data);
         }
     }.check);
 }

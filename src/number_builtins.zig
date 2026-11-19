@@ -37,7 +37,7 @@ pub const number_methods = std.StaticStringMap(MethodSpec).initComptime(.{
 });
 
 fn requireNumber(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!f64 {
-    return (try requirePrimitive(ctx, this_value, .number, "Number.prototype.{s} called on a non-number", method)).number;
+    return (try requirePrimitive(ctx, this_value, .number, "Number.prototype.{s} called on a non-number", method)).asNumber();
 }
 
 /// `n.toString(radix?)` / `toLocaleString` -- radix 2..36 (default 10).
@@ -59,7 +59,7 @@ fn numberValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
 /// Convert a present argument to Number; z-number applies integer conversion,
 /// defaults and range validation in the order required by each method.
 fn numberFormatArg(ctx: *anyopaque, args: []const JSValue) anyerror!?f64 {
-    if (arg(args, 0) == .undefined) return null;
+    if (arg(args, 0).tag() == .undefined) return null;
     return try interp(ctx).toNumberJS(arg(args, 0));
 }
 
@@ -112,7 +112,7 @@ fn numberIsNaN(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     _ = allocator;
     _ = this_value;
     const v = arg(args, 0);
-    return JSValue.fromBool(v == .number and std.math.isNan(v.number));
+    return JSValue.fromBool(v.tag() == .number and std.math.isNan(v.asNumber()));
 }
 
 fn numberIsFinite(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -120,7 +120,7 @@ fn numberIsFinite(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     _ = allocator;
     _ = this_value;
     const v = arg(args, 0);
-    return JSValue.fromBool(v == .number and std.math.isFinite(v.number));
+    return JSValue.fromBool(v.tag() == .number and std.math.isFinite(v.asNumber()));
 }
 
 fn numberIsInteger(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -128,7 +128,7 @@ fn numberIsInteger(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     _ = allocator;
     _ = this_value;
     const v = arg(args, 0);
-    return JSValue.fromBool(v == .number and std.math.isFinite(v.number) and v.number == @trunc(v.number));
+    return JSValue.fromBool(v.tag() == .number and std.math.isFinite(v.asNumber()) and v.asNumber() == @trunc(v.asNumber()));
 }
 
 fn numberIsSafeInteger(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -136,7 +136,7 @@ fn numberIsSafeInteger(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
     _ = allocator;
     _ = this_value;
     const v = arg(args, 0);
-    return JSValue.fromBool(v == .number and std.math.isFinite(v.number) and v.number == @trunc(v.number) and @abs(v.number) <= 9007199254740991.0);
+    return JSValue.fromBool(v.tag() == .number and std.math.isFinite(v.asNumber()) and v.asNumber() == @trunc(v.asNumber()) and @abs(v.asNumber()) <= 9007199254740991.0);
 }
 
 /// Installs the `Number` constructor + statics.

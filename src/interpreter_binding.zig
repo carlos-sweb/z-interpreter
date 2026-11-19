@@ -41,7 +41,7 @@ const FiberState = interpreter_mod.FiberState;
 /// owned one.
 pub fn iterableItems(self: *Interpreter, value: JSValue) anyerror![]const JSValue {
     const arena = self.gc_allocator;
-    return switch (value) {
+    return switch (value.unpack()) {
         .array => |box| blk: {
             const src = box.value.toSlice();
             const out = try arena.alloc(JSValue, src.len);
@@ -73,8 +73,8 @@ pub fn iterableItems(self: *Interpreter, value: JSValue) anyerror![]const JSValu
             var out: std.ArrayList(JSValue) = .empty;
             for (ks, vs) |k, v| {
                 var pair = try self.gcNewArray();
-                _ = try pair.array.value.push(k.retain());
-                _ = try pair.array.value.push(v.retain());
+                _ = try pair.asArray().value.push(k.retain());
+                _ = try pair.asArray().value.push(v.retain());
                 try out.append(arena, pair);
             }
             break :blk try out.toOwnedSlice(arena);
@@ -88,7 +88,7 @@ pub fn iterableItems(self: *Interpreter, value: JSValue) anyerror![]const JSValu
             const out = try arena.alloc(JSValue, box.value.len);
             var i: usize = 0;
             while (i < box.value.len) : (i += 1) {
-                out[i] = try builtins.typedElemGet(self, box.value.kind, &box.value.owner.array_buffer.value, box.value.byte_offset, box.value.len, i);
+                out[i] = try builtins.typedElemGet(self, box.value.kind, &box.value.owner.asArrayBuffer().value, box.value.byte_offset, box.value.len, i);
             }
             break :blk out;
         },
@@ -105,15 +105,15 @@ pub fn resolveIterator(self: *Interpreter, obj: JSValue) anyerror!JSValue {
         const key = try self.encodeKey(sym);
         defer self.gc_allocator.free(key);
         const method = try self.getProperty(obj, key);
-        if (method == .function) {
-            const iter = try method.function.value.call(method.function.value.ctx, arena, obj, &.{});
-            if (iter != .object) return self.throwError(.type_error, "Result of the Symbol.iterator method is not an object", .{});
+        if (method.isFunction()) {
+            const iter = try method.asFunction().value.call(method.asFunction().value.ctx, arena, obj, &.{});
+            if (!iter.isObject()) return self.throwError(.type_error, "Result of the Symbol.iterator method is not an object", .{});
             return iter;
         }
     }
     // Fallback: the object is itself an iterator (generator objects,
     // hand-written `{ next() {} }`).
-    if ((try self.getProperty(obj, "next")) == .function) return obj;
+    if ((try self.getProperty(obj, "next")).isFunction()) return obj;
     return self.throwError(.type_error, "{s} is not iterable", .{obj.typeOf()});
 }
 
@@ -129,9 +129,9 @@ pub fn resolveAsyncIterator(self: *Interpreter, obj: JSValue) anyerror!JSValue {
         const key = try self.encodeKey(sym);
         defer self.gc_allocator.free(key);
         const method = try self.getProperty(obj, key);
-        if (method == .function) {
-            const iter = try method.function.value.call(method.function.value.ctx, arena, obj, &.{});
-            if (iter != .object) return self.throwError(.type_error, "Result of the Symbol.asyncIterator method is not an object", .{});
+        if (method.isFunction()) {
+            const iter = try method.asFunction().value.call(method.asFunction().value.ctx, arena, obj, &.{});
+            if (!iter.isObject()) return self.throwError(.type_error, "Result of the Symbol.asyncIterator method is not an object", .{});
             return iter;
         }
     }
@@ -142,11 +142,11 @@ pub fn resolveAsyncIterator(self: *Interpreter, obj: JSValue) anyerror!JSValue {
 pub fn drainIterator(self: *Interpreter, iter: JSValue) anyerror![]const JSValue {
     const arena = self.gc_allocator;
     const next_fn = try self.getProperty(iter, "next");
-    if (next_fn != .function) return self.throwError(.type_error, "iterator.next is not a function", .{});
+    if (!next_fn.isFunction()) return self.throwError(.type_error, "iterator.next is not a function", .{});
     var out: std.ArrayList(JSValue) = .empty;
     while (true) {
-        const step = try next_fn.function.value.call(next_fn.function.value.ctx, arena, iter, &.{});
-        if (step != .object) return self.throwError(.type_error, "Iterator result {s} is not an object", .{step.typeOf()});
+        const step = try next_fn.asFunction().value.call(next_fn.asFunction().value.ctx, arena, iter, &.{});
+        if (!step.isObject()) return self.throwError(.type_error, "Iterator result {s} is not an object", .{step.typeOf()});
         if (coercion.isTruthy(try self.getProperty(step, "done"))) break;
         try out.append(arena, try self.getProperty(step, "value"));
     }
@@ -166,15 +166,15 @@ pub fn evalYieldDelegate(self: *Interpreter, env: *Environment, fs: *FiberState,
 
     // Iterator-protocol object: forward next(resume), return the
     // completion value.
-    if (iterable == .object) {
+    if (iterable.isObject()) {
         const next_fn = try self.getProperty(iterable, "next");
         defer next_fn.deinit();
-        if (next_fn == .function) {
+        if (next_fn.isFunction()) {
             var resume_value = JSValue.UNDEFINED;
             while (true) {
-                const step = try next_fn.function.value.call(next_fn.function.value.ctx, arena, iterable, &.{resume_value});
+                const step = try next_fn.asFunction().value.call(next_fn.asFunction().value.ctx, arena, iterable, &.{resume_value});
                 defer step.deinit();
-                if (step != .object) return self.throwError(.type_error, "Iterator result {s} is not an object", .{step.typeOf()});
+                if (!step.isObject()) return self.throwError(.type_error, "Iterator result {s} is not an object", .{step.typeOf()});
                 const done = try self.getProperty(step, "done");
                 defer done.deinit();
                 if (coercion.isTruthy(done)) {
@@ -259,7 +259,7 @@ pub fn bindPattern(self: *Interpreter, env: *Environment, pattern: *const zstate
                 // an item (see iterableItems' ownership note).
                 var from_default = false;
                 defer if (from_default) v.deinit();
-                if (v == .@"undefined") {
+                if (v.isUndefined()) {
                     if (el.default) |def| {
                         v = try self.evalExpression(env, def);
                         from_default = true;
@@ -277,15 +277,15 @@ pub fn bindPattern(self: *Interpreter, env: *Environment, pattern: *const zstate
                 defer rest_arr.deinit();
                 if (arr_pat.elements.len < items.len) {
                     for (items[arr_pat.elements.len..]) |item| {
-                        _ = try rest_arr.array.value.push(item.retain());
+                        _ = try rest_arr.asArray().value.push(item.retain());
                     }
                 }
                 try self.bindPattern(env, rest_pat, rest_arr, mode);
             }
         },
         .object => |obj_pat| {
-            if (value == .@"undefined" or value == .@"null") {
-                const what: []const u8 = if (value == .@"null") "null" else "undefined";
+            if (value.isUndefined() or value.isNull()) {
+                const what: []const u8 = if (value.isNull()) "null" else "undefined";
                 if (obj_pat.properties.len > 0) {
                     return self.throwError(.type_error, "Cannot destructure property '{s}' of '{s}' as it is {s}.", .{ obj_pat.properties[0].key, what, what });
                 }
@@ -299,7 +299,7 @@ pub fn bindPattern(self: *Interpreter, env: *Environment, pattern: *const zstate
                 // Owned either way (getProperty's, or the default's) and
                 // bindPattern retains what it binds: always released here.
                 defer v.deinit();
-                if (v == .@"undefined") {
+                if (v.isUndefined()) {
                     if (prop.default) |def| {
                         v = try self.evalExpression(env, def);
                         // NamedEvaluation: `{a = AnonFn}` names it "a".
@@ -316,7 +316,7 @@ pub fn bindPattern(self: *Interpreter, env: *Environment, pattern: *const zstate
                 // object (narrowed -- real JS copies own enumerable
                 // props of the coerced object).
                 var rest_obj = try self.ordinaryObject();
-                if (value == .proxy) {
+                if (value.isProxy()) {
                     const ks = try builtins.ownEnumerableKeys(self, arena, value);
                     defer builtins.freeOwnedKeys(arena, ks);
                     outer_p: for (ks) |k| {
@@ -324,16 +324,16 @@ pub fn bindPattern(self: *Interpreter, env: *Environment, pattern: *const zstate
                         for (obj_pat.properties) |prop| {
                             if (std.mem.eql(u8, prop.key, k)) continue :outer_p;
                         }
-                        try rest_obj.object.value.set(k, try self.getProperty(value, k));
+                        try rest_obj.asObject().value.set(k, try self.getProperty(value, k));
                     }
-                } else if (value == .object) {
-                    const keys = try value.object.value.keys(arena);
+                } else if (value.isObject()) {
+                    const keys = try value.asObject().value.keys(arena);
                     defer arena.free(keys);
                     outer: for (keys) |k| {
                         for (obj_pat.properties) |prop| {
                             if (std.mem.eql(u8, prop.key, k)) continue :outer;
                         }
-                        try rest_obj.object.value.set(k, value.object.value.get(k).?.retain());
+                        try rest_obj.asObject().value.set(k, value.asObject().value.get(k).?.retain());
                     }
                 }
                 switch (mode) {
@@ -368,7 +368,7 @@ pub fn destructuringAssign(self: *Interpreter, env: *Environment, target: *zpars
                     // assignTo retains what it stores.
                     defer rest_arr.deinit();
                     if (i < items.len) {
-                        for (items[i..]) |item| _ = try rest_arr.array.value.push(item.retain());
+                        for (items[i..]) |item| _ = try rest_arr.asArray().value.push(item.retain());
                     }
                     try self.destructuringAssignTarget(env, el.data.spread, rest_arr);
                     break;
@@ -380,7 +380,7 @@ pub fn destructuringAssign(self: *Interpreter, env: *Environment, target: *zpars
                 var from_default = false;
                 defer if (from_default) v.deinit();
                 if (el.data == .assignment and el.data.assignment.op == .assign) {
-                    if (v == .@"undefined") {
+                    if (v.isUndefined()) {
                         v = try self.evalExpression(env, el.data.assignment.value);
                         from_default = true;
                     }
@@ -390,8 +390,8 @@ pub fn destructuringAssign(self: *Interpreter, env: *Environment, target: *zpars
             }
         },
         .object_literal => |elements| {
-            if (value == .@"undefined" or value == .@"null") {
-                const what: []const u8 = if (value == .@"null") "null" else "undefined";
+            if (value.isUndefined() or value.isNull()) {
+                const what: []const u8 = if (value.isNull()) "null" else "undefined";
                 const first_key: ?[]const u8 = for (elements) |el| {
                     switch (el) {
                         .property => |p| if (!p.computed and p.key.data == .identifier) break p.key.data.identifier,
@@ -421,7 +421,7 @@ pub fn destructuringAssign(self: *Interpreter, env: *Environment, target: *zpars
                         // always released here.
                         defer v.deinit();
                         if (el_target.data == .assignment and el_target.data.assignment.op == .assign) {
-                            if (v == .@"undefined") {
+                            if (v.isUndefined()) {
                                 v = try self.evalExpression(env, el_target.data.assignment.value);
                             }
                             el_target = el_target.data.assignment.target;
@@ -438,7 +438,7 @@ pub fn destructuringAssign(self: *Interpreter, env: *Environment, target: *zpars
                         var rest_obj = try self.ordinaryObject();
                         // assignTo retains what it stores.
                         defer rest_obj.deinit();
-                        if (value == .proxy) {
+                        if (value.isProxy()) {
                             const ks = try builtins.ownEnumerableKeys(self, arena, value);
                             defer builtins.freeOwnedKeys(arena, ks);
                             outer_p: for (ks) |k| {
@@ -446,16 +446,16 @@ pub fn destructuringAssign(self: *Interpreter, env: *Environment, target: *zpars
                                 for (consumed.items) |c| {
                                     if (std.mem.eql(u8, c.key, k)) continue :outer_p;
                                 }
-                                try rest_obj.object.value.set(k, try self.getProperty(value, k));
+                                try rest_obj.asObject().value.set(k, try self.getProperty(value, k));
                             }
-                        } else if (value == .object) {
-                            const keys = try value.object.value.keys(arena);
+                        } else if (value.isObject()) {
+                            const keys = try value.asObject().value.keys(arena);
                             defer arena.free(keys);
                             outer: for (keys) |k| {
                                 for (consumed.items) |c| {
                                     if (std.mem.eql(u8, c.key, k)) continue :outer;
                                 }
-                                try rest_obj.object.value.set(k, value.object.value.get(k).?.retain());
+                                try rest_obj.asObject().value.set(k, value.asObject().value.get(k).?.retain());
                             }
                         }
                         try self.destructuringAssignTarget(env, arg, rest_obj);
@@ -542,7 +542,7 @@ pub fn forIterationStep(self: *Interpreter, env: *Environment, binding: zstateme
 pub fn closeIterator(self: *Interpreter, iterator: JSValue) anyerror!void {
     const ret = try self.getProperty(iterator, "return");
     defer ret.deinit();
-    if (ret == .undefined or ret == .null) return;
+    if (ret.isUndefined() or ret.isNull()) return;
     const r = try self.callValue(ret, iterator, &.{}, "return");
     defer r.deinit();
     if (!@import("builtin_helpers.zig").isObjectLike(r)) return self.throwError(.type_error, "Iterator result {s} is not an object", .{r.typeOf()});
@@ -565,7 +565,7 @@ pub fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zs
     const fs: ?*FiberState = if (is_await) (self.current_fiber orelse return error.NotImplemented) else null;
     const iterable = try self.evalExpression(env, head.iterable);
     defer iterable.deinit();
-    switch (iterable) {
+    switch (iterable.unpack()) {
         .array => |box| {
             // Live iteration (ArrayIterator semantics): re-read length
             // each step and retain the element, so a body that mutates
@@ -610,8 +610,8 @@ pub fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zs
                 const v = (box.value.get(k) orelse JSValue.UNDEFINED).retain();
                 i += 1;
                 var entry = try self.gcNewArray();
-                _ = try entry.array.value.push(k);
-                _ = try entry.array.value.push(v);
+                _ = try entry.asArray().value.push(k);
+                _ = try entry.asArray().value.push(v);
                 if (is_await) {
                     const awaited = try self.awaitValue(fs.?, entry);
                     entry.deinit();
@@ -652,7 +652,7 @@ pub fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zs
             const iter = if (is_await) try self.resolveAsyncIterator(iterable) else try self.resolveIterator(iterable);
             const next_fn = try self.getProperty(iter, "next");
             while (true) {
-                var step_result = try next_fn.function.value.call(next_fn.function.value.ctx, arena, iter, &.{});
+                var step_result = try next_fn.asFunction().value.call(next_fn.asFunction().value.ctx, arena, iter, &.{});
                 // A real async iterator's next() returns a PROMISE of
                 // {value,done}; the AsyncFromSyncIterator fallback
                 // (plain Symbol.iterator) returns the {value,done}
@@ -660,13 +660,13 @@ pub fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zs
                 // is a harmless one-tick round trip, so this one check
                 // handles both without needing to track which case
                 // resolveAsyncIterator picked.
-                if (is_await and step_result == .promise) {
+                if (is_await and step_result.isPromise()) {
                     const awaited = try self.awaitValue(fs.?, step_result);
                     step_result.deinit();
                     step_result = awaited;
                 }
                 defer step_result.deinit();
-                if (step_result != .object) {
+                if (!step_result.isObject()) {
                     return self.throwError(.type_error, "Iterator result {s} is not an object", .{step_result.typeOf()});
                 }
                 const done = try self.getProperty(step_result, "done");
@@ -707,7 +707,7 @@ pub fn evalForIn(self: *Interpreter, env: *Environment, head: anytype, body: *zs
     const arena = self.gc_allocator;
     const target = try self.evalExpression(env, head.object);
     defer target.deinit();
-    switch (target) {
+    switch (target.unpack()) {
         .object => |box| {
             var seen: std.StringHashMapUnmanaged(void) = .empty;
             defer seen.deinit(arena);
@@ -718,7 +718,7 @@ pub fn evalForIn(self: *Interpreter, env: *Environment, head: anytype, body: *zs
             // bag walk below would miss them entirely -- same gap as
             // ownEnumerableKeys (see its global_builtin_names comment).
             if (self.global_object) |go| {
-                if (target.object == go.object) {
+                if (target.asObject() == go.asObject()) {
                     if (self.global_var_env) |gve| {
                         for (gve.bindings.items) |binding| {
                             if (seen.contains(binding.name)) continue;
@@ -771,7 +771,7 @@ pub fn evalForIn(self: *Interpreter, env: *Environment, head: anytype, body: *zs
                 const key_str = try std.fmt.allocPrint(arena, "{d}", .{i});
                 try owned_idx_keys.append(arena, key_str);
                 if (bag_opt) |bag| {
-                    if (bag.object.value.getOwnRecord(key_str)) |rec| {
+                    if (bag.asObject().value.getOwnRecord(key_str)) |rec| {
                         if (!rec.descriptor.enumerable) {
                             try seen.put(arena, key_str, {});
                             continue;
@@ -782,7 +782,7 @@ pub fn evalForIn(self: *Interpreter, env: *Environment, head: anytype, body: *zs
                 try keys_list.append(arena, key_str);
             }
             if (bag_opt) |bag| {
-                const ks = try bag.object.value.keys(arena);
+                const ks = try bag.asObject().value.keys(arena);
                 defer arena.free(ks);
                 for (ks) |k| {
                     if (Interpreter.isSymbolKey(k)) continue;
@@ -792,7 +792,7 @@ pub fn evalForIn(self: *Interpreter, env: *Environment, head: anytype, body: *zs
                     }
                 }
             }
-            var current: ?*const @TypeOf(self.protos.array.object.value) = &self.protos.array.object.value;
+            var current: ?*const @TypeOf(self.protos.array.asObject().value) = &self.protos.array.asObject().value;
             while (current) |o| : (current = o.getPrototype()) {
                 const ks = try o.keys(arena);
                 defer arena.free(ks);
@@ -812,9 +812,9 @@ pub fn evalForIn(self: *Interpreter, env: *Environment, head: anytype, body: *zs
             }
         },
         .date, .promise, .map, .set, .@"error", .regex, .array_buffer, .data_view => {
-            const bag_opt = if (target == .regex) self.regexProps(target) else self.extraProps(target);
+            const bag_opt = if (target.isRegex()) self.regexProps(target) else self.extraProps(target);
             if (bag_opt) |bag| {
-                const ks = try bag.object.value.keys(arena);
+                const ks = try bag.asObject().value.keys(arena);
                 defer arena.free(ks);
                 for (ks) |k| {
                     if (Interpreter.isSymbolKey(k)) continue;

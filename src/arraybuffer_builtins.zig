@@ -96,7 +96,7 @@ fn arrayBufferConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSV
     const self = interp(ctx);
     if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor ArrayBuffer requires 'new'", .{});
     const len_arg = arg(args, 0);
-    const byte_length: usize = if (len_arg == .undefined) 0 else try toByteIndexArg(self, len_arg, "length");
+    const byte_length: usize = if (len_arg.tag() == .undefined) 0 else try toByteIndexArg(self, len_arg, "length");
     const ab = try self.gcNewArrayBuffer(byte_length);
     errdefer ab.deinit();
     if (self.construct_proto) |proto| {
@@ -117,7 +117,7 @@ fn sharedArrayBufferConstructor(ctx: *anyopaque, allocator: Allocator, this_valu
     const self = interp(ctx);
     if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor SharedArrayBuffer requires 'new'", .{});
     const len_arg = arg(args, 0);
-    const byte_length: usize = if (len_arg == .undefined) 0 else try toByteIndexArg(self, len_arg, "length");
+    const byte_length: usize = if (len_arg.tag() == .undefined) 0 else try toByteIndexArg(self, len_arg, "length");
     const sab = try self.gcNewSharedArrayBuffer(byte_length);
     errdefer sab.deinit();
     if (self.construct_proto) |proto| {
@@ -138,13 +138,13 @@ fn sharedArrayBufferConstructor(ctx: *anyopaque, allocator: Allocator, this_valu
 fn arrayBufferSlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const self = interp(ctx);
-    if (this_value != .array_buffer) return self.throwError(.type_error, "ArrayBuffer.prototype.slice called on incompatible receiver", .{});
-    const src = &this_value.array_buffer.value;
+    if (this_value.tag() != .array_buffer) return self.throwError(.type_error, "ArrayBuffer.prototype.slice called on incompatible receiver", .{});
+    const src = &this_value.asArrayBuffer().value;
     const len = src.byteLength();
     const start_arg = arg(args, 0);
     const end_arg = arg(args, 1);
-    const start: usize = if (start_arg == .undefined) 0 else try toByteIndexArg(self, start_arg, "start");
-    const end: usize = if (end_arg == .undefined) len else try toByteIndexArg(self, end_arg, "end");
+    const start: usize = if (start_arg.tag() == .undefined) 0 else try toByteIndexArg(self, start_arg, "start");
+    const end: usize = if (end_arg.tag() == .undefined) len else try toByteIndexArg(self, end_arg, "end");
     const first = @min(start, len);
     const final = @min(end, len);
     const new_len = if (final > first) final - first else 0;
@@ -152,17 +152,17 @@ fn arrayBufferSlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
         defer ctor.deinit();
         const new_buf = try self.constructValue(ctor, &.{JSValue.fromNumber(@floatFromInt(new_len))}, "ArrayBuffer");
         errdefer new_buf.deinit();
-        if (new_buf != .array_buffer or new_buf.array_buffer.value.is_shared != src.is_shared) {
+        if (new_buf.tag() != .array_buffer or new_buf.asArrayBuffer().value.is_shared != src.is_shared) {
             return self.throwError(.type_error, "Species constructor did not return a compatible ArrayBuffer", .{});
         }
-        if (new_buf.array_buffer == this_value.array_buffer) {
+        if (new_buf.asArrayBuffer() == this_value.asArrayBuffer()) {
             return self.throwError(.type_error, "Species constructor returned the same ArrayBuffer", .{});
         }
-        if (new_buf.array_buffer.value.byteLength() < new_len) {
+        if (new_buf.asArrayBuffer().value.byteLength() < new_len) {
             return self.throwError(.type_error, "Species constructor returned an ArrayBuffer that is too small", .{});
         }
         if (new_len > 0) {
-            @memcpy(new_buf.array_buffer.value.bytes[0..new_len], src.bytes[first .. first + new_len]);
+            @memcpy(new_buf.asArrayBuffer().value.bytes[0..new_len], src.bytes[first .. first + new_len]);
         }
         return new_buf;
     }
@@ -177,13 +177,13 @@ fn dataViewConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
     const self = interp(ctx);
     if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor DataView requires 'new'", .{});
     const buffer_arg = arg(args, 0);
-    if (buffer_arg != .array_buffer) {
+    if (buffer_arg.tag() != .array_buffer) {
         return self.throwError(.type_error, "First argument to DataView constructor must be an ArrayBuffer", .{});
     }
     const offset_arg = arg(args, 1);
-    const byte_offset: usize = if (offset_arg == .undefined) 0 else try toByteIndexArg(self, offset_arg, "byteOffset");
+    const byte_offset: usize = if (offset_arg.tag() == .undefined) 0 else try toByteIndexArg(self, offset_arg, "byteOffset");
     const length_arg = arg(args, 2);
-    const byte_length: ?usize = if (length_arg == .undefined) null else try toByteIndexArg(self, length_arg, "byteLength");
+    const byte_length: ?usize = if (length_arg.tag() == .undefined) null else try toByteIndexArg(self, length_arg, "byteLength");
     const dv = self.gcNewDataView(buffer_arg.retain(), byte_offset, byte_length) catch |e| return self.bufferErr(e);
     errdefer dv.deinit();
     if (self.construct_proto) |proto| {
@@ -195,8 +195,8 @@ fn dataViewConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
 }
 
 fn requireDataView(self: *Interpreter, v: JSValue, method: []const u8) anyerror!zbuffer.DataView {
-    if (v != .data_view) return self.throwError(.type_error, "DataView.prototype.{s} called on incompatible receiver", .{method});
-    return v.data_view.value.view;
+    if (v.tag() != .data_view) return self.throwError(.type_error, "DataView.prototype.{s} called on incompatible receiver", .{method});
+    return v.asDataView().value.view;
 }
 
 fn dataViewGetInt8(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -368,7 +368,7 @@ fn dataViewSetBigInt64(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
     const x = try toBigIntValue(self, self.gc_allocator, arg(args, 1));
     defer x.deinit();
-    const value = try toI64Wrapped(self, x.bigint.value);
+    const value = try toI64Wrapped(self, x.asBigInt().value);
     dv.setBigInt64(offset, value, coercion.isTruthy(arg(args, 2))) catch |e| return self.bufferErr(e);
     return JSValue.UNDEFINED;
 }
@@ -379,7 +379,7 @@ fn dataViewSetBigUint64(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
     const x = try toBigIntValue(self, self.gc_allocator, arg(args, 1));
     defer x.deinit();
-    const value = try toU64Wrapped(self, x.bigint.value);
+    const value = try toU64Wrapped(self, x.asBigInt().value);
     dv.setBigUint64(offset, value, coercion.isTruthy(arg(args, 2))) catch |e| return self.bufferErr(e);
     return JSValue.UNDEFINED;
 }
@@ -402,7 +402,7 @@ fn typedArrayCtx(ctx: *anyopaque) *TypedArrayCtorCtx {
 }
 
 pub fn isTypedArrayConstructor(v: JSValue) bool {
-    return v == .function and v.function.value.call == typedArrayConstructor;
+    return v.isFunction() and v.asFunction().value.call == typedArrayConstructor;
 }
 
 fn constructedTypedArray(self: *Interpreter, buf: JSValue, byte_offset: usize, len: ?usize, kind: zvalue.TypedKind) anyerror!JSValue {
@@ -431,25 +431,25 @@ fn typedArrayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
     const elem_size = kind.elemSize();
     const first = arg(args, 0);
 
-    if (first == .array_buffer) {
-        const byte_offset: usize = if (arg(args, 1) == .undefined) 0 else try toByteIndexArg(self, arg(args, 1), "byteOffset");
+    if (first.tag() == .array_buffer) {
+        const byte_offset: usize = if (arg(args, 1).tag() == .undefined) 0 else try toByteIndexArg(self, arg(args, 1), "byteOffset");
         const length_arg = arg(args, 2);
-        const len: ?usize = if (length_arg == .undefined) null else try toByteIndexArg(self, length_arg, "length");
+        const len: ?usize = if (length_arg.tag() == .undefined) null else try toByteIndexArg(self, length_arg, "length");
         return constructedTypedArray(self, first.retain(), byte_offset, len, kind);
     }
 
     if (!builtin_helpers.isObjectLike(first)) {
-        const n: usize = if (first == .undefined) 0 else try toByteIndexArg(self, first, "length");
+        const n: usize = if (first.tag() == .undefined) 0 else try toByteIndexArg(self, first, "length");
         const buf = self.gcNewArrayBuffer(n * elem_size) catch return self.throwError(.range_error, "Invalid typed array length: {d}", .{n});
         // gcNewTypedArray takes `buf` (its owner) even when it fails.
         return constructedTypedArray(self, buf, 0, n, kind);
     }
 
-    if (first == .typed_array) {
-        if (first.typed_array.value.kind.isBigInt() != kind.isBigInt()) {
+    if (first.tag() == .typed_array) {
+        if (first.asTypedArray().value.kind.isBigInt() != kind.isBigInt()) {
             return self.throwError(.type_error, "Cannot mix BigInt and other types, use explicit conversions", .{});
         }
-        const src_len = first.typed_array.value.len;
+        const src_len = first.asTypedArray().value.len;
         const buf = self.gcNewArrayBuffer(src_len * elem_size) catch return self.throwError(.range_error, "Invalid typed array length: {d}", .{src_len});
         const ta = try constructedTypedArray(self, buf, 0, src_len, kind);
         errdefer ta.deinit();
@@ -457,7 +457,7 @@ fn typedArrayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
         while (i < src_len) : (i += 1) {
             const v = try taGet(self, first, i);
             defer v.deinit();
-            try typedElemSet(self, kind, &buf.array_buffer.value, 0, src_len, i, v);
+            try typedElemSet(self, kind, &buf.asArrayBuffer().value, 0, src_len, i, v);
         }
         return ta;
     }
@@ -470,8 +470,8 @@ fn typedArrayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
     }
     defer using_iter.deinit();
 
-    if (using_iter != .undefined and using_iter != .null) {
-        if (using_iter != .function) return self.throwError(.type_error, "Symbol.iterator is not a function", .{});
+    if (using_iter.tag() != .undefined and using_iter.tag() != .null) {
+        if (using_iter.tag() != .function) return self.throwError(.type_error, "Symbol.iterator is not a function", .{});
         const iter = try self.callValue(using_iter, first, &.{}, "[Symbol.iterator]");
         defer iter.deinit();
         if (!builtin_helpers.isObjectLike(iter)) return self.throwError(.type_error, "Result of the Symbol.iterator method is not an object", .{});
@@ -484,7 +484,7 @@ fn typedArrayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
         const ta = try constructedTypedArray(self, buf, 0, values.len, kind);
         errdefer ta.deinit();
         for (values, 0..) |item, i| {
-            try typedElemSet(self, kind, &buf.array_buffer.value, 0, values.len, i, item);
+            try typedElemSet(self, kind, &buf.asArrayBuffer().value, 0, values.len, i, item);
         }
         return ta;
     }
@@ -501,7 +501,7 @@ fn typedArrayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
         defer allocator.free(key);
         const v = try self.getProperty(first, key);
         defer v.deinit();
-        try typedElemSet(self, kind, &buf.array_buffer.value, 0, len, i, v);
+        try typedElemSet(self, kind, &buf.asArrayBuffer().value, 0, len, i, v);
     }
     return ta;
 }
@@ -516,7 +516,7 @@ fn typedArrayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
 // none of the functions below `.retain()` what `taGet` hands them. =====
 
 fn isTypedArrayDetached(this_value: JSValue) bool {
-    return this_value == .typed_array and builtin_helpers.isTypedArrayDetached(&this_value.typed_array.value);
+    return this_value.tag() == .typed_array and builtin_helpers.isTypedArrayDetached(&this_value.asTypedArray().value);
 }
 
 fn requireTypedArray(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!void {
@@ -527,20 +527,20 @@ fn requireTypedArray(ctx: *anyopaque, this_value: JSValue, method: []const u8) a
 }
 
 fn taLen(this_value: JSValue) usize {
-    return this_value.typed_array.value.len;
+    return this_value.asTypedArray().value.len;
 }
 
 fn taBuf(this_value: JSValue) *zbuffer.ArrayBuffer {
-    return &this_value.typed_array.value.owner.array_buffer.value;
+    return &this_value.asTypedArray().value.owner.asArrayBuffer().value;
 }
 
 fn taGet(self: *Interpreter, this_value: JSValue, i: usize) anyerror!JSValue {
-    const box = this_value.typed_array.value;
+    const box = this_value.asTypedArray().value;
     return typedElemGet(self, box.kind, taBuf(this_value), box.byte_offset, box.len, i);
 }
 
 fn taWrite(self: *Interpreter, this_value: JSValue, i: usize, v: JSValue) anyerror!void {
-    const box = this_value.typed_array.value;
+    const box = this_value.asTypedArray().value;
     return typedElemSet(self, box.kind, taBuf(this_value), box.byte_offset, box.len, i, v);
 }
 
@@ -555,20 +555,20 @@ fn newSameKindTypedArray(self: *Interpreter, kind: zvalue.TypedKind, len: usize)
 
 fn speciesConstructor(self: *Interpreter, exemplar: JSValue) anyerror!?JSValue {
     const c = try self.getProperty(exemplar, "constructor");
-    if (c == .undefined) return null;
+    if (c.tag() == .undefined) return null;
     defer c.deinit();
     if (!builtin_helpers.isObjectLike(c)) return self.throwError(.type_error, "Constructor is not an object", .{});
     const key = try @import("regex_builtins.zig").wellKnownKey(self, "species");
     defer self.gc_allocator.free(key);
     const s = try self.getProperty(c, key);
-    if (s == .undefined or s == .null) return null;
+    if (s.tag() == .undefined or s.tag() == .null) return null;
     if (self.isConstructor(s)) return s;
     s.deinit();
     return self.throwError(.type_error, "Species constructor is not a constructor", .{});
 }
 
 fn typedArraySpeciesCreate(self: *Interpreter, exemplar: JSValue, len: usize) anyerror!JSValue {
-    const box = exemplar.typed_array.value;
+    const box = exemplar.asTypedArray().value;
     if (try speciesConstructor(self, exemplar)) |ctor| {
         defer ctor.deinit();
         return typedArrayCreateFromConstructor(self, ctor, len);
@@ -592,7 +592,7 @@ fn taMap(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []con
     const cb = try requireCallback(ctx, args);
     const this_arg = arg(args, 1);
     const self = interp(ctx);
-    const box = this_value.typed_array.value;
+    const box = this_value.asTypedArray().value;
     const len = box.len;
     const result = try typedArraySpeciesCreate(self, this_value, len);
     errdefer result.deinit();
@@ -610,7 +610,7 @@ fn taFilter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
     const cb = try requireCallback(ctx, args);
     const this_arg = arg(args, 1);
     const self = interp(ctx);
-    const box = this_value.typed_array.value;
+    const box = this_value.asTypedArray().value;
     const len = box.len;
     var kept: std.ArrayList(JSValue) = .empty;
     defer {
@@ -728,7 +728,7 @@ fn taReduce(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
     }
     while (i < len) : (i += 1) {
         const item = try taGet(self, this_value, i);
-        acc = try cb.function.value.call(cb.function.value.ctx, allocator, JSValue.UNDEFINED, &.{ acc, item, JSValue.fromNumber(@floatFromInt(i)), this_value });
+        acc = try cb.asFunction().value.call(cb.asFunction().value.ctx, allocator, JSValue.UNDEFINED, &.{ acc, item, JSValue.fromNumber(@floatFromInt(i)), this_value });
     }
     return acc;
 }
@@ -749,7 +749,7 @@ fn taReduceRight(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
             have = true;
             continue;
         }
-        acc = try cb.function.value.call(cb.function.value.ctx, allocator, JSValue.UNDEFINED, &.{ acc, item, JSValue.fromNumber(@floatFromInt(i)), this_value });
+        acc = try cb.asFunction().value.call(cb.asFunction().value.ctx, allocator, JSValue.UNDEFINED, &.{ acc, item, JSValue.fromNumber(@floatFromInt(i)), this_value });
     }
     if (!have) return self.throwError(.type_error, "Reduce of empty array with no initial value", .{});
     return acc;
@@ -769,7 +769,7 @@ fn taIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     var i: usize = start;
     while (i < len) : (i += 1) {
         const elem = try taGet(self, this_value, i);
-        if (elem != .undefined and zvalue.equality.strictEquals(elem, target)) return JSValue.fromNumber(@floatFromInt(i));
+        if (elem.tag() != .undefined and zvalue.equality.strictEquals(elem, target)) return JSValue.fromNumber(@floatFromInt(i));
     }
     return JSValue.fromNumber(-1);
 }
@@ -808,7 +808,7 @@ fn taLastIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     while (i > 0) {
         i -= 1;
         const elem = try taGet(self, this_value, i);
-        if (elem != .undefined and zvalue.equality.strictEquals(elem, target)) return JSValue.fromNumber(@floatFromInt(i));
+        if (elem.tag() != .undefined and zvalue.equality.strictEquals(elem, target)) return JSValue.fromNumber(@floatFromInt(i));
     }
     return JSValue.fromNumber(-1);
 }
@@ -846,7 +846,7 @@ fn taJoin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     // rule as Array.prototype.join (see array_builtins.zig's arrayJoin
     // and its comment -- `[1,2].join(null)` is "1null2", not "1,2").
     const sep_arg = arg(args, 0);
-    const owned_sep: ?[]const u8 = if (sep_arg == .undefined) null else try self.toDisplayStringJS(allocator, sep_arg);
+    const owned_sep: ?[]const u8 = if (sep_arg.tag() == .undefined) null else try self.toDisplayStringJS(allocator, sep_arg);
     defer if (owned_sep) |s| allocator.free(s);
     const sep = owned_sep orelse ",";
     return taJoinWith(self, allocator, this_value, sep);
@@ -866,7 +866,7 @@ fn taToLocaleString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
         defer elem.deinit();
         const tl_fn = try self.getProperty(elem, "toLocaleString");
         defer tl_fn.deinit();
-        if (tl_fn != .function and tl_fn != .proxy) {
+        if (tl_fn.tag() != .function and tl_fn.tag() != .proxy) {
             return self.throwError(.type_error, "toLocaleString is not a function", .{});
         }
         const res = try self.callValue(tl_fn, elem, &.{}, "toLocaleString");
@@ -888,15 +888,15 @@ fn taFill(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     _ = allocator;
     try requireTypedArray(ctx, this_value, "fill");
     const self = interp(ctx);
-    const box = this_value.typed_array.value;
+    const box = this_value.asTypedArray().value;
     const len = box.len;
     const coerced_val: JSValue = if (box.kind.isBigInt())
         try toBigIntValue(self, self.gc_allocator, arg(args, 0))
     else
         JSValue.fromNumber(try toNumberStrict(self, arg(args, 0)));
     defer coerced_val.deinit();
-    const start = if (arg(args, 1) == .undefined) 0 else normIndex(try toNumberStrict(self, arg(args, 1)), len);
-    const end = if (arg(args, 2) == .undefined) len else normIndex(try toNumberStrict(self, arg(args, 2)), len);
+    const start = if (arg(args, 1).tag() == .undefined) 0 else normIndex(try toNumberStrict(self, arg(args, 1)), len);
+    const end = if (arg(args, 2).tag() == .undefined) len else normIndex(try toNumberStrict(self, arg(args, 2)), len);
     if (isTypedArrayDetached(this_value)) return self.throwError(.type_error, "Cannot perform TypedArray.prototype.fill on a detached ArrayBuffer", .{});
     var i = start;
     while (i < end) : (i += 1) try taWrite(self, this_value, i, coerced_val);
@@ -908,8 +908,8 @@ fn taCopyWithin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     const self = interp(ctx);
     const len = taLen(this_value);
     const target = normIndex(try toNumberStrict(self, arg(args, 0)), len);
-    const start = if (arg(args, 1) == .undefined) 0 else normIndex(try toNumberStrict(self, arg(args, 1)), len);
-    const end = if (arg(args, 2) == .undefined) len else normIndex(try toNumberStrict(self, arg(args, 2)), len);
+    const start = if (arg(args, 1).tag() == .undefined) 0 else normIndex(try toNumberStrict(self, arg(args, 1)), len);
+    const end = if (arg(args, 2).tag() == .undefined) len else normIndex(try toNumberStrict(self, arg(args, 2)), len);
     if (start >= end or target >= len) return this_value.retain();
     const count = @min(end - start, len - target);
     // Snapshot first so overlapping source/destination ranges are always
@@ -949,24 +949,26 @@ fn taReverse(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
 /// `Array.prototype.sort`'s default STRING order -- with NaN always
 /// sorting last (real spec's SortCompare); BigInt kinds compare exactly.
 fn taSortLess(self: *Interpreter, allocator: Allocator, cmp: JSValue, kind: zvalue.TypedKind, a: JSValue, b: JSValue) anyerror!bool {
-    if (cmp == .function) {
-        const r = try cmp.function.value.call(cmp.function.value.ctx, allocator, JSValue.UNDEFINED, &.{ a, b });
+    if (cmp.tag() == .function) {
+        const r = try cmp.asFunction().value.call(cmp.asFunction().value.ctx, allocator, JSValue.UNDEFINED, &.{ a, b });
         defer r.deinit();
         return (try toNumberStrict(self, r)) < 0;
     }
-    if (kind.isBigInt()) return a.bigint.value.cmp(b.bigint.value) == .lt;
-    if (std.math.isNan(a.number)) return false;
-    if (std.math.isNan(b.number)) return true;
-    if (a.number == 0 and b.number == 0) return std.math.signbit(a.number) and !std.math.signbit(b.number);
-    return a.number < b.number;
+    if (kind.isBigInt()) return a.asBigInt().value.cmp(b.asBigInt().value) == .lt;
+    const an = a.asNumber();
+    const bn = b.asNumber();
+    if (std.math.isNan(an)) return false;
+    if (std.math.isNan(bn)) return true;
+    if (an == 0 and bn == 0) return std.math.signbit(an) and !std.math.signbit(bn);
+    return an < bn;
 }
 
 fn taSort(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireTypedArray(ctx, this_value, "sort");
     const self = interp(ctx);
     const cmp = arg(args, 0);
-    if (cmp != .undefined and cmp != .function) return self.throwError(.type_error, "The comparison function must be either a function or undefined", .{});
-    const box = this_value.typed_array.value;
+    if (cmp.tag() != .undefined and cmp.tag() != .function) return self.throwError(.type_error, "The comparison function must be either a function or undefined", .{});
+    const box = this_value.asTypedArray().value;
     const n = box.len;
     if (n < 2) return this_value.retain();
     const tmp = try allocator.alloc(JSValue, n);
@@ -997,7 +999,7 @@ fn taToReversed(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     _ = args;
     try requireTypedArray(ctx, this_value, "toReversed");
     const self = interp(ctx);
-    const box = this_value.typed_array.value;
+    const box = this_value.asTypedArray().value;
     const len = box.len;
     const result = try newSameKindTypedArray(self, box.kind, len);
     errdefer result.deinit();
@@ -1014,8 +1016,8 @@ fn taToSorted(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     try requireTypedArray(ctx, this_value, "toSorted");
     const self = interp(ctx);
     const cmp = arg(args, 0);
-    if (cmp != .undefined and cmp != .function) return self.throwError(.type_error, "The comparison function must be either a function or undefined", .{});
-    const box = this_value.typed_array.value;
+    if (cmp.tag() != .undefined and cmp.tag() != .function) return self.throwError(.type_error, "The comparison function must be either a function or undefined", .{});
+    const box = this_value.asTypedArray().value;
     const n = box.len;
     const tmp = try allocator.alloc(JSValue, n);
     defer allocator.free(tmp);
@@ -1046,7 +1048,7 @@ fn taWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     _ = allocator;
     try requireTypedArray(ctx, this_value, "with");
     const self = interp(ctx);
-    const box = this_value.typed_array.value;
+    const box = this_value.asTypedArray().value;
     const len = box.len;
     const rel = toIntSat(try toNumberStrict(self, arg(args, 0)));
     const actual_index: isize = if (rel >= 0) rel else @as(isize, @intCast(len)) + rel;
@@ -1082,17 +1084,17 @@ fn taSetMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     const self = interp(ctx);
     const len = taLen(this_value);
     const source = arg(args, 0);
-    const offset_raw = if (arg(args, 1) == .undefined) 0.0 else try toNumberStrict(self, arg(args, 1));
+    const offset_raw = if (arg(args, 1).tag() == .undefined) 0.0 else try toNumberStrict(self, arg(args, 1));
     const offset_int: f64 = if (std.math.isNan(offset_raw)) 0.0 else @trunc(offset_raw);
     if (offset_int < 0) return self.throwError(.range_error, "Offset is out of bounds", .{});
     if (isTypedArrayDetached(this_value)) return self.throwError(.type_error, "Cannot perform TypedArray.prototype.set on a detached ArrayBuffer", .{});
 
-    if (source == .typed_array) {
+    if (source.tag() == .typed_array) {
         if (isTypedArrayDetached(source)) return self.throwError(.type_error, "Cannot perform TypedArray.prototype.set on a detached ArrayBuffer", .{});
-        if (source.typed_array.value.kind.isBigInt() != this_value.typed_array.value.kind.isBigInt()) {
+        if (source.asTypedArray().value.kind.isBigInt() != this_value.asTypedArray().value.kind.isBigInt()) {
             return self.throwError(.type_error, "Cannot mix BigInt and other types, use explicit conversions", .{});
         }
-        const slen = source.typed_array.value.len;
+        const slen = source.asTypedArray().value.len;
         if (std.math.isPositiveInf(offset_int) or offset_int + @as(f64, @floatFromInt(slen)) > @as(f64, @floatFromInt(len))) {
             const msg = if (offset_int > @as(f64, @floatFromInt(len))) "Offset is out of bounds" else "Source is too large";
             return self.throwError(.range_error, "{s}", .{msg});
@@ -1109,7 +1111,7 @@ fn taSetMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
         return JSValue.UNDEFINED;
     }
 
-    if (source == .undefined or source == .null) {
+    if (source.tag() == .undefined or source.tag() == .null) {
         return self.throwError(.type_error, "Cannot convert undefined or null to object", .{});
     }
     const len_v = try self.getProperty(source, "length");
@@ -1137,10 +1139,10 @@ fn taSubarray(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     _ = allocator;
     try requireTypedArray(ctx, this_value, "subarray");
     const self = interp(ctx);
-    const box = this_value.typed_array.value;
+    const box = this_value.asTypedArray().value;
     const len = box.len;
-    const start = if (arg(args, 0) == .undefined) 0 else normIndex(try toNumberStrict(self, arg(args, 0)), len);
-    const end = if (arg(args, 1) == .undefined) len else normIndex(try toNumberStrict(self, arg(args, 1)), len);
+    const start = if (arg(args, 0).tag() == .undefined) 0 else normIndex(try toNumberStrict(self, arg(args, 0)), len);
+    const end = if (arg(args, 1).tag() == .undefined) len else normIndex(try toNumberStrict(self, arg(args, 1)), len);
     const count = if (end > start) end - start else 0;
     const new_byte_offset = box.byte_offset + start * box.kind.elemSize();
     if (try speciesConstructor(self, this_value)) |ctor| {
@@ -1151,7 +1153,7 @@ fn taSubarray(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
             JSValue.fromNumber(@floatFromInt(count)),
         }, "TypedArray");
         errdefer new_ta.deinit();
-        if (new_ta != .typed_array) return self.throwError(.type_error, "Derived TypedArray constructor created a non-TypedArray object", .{});
+        if (new_ta.tag() != .typed_array) return self.throwError(.type_error, "Derived TypedArray constructor created a non-TypedArray object", .{});
         return new_ta;
     }
     return self.gcNewTypedArray(box.owner.retain(), new_byte_offset, count, box.kind) catch |e| self.bufferErr(e);
@@ -1161,10 +1163,10 @@ fn taSubarray(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 fn taSlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireTypedArray(ctx, this_value, "slice");
     const self = interp(ctx);
-    const box = this_value.typed_array.value;
+    const box = this_value.asTypedArray().value;
     const len = box.len;
-    const start = if (arg(args, 0) == .undefined) 0 else normIndex(try toNumberStrict(self, arg(args, 0)), len);
-    const end = if (arg(args, 1) == .undefined) len else normIndex(try toNumberStrict(self, arg(args, 1)), len);
+    const start = if (arg(args, 0).tag() == .undefined) 0 else normIndex(try toNumberStrict(self, arg(args, 0)), len);
+    const end = if (arg(args, 1).tag() == .undefined) len else normIndex(try toNumberStrict(self, arg(args, 1)), len);
     const count = if (end > start) end - start else 0;
     const result = try typedArraySpeciesCreate(self, this_value, count);
     errdefer result.deinit();
@@ -1187,7 +1189,7 @@ fn taSlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
 /// above, above `makeArrayIterator`) UNCHANGED -- that machinery already
 /// operates on a plain owned `[]const JSValue` snapshot, not on `.array`
 /// specifically. Only the snapshot-building step differs from
-/// `makeArrayIterator` (via `taGet` instead of `.array.value.toSlice()` +
+/// `makeArrayIterator` (via `taGet` instead of `.asArray().value.toSlice()` +
 /// `.retain()` -- `taGet`'s results are already owned, see the section
 /// comment above).
 fn taIterator(self: *Interpreter, allocator: Allocator, this_value: JSValue, kind: @FieldType(ArrayIterCtx, "kind")) anyerror!JSValue {
@@ -1199,12 +1201,12 @@ fn taIterator(self: *Interpreter, allocator: Allocator, this_value: JSValue, kin
     ic.* = .{ .interp = self, .items = snapshot, .kind = kind };
     try self.gcTrackArrayIterCtx(ic);
     var obj = try self.gcNewObject();
-    if (self.iterator_prototype) |p| try obj.object.value.setPrototype(&p.object.value);
-    try obj.object.value.set("next", try self.gcNewFunction(.{ .ctx = ic, .name = "next", .call = arrayIterNext }));
+    if (self.iterator_prototype) |p| try obj.asObject().value.setPrototype(&p.asObject().value);
+    try obj.asObject().value.set("next", try self.gcNewFunction(.{ .ctx = ic, .name = "next", .call = arrayIterNext }));
     if (self.symbol_iterator) |sym| {
         const key = try self.encodeKey(sym);
         defer allocator.free(key);
-        try obj.object.value.set(key, try self.nativeMethod("iterator", "self", 0, iteratorSelfBuiltin));
+        try obj.asObject().value.set(key, try self.nativeMethod("iterator", "self", 0, iteratorSelfBuiltin));
     }
     return obj;
 }
@@ -1274,8 +1276,8 @@ fn typedArrayCreateFromConstructor(self: *Interpreter, ctor: JSValue, len: usize
     if (!self.isConstructor(ctor)) return self.throwError(.type_error, "{s} is not a constructor", .{ctor.typeOf()});
     const new_ta = try self.constructValue(ctor, &.{JSValue.fromNumber(@floatFromInt(len))}, "TypedArray");
     errdefer new_ta.deinit();
-    if (new_ta != .typed_array) return self.throwError(.type_error, "Derived TypedArray constructor created a non-TypedArray object", .{});
-    if (new_ta.typed_array.value.len < len) return self.throwError(.type_error, "Derived TypedArray constructor created an array which was too small", .{});
+    if (new_ta.tag() != .typed_array) return self.throwError(.type_error, "Derived TypedArray constructor created a non-TypedArray object", .{});
+    if (new_ta.asTypedArray().value.len < len) return self.throwError(.type_error, "Derived TypedArray constructor created an array which was too small", .{});
     return new_ta;
 }
 
@@ -1286,9 +1288,9 @@ fn typedArrayFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     const source = arg(args, 0);
     const mapfn = arg(args, 1);
     const this_arg = arg(args, 2);
-    if (mapfn != .undefined and mapfn != .function) return self.throwError(.type_error, "TypedArray.from: mapfn is not a function", .{});
-    const mapping = mapfn == .function;
-    if (source == .undefined or source == .null) return self.throwError(.type_error, "Cannot convert undefined or null to object", .{});
+    if (mapfn.tag() != .undefined and mapfn.tag() != .function) return self.throwError(.type_error, "TypedArray.from: mapfn is not a function", .{});
+    const mapping = mapfn.tag() == .function;
+    if (source.tag() == .undefined or source.tag() == .null) return self.throwError(.type_error, "Cannot convert undefined or null to object", .{});
 
     var using_iter: JSValue = JSValue.UNDEFINED;
     if (self.symbol_iterator) |sym| {
@@ -1298,8 +1300,8 @@ fn typedArrayFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     }
     defer using_iter.deinit();
 
-    if (using_iter != .undefined and using_iter != .null) {
-        if (using_iter != .function) return self.throwError(.type_error, "Symbol.iterator is not a function", .{});
+    if (using_iter.tag() != .undefined and using_iter.tag() != .null) {
+        if (using_iter.tag() != .function) return self.throwError(.type_error, "Symbol.iterator is not a function", .{});
         const iter = try self.callValue(using_iter, source, &.{}, "[Symbol.iterator]");
         defer iter.deinit();
         if (!builtin_helpers.isObjectLike(iter)) return self.throwError(.type_error, "Result of the Symbol.iterator method is not an object", .{});
@@ -1312,7 +1314,7 @@ fn typedArrayFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
         errdefer target_obj.deinit();
         for (values, 0..) |k_val, k| {
             const mapped = if (mapping)
-                try mapfn.function.value.call(mapfn.function.value.ctx, allocator, this_arg, &.{ k_val, JSValue.fromNumber(@floatFromInt(k)) })
+                try mapfn.asFunction().value.call(mapfn.asFunction().value.ctx, allocator, this_arg, &.{ k_val, JSValue.fromNumber(@floatFromInt(k)) })
             else
                 k_val.retain();
             defer mapped.deinit();
@@ -1333,7 +1335,7 @@ fn typedArrayFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
         const k_val = try self.getProperty(source, pk);
         defer k_val.deinit();
         const mapped = if (mapping)
-            try mapfn.function.value.call(mapfn.function.value.ctx, allocator, this_arg, &.{ k_val, JSValue.fromNumber(@floatFromInt(k)) })
+            try mapfn.asFunction().value.call(mapfn.asFunction().value.ctx, allocator, this_arg, &.{ k_val, JSValue.fromNumber(@floatFromInt(k)) })
         else
             k_val.retain();
         defer mapped.deinit();
@@ -1368,14 +1370,14 @@ pub fn installHierarchy(self: *Interpreter) !JSValue {
         .call = typedArrayAbstractConstructor,
         .constructable = true,
     });
-    typed_array_ctor.function.value.prototype = typed_array_base.retain();
+    typed_array_ctor.asFunction().value.prototype = typed_array_base.retain();
     const ta_statics = try self.functionStatics(typed_array_ctor);
     try builtin_helpers.dneConst(ta_statics, "prototype", typed_array_base.retain());
     try builtin_helpers.dneMethod(ta_statics, "from", try native(self, "from", 1, typedArrayFrom));
     try builtin_helpers.dneMethod(ta_statics, "of", try native(self, "of", 0, typedArrayOf));
     try builtin_helpers.dneMethod(typed_array_base, "constructor", typed_array_ctor.retain());
-    if (self.protos.array.object.value.get("toString")) |arr_to_str| {
-        const old_to_str = typed_array_base.object.value.get("toString");
+    if (self.protos.array.asObject().value.get("toString")) |arr_to_str| {
+        const old_to_str = typed_array_base.asObject().value.get("toString");
         try builtin_helpers.dneMethod(typed_array_base, "toString", arr_to_str.retain());
         if (old_to_str) |old| old.deinit();
     }
@@ -1398,7 +1400,7 @@ pub fn installHierarchy(self: *Interpreter) !JSValue {
         const proto = try self.functionPrototype(ctor);
         const ctor_statics = try self.functionStatics(ctor);
         try builtin_helpers.dneConst(ctor_statics, "prototype", proto.retain());
-        try ctor_statics.object.value.setPrototype(&ta_statics.object.value);
+        try ctor_statics.asObject().value.setPrototype(&ta_statics.asObject().value);
     }
     return ta_statics;
 }
@@ -1408,10 +1410,10 @@ fn hostDetachArrayBuffer(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
     _ = this_value;
     const self = interp(ctx);
     const buf = arg(args, 0);
-    if (buf != .array_buffer or buf.array_buffer.value.is_shared) {
+    if (buf.tag() != .array_buffer or buf.asArrayBuffer().value.is_shared) {
         return self.throwError(.type_error, "detachArrayBuffer requires a non-shared ArrayBuffer", .{});
     }
-    buf.array_buffer.value.detach();
+    buf.asArrayBuffer().value.detach();
     return JSValue.UNDEFINED;
 }
 

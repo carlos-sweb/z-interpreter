@@ -22,7 +22,7 @@ test "closures + loops + console output together" {
         struct {
             fn check(_: void, r: helpers.Result) !void {
                 try testing.expectEqualStrings("first: 3\nsecond: 6\n", r.stdout);
-                try testing.expect(r.value.number == 6);
+                try testing.expect(r.value.asNumber() == 6);
             }
         }.check,
     );

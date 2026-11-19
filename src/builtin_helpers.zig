@@ -112,17 +112,17 @@ pub fn installBuiltin(self: *Interpreter, comptime spec: BuiltinSpec) !JSValue {
 /// Math.floor, Array.prototype.* (so `Object.keys(Date)` is empty and
 /// verifyProperty sees enumerable:false).
 pub fn dneMethod(obj: JSValue, name: []const u8, value: JSValue) !void {
-    try obj.object.value.defineProperty(name, value, .{ .writable = true, .enumerable = false, .configurable = true });
+    try obj.asObject().value.defineProperty(name, value, .{ .writable = true, .enumerable = false, .configurable = true });
 }
 
 /// Define a builtin constant: NON-enumerable, NON-writable, NON-configurable
 /// (Number.MAX_SAFE_INTEGER, Math.PI, the well-known Symbols, ...).
 pub fn dneConst(obj: JSValue, name: []const u8, value: JSValue) !void {
-    try obj.object.value.defineProperty(name, value, .{ .writable = false, .enumerable = false, .configurable = false });
+    try obj.asObject().value.defineProperty(name, value, .{ .writable = false, .enumerable = false, .configurable = false });
 }
 
-pub fn requireTag(ctx: *anyopaque, this_value: JSValue, comptime tag: std.meta.Tag(JSValue), comptime message: []const u8, method: []const u8) anyerror!JSValue {
-    if (this_value != tag) {
+pub fn requireTag(ctx: *anyopaque, this_value: JSValue, comptime expected_tag: JSValue.Tag, comptime message: []const u8, method: []const u8) anyerror!JSValue {
+    if (this_value.tag() != expected_tag) {
         return interp(ctx).throwError(.type_error, message, .{method});
     }
     return this_value;
@@ -133,9 +133,9 @@ pub fn requireTag(ctx: *anyopaque, this_value: JSValue, comptime tag: std.meta.T
 /// `Interpreter.unboxPrimitiveWrapper`'s doc) before checking the tag --
 /// shared by the 3 primitive-prototype guards that need to accept both
 /// `"x".toUpperCase()` and `new String("x").toUpperCase()`.
-pub fn requirePrimitive(ctx: *anyopaque, this_value: JSValue, comptime tag: std.meta.Tag(JSValue), comptime message: []const u8, method: []const u8) anyerror!JSValue {
-    const v: JSValue = if (this_value == tag) this_value else interp(ctx).unboxPrimitiveWrapper(this_value) orelse this_value;
-    if (v != tag) {
+pub fn requirePrimitive(ctx: *anyopaque, this_value: JSValue, comptime expected_tag: JSValue.Tag, comptime message: []const u8, method: []const u8) anyerror!JSValue {
+    const v: JSValue = if (this_value.tag() == expected_tag) this_value else interp(ctx).unboxPrimitiveWrapper(this_value) orelse this_value;
+    if (v.tag() != expected_tag) {
         return interp(ctx).throwError(.type_error, message, .{method});
     }
     return v;
@@ -143,18 +143,18 @@ pub fn requirePrimitive(ctx: *anyopaque, this_value: JSValue, comptime tag: std.
 
 pub fn requireCallback(ctx: *anyopaque, args: []const JSValue) anyerror!JSValue {
     const cb = arg(args, 0);
-    if (cb != .function) return interp(ctx).throwError(.type_error, "callback is not a function", .{});
+    if (!cb.isFunction()) return interp(ctx).throwError(.type_error, "callback is not a function", .{});
     return cb;
 }
 
 pub fn callCallback(cb: JSValue, allocator: Allocator, item: JSValue, index: usize, receiver: JSValue) anyerror!JSValue {
-    return cb.function.value.call(cb.function.value.ctx, allocator, JSValue.UNDEFINED, &.{
+    return cb.asFunction().value.call(cb.asFunction().value.ctx, allocator, JSValue.UNDEFINED, &.{
         item, JSValue.fromNumber(@floatFromInt(index)), receiver,
     });
 }
 
 pub fn callCallbackWithThis(cb: JSValue, allocator: Allocator, this_arg: JSValue, item: JSValue, index: usize, receiver: JSValue) anyerror!JSValue {
-    return cb.function.value.call(cb.function.value.ctx, allocator, this_arg, &.{
+    return cb.asFunction().value.call(cb.asFunction().value.ctx, allocator, this_arg, &.{
         item, JSValue.fromNumber(@floatFromInt(index)), receiver,
     });
 }
@@ -191,7 +191,7 @@ pub fn toBigIntValue(self: *Interpreter, allocator: Allocator, a_in: JSValue) an
     const owned = !Interpreter.isPrimitiveTag(a_in);
     const a = if (owned) try self.toPrimitive(a_in, .number) else a_in;
     defer if (owned) a.deinit();
-    return switch (a) {
+    return switch (a.unpack()) {
         .bigint => a.retain(),
         .boolean => |b| self.gcNewBigIntValue(try zbigint.ZBigInt.fromInt(self.gc_allocator, if (b) 1 else 0)),
         .string => |box| {
@@ -223,8 +223,8 @@ pub fn toBigIntValue(self: *Interpreter, allocator: Allocator, a_in: JSValue) an
 pub fn toNumberStrict(self: *Interpreter, v: JSValue) anyerror!f64 {
     const prim = if (Interpreter.isPrimitiveTag(v)) v.retain() else try self.toPrimitive(v, .number);
     defer prim.deinit();
-    if (prim == .symbol or prim == .bigint) {
-        return self.throwError(.type_error, "Cannot convert a {s} value to a number", .{@tagName(prim)});
+    if (prim.isSymbol() or prim.isBigInt()) {
+        return self.throwError(.type_error, "Cannot convert a {s} value to a number", .{@tagName(prim.tag())});
     }
     return try self.toNumberJS(prim);
 }
@@ -334,7 +334,7 @@ pub fn typedView(comptime T: type, buffer: *zbuffer.ArrayBuffer, byte_offset: us
 /// out-of-range reads are `undefined` handled entirely at the
 /// getProperty call site, never reaching this far).
 pub fn isTypedArrayDetached(ta: anytype) bool {
-    return ta.owner == .array_buffer and ta.owner.array_buffer.value.isDetached();
+    return ta.owner.isArrayBuffer() and ta.owner.asArrayBuffer().value.isDetached();
 }
 
 pub fn typedElemGet(self: *Interpreter, kind: zvalue.TypedKind, buffer: *zbuffer.ArrayBuffer, byte_offset: usize, len: usize, index: usize) anyerror!JSValue {
@@ -369,7 +369,7 @@ pub fn typedElemSet(self: *Interpreter, kind: zvalue.TypedKind, buffer: *zbuffer
     // catchable throw for Symbol today (`error.NotImplemented`, which
     // is uncatchable from JS). Guarded once here rather than in each of
     // the 8 branches.
-    if (value == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a {s}", .{if (kind.isBigInt()) "BigInt" else "number"});
+    if (value.isSymbol()) return self.throwError(.type_error, "Cannot convert a Symbol value to a {s}", .{if (kind.isBigInt()) "BigInt" else "number"});
     const num_val: JSValue = if (kind.isBigInt()) JSValue.UNDEFINED else JSValue.fromNumber(try toNumberStrict(self, value));
     if (buffer.isDetached()) return;
     switch (kind) {
@@ -402,23 +402,23 @@ pub fn typedElemSet(self: *Interpreter, kind: zvalue.TypedKind, buffer: *zbuffer
             typedView(u32, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
         },
         .f32 => {
-            const v: f32 = @floatCast(num_val.number);
+            const v: f32 = @floatCast(num_val.asNumber());
             typedView(f32, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
         },
         .f64 => {
-            const v = num_val.number;
+            const v = num_val.asNumber();
             typedView(f64, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
         },
         .i64 => {
             const x = try toBigIntValue(self, self.gc_allocator, value);
             defer x.deinit();
-            const v = try toI64Wrapped(self, x.bigint.value);
+            const v = try toI64Wrapped(self, x.asBigInt().value);
             typedView(i64, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
         },
         .u64 => {
             const x = try toBigIntValue(self, self.gc_allocator, value);
             defer x.deinit();
-            const v = try toU64Wrapped(self, x.bigint.value);
+            const v = try toU64Wrapped(self, x.asBigInt().value);
             typedView(u64, buffer, byte_offset, len).set(index, v) catch |e| return oobIsNoop(e);
         },
     }
@@ -461,7 +461,7 @@ pub fn hasIteratorMethod(self: *Interpreter, value: JSValue) anyerror!bool {
     defer self.gc_allocator.free(key);
     const m = try self.getProperty(value, key);
     defer m.deinit();
-    return m == .function;
+    return m.isFunction();
 }
 
 /// ECMA-262 LengthOfArrayLike + per-index Get -- the array-like
@@ -508,8 +508,8 @@ pub fn arrayIterNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     // Object.prototype, not null.
     var result = try ic.interp.ordinaryObject();
     if (ic.index >= ic.items.len) {
-        try result.object.value.set("value", JSValue.UNDEFINED);
-        try result.object.value.set("done", JSValue.fromBool(true));
+        try result.asObject().value.set("value", JSValue.UNDEFINED);
+        try result.asObject().value.set("done", JSValue.fromBool(true));
         return result;
     }
     const i = ic.index;
@@ -519,19 +519,19 @@ pub fn arrayIterNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
         .values => ic.items[i].retain(),
         .entries => blk: {
             var pair = try ic.interp.gcNewArray();
-            _ = try pair.array.value.push(JSValue.fromNumber(@floatFromInt(i)));
-            _ = try pair.array.value.push(ic.items[i].retain());
+            _ = try pair.asArray().value.push(JSValue.fromNumber(@floatFromInt(i)));
+            _ = try pair.asArray().value.push(ic.items[i].retain());
             break :blk pair;
         },
     };
-    try result.object.value.set("value", value);
-    try result.object.value.set("done", JSValue.fromBool(false));
+    try result.asObject().value.set("value", value);
+    try result.asObject().value.set("done", JSValue.fromBool(false));
     return result;
 }
 
 pub fn makeArrayIterator(self: *Interpreter, allocator: Allocator, this_value: JSValue, kind: @FieldType(ArrayIterCtx, "kind")) anyerror!JSValue {
-    const snapshot: []JSValue = if (this_value == .array) blk: {
-        const src = this_value.array.value.toSlice();
+    const snapshot: []JSValue = if (this_value.isArray()) blk: {
+        const src = this_value.asArray().value.toSlice();
         const s = try allocator.alloc(JSValue, src.len);
         for (src, 0..) |item, i| s[i] = item.retain();
         break :blk s;
@@ -553,12 +553,12 @@ pub fn makeArrayIterator(self: *Interpreter, allocator: Allocator, this_value: J
     ic.* = .{ .interp = self, .items = snapshot, .kind = kind };
     try self.gcTrackArrayIterCtx(ic);
     var obj = try self.gcNewObject();
-    if (self.iterator_prototype) |p| try obj.object.value.setPrototype(&p.object.value);
-    try obj.object.value.set("next", try self.gcNewFunction(.{ .ctx = ic, .name = "next", .call = arrayIterNext }));
+    if (self.iterator_prototype) |p| try obj.asObject().value.setPrototype(&p.asObject().value);
+    try obj.asObject().value.set("next", try self.gcNewFunction(.{ .ctx = ic, .name = "next", .call = arrayIterNext }));
     if (self.symbol_iterator) |sym| {
         const key = try self.encodeKey(sym);
         defer allocator.free(key);
-        try obj.object.value.set(key, try self.nativeMethod("iterator", "self", 0, iteratorSelfBuiltin));
+        try obj.asObject().value.set(key, try self.nativeMethod("iterator", "self", 0, iteratorSelfBuiltin));
     }
     return obj;
 }
@@ -577,7 +577,7 @@ pub fn iteratorSelfBuiltin(ctx: *anyopaque, allocator: Allocator, this_value: JS
 /// engine (plain objects, arrays, functions, regexes, maps, sets,
 /// errors, dates, promises, even another proxy), not just `.object`.
 pub fn isObjectLike(v: JSValue) bool {
-    return switch (v) {
+    return switch (v.tag()) {
         .undefined, .null, .boolean, .number, .string, .symbol, .bigint => false,
         else => true,
     };

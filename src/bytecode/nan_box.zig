@@ -50,7 +50,7 @@ pub const NaNBoxedValue = struct {
     }
 
     pub fn fromJSValue(v: JSValue, allocator: ?std.mem.Allocator) BoxError!NaNBoxedValue {
-        switch (v) {
+        switch (v.unpack()) {
             .number => |n| {
                 if (std.math.isNan(n)) {
                     return .{ .bits = CANONICAL_NAN };
@@ -112,18 +112,18 @@ pub const NaNBoxedValue = struct {
                 2 => return JSValue.NULL,
                 3 => return JSValue.fromBool(false),
                 4 => return JSValue.fromBool(true),
-                else => return .{ .function = @ptrFromInt(raw_ptr) },
+                else => return JSValue.pack(.{ .function = @ptrFromInt(raw_ptr) }),
             }
         }
 
         return switch (tag) {
-            TAG_STRING => .{ .string = @ptrFromInt(raw_ptr) },
-            TAG_ARRAY => .{ .array = @ptrFromInt(raw_ptr) },
-            TAG_OBJECT => .{ .object = @ptrFromInt(raw_ptr) },
-            TAG_BIGINT => .{ .bigint = @ptrFromInt(raw_ptr) },
-            TAG_SYMBOL => .{ .symbol = @ptrFromInt(raw_ptr) },
-            TAG_REGEX => .{ .regex = @ptrFromInt(raw_ptr) },
-            TAG_MAP => .{ .map = @ptrFromInt(raw_ptr) },
+            TAG_STRING => JSValue.pack(.{ .string = @ptrFromInt(raw_ptr) }),
+            TAG_ARRAY => JSValue.pack(.{ .array = @ptrFromInt(raw_ptr) }),
+            TAG_OBJECT => JSValue.pack(.{ .object = @ptrFromInt(raw_ptr) }),
+            TAG_BIGINT => JSValue.pack(.{ .bigint = @ptrFromInt(raw_ptr) }),
+            TAG_SYMBOL => JSValue.pack(.{ .symbol = @ptrFromInt(raw_ptr) }),
+            TAG_REGEX => JSValue.pack(.{ .regex = @ptrFromInt(raw_ptr) }),
+            TAG_MAP => JSValue.pack(.{ .map = @ptrFromInt(raw_ptr) }),
             TAG_OTHER => {
                 const box: *zvalue.Rc(JSValue) = @ptrFromInt(raw_ptr);
                 return box.value;

@@ -33,11 +33,11 @@ fn errorToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     const self = interp(ctx);
     const name_v = try self.getProperty(this_value, "name");
     defer name_v.deinit();
-    const name = if (name_v == .undefined) try allocator.dupe(u8, "Error") else try self.toDisplayStringJS(allocator, name_v);
+    const name = if (name_v.tag() == .undefined) try allocator.dupe(u8, "Error") else try self.toDisplayStringJS(allocator, name_v);
     defer allocator.free(name);
     const msg_v = try self.getProperty(this_value, "message");
     defer msg_v.deinit();
-    const msg = if (msg_v == .undefined) try allocator.dupe(u8, "") else try self.toDisplayStringJS(allocator, msg_v);
+    const msg = if (msg_v.tag() == .undefined) try allocator.dupe(u8, "") else try self.toDisplayStringJS(allocator, msg_v);
     defer allocator.free(msg);
     if (name.len == 0) return self.gcNewString(msg);
     if (msg.len == 0) return self.gcNewString(name);
@@ -57,7 +57,7 @@ fn errorIsError(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     _ = this_value;
     if (args.len == 0) return JSValue.fromBool(false);
     const v = args[0];
-    return JSValue.fromBool(v == .@"error" or (v == .object and v.object.value.is_error_data));
+    return JSValue.fromBool(v.isError() or (v.tag() == .object and v.asObject().value.is_error_data));
 }
 
 // ===== Error constructors =====
@@ -66,11 +66,11 @@ fn installErrorCause(self: *Interpreter, o: JSValue, options: JSValue) anyerror!
     const has_cause = if (builtin_helpers.isObjectLike(options)) blk: {
         const k = try self.gcNewString("cause");
         defer k.deinit();
-        break :blk (try self.evalIn(k, options)).boolean;
+        break :blk (try self.evalIn(k, options)).asBool();
     } else false;
     if (has_cause) {
         const cause = try self.getProperty(options, "cause");
-        try o.object.value.defineProperty("cause", cause, hidden);
+        try o.asObject().value.defineProperty("cause", cause, hidden);
     }
 }
 
@@ -88,20 +88,20 @@ fn errorConstructor(comptime kind: zvalue.ErrorKind) NativeFn {
     return struct {
         fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
             const self = interp(ctx);
-            const o: JSValue = if (self.construct_target == ctx and this_value == .object) this_value.retain() else blk: {
+            const o: JSValue = if (self.construct_target == ctx and this_value.tag() == .object) this_value.retain() else blk: {
                 var fresh = try self.gcNewObject();
                 const proto = try nativeErrorProto(self, kind);
-                if (proto == .object) try fresh.object.value.setPrototype(&proto.object.value);
+                if (proto.tag() == .object) try fresh.asObject().value.setPrototype(&proto.asObject().value);
                 break :blk fresh;
             };
             errdefer o.deinit();
-            o.object.value.is_error_data = true;
+            o.asObject().value.is_error_data = true;
             const msg_v = arg(args, 0);
-            if (msg_v != .undefined) {
-                if (msg_v == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a string", .{});
+            if (msg_v.tag() != .undefined) {
+                if (msg_v.tag() == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a string", .{});
                 const msg = try self.toDisplayStringJS(allocator, msg_v);
                 defer allocator.free(msg);
-                try o.object.value.defineProperty("message", try self.gcNewString(msg), hidden);
+                try o.asObject().value.defineProperty("message", try self.gcNewString(msg), hidden);
             }
             try installErrorCause(self, o, arg(args, 1));
             return o;
@@ -155,12 +155,12 @@ const hidden = zvalue.PropertyDescriptor{ .writable = true, .enumerable = false,
 pub fn newAggregateError(self: *Interpreter, message: ?[]const u8, errs: []const JSValue) !JSValue {
     var o = try self.gcNewObject();
     errdefer o.deinit();
-    o.object.value.is_error_data = true;
-    try o.object.value.setPrototype(&self.protos.aggregate_error.object.value);
-    if (message) |m| try o.object.value.defineProperty("message", try self.gcNewString(m), hidden);
+    o.asObject().value.is_error_data = true;
+    try o.asObject().value.setPrototype(&self.protos.aggregate_error.asObject().value);
+    if (message) |m| try o.asObject().value.defineProperty("message", try self.gcNewString(m), hidden);
     var list = try self.gcNewArray();
-    for (errs) |e| _ = try list.array.value.push(e.retain());
-    try o.object.value.defineProperty("errors", list, hidden);
+    for (errs) |e| _ = try list.asArray().value.push(e.retain());
+    try o.asObject().value.defineProperty("errors", list, hidden);
     return o;
 }
 
@@ -168,26 +168,26 @@ pub fn newAggregateError(self: *Interpreter, message: ?[]const u8, errs: []const
 /// message, then InstallErrorCause, then `errors` from the iterable.
 fn aggregateErrorConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const self = interp(ctx);
-    const o: JSValue = if (self.construct_target == ctx and this_value == .object) this_value.retain() else blk: {
+    const o: JSValue = if (self.construct_target == ctx and this_value.tag() == .object) this_value.retain() else blk: {
         var fresh = try self.gcNewObject();
-        try fresh.object.value.setPrototype(&self.protos.aggregate_error.object.value);
+        try fresh.asObject().value.setPrototype(&self.protos.aggregate_error.asObject().value);
         break :blk fresh;
     };
     errdefer o.deinit();
-    o.object.value.is_error_data = true;
+    o.asObject().value.is_error_data = true;
     const msg_v = arg(args, 1);
-    if (msg_v != .undefined) {
-        if (msg_v == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a string", .{});
+    if (msg_v.tag() != .undefined) {
+        if (msg_v.tag() == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a string", .{});
         const m = try self.toDisplayStringJS(allocator, msg_v);
         defer allocator.free(m);
-        try o.object.value.defineProperty("message", try self.gcNewString(m), hidden);
+        try o.asObject().value.defineProperty("message", try self.gcNewString(m), hidden);
     }
     try installErrorCause(self, o, arg(args, 2));
     const items = try self.iterableItems(arg(args, 0));
     defer self.gc_allocator.free(items);
     var list = try self.gcNewArray();
-    for (items) |e| _ = try list.array.value.push(e.retain());
-    try o.object.value.defineProperty("errors", list, hidden);
+    for (items) |e| _ = try list.asArray().value.push(e.retain());
+    try o.asObject().value.defineProperty("errors", list, hidden);
     return o;
 }
 
@@ -197,9 +197,9 @@ fn aggregateErrorConstructor(ctx: *anyopaque, allocator: Allocator, this_value: 
 pub fn installAggregate(self: *Interpreter) !void {
     const eproto = self.protos.@"error";
     const ector = self.global_env.get("Error").?;
-    try eproto.object.value.defineProperty("constructor", ector.retain(), hidden);
-    try eproto.object.value.defineProperty("name", try self.gcNewString("Error"), hidden);
-    try eproto.object.value.defineProperty("message", try self.gcNewString(""), hidden);
+    try eproto.asObject().value.defineProperty("constructor", ector.retain(), hidden);
+    try eproto.asObject().value.defineProperty("name", try self.gcNewString("Error"), hidden);
+    try eproto.asObject().value.defineProperty("message", try self.gcNewString(""), hidden);
 
     inline for (.{
         "EvalError",
@@ -211,17 +211,17 @@ pub fn installAggregate(self: *Interpreter) !void {
     }) |name| {
         const nctor = self.global_env.get(name).?;
         const nproto = try self.functionPrototype(nctor);
-        try nproto.object.value.setPrototype(&self.protos.@"error".object.value);
-        try nproto.object.value.defineProperty("constructor", nctor.retain(), hidden);
-        try nproto.object.value.defineProperty("name", try self.gcNewString(name), hidden);
-        try nproto.object.value.defineProperty("message", try self.gcNewString(""), hidden);
+        try nproto.asObject().value.setPrototype(&self.protos.@"error".asObject().value);
+        try nproto.asObject().value.defineProperty("constructor", nctor.retain(), hidden);
+        try nproto.asObject().value.defineProperty("name", try self.gcNewString(name), hidden);
+        try nproto.asObject().value.defineProperty("message", try self.gcNewString(""), hidden);
     }
 
     const ctor = try builtin_helpers.installBuiltin(self, .{ .name = "AggregateError", .ctor = .{ .arity = 2, .call = aggregateErrorConstructor, .constructable = true } });
     const proto = try self.functionPrototype(ctor);
-    try proto.object.value.setPrototype(&self.protos.@"error".object.value);
-    try proto.object.value.defineProperty("constructor", ctor.retain(), hidden);
-    try proto.object.value.defineProperty("name", try self.gcNewString("AggregateError"), hidden);
-    try proto.object.value.defineProperty("message", try self.gcNewString(""), hidden);
+    try proto.asObject().value.setPrototype(&self.protos.@"error".asObject().value);
+    try proto.asObject().value.defineProperty("constructor", ctor.retain(), hidden);
+    try proto.asObject().value.defineProperty("name", try self.gcNewString("AggregateError"), hidden);
+    try proto.asObject().value.defineProperty("message", try self.gcNewString(""), hidden);
     self.protos.aggregate_error = proto;
 }

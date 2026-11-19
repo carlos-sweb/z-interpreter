@@ -330,7 +330,7 @@ test "traceChildren visits the parent, every binding, this/super, but not tdz na
     // from tdz-only "z" and no trace of private_ctx's opaque pointer.
     try testing.expectEqual(@as(usize, 5), mock.values.items.len);
     var sum: f64 = 0;
-    for (mock.values.items) |v| sum += v.number;
+    for (mock.values.items) |v| sum += v.asNumber();
     try testing.expectEqual(@as(f64, 1 + 2 + 3 + 4 + 5), sum);
 }
 

@@ -144,8 +144,8 @@ fn asyncGeneratorNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
 /// `Object.getPrototypeOf(gen().next())` is Object.prototype, not null.
 fn iterResult(self: *Interpreter, value: JSValue, done: bool) anyerror!JSValue {
     var obj = try self.ordinaryObject();
-    try obj.object.value.set("value", value.retain());
-    try obj.object.value.set("done", JSValue.fromBool(done));
+    try obj.asObject().value.set("value", value.retain());
+    try obj.asObject().value.set("done", JSValue.fromBool(done));
     return obj;
 }
 
@@ -320,7 +320,7 @@ pub fn runPendingJob(self: *Interpreter) anyerror!void {
         }
         return;
     };
-    const result = handler.function.value.call(handler.function.value.ctx, arena, JSValue.UNDEFINED, &.{job.argument}) catch |err0| {
+    const result = handler.asFunction().value.call(handler.asFunction().value.ctx, arena, JSValue.UNDEFINED, &.{job.argument}) catch |err0| {
         const err = self.throwIfGap(err0);
         if (err != error.JsThrow) return err;
         const ex = self.pending_exception.?;
@@ -337,8 +337,8 @@ pub fn runPendingJob(self: *Interpreter) anyerror!void {
 /// itself is the spec's chaining-cycle TypeError; anything else
 /// fulfills.
 pub fn resolvePromise(self: *Interpreter, p: JSValue, value: JSValue) anyerror!void {
-    if (value == .promise) {
-        if (value.promise == p.promise) {
+    if (value.isPromise()) {
+        if (value.asPromise() == p.asPromise()) {
             const cycle = try self.gcNewError(.type_error, "Chaining cycle detected for promise");
             return self.settlePromise(p, .rejected, cycle);
         }
@@ -357,7 +357,7 @@ pub fn rejectPromiseValue(self: *Interpreter, p: JSValue, reason: JSValue) anyer
 /// enqueues every stored reaction with the settlement.
 pub fn settlePromise(self: *Interpreter, p: JSValue, state: zvalue.PromiseState, value: JSValue) anyerror!void {
     const arena = self.gc_allocator;
-    const reactions = try p.promise.value.settle(arena, state, value.retain());
+    const reactions = try p.asPromise().value.settle(arena, state, value.retain());
     defer arena.free(reactions);
     for (reactions) |r| {
         try self.pending_jobs.append(arena, .{
@@ -375,7 +375,7 @@ pub fn settlePromise(self: *Interpreter, p: JSValue, state: zvalue.PromiseState,
 /// the queue, never inline).
 pub fn subscribePromise(self: *Interpreter, p: JSValue, on_fulfilled: ?JSValue, on_rejected: ?JSValue, derived: ?JSValue) anyerror!void {
     const arena = self.gc_allocator;
-    const settled = try p.promise.value.subscribe(arena, .{
+    const settled = try p.asPromise().value.subscribe(arena, .{
         .on_fulfilled = if (on_fulfilled) |h| h.retain() else null,
         .on_rejected = if (on_rejected) |h| h.retain() else null,
         .derived = if (derived) |d| d.retain() else null,
@@ -471,7 +471,7 @@ pub fn resumeFiber(self: *Interpreter, fs: *FiberState) anyerror!void {
 /// evaluator, AsyncGeneratorYield's implicit Await of a yielded value,
 /// and `for await`'s per-value Await.
 pub fn awaitValue(self: *Interpreter, fs: *FiberState, operand: JSValue) anyerror!JSValue {
-    const p = if (operand == .promise) operand else try self.fulfilledPromise(operand);
+    const p = if (operand.isPromise()) operand else try self.fulfilledPromise(operand);
     const on_f = try self.gcNewFunction(.{ .ctx = fs, .name = "", .call = awaitOnFulfilled });
     const on_r = try self.gcNewFunction(.{ .ctx = fs, .name = "", .call = awaitOnRejected });
     try self.subscribePromise(p, on_f, on_r, null);
@@ -513,15 +513,15 @@ pub fn makeGeneratorObject(self: *Interpreter, fnode: *zfunctions.FunctionNode, 
     fs.fiber = try fiber_mod.Fiber.init(arena, fiberEntry, fs);
     try self.gcTrackFiberState(fs);
     var obj = try self.gcNewObject();
-    if (self.iterator_prototype) |p| try obj.object.value.setPrototype(&p.object.value);
-    try obj.object.value.set("next", try self.gcNewFunction(.{ .ctx = fs, .name = "next", .call = generatorNext }));
+    if (self.iterator_prototype) |p| try obj.asObject().value.setPrototype(&p.asObject().value);
+    try obj.asObject().value.set("next", try self.gcNewFunction(.{ .ctx = fs, .name = "next", .call = generatorNext }));
     // A generator IS its own iterable: `gen()[Symbol.iterator]()`
     // returns the generator itself (so `[...gen()]` works via the
     // Symbol.iterator path too, and `gen()[Symbol.iterator]() === gen()`).
     if (self.symbol_iterator) |sym| {
         const key = try self.encodeKey(sym);
         defer self.gc_allocator.free(key);
-        try obj.object.value.set(key, try self.nativeMethod("iterator", "self", 0, iteratorSelf));
+        try obj.asObject().value.set(key, try self.nativeMethod("iterator", "self", 0, iteratorSelf));
     }
     return obj;
 }
@@ -581,11 +581,11 @@ pub fn makeAsyncGeneratorObject(self: *Interpreter, fnode: *zfunctions.FunctionN
     fs.fiber = try fiber_mod.Fiber.init(arena, fiberEntry, fs);
     try self.gcTrackFiberState(fs);
     var obj = try self.gcNewObject();
-    try obj.object.value.set("next", try self.gcNewFunction(.{ .ctx = fs, .name = "next", .call = asyncGeneratorNext }));
+    try obj.asObject().value.set("next", try self.gcNewFunction(.{ .ctx = fs, .name = "next", .call = asyncGeneratorNext }));
     if (self.symbol_async_iterator) |sym| {
         const key = try self.encodeKey(sym);
         defer self.gc_allocator.free(key);
-        try obj.object.value.set(key, try self.nativeMethod("asyncIterator", "self", 0, iteratorSelf));
+        try obj.asObject().value.set(key, try self.nativeMethod("asyncIterator", "self", 0, iteratorSelf));
     }
     return obj;
 }
@@ -641,7 +641,7 @@ pub fn runEventLoop(self: *Interpreter) anyerror!void {
             };
             _ = std.os.linux.nanosleep(&req, null);
         }
-        _ = timer.callback.function.value.call(timer.callback.function.value.ctx, arena, JSValue.UNDEFINED, &.{}) catch |err0| {
+        _ = timer.callback.asFunction().value.call(timer.callback.asFunction().value.ctx, arena, JSValue.UNDEFINED, &.{}) catch |err0| {
             const err = self.throwIfGap(err0);
             if (err != error.JsThrow) return err;
             return error.UncaughtException;

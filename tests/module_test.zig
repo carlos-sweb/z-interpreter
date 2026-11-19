@@ -110,13 +110,13 @@ test "missing module and missing export are catchable with Node-style messages" 
     defer r.deinit();
     try testing.expectError(error.UncaughtException, r.interp.runModule("main"));
     const ex = r.interp.pending_exception.?;
-    try testing.expect(std.mem.startsWith(u8, ex.@"error".value.message, "Cannot find module 'nope'"));
+    try testing.expect(std.mem.startsWith(u8, ex.asError().value.message, "Cannot find module 'nope'"));
 
     var r2 = try Run.init(&fs);
     defer r2.deinit();
     try testing.expectError(error.UncaughtException, r2.interp.runModule("main2"));
     const ex2 = r2.interp.pending_exception.?;
-    try testing.expectEqualStrings("The requested module 'm2' does not provide an export named 'zeta'", ex2.@"error".value.message);
+    try testing.expectEqualStrings("The requested module 'm2' does not provide an export named 'zeta'", ex2.asError().value.message);
 }
 
 test "import cycles are the documented catchable error" {
@@ -128,7 +128,7 @@ test "import cycles are the documented catchable error" {
     defer r.deinit();
     try testing.expectError(error.UncaughtException, r.interp.runModule("a"));
     const ex = r.interp.pending_exception.?;
-    try testing.expect(std.mem.startsWith(u8, ex.@"error".value.message, "Circular dependency detected"));
+    try testing.expect(std.mem.startsWith(u8, ex.asError().value.message, "Circular dependency detected"));
 }
 
 test "async work inside modules drains through runModule's loop" {
@@ -151,7 +151,7 @@ test "import in a classic run() without a loader is a catchable SyntaxError" {
     var interp = try zinterpreter.Interpreter.init(testing.allocator, &allocating.writer);
     defer interp.deinit();
     try testing.expectError(error.UncaughtException, interp.run("import { x } from 'm';"));
-    try testing.expectEqualStrings("Cannot use import statement outside a module", interp.pending_exception.?.@"error".value.message);
+    try testing.expectEqualStrings("Cannot use import statement outside a module", interp.pending_exception.?.asError().value.message);
 }
 
 /// Refcount of the object module `module` exports as `name`, after
@@ -161,9 +161,9 @@ fn exportRefcountAfter(fs: *const MockFs, entry: []const u8, module: []const u8,
     defer r.deinit();
     _ = try r.interp.runModule(entry);
     const rec = r.interp.modules.get(module).?;
-    const v = rec.exports.object.value.get(name).?;
-    try testing.expect(v == .object);
-    return v.object.refCount();
+    const v = rec.exports.asObject().value.get(name).?;
+    try testing.expect(v.isObject());
+    return v.asObject().refCount();
 }
 
 test "a local export over an `export *` name releases the re-exported value" {

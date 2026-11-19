@@ -68,7 +68,7 @@ pub fn globalParseInt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     const self = interp(ctx);
     const s = try argString(self, allocator, args, 0);
     defer allocator.free(s);
-    const radix: ?f64 = if (arg(args, 1) == .undefined) null else try self.toNumberJS(arg(args, 1));
+    const radix: ?f64 = if (arg(args, 1).tag() == .undefined) null else try self.toNumberJS(arg(args, 1));
     return JSValue.fromNumber(try znumber.ParsingMethods.parseInt(allocator, s, radix));
 }
 
@@ -155,8 +155,8 @@ fn globalEval(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     _ = this_value;
     const self = interp(ctx);
     const a = arg(args, 0);
-    if (a != .string) return a.retain();
-    return self.evalSource(self.global_env, a.string.value.data);
+    if (a.tag() != .string) return a.retain();
+    return self.evalSource(self.global_env, a.asString().value.data);
 }
 
 /// Installs `console`/`print`, `parseInt`/`parseFloat`/`isNaN`/

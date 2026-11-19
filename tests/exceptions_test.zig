@@ -8,8 +8,8 @@ const helpers = @import("helpers.zig");
 test "uncaught throw of a primitive surfaces the raw value" {
     try helpers.expectUncaughtValue("throw 42;", {}, struct {
         fn check(_: void, ex: zvalue.JSValue) !void {
-            try testing.expect(ex == .number);
-            try testing.expectEqual(@as(f64, 42), ex.number);
+            try testing.expect(ex.isNumber());
+            try testing.expectEqual(@as(f64, 42), ex.asNumber());
         }
     }.check);
 }
@@ -29,7 +29,7 @@ test "catch without a param" {
 test "catch param lives in its own scope, doesn't clobber an outer binding" {
     try helpers.runAndCheck("var e = 'outer'; try { throw 'in'; } catch (e) {} e;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expectEqualStrings("outer", r.value.string.value.data);
+            try testing.expectEqualStrings("outer", r.value.asString().value.data);
         }
     }.check);
 }
@@ -55,7 +55,7 @@ test "a throw unwinds through three nested call frames" {
         {},
         struct {
             fn check(_: void, r: helpers.Result) !void {
-                try testing.expectEqualStrings("deep", r.value.string.value.data);
+                try testing.expectEqualStrings("deep", r.value.asString().value.data);
             }
         }.check,
     );
@@ -71,7 +71,7 @@ test "nested try, inner handles, outer untouched" {
         {},
         struct {
             fn check(_: void, r: helpers.Result) !void {
-                try testing.expectEqualStrings("inner!", r.value.string.value.data);
+                try testing.expectEqualStrings("inner!", r.value.asString().value.data);
             }
         }.check,
     );
@@ -93,7 +93,7 @@ test "a NORMAL finally does not override the return" {
         {},
         struct {
             fn check(_: void, r: helpers.Result) !void {
-                try testing.expectEqualStrings("fin1", r.value.string.value.data);
+                try testing.expectEqualStrings("fin1", r.value.asString().value.data);
             }
         }.check,
     );
@@ -109,7 +109,7 @@ test "finally runs on the uncaught-throw path and the exception is re-raised aft
         {},
         struct {
             fn check(_: void, r: helpers.Result) !void {
-                try testing.expectEqualStrings("f1", r.value.string.value.data);
+                try testing.expectEqualStrings("f1", r.value.asString().value.data);
             }
         }.check,
     );
@@ -136,7 +136,7 @@ test "catch throws, finally still runs, order preserved" {
         {},
         struct {
             fn check(_: void, r: helpers.Result) !void {
-                try testing.expectEqualStrings("cf2", r.value.string.value.data);
+                try testing.expectEqualStrings("cf2", r.value.asString().value.data);
             }
         }.check,
     );
@@ -151,12 +151,12 @@ test "try-finally with no catch, normal path" {
 test "reading an undeclared identifier throws a catchable ReferenceError" {
     try helpers.runAndCheck("var r; try { nope; } catch (e) { r = e; } typeof r;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expectEqualStrings("object", r.value.string.value.data);
+            try testing.expectEqualStrings("object", r.value.asString().value.data);
         }
     }.check);
     try helpers.runAndCheck("var r; try { nope; } catch (e) { r = e.name + ': ' + e.message; } r;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expectEqualStrings("ReferenceError: nope is not defined", r.value.string.value.data);
+            try testing.expectEqualStrings("ReferenceError: nope is not defined", r.value.asString().value.data);
         }
     }.check);
 }
@@ -164,12 +164,12 @@ test "reading an undeclared identifier throws a catchable ReferenceError" {
 test "member access on null/undefined throws TypeError with Node's message" {
     try helpers.runAndCheck("var r; try { null.x; } catch (e) { r = e.message; } r;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expectEqualStrings("Cannot read properties of null (reading 'x')", r.value.string.value.data);
+            try testing.expectEqualStrings("Cannot read properties of null (reading 'x')", r.value.asString().value.data);
         }
     }.check);
     try helpers.runAndCheck("var r; try { undefined.foo; } catch (e) { r = e.name; } r;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expectEqualStrings("TypeError", r.value.string.value.data);
+            try testing.expectEqualStrings("TypeError", r.value.asString().value.data);
         }
     }.check);
 }
@@ -177,7 +177,7 @@ test "member access on null/undefined throws TypeError with Node's message" {
 test "calling a non-function throws TypeError" {
     try helpers.runAndCheck("var x = 5; var r; try { x(); } catch (e) { r = e.message; } r;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expectEqualStrings("x is not a function", r.value.string.value.data);
+            try testing.expectEqualStrings("x is not a function", r.value.asString().value.data);
         }
     }.check);
 }
@@ -185,7 +185,7 @@ test "calling a non-function throws TypeError" {
 test "assigning to an undeclared name throws ReferenceError" {
     try helpers.runAndCheck("var r; try { zz = 1; } catch (e) { r = e.name; } r;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expectEqualStrings("ReferenceError", r.value.string.value.data);
+            try testing.expectEqualStrings("ReferenceError", r.value.asString().value.data);
         }
     }.check);
 }
@@ -193,7 +193,7 @@ test "assigning to an undeclared name throws ReferenceError" {
 test "setting a property on null throws TypeError" {
     try helpers.runAndCheck("var r; try { null.a = 1; } catch (e) { r = e.name; } r;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expectEqualStrings("TypeError", r.value.string.value.data);
+            try testing.expectEqualStrings("TypeError", r.value.asString().value.data);
         }
     }.check);
 }
@@ -201,7 +201,7 @@ test "setting a property on null throws TypeError" {
 test "typeof on an undeclared identifier still doesn't throw (spec quirk preserved)" {
     try helpers.runAndCheck("typeof nope;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expectEqualStrings("undefined", r.value.string.value.data);
+            try testing.expectEqualStrings("undefined", r.value.asString().value.data);
         }
     }.check);
 }

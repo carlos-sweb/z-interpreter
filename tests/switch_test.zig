@@ -17,7 +17,7 @@ test "fallthrough without break accumulates" {
 test "no match and no default: nothing runs, value undefined" {
     try helpers.runAndCheck("var r = 0; switch (9) { case 1: r = 1; case 2: r = 2; } r;", {}, struct {
         fn check(_: void, res: helpers.Result) !void {
-            try testing.expectEqual(@as(f64, 0), res.value.number);
+            try testing.expectEqual(@as(f64, 0), res.value.asNumber());
         }
     }.check);
 }

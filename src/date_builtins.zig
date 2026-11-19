@@ -120,10 +120,10 @@ fn dateConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     if (args.len == 0) return interp(ctx).gcNewDate(nowMs());
     if (args.len == 1) {
         const first = args[0];
-        if (first == .string) {
-            return interp(ctx).gcNewDate(zvalue.ZDate.fromString(first.string.value.data).timestamp);
+        if (first.isString()) {
+            return interp(ctx).gcNewDate(zvalue.ZDate.fromString(first.asString().value.data).timestamp);
         }
-        if (first == .date) return interp(ctx).gcNewDate(first.date.value.getTime());
+        if (first.isDate()) return interp(ctx).gcNewDate(first.asDate().value.getTime());
         return interp(ctx).gcNewDate(timeClip(try interp(ctx).toNumberJS(first)));
     }
     // Multi-arg form: read up to 7 fields; a present-but-invalid field (NaN,
@@ -159,8 +159,8 @@ fn dateParse(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     _ = allocator;
     _ = this_value;
     const s = arg(args, 0);
-    if (s != .string) return JSValue.fromNumber(std.math.nan(f64));
-    const ms = zvalue.ZDate.parse(s.string.value.data);
+    if (!s.isString()) return JSValue.fromNumber(std.math.nan(f64));
+    const ms = zvalue.ZDate.parse(s.asString().value.data);
     if (ms == INVALID_DATE_MS) return JSValue.fromNumber(std.math.nan(f64));
     return JSValue.fromNumber(@floatFromInt(ms));
 }
@@ -203,8 +203,8 @@ pub fn dateToPrimitive(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
     }
     const h = arg(args, 0);
     const hint: Interpreter.OrdinaryHint = blk: {
-        if (h == .string) {
-            const s = h.string.value.data;
+        if (h.tag() == .string) {
+            const s = h.asString().value.data;
             if (std.mem.eql(u8, s, "string") or std.mem.eql(u8, s, "default")) break :blk .string;
             if (std.mem.eql(u8, s, "number")) break :blk .number;
         }
@@ -227,7 +227,7 @@ fn dateGetTime(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     _ = allocator;
     _ = args;
     const d = try requireDate(ctx, this_value, "getTime");
-    return msToNumber(d.date.value.getTime());
+    return msToNumber(d.asDate().value.getTime());
 }
 
 /// ?i32-returning ZDate getters (null = Invalid Date -> NaN, real JS).
@@ -237,7 +237,7 @@ fn dateGetter(comptime method: []const u8) NativeFn {
             _ = allocator;
             _ = args;
             const d = try requireDate(ctx, this_value, method);
-            const v = @field(zvalue.ZDate, method)(d.date.value) orelse return JSValue.fromNumber(std.math.nan(f64));
+            const v = @field(zvalue.ZDate, method)(d.asDate().value) orelse return JSValue.fromNumber(std.math.nan(f64));
             return JSValue.fromNumber(@floatFromInt(v));
         }
     }.call;
@@ -246,7 +246,7 @@ fn dateGetter(comptime method: []const u8) NativeFn {
 fn dateToISOString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
     const d = try requireDate(ctx, this_value, "toISOString");
-    const iso = d.date.value.toISOString(allocator) catch
+    const iso = d.asDate().value.toISOString(allocator) catch
         return interp(ctx).throwError(.range_error, "Invalid time value", .{});
     defer allocator.free(iso);
     return interp(ctx).gcNewString(iso);
@@ -265,7 +265,7 @@ fn dateToJSON(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     defer o.deinit();
     const tv = try self.toPrimitive(o, .number);
     defer tv.deinit();
-    if (tv == .number and !std.math.isFinite(tv.number)) return JSValue.NULL;
+    if (tv.tag() == .number and !std.math.isFinite(tv.asNumber())) return JSValue.NULL;
     const to_iso = try self.getProperty(o, "toISOString");
     defer to_iso.deinit();
     return self.callValue(to_iso, o, &.{}, "toISOString");
@@ -279,7 +279,7 @@ fn dateFormatter(comptime method: []const u8) NativeFn {
         fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
             _ = args;
             const d = try requireDate(ctx, this_value, method);
-            const s = @field(zvalue.ZDate, method)(d.date.value, allocator) catch
+            const s = @field(zvalue.ZDate, method)(d.asDate().value, allocator) catch
                 return interp(ctx).gcNewString("Invalid Date");
             defer allocator.free(s);
             return interp(ctx).gcNewString(s);
@@ -294,7 +294,7 @@ fn dateLocale(comptime method: []const u8) NativeFn {
         fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
             _ = args;
             const d = try requireDate(ctx, this_value, method);
-            const s = @field(zvalue.ZDate, method)(d.date.value, allocator, null) catch
+            const s = @field(zvalue.ZDate, method)(d.asDate().value, allocator, null) catch
                 return interp(ctx).gcNewString("Invalid Date");
             defer allocator.free(s);
             return interp(ctx).gcNewString(s);
@@ -307,8 +307,8 @@ fn dateLocale(comptime method: []const u8) NativeFn {
 fn dateSetTime(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const d = try requireDate(ctx, this_value, "setTime");
-    _ = d.date.value.setTime(timeClip(try interp(ctx).toNumberJS(arg(args, 0))));
-    return msToNumber(d.date.value.getTime());
+    _ = d.asDate().value.setTime(timeClip(try interp(ctx).toNumberJS(arg(args, 0))));
+    return msToNumber(d.asDate().value.getTime());
 }
 
 /// Component setters (local and UTC). The first arg is required; `n_optional`
@@ -322,7 +322,7 @@ fn dateSetter(comptime method: []const u8, comptime n_optional: usize) NativeFn 
             _ = allocator;
             const self = interp(ctx);
             const d = try requireDate(ctx, this_value, method);
-            const p = &d.date.value;
+            const p = &d.asDate().value;
             const initial_t = p.getTime();
             // Every provided field is ToNumber'd regardless of an earlier
             // one already being invalid (confirmed against Node: every
@@ -380,7 +380,7 @@ fn dateToTemporalInstant(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
     _ = args;
     const self = interp(ctx);
     const date = try requireDate(ctx, this_value, "toTemporalInstant");
-    const ms = date.date.value.getTime();
+    const ms = date.asDate().value.getTime();
     if (ms > 8_640_000_000_000_000 or ms < -8_640_000_000_000_000) return self.throwError(.range_error, "Invalid Date", .{});
     const instant = @import("ztemporal").Instant.fromEpochMilliseconds(ms) catch return self.throwError(.range_error, "Invalid Date", .{});
     return self.gcNewTemporal(.{ .instant = instant });

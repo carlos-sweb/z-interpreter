@@ -27,7 +27,7 @@ fn jsonStringify(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     // JSONError.Unserializable (there's no []u8 to return), so it must be
     // special-cased BEFORE calling it, or the interpreter can't tell it
     // apart from the BigInt case below (which DOES throw).
-    if (v == .undefined or v == .function or v == .symbol) return JSValue.UNDEFINED;
+    if (v.isUndefined() or v.isFunction() or v.isSymbol()) return JSValue.UNDEFINED;
     const out = zjson.stringify(allocator, v) catch |err| switch (err) {
         error.CircularStructure => return interp(ctx).throwError(.type_error, "Converting circular structure to JSON", .{}),
         // Real Node: JSON.stringify(5n) (BigInt anywhere in the tree, not
@@ -45,8 +45,8 @@ fn jsonParse(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     _ = this_value;
     const self = interp(ctx);
     const text = arg(args, 0);
-    if (text != .string) return self.throwError(.syntax_error, "Unexpected token in JSON", .{});
-    const value = zjson.parse(allocator, text.string.value.data) catch |err| switch (err) {
+    if (!text.isString()) return self.throwError(.syntax_error, "Unexpected token in JSON", .{});
+    const value = zjson.parse(allocator, text.asString().value.data) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         // A real, catchable SyntaxError -- matching JSON.parse's spec'd
         // failure mode.

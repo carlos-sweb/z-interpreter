@@ -9,7 +9,7 @@ const helpers = @import("helpers.zig");
 test "a bigint literal evaluates to a real bigint value, typeof is \"bigint\"" {
     try helpers.runAndCheck("123456789012345678901234567890n;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expect(r.value == .bigint);
+            try testing.expect(r.value.isBigInt());
         }
     }.check);
     try helpers.expectStdout("console.log(typeof 123n);", "bigint\n");

@@ -55,11 +55,11 @@ fn proxyRevoke(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     _ = this_value;
     _ = args;
     const c: *RevokeCtx = @ptrCast(@alignCast(ctx));
-    if (c.proxy != .proxy) return JSValue.UNDEFINED;
+    if (c.proxy.tag() != .proxy) return JSValue.UNDEFINED;
     const p = c.proxy;
     c.proxy = JSValue.NULL;
-    const old = p.proxy.value.handler;
-    p.proxy.value.handler = JSValue.NULL;
+    const old = p.asProxy().value.handler;
+    p.asProxy().value.handler = JSValue.NULL;
     old.deinit();
     p.deinit();
     return JSValue.UNDEFINED;
@@ -76,8 +76,8 @@ fn proxyRevocable(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     try self.gcTrackRevokeCtx(c);
     const revoke = try self.gcNewFunction(.{ .ctx = c, .name = "", .arity = 0, .call = proxyRevoke });
     var result = try self.ordinaryObject();
-    try result.object.value.set("proxy", proxy);
-    try result.object.value.set("revoke", revoke);
+    try result.asObject().value.set("proxy", proxy);
+    try result.asObject().value.set("revoke", revoke);
     return result;
 }
 

@@ -31,7 +31,7 @@ test "method identity holds across values (same function on the prototype)" {
 test "Object.create(null) inherits nothing" {
     try helpers.runAndCheck("typeof Object.create(null).hasOwnProperty === 'undefined';", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expect(r.value.boolean == true);
+            try testing.expect(r.value.asBool() == true);
         }
     }.check);
 }
@@ -126,7 +126,7 @@ test "Boolean.prototype methods" {
     try helpers.expectStdout("console.log(true.toString(), false.toString());", "true false\n");
     try helpers.runAndCheck("true.valueOf();", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expect(r.value == .boolean and r.value.boolean == true);
+            try testing.expect(r.value.isBool() and r.value.asBool() == true);
         }
     }.check);
 }

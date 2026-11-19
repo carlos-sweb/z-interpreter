@@ -20,8 +20,8 @@ test "gcNewArrayBuffer registers a GC-tracked, zero-initialized buffer" {
     const buf = try interp.gcNewArrayBuffer(8);
     defer buf.deinit();
     try testing.expectEqualStrings("object", buf.typeOf());
-    try testing.expectEqual(@as(usize, 8), buf.array_buffer.value.byteLength());
-    for (buf.array_buffer.value.bytes) |b| try testing.expectEqual(@as(u8, 0), b);
+    try testing.expectEqual(@as(usize, 8), buf.asArrayBuffer().value.byteLength());
+    for (buf.asArrayBuffer().value.bytes) |b| try testing.expectEqual(@as(u8, 0), b);
 }
 
 test "gcNewDataView reads/writes through to the owning buffer, typeof is object" {
@@ -36,8 +36,8 @@ test "gcNewDataView reads/writes through to the owning buffer, typeof is object"
     defer dv.deinit();
 
     try testing.expectEqualStrings("object", dv.typeOf());
-    try dv.data_view.value.view.setInt32(0, -1, false);
-    try testing.expectEqualSlices(u8, &.{ 255, 255, 255, 255 }, buf.array_buffer.value.bytes);
+    try dv.asDataView().value.view.setInt32(0, -1, false);
+    try testing.expectEqualSlices(u8, &.{ 255, 255, 255, 255 }, buf.asArrayBuffer().value.bytes);
 }
 
 test "gcNewDataView out-of-range window is a real error" {

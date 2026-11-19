@@ -56,15 +56,15 @@ fn regexpConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     var owned_flags: ?[]const u8 = null;
     defer if (owned_source) |s| allocator.free(s);
     defer if (owned_flags) |f| allocator.free(f);
-    if (pat_arg == .regex) {
+    if (pat_arg.tag() == .regex) {
         const st = self.regexState(pat_arg);
         source = st.source;
         flags = st.flags;
-    } else if (pat_arg != .undefined) {
+    } else if (pat_arg.tag() != .undefined) {
         owned_source = try self.toDisplayStringJS(allocator, pat_arg);
         source = owned_source.?;
     }
-    if (arg(args, 1) != .undefined) {
+    if (arg(args, 1).tag() != .undefined) {
         owned_flags = try self.toDisplayStringJS(allocator, arg(args, 1));
         flags = owned_flags.?;
     }
@@ -176,7 +176,7 @@ pub fn subjectOf(data: []const u8) zregex.Subject {
 /// if none (or `pos` is past the end).
 pub fn execRaw(allocator: Allocator, re: JSValue, data: []const u8, pos: usize) anyerror!?RegexMatch {
     if (pos > data.len) return null;
-    const rx = &re.regex.value;
+    const rx = &re.asRegex().value;
     const slots = try allocator.alloc(?usize, rx.slotCount());
     errdefer allocator.free(slots);
     var out: zregex.MatchSlots = .{ .slots = slots };
@@ -192,7 +192,7 @@ pub fn execRaw(allocator: Allocator, re: JSValue, data: []const u8, pos: usize) 
 /// AdvanceStringIndex over subject positions: one code unit past `pos`
 /// without `u`/`v`, one code point with it.
 pub fn advancePos(re: JSValue, data: []const u8, pos: usize) usize {
-    return re.regex.value.advanceIndex(subjectOf(data), pos);
+    return re.asRegex().value.advanceIndex(subjectOf(data), pos);
 }
 
 /// UTF-16 indices of increasing subject positions in O(total length):
@@ -231,7 +231,7 @@ pub fn makeMatchArrayAt(self: *Interpreter, allocator: Allocator, m: RegexMatch,
     const groups = try matchGroups(self, m);
     var g: usize = 0;
     while (g <= m.groupCount()) : (g += 1) {
-        _ = try result.array.value.push(try m.capture(self, g));
+        _ = try result.asArray().value.push(try m.capture(self, g));
     }
     // exec/match arrays carry extra own properties.
     try setArrayOwn(self, result, "index", JSValue.fromNumber(@floatFromInt(index)));
@@ -253,27 +253,27 @@ pub fn matchIndices(self: *Interpreter, m: RegexMatch) anyerror!JSValue {
         const a = m.slots[2 * g];
         const b = m.slots[2 * g + 1];
         if (a == null or b == null) {
-            _ = try indices.array.value.push(JSValue.UNDEFINED);
+            _ = try indices.asArray().value.push(JSValue.UNDEFINED);
             continue;
         }
         var pair = try self.gcNewArray();
-        _ = try pair.array.value.push(JSValue.fromNumber(@floatFromInt(posToUtf16(m.data, a.?))));
-        _ = try pair.array.value.push(JSValue.fromNumber(@floatFromInt(posToUtf16(m.data, b.?))));
-        _ = try indices.array.value.push(pair);
+        _ = try pair.asArray().value.push(JSValue.fromNumber(@floatFromInt(posToUtf16(m.data, a.?))));
+        _ = try pair.asArray().value.push(JSValue.fromNumber(@floatFromInt(posToUtf16(m.data, b.?))));
+        _ = try indices.asArray().value.push(pair);
     }
-    const named = m.re.regex.value.compiled.named_groups;
+    const named = m.re.asRegex().value.compiled.named_groups;
     if (named.len == 0 or named[named.len - 1].index > m.groupCount()) {
         try setArrayOwn(self, indices, "groups", JSValue.UNDEFINED);
         return indices;
     }
     var groups = try self.gcNewObject();
     for (named) |ng| {
-        const v = indices.array.value.get(ng.index);
-        if (groups.object.value.getOwn(ng.name)) |old| {
-            if (v == .undefined) continue;
+        const v = indices.asArray().value.get(ng.index);
+        if (groups.asObject().value.getOwn(ng.name)) |old| {
+            if (v.tag() == .undefined) continue;
             old.deinit();
         }
-        try groups.object.value.set(ng.name, v.retain());
+        try groups.asObject().value.set(ng.name, v.retain());
     }
     try setArrayOwn(self, indices, "groups", groups);
     return indices;
@@ -283,17 +283,17 @@ pub fn matchIndices(self: *Interpreter, m: RegexMatch) anyerror!JSValue {
 /// duplicate name (`(?<x>a)|(?<x>b)`) takes whichever of its groups took
 /// part; the property keeps its first position.
 pub fn matchGroups(self: *Interpreter, m: RegexMatch) anyerror!JSValue {
-    const named = m.re.regex.value.compiled.named_groups;
+    const named = m.re.asRegex().value.compiled.named_groups;
     if (named.len == 0) return JSValue.UNDEFINED;
     var groups = try self.gcNewObject();
     for (named) |ng| {
         if (ng.index > m.groupCount()) continue;
         const v = try m.capture(self, ng.index);
-        if (groups.object.value.getOwn(ng.name)) |old| {
-            if (v == .undefined) continue;
+        if (groups.asObject().value.getOwn(ng.name)) |old| {
+            if (v.tag() == .undefined) continue;
             old.deinit();
         }
-        try groups.object.value.set(ng.name, v);
+        try groups.asObject().value.set(ng.name, v);
     }
     return groups;
 }
@@ -342,8 +342,8 @@ pub const regexExecFn = regexExec;
 fn regexExec(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const re = try requireRegex(ctx, this_value, "exec");
     const self = interp(ctx);
-    const is_str = arg(args, 0) == .string;
-    const input = if (is_str) arg(args, 0).string.value.data else try self.toDisplayStringJS(allocator, arg(args, 0));
+    const is_str = arg(args, 0).tag() == .string;
+    const input = if (is_str) arg(args, 0).asString().value.data else try self.toDisplayStringJS(allocator, arg(args, 0));
     defer if (!is_str) allocator.free(input);
     const m = try builtinExec(self, allocator, re, input) orelse return JSValue.NULL;
     defer m.deinit();
@@ -440,10 +440,10 @@ fn lineTerminatorEscape(rest: []const u8) LineTerminator {
 /// %RegExp.prototype% itself (which has no [[OriginalFlags]] but answers
 /// undefined / "(?:)"). Anything else is a TypeError.
 fn flagReceiver(self: *Interpreter, this_value: JSValue, comptime getter: []const u8) anyerror!?JSValue {
-    if (this_value == .regex) return this_value;
+    if (this_value.tag() == .regex) return this_value;
     if (!isObjectLike(this_value))
         return self.throwError(.type_error, "RegExp.prototype." ++ getter ++ " getter called on non-object", .{});
-    if (this_value == .object and this_value.object == self.protos.regex.object) return null;
+    if (this_value.isObject() and this_value.asObject() == self.protos.regex.asObject()) return null;
     return self.throwError(.type_error, "RegExp.prototype." ++ getter ++ " getter called on non-RegExp object", .{});
 }
 
@@ -509,8 +509,8 @@ fn speciesGetter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
 /// attributes of every builtin accessor property).
 fn defineGetter(self: *Interpreter, target: JSValue, key: []const u8, name: []const u8, call: NativeFn) !void {
     const getter = try native(self, name, 0, call);
-    try target.object.value.defineAccessor(key, getter, null, JSValue.UNDEFINED);
-    const rec = target.object.value.getOwnRecordMut(key).?;
+    try target.asObject().value.defineAccessor(key, getter, null, JSValue.UNDEFINED);
+    const rec = target.asObject().value.getOwnRecordMut(key).?;
     rec.descriptor.enumerable = false;
     rec.descriptor.configurable = true;
 }
@@ -518,7 +518,7 @@ fn defineGetter(self: *Interpreter, target: JSValue, key: []const u8, name: []co
 /// A well-known symbol (`Symbol.match`, ...) as a property key.
 pub fn wellKnownKey(self: *Interpreter, comptime name: []const u8) ![]const u8 {
     const symbol_ctor = self.global_env.get("Symbol").?;
-    const sym = (try self.functionStatics(symbol_ctor)).object.value.get(name).?;
+    const sym = (try self.functionStatics(symbol_ctor)).asObject().value.get(name).?;
     return self.encodeKey(sym);
 }
 
@@ -545,17 +545,17 @@ pub fn installProtoExtras(self: *Interpreter) !void {
         const key = try wellKnownKey(self, e[0]);
         defer self.gc_allocator.free(key);
         const f = try native(self, "[Symbol." ++ e[0] ++ "]", e[1], e[2]);
-        try proto.object.value.defineProperty(key, f, .{ .writable = true, .enumerable = false, .configurable = true });
+        try proto.asObject().value.defineProperty(key, f, .{ .writable = true, .enumerable = false, .configurable = true });
     }
 
-    try proto.object.value.defineProperty("compile", try native(self, "compile", 2, regexCompile), .{ .writable = true, .enumerable = false, .configurable = true });
+    try proto.asObject().value.defineProperty("compile", try native(self, "compile", 2, regexCompile), .{ .writable = true, .enumerable = false, .configurable = true });
     try installStringIteratorProto(self);
 
     const species_key = try wellKnownKey(self, "species");
     defer self.gc_allocator.free(species_key);
     const statics = try self.functionStatics(self.global_env.get("RegExp").?);
     try defineGetter(self, statics, species_key, "get [Symbol.species]", speciesGetter);
-    try statics.object.value.defineProperty("escape", try native(self, "escape", 1, regexpEscape), .{ .writable = true, .enumerable = false, .configurable = true });
+    try statics.asObject().value.defineProperty("escape", try native(self, "escape", 1, regexpEscape), .{ .writable = true, .enumerable = false, .configurable = true });
 }
 
 /// RegExp.prototype.compile(pattern, flags) (Annex B): RegExpInitialize
@@ -569,15 +569,15 @@ fn regexCompile(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     const flags = arg(args, 1);
     var p: []u8 = undefined;
     var f: []u8 = undefined;
-    if (pattern == .regex) {
-        if (flags != .undefined) return self.throwError(.type_error, "Cannot supply flags when constructing one RegExp from another", .{});
+    if (pattern.tag() == .regex) {
+        if (flags.tag() != .undefined) return self.throwError(.type_error, "Cannot supply flags when constructing one RegExp from another", .{});
         const st = self.regexState(pattern);
         p = try allocator.dupe(u8, st.source);
         f = try allocator.dupe(u8, st.flags);
     } else {
-        p = if (pattern == .undefined) try allocator.dupe(u8, "") else try self.toDisplayStringJS(allocator, pattern);
+        p = if (pattern.tag() == .undefined) try allocator.dupe(u8, "") else try self.toDisplayStringJS(allocator, pattern);
         errdefer allocator.free(p);
-        f = if (flags == .undefined) try allocator.dupe(u8, "") else try self.toDisplayStringJS(allocator, flags);
+        f = if (flags.tag() == .undefined) try allocator.dupe(u8, "") else try self.toDisplayStringJS(allocator, flags);
     }
     defer allocator.free(p);
     defer allocator.free(f);
@@ -592,8 +592,8 @@ fn regexpEscape(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     _ = this_value;
     const self = interp(ctx);
     const s = arg(args, 0);
-    if (s != .string) return self.throwError(.type_error, "RegExp.escape requires a string", .{});
-    const data = s.string.value.data;
+    if (s.tag() != .string) return self.throwError(.type_error, "RegExp.escape requires a string", .{});
+    const data = s.asString().value.data;
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
     var i: usize = 0;
@@ -687,14 +687,14 @@ fn installStringIteratorProto(self: *Interpreter) !void {
     if (self.symbol_iterator) |sym| {
         const key = try self.encodeKey(sym);
         defer self.gc_allocator.free(key);
-        try parent.object.value.defineProperty(key, try native(self, "[Symbol.iterator]", 0, builtin_helpers.iteratorSelfBuiltin), .{ .writable = true, .enumerable = false, .configurable = true });
+        try parent.asObject().value.defineProperty(key, try native(self, "[Symbol.iterator]", 0, builtin_helpers.iteratorSelfBuiltin), .{ .writable = true, .enumerable = false, .configurable = true });
     }
     const proto = try self.gcNewObject();
-    try proto.object.value.setPrototype(&parent.object.value);
-    try proto.object.value.defineProperty("next", try native(self, "next", 0, regex_protocol.regExpStringIteratorNext), .{ .writable = true, .enumerable = false, .configurable = true });
+    try proto.asObject().value.setPrototype(&parent.asObject().value);
+    try proto.asObject().value.defineProperty("next", try native(self, "next", 0, regex_protocol.regExpStringIteratorNext), .{ .writable = true, .enumerable = false, .configurable = true });
     const tag_key = try wellKnownKey(self, "toStringTag");
     defer self.gc_allocator.free(tag_key);
-    try proto.object.value.defineProperty(tag_key, try self.gcNewString("RegExp String Iterator"), .{ .writable = false, .enumerable = false, .configurable = true });
+    try proto.asObject().value.defineProperty(tag_key, try self.gcNewString("RegExp String Iterator"), .{ .writable = false, .enumerable = false, .configurable = true });
     // [[Prototype]] is a raw pointer, not a counted reference: the
     // interpreter field owns `parent`.
     self.iterator_prototype = parent;
@@ -703,9 +703,9 @@ fn installStringIteratorProto(self: *Interpreter) !void {
 
 /// SameValue (Object.is).
 pub fn sameValue(a: JSValue, b: JSValue) bool {
-    if (a == .number and b == .number) {
-        const x = a.number;
-        const y = b.number;
+    if (a.isNumber() and b.isNumber()) {
+        const x = a.asNumber();
+        const y = b.asNumber();
         if (std.math.isNan(x) and std.math.isNan(y)) return true;
         return x == y and std.math.signbit(x) == std.math.signbit(y);
     }
@@ -718,8 +718,8 @@ pub fn sameValue(a: JSValue, b: JSValue) bool {
 /// nothing else. (Other keys go to the RegExp's own-property bag.)
 pub fn regexDefineProperty(self: *Interpreter, re: JSValue, key: []const u8, desc: JSValue) anyerror!void {
     _ = key;
-    if (desc != .object) return self.throwError(.type_error, "Property description must be an object", .{});
-    const d = &desc.object.value;
+    if (desc.tag() != .object) return self.throwError(.type_error, "Property description must be an object", .{});
+    const d = &desc.asObject().value;
     const st = self.regexState(re);
     const redefine = d.hasOwnProperty("get") or d.hasOwnProperty("set") or
         (if (d.get("enumerable")) |v| coercion.isTruthy(v) else false) or

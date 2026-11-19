@@ -23,8 +23,8 @@ pub const CatchHandler = struct {
     reg_top: u32,
 };
 
-const ObjectBox = @typeInfo(@FieldType(JSValue, "object")).pointer.child;
-const ArrayBox = @typeInfo(@FieldType(JSValue, "array")).pointer.child;
+const ObjectBox = zvalue.Rc(zvalue.ZObject(JSValue));
+const ArrayBox = zvalue.Rc(zvalue.ZArray(JSValue));
 
 threadlocal var obj_pool: [32]*ObjectBox = undefined;
 threadlocal var obj_pool_len: usize = 0;
@@ -53,10 +53,7 @@ const PropIC = struct {
 };
 
 inline fn needsDeinit(v: JSValue) bool {
-    return switch (v) {
-        .undefined, .null, .boolean, .number => false,
-        else => true,
-    };
+    return v.needsDeinit();
 }
 
 inline fn setRegPrimitive(registers: []JSValue, index: u8, val: JSValue) !void {
@@ -86,9 +83,9 @@ const BytecodeTarget = struct {
 };
 
 fn getBytecodeTarget(callee: JSValue) ?BytecodeTarget {
-    if (callee != .function) return null;
-    if (callee.function.value.call != interpreter_class.closureCall) return null;
-    const cc: *ClosureCtx = @ptrCast(@alignCast(callee.function.value.ctx));
+    if (!callee.isFunction()) return null;
+    if (callee.asFunction().value.call != interpreter_class.closureCall) return null;
+    const cc: *ClosureCtx = @ptrCast(@alignCast(callee.asFunction().value.ctx));
     if (cc.function_node.is_generator or cc.function_node.is_async) return null;
     if (!cc.interp.compile_options.use_bytecode_vm) return null;
     const cb = interpreter_class.getOrCompileBytecode(cc.interp, cc.function_node) orelse return null;
@@ -100,79 +97,77 @@ fn getBytecodeTarget(callee: JSValue) ?BytecodeTarget {
 }
 
 fn calleeMatches(cached: JSValue, current: JSValue) bool {
-    if (cached != .function or current != .function) return false;
-    return cached.function == current.function or (cached.function.value.ctx == current.function.value.ctx and cached.function.value.call == current.function.value.call);
+    if (!cached.isFunction() or !current.isFunction()) return false;
+    return cached.asFunction() == current.asFunction() or (cached.asFunction().value.ctx == current.asFunction().value.ctx and cached.asFunction().value.call == current.asFunction().value.call);
 }
 
 fn deinitSlot(v: *JSValue) void {
-    switch (v.*) {
-        .undefined, .null, .boolean, .number => {},
-        .object => |box| {
-            if (box._count == 1 and obj_pool_len < 32 and !box.value.is_frozen and box.value.is_extensible and box.value.properties.capacity() <= 16) {
-                if (box.value.canPreserveShape()) {
-                    for (box.value.properties.entries.items(.value)) |*prop| {
-                        if (needsDeinit(prop.value)) prop.value.deinit();
-                        prop.value = JSValue.UNDEFINED;
-                    }
-                    box.value.recyclePreserveShape();
-                    obj_pool[obj_pool_len] = box;
-                    obj_pool_len += 1;
-                    v.* = JSValue.UNDEFINED;
-                    return;
-                }
-                var has_accessor = false;
+    if (!v.needsDeinit()) return;
+    if (v.isObject()) {
+        const box = v.asObject();
+        if (box._count == 1 and obj_pool_len < 32 and !box.value.is_frozen and box.value.is_extensible and box.value.properties.capacity() <= 16) {
+            if (box.value.canPreserveShape()) {
                 for (box.value.properties.entries.items(.value)) |*prop| {
-                    if (prop.isAccessor()) {
-                        has_accessor = true;
-                        break;
-                    }
+                    if (prop.value.needsDeinit()) prop.value.deinit();
+                    prop.value = JSValue.UNDEFINED;
                 }
-                if (!has_accessor) {
-                    for (box.value.properties.entries.items(.value)) |*prop| {
-                        if (needsDeinit(prop.value)) prop.value.deinit();
-                    }
-                    box.value.clearRetainingCapacity();
-                    obj_pool[obj_pool_len] = box;
-                    obj_pool_len += 1;
-                    v.* = JSValue.UNDEFINED;
-                    return;
-                }
-            }
-            v.deinit();
-            v.* = JSValue.UNDEFINED;
-        },
-        .array => |box| {
-            if (box._count == 1 and arr_pool_len < 32 and box.value.holey == null and box.value.items.capacity <= 16) {
-                var has_rc = false;
-                for (box.value.items.items) |el| {
-                    if (needsDeinit(el)) {
-                        has_rc = true;
-                        break;
-                    }
-                }
-                if (has_rc) {
-                    for (box.value.items.items) |*el| {
-                        if (needsDeinit(el.*)) el.deinit();
-                    }
-                }
-                box.value.items.items.len = 0;
-                arr_pool[arr_pool_len] = box;
-                arr_pool_len += 1;
+                box.value.recyclePreserveShape();
+                obj_pool[obj_pool_len] = box;
+                obj_pool_len += 1;
                 v.* = JSValue.UNDEFINED;
                 return;
             }
-            v.deinit();
+            var has_accessor = false;
+            for (box.value.properties.entries.items(.value)) |*prop| {
+                if (prop.isAccessor()) {
+                    has_accessor = true;
+                    break;
+                }
+            }
+            if (!has_accessor) {
+                for (box.value.properties.entries.items(.value)) |*prop| {
+                    if (prop.value.needsDeinit()) prop.value.deinit();
+                }
+                box.value.clearRetainingCapacity();
+                obj_pool[obj_pool_len] = box;
+                obj_pool_len += 1;
+                v.* = JSValue.UNDEFINED;
+                return;
+            }
+        }
+        v.deinit();
+        v.* = JSValue.UNDEFINED;
+    } else if (v.isArray()) {
+        const box = v.asArray();
+        if (box._count == 1 and arr_pool_len < 32 and box.value.holey == null and box.value.items.capacity <= 16) {
+            var has_rc = false;
+            for (box.value.items.items) |el| {
+                if (el.needsDeinit()) {
+                    has_rc = true;
+                    break;
+                }
+            }
+            if (has_rc) {
+                for (box.value.items.items) |*el| {
+                    if (el.needsDeinit()) el.deinit();
+                }
+            }
+            box.value.items.items.len = 0;
+            arr_pool[arr_pool_len] = box;
+            arr_pool_len += 1;
             v.* = JSValue.UNDEFINED;
-        },
-        else => {
-            v.deinit();
-            v.* = JSValue.UNDEFINED;
-        },
+            return;
+        }
+        v.deinit();
+        v.* = JSValue.UNDEFINED;
+    } else {
+        v.deinit();
+        v.* = JSValue.UNDEFINED;
     }
 }
 
 fn callFallback(allocator: Allocator, callee: JSValue, this_value: JSValue, args_slice: []const JSValue) !JSValue {
-    if (callee != .function) return error.UnsupportedOpcode;
+    if (!callee.isFunction()) return error.UnsupportedOpcode;
     var inline_args: [4]JSValue = undefined;
     const is_heap = args_slice.len > inline_args.len;
     const call_args = if (is_heap)
@@ -184,7 +179,7 @@ fn callFallback(allocator: Allocator, callee: JSValue, this_value: JSValue, args
         if (is_heap) allocator.free(call_args);
     }
     for (call_args, args_slice) |*dest, src| dest.* = src.retain();
-    return try callee.function.value.call(callee.function.value.ctx, allocator, this_value, call_args);
+    return try callee.asFunction().value.call(callee.asFunction().value.ctx, allocator, this_value, call_args);
 }
 
 fn constantKey(block: *const codeblock.CodeBlock, index: u8) ![]const u8 {
@@ -197,92 +192,89 @@ fn constantKey(block: *const codeblock.CodeBlock, index: u8) ![]const u8 {
 
 fn keyToString(allocator: Allocator, key_val: JSValue, buf: *[32]u8) ![]const u8 {
     _ = allocator;
-    return switch (key_val) {
-        .string => |s| s.value.data,
-        .number => |n| blk: {
-            if (std.math.isNan(n) or std.math.isInf(n)) return error.UnsupportedOpcode;
-            const idx: i64 = @intFromFloat(n);
-            if (@as(f64, @floatFromInt(idx)) == n) {
-                break :blk std.fmt.bufPrint(buf, "{d}", .{idx}) catch return error.UnsupportedOpcode;
-            } else {
-                break :blk std.fmt.bufPrint(buf, "{d}", .{n}) catch return error.UnsupportedOpcode;
-            }
-        },
-        else => return error.UnsupportedOpcode,
-    };
+    if (key_val.isString()) {
+        return key_val.asString().value.data;
+    } else if (key_val.isNumber()) {
+        const n = key_val.asNumber();
+        if (std.math.isNan(n) or std.math.isInf(n)) return error.UnsupportedOpcode;
+        const idx: i64 = @intFromFloat(n);
+        if (@as(f64, @floatFromInt(idx)) == n) {
+            return std.fmt.bufPrint(buf, "{d}", .{idx}) catch return error.UnsupportedOpcode;
+        } else {
+            return std.fmt.bufPrint(buf, "{d}", .{n}) catch return error.UnsupportedOpcode;
+        }
+    }
+    return error.UnsupportedOpcode;
 }
 
 fn getProp(allocator: Allocator, obj: JSValue, key: []const u8) !JSValue {
-    switch (obj) {
-        .object => |box| {
-            if (box.value.getOwnRecord(key)) |rec| {
+    if (obj.isObject()) {
+        const box = obj.asObject();
+        if (box.value.getOwnRecord(key)) |rec| {
+            if (rec.isAccessor()) return error.UnsupportedOpcode;
+            return rec.value.retain();
+        }
+        var current = box.value.getPrototype();
+        while (current) |p| : (current = p.getPrototype()) {
+            if (p.getOwnRecord(key)) |rec| {
                 if (rec.isAccessor()) return error.UnsupportedOpcode;
                 return rec.value.retain();
             }
-            var current = box.value.getPrototype();
-            while (current) |p| : (current = p.getPrototype()) {
-                if (p.getOwnRecord(key)) |rec| {
-                    if (rec.isAccessor()) return error.UnsupportedOpcode;
-                    return rec.value.retain();
-                }
-            }
-            return JSValue.UNDEFINED;
-        },
-        .array => |box| {
-            if (std.mem.eql(u8, key, "length")) {
-                return JSValue.fromNumber(@floatFromInt(box.value.length()));
-            }
-            const idx = std.fmt.parseInt(usize, key, 10) catch return JSValue.UNDEFINED;
-            if (idx >= box.value.length()) return JSValue.UNDEFINED;
-            return box.value.get(idx).retain();
-        },
-        .string => |box| {
-            if (std.mem.eql(u8, key, "length")) {
-                return JSValue.fromNumber(@floatFromInt(box.value.data.len));
-            }
-            const idx = std.fmt.parseInt(usize, key, 10) catch return JSValue.UNDEFINED;
-            if (idx >= box.value.data.len) return JSValue.UNDEFINED;
-            return try JSValue.newString(allocator, box.value.data[idx .. idx + 1]);
-        },
-        else => return error.UnsupportedOpcode,
+        }
+        return JSValue.UNDEFINED;
+    } else if (obj.isArray()) {
+        const box = obj.asArray();
+        if (std.mem.eql(u8, key, "length")) {
+            return JSValue.fromNumber(@floatFromInt(box.value.length()));
+        }
+        const idx = std.fmt.parseInt(usize, key, 10) catch return JSValue.UNDEFINED;
+        if (idx >= box.value.length()) return JSValue.UNDEFINED;
+        return box.value.get(idx).retain();
+    } else if (obj.isString()) {
+        const box = obj.asString();
+        if (std.mem.eql(u8, key, "length")) {
+            return JSValue.fromNumber(@floatFromInt(box.value.data.len));
+        }
+        const idx = std.fmt.parseInt(usize, key, 10) catch return JSValue.UNDEFINED;
+        if (idx >= box.value.data.len) return JSValue.UNDEFINED;
+        return try JSValue.newString(allocator, box.value.data[idx .. idx + 1]);
     }
+    return error.UnsupportedOpcode;
 }
 
 fn setProp(allocator: Allocator, obj: JSValue, key: []const u8, val: JSValue) !void {
     _ = allocator;
-    switch (obj) {
-        .object => |box| {
-            if (box.value.getOwnRecord(key)) |rec| {
-                if (rec.isAccessor()) return error.UnsupportedOpcode;
+    if (obj.isObject()) {
+        const box = obj.asObject();
+        if (box.value.getOwnRecord(key)) |rec| {
+            if (rec.isAccessor()) return error.UnsupportedOpcode;
+        }
+        const old = box.value.getOwn(key);
+        try box.value.set(key, val.retain());
+        if (old) |o| o.deinit();
+    } else if (obj.isArray()) {
+        const box = obj.asArray();
+        const idx = std.fmt.parseInt(usize, key, 10) catch return error.UnsupportedOpcode;
+        const cur = box.value.length();
+        if (idx < cur) {
+            box.value.toSliceMut()[idx].deinit();
+            box.value.toSliceMut()[idx] = val.retain();
+        } else {
+            while (box.value.length() < idx) {
+                _ = try box.value.push(JSValue.UNDEFINED);
             }
-            const old = box.value.getOwn(key);
-            try box.value.set(key, val.retain());
-            if (old) |o| o.deinit();
-        },
-        .array => |box| {
-            const idx = std.fmt.parseInt(usize, key, 10) catch return error.UnsupportedOpcode;
-            const cur = box.value.length();
-            if (idx < cur) {
-                box.value.toSliceMut()[idx].deinit();
-                box.value.toSliceMut()[idx] = val.retain();
-            } else {
-                while (box.value.length() < idx) {
-                    _ = try box.value.push(JSValue.UNDEFINED);
-                }
-                _ = try box.value.push(val.retain());
-            }
-        },
-        else => return error.UnsupportedOpcode,
-    }
+            _ = try box.value.push(val.retain());
+        }
+    } else return error.UnsupportedOpcode;
 }
 
 fn getElem(allocator: Allocator, obj: JSValue, key_val: JSValue) !JSValue {
-    if (obj == .array and key_val == .number) {
-        const n = key_val.number;
+    if (obj.isArray() and key_val.isNumber()) {
+        const n = key_val.asNumber();
         if (n >= 0 and !std.math.isNan(n) and !std.math.isInf(n)) {
             const idx: usize = @intFromFloat(n);
             if (@as(f64, @floatFromInt(idx)) == n) {
-                if (idx < obj.array.value.length()) return obj.array.value.get(idx).retain();
+                if (idx < obj.asArray().value.length()) return obj.asArray().value.get(idx).retain();
                 return JSValue.UNDEFINED;
             }
         }
@@ -293,20 +285,20 @@ fn getElem(allocator: Allocator, obj: JSValue, key_val: JSValue) !JSValue {
 }
 
 fn setElem(allocator: Allocator, obj: JSValue, key_val: JSValue, val: JSValue) !void {
-    if (obj == .array and key_val == .number) {
-        const n = key_val.number;
+    if (obj.isArray() and key_val.isNumber()) {
+        const n = key_val.asNumber();
         if (n >= 0 and !std.math.isNan(n) and !std.math.isInf(n)) {
             const idx: usize = @intFromFloat(n);
             if (@as(f64, @floatFromInt(idx)) == n) {
-                const cur = obj.array.value.length();
+                const cur = obj.asArray().value.length();
                 if (idx < cur) {
-                    obj.array.value.toSliceMut()[idx].deinit();
-                    obj.array.value.toSliceMut()[idx] = val.retain();
+                    obj.asArray().value.toSliceMut()[idx].deinit();
+                    obj.asArray().value.toSliceMut()[idx] = val.retain();
                 } else {
-                    while (obj.array.value.length() < idx) {
-                        _ = try obj.array.value.push(JSValue.UNDEFINED);
+                    while (obj.asArray().value.length() < idx) {
+                        _ = try obj.asArray().value.push(JSValue.UNDEFINED);
                     }
-                    _ = try obj.array.value.push(val.retain());
+                    _ = try obj.asArray().value.push(val.retain());
                 }
                 return;
             }
@@ -408,15 +400,15 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                     const box = obj_pool[obj_pool_len];
                     box._count = 1;
                     if (frame.interp) |itp| {
-                        if (itp.protos.object == .object) {
-                            box.value.prototype = &itp.protos.object.object.value;
+                        if (itp.protos.object.isObject()) {
+                            box.value.prototype = &itp.protos.object.asObject().value;
                         } else {
                             box.value.prototype = null;
                         }
                     } else {
                         box.value.prototype = null;
                     }
-                    try setRegValue(frame, frame_regs, op.a, JSValue{ .object = box });
+                    try setRegValue(frame, frame_regs, op.a, JSValue.fromObject(box));
                 } else {
                     const obj = if (frame.interp) |itp| try itp.ordinaryObject() else try JSValue.newObject(allocator);
                     try setRegValue(frame, frame_regs, op.a, obj);
@@ -429,19 +421,19 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                     box._count = 1;
                     const cap = @max(@as(usize, op.b), 4);
                     try box.value.reserve(cap);
-                    try setRegValue(frame, frame_regs, op.a, JSValue{ .array = box });
+                    try setRegValue(frame, frame_regs, op.a, JSValue.fromArray(box));
                 } else {
                     const arr = try JSValue.newArray(allocator);
                     const cap = @max(@as(usize, op.b), 4);
-                    try arr.array.value.reserve(cap);
+                    try arr.asArray().value.reserve(cap);
                     try setRegValue(frame, frame_regs, op.a, arr);
                 }
             },
             .get_prop => {
                 const obj = try getRegister(frame_regs, op.b);
                 const key = try constantKey(frame.block, op.c);
-                if (obj == .object) {
-                    const box = obj.object;
+                if (obj.isObject()) {
+                    const box = obj.asObject();
                     const ic_idx = ((@intFromPtr(frame.block) >> 4) +% op_pc) & 255;
                     const ic = &prop_ic[ic_idx];
                     if (ic.block == frame.block and ic.pc == op_pc and ic.shape_id == box.value.shape_id and ic.key_ptr == key.ptr and ic.slot_idx < box.value.properties.count()) {
@@ -492,8 +484,8 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                 const obj = try getRegister(frame_regs, op.a);
                 const key = try constantKey(frame.block, op.b);
                 const val = try getRegister(frame_regs, op.c);
-                if (obj == .object) {
-                    const box = obj.object;
+                if (obj.isObject()) {
+                    const box = obj.asObject();
                     const ic_idx = ((@intFromPtr(frame.block) >> 4) +% op_pc) & 255;
                     const ic = &prop_ic[ic_idx];
                     if (ic.block == frame.block and ic.pc == op_pc and ic.shape_id == box.value.shape_id and ic.key_ptr == key.ptr) {
@@ -521,7 +513,7 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                         }
                     }
                     if (frame.interp) |itp| {
-                        const proto_is_obj_proto = if (box.value.prototype) |p| (itp.protos.object == .object and p == &itp.protos.object.object.value) else true;
+                        const proto_is_obj_proto = if (box.value.prototype) |p| (itp.protos.object.isObject() and p == &itp.protos.object.asObject().value) else true;
                         if (box.value.properties.getIndex(key) == null and proto_is_obj_proto) {
                             const prev_shape = box.value.shape_id;
                             const prev_count = box.value.properties.count();
@@ -578,12 +570,12 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
             },
             .get_elem_const => {
                 const obj = try getRegister(frame_regs, op.b);
-                if (obj == .array and op.c < frame.block.constants.len) {
+                if (obj.isArray() and op.c < frame.block.constants.len) {
                     const c = frame.block.constants[op.c];
                     if (c == .number) {
                         const idx: usize = @intFromFloat(c.number);
-                        if (idx < obj.array.value.length()) {
-                            const elem = obj.array.value.get(idx);
+                        if (idx < obj.asArray().value.length()) {
+                            const elem = obj.asArray().value.get(idx);
                             if (!needsDeinit(elem)) {
                                 try setRegPrimitive(frame_regs, op.a, elem);
                             } else {
@@ -623,8 +615,8 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                 const obj = try getRegister(frame_regs, op.a);
                 const val = try getRegister(frame_regs, op.c);
                 const idx: usize = op.b;
-                if (obj == .array) {
-                    const arr = &obj.array.value;
+                if (obj.isArray()) {
+                    const arr = &obj.asArray().value;
                     const val_to_store = if (needsDeinit(val)) val.retain() else val;
                     if (arr.holey == null and idx == arr.items.items.len) {
                         try arr.items.append(arr.allocator, val_to_store);
@@ -675,8 +667,8 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
             .add => {
                 const left = try getRegister(frame_regs, op.b);
                 const right = try getRegister(frame_regs, op.c);
-                if (left == .number and right == .number) {
-                    try setRegPrimitive(frame_regs, op.a, JSValue.fromNumber(left.number + right.number));
+                if (left.isNumber() and right.isNumber()) {
+                    try setRegPrimitive(frame_regs, op.a, JSValue.fromNumber(left.asNumber() + right.asNumber()));
                 } else {
                     try addOp(frame, frame_regs, allocator, op);
                 }
@@ -703,8 +695,8 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                 const left = try getRegister(frame_regs, op.b);
                 if (op.c < frame.block.constants.len) {
                     const c = frame.block.constants[op.c];
-                    if (left == .number and c == .number) {
-                        try setRegPrimitive(frame_regs, op.a, JSValue.fromNumber(left.number - c.number));
+                    if (left.isNumber() and c == .number) {
+                        try setRegPrimitive(frame_regs, op.a, JSValue.fromNumber(left.asNumber() - c.number));
                     } else return error.UnsupportedOpcode;
                 } else return error.InvalidConstant;
             },
@@ -712,8 +704,8 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                 const left = try getRegister(frame_regs, op.b);
                 if (op.c < frame.block.constants.len) {
                     const c = frame.block.constants[op.c];
-                    if (left == .number and c == .number) {
-                        try setRegPrimitive(frame_regs, op.a, JSValue.fromNumber(left.number + c.number));
+                    if (left.isNumber() and c == .number) {
+                        try setRegPrimitive(frame_regs, op.a, JSValue.fromNumber(left.asNumber() + c.number));
                     } else {
                         try addLocalConst(frame_regs, allocator, frame.block, op);
                     }
@@ -723,8 +715,8 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                 const left = try getRegister(frame_regs, op.b);
                 if (op.c < frame.block.constants.len) {
                     const c = frame.block.constants[op.c];
-                    if (left == .number and c == .number) {
-                        try setRegPrimitive(frame_regs, op.a, JSValue.fromBool(left.number < c.number));
+                    if (left.isNumber() and c == .number) {
+                        try setRegPrimitive(frame_regs, op.a, JSValue.fromBool(left.asNumber() < c.number));
                     } else return error.UnsupportedOpcode;
                 } else return error.InvalidConstant;
             },
@@ -735,15 +727,15 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
                 const left = try getRegister(frame_regs, op.b);
                 if (op.c < frame.block.constants.len) {
                     const c = frame.block.constants[op.c];
-                    if (left == .number and c == .number) {
-                        try setRegPrimitive(frame_regs, op.a, JSValue.fromBool(left.number == c.number));
+                    if (left.isNumber() and c == .number) {
+                        try setRegPrimitive(frame_regs, op.a, JSValue.fromBool(left.asNumber() == c.number));
                     } else return error.UnsupportedOpcode;
                 } else return error.InvalidConstant;
             },
             .neg => {
                 const src = try getRegister(frame_regs, op.b);
-                if (src != .number) return error.UnsupportedOpcode;
-                try setRegPrimitive(frame_regs, op.a, JSValue.fromNumber(-src.number));
+                if (!src.isNumber()) return error.UnsupportedOpcode;
+                try setRegPrimitive(frame_regs, op.a, JSValue.fromNumber(-src.asNumber()));
             },
             .not => {
                 const truthy = try isTruthy(frame_regs, op.b);
@@ -751,8 +743,8 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
             },
             .not_bits => {
                 const src = try getRegister(frame_regs, op.b);
-                if (src != .number) return error.UnsupportedOpcode;
-                try setRegPrimitive(frame_regs, op.a, JSValue.fromNumber(@floatFromInt(~numberToInt32(src.number))));
+                if (!src.isNumber()) return error.UnsupportedOpcode;
+                try setRegPrimitive(frame_regs, op.a, JSValue.fromNumber(@floatFromInt(~numberToInt32(src.asNumber()))));
             },
             .typeof => {
                 const src = try getRegister(frame_regs, op.b);
@@ -762,17 +754,17 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
             .jump => frame.pc = @intCast(try jumpTarget(frame.block, op)),
             .jump_if_true => {
                 const val = try getRegister(frame_regs, op.a);
-                const truthy = if (val == .boolean) val.boolean else try isTruthy(frame_regs, op.a);
+                const truthy = if (val.isBool()) val.asBool() else try isTruthy(frame_regs, op.a);
                 if (truthy) frame.pc = @intCast(try jumpTarget(frame.block, op));
             },
             .jump_if_false => {
                 const val = try getRegister(frame_regs, op.a);
-                const truthy = if (val == .boolean) val.boolean else try isTruthy(frame_regs, op.a);
+                const truthy = if (val.isBool()) val.asBool() else try isTruthy(frame_regs, op.a);
                 if (!truthy) frame.pc = @intCast(try jumpTarget(frame.block, op));
             },
             .jump_if_not_nullish => {
                 const val = try getRegister(frame_regs, op.a);
-                if (val != .undefined and val != .null) frame.pc = @intCast(try jumpTarget(frame.block, op));
+                if (!val.isUndefined() and !val.isNull()) frame.pc = @intCast(try jumpTarget(frame.block, op));
             },
             .call => {
                 const callee = try getRegister(frame_regs, op.b);
@@ -979,33 +971,33 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
             },
             .iter_init => {
                 const iterable = try getRegister(frame_regs, op.b);
-                if (iterable != .array and iterable != .string) return error.UnsupportedOpcode;
+                if (!iterable.isArray() and !iterable.isString()) return error.UnsupportedOpcode;
                 const it = try JSValue.newArray(allocator);
-                _ = try it.array.value.push(iterable.retain());
-                _ = try it.array.value.push(JSValue.fromNumber(0));
+                _ = try it.asArray().value.push(iterable.retain());
+                _ = try it.asArray().value.push(JSValue.fromNumber(0));
                 try setRegTracked(frame, frame_regs, op.a, it);
             },
             .iter_next => {
                 const it = try getRegister(frame_regs, op.c);
-                if (it != .array or it.array.value.length() < 2) return error.UnsupportedOpcode;
-                const target = it.array.value.get(0);
-                const idx_val = it.array.value.get(1);
-                if (idx_val != .number) return error.UnsupportedOpcode;
-                const idx: usize = @intFromFloat(idx_val.number);
-                if (target == .array) {
-                    if (idx < target.array.value.length()) {
-                        const val = target.array.value.get(idx).retain();
-                        it.array.value.toSliceMut()[1] = JSValue.fromNumber(@floatFromInt(idx + 1));
+                if (!it.isArray() or it.asArray().value.length() < 2) return error.UnsupportedOpcode;
+                const target = it.asArray().value.get(0);
+                const idx_val = it.asArray().value.get(1);
+                if (!idx_val.isNumber()) return error.UnsupportedOpcode;
+                const idx: usize = @intFromFloat(idx_val.asNumber());
+                if (target.isArray()) {
+                    if (idx < target.asArray().value.length()) {
+                        const val = target.asArray().value.get(idx).retain();
+                        it.asArray().value.toSliceMut()[1] = JSValue.fromNumber(@floatFromInt(idx + 1));
                         try setRegTracked(frame, frame_regs, op.a, val);
                         try setRegister(frame_regs, op.b, JSValue.fromBool(false));
                     } else {
                         try setRegister(frame_regs, op.a, JSValue.UNDEFINED);
                         try setRegister(frame_regs, op.b, JSValue.fromBool(true));
                     }
-                } else if (target == .string) {
-                    if (idx < target.string.value.data.len) {
-                        const ch = try JSValue.newString(allocator, target.string.value.data[idx .. idx + 1]);
-                        it.array.value.toSliceMut()[1] = JSValue.fromNumber(@floatFromInt(idx + 1));
+                } else if (target.isString()) {
+                    if (idx < target.asString().value.data.len) {
+                        const ch = try JSValue.newString(allocator, target.asString().value.data[idx .. idx + 1]);
+                        it.asArray().value.toSliceMut()[1] = JSValue.fromNumber(@floatFromInt(idx + 1));
                         try setRegTracked(frame, frame_regs, op.a, ch);
                         try setRegister(frame_regs, op.b, JSValue.fromBool(false));
                     } else {
@@ -1081,14 +1073,16 @@ fn numberToInt32(n: f64) i32 {
 fn bitwise(registers: []JSValue, op: codeblock.Op, kind: BitwiseOp) !void {
     const left = try getRegister(registers, op.b);
     const right = try getRegister(registers, op.c);
-    if (left != .number or right != .number) return error.UnsupportedOpcode;
+    if (!left.isNumber() or !right.isNumber()) return error.UnsupportedOpcode;
+    const lnum = left.asNumber();
+    const rnum = right.asNumber();
     const result: f64 = switch (kind) {
-        .bit_and => @floatFromInt(numberToInt32(left.number) & numberToInt32(right.number)),
-        .bit_or => @floatFromInt(numberToInt32(left.number) | numberToInt32(right.number)),
-        .bit_xor => @floatFromInt(numberToInt32(left.number) ^ numberToInt32(right.number)),
-        .shl => @floatFromInt(numberToInt32(left.number) << @as(u5, @intCast(numberToUint32(right.number) & 31))),
-        .shr => @floatFromInt(numberToInt32(left.number) >> @as(u5, @intCast(numberToUint32(right.number) & 31))),
-        .ushr => @floatFromInt(numberToUint32(left.number) >> @as(u5, @intCast(numberToUint32(right.number) & 31))),
+        .bit_and => @floatFromInt(numberToInt32(lnum) & numberToInt32(rnum)),
+        .bit_or => @floatFromInt(numberToInt32(lnum) | numberToInt32(rnum)),
+        .bit_xor => @floatFromInt(numberToInt32(lnum) ^ numberToInt32(rnum)),
+        .shl => @floatFromInt(numberToInt32(lnum) << @as(u5, @intCast(numberToUint32(rnum) & 31))),
+        .shr => @floatFromInt(numberToInt32(lnum) >> @as(u5, @intCast(numberToUint32(rnum) & 31))),
+        .ushr => @floatFromInt(numberToUint32(lnum) >> @as(u5, @intCast(numberToUint32(rnum) & 31))),
     };
     try setRegister(registers, op.a, JSValue.fromNumber(result));
 }
@@ -1096,14 +1090,16 @@ fn bitwise(registers: []JSValue, op: codeblock.Op, kind: BitwiseOp) !void {
 fn arithmetic(registers: []JSValue, op: codeblock.Op, kind: Arithmetic) !void {
     const left = try getRegister(registers, op.b);
     const right = try getRegister(registers, op.c);
-    if (left != .number or right != .number) return error.UnsupportedOpcode;
+    if (!left.isNumber() or !right.isNumber()) return error.UnsupportedOpcode;
+    const lnum = left.asNumber();
+    const rnum = right.asNumber();
     const result = switch (kind) {
-        .add => left.number + right.number,
-        .sub => left.number - right.number,
-        .mul => left.number * right.number,
-        .div => left.number / right.number,
-        .mod => @mod(left.number, right.number),
-        .pow => zmath.pow(left.number, right.number),
+        .add => lnum + rnum,
+        .sub => lnum - rnum,
+        .mul => lnum * rnum,
+        .div => lnum / rnum,
+        .mod => @mod(lnum, rnum),
+        .pow => zmath.pow(lnum, rnum),
     };
     try setRegister(registers, op.a, JSValue.fromNumber(result));
 }
@@ -1111,18 +1107,20 @@ fn arithmetic(registers: []JSValue, op: codeblock.Op, kind: Arithmetic) !void {
 fn comparison(registers: []JSValue, op: codeblock.Op, kind: Comparison) !void {
     const left = try getRegister(registers, op.b);
     const right = try getRegister(registers, op.c);
-    if (left == .number and right == .number) {
+    if (left.isNumber() and right.isNumber()) {
+        const lnum = left.asNumber();
+        const rnum = right.asNumber();
         const result = switch (kind) {
-            .lt => left.number < right.number,
-            .gt => left.number > right.number,
-            .le => left.number <= right.number,
-            .ge => left.number >= right.number,
-            .eq => left.number == right.number,
-            .ne => left.number != right.number,
+            .lt => lnum < rnum,
+            .gt => lnum > rnum,
+            .le => lnum <= rnum,
+            .ge => lnum >= rnum,
+            .eq => lnum == rnum,
+            .ne => lnum != rnum,
         };
         try setRegister(registers, op.a, JSValue.fromBool(result));
-    } else if (left == .string and right == .string) {
-        const eq = std.mem.eql(u8, left.string.value.data, right.string.value.data);
+    } else if (left.isString() and right.isString()) {
+        const eq = std.mem.eql(u8, left.asString().value.data, right.asString().value.data);
         const result = switch (kind) {
             .eq => eq,
             .ne => !eq,
@@ -1135,11 +1133,11 @@ fn comparison(registers: []JSValue, op: codeblock.Op, kind: Comparison) !void {
 fn addOp(frame: *CallFrame, registers: []JSValue, allocator: Allocator, op: codeblock.Op) !void {
     const left = try getRegister(registers, op.b);
     const right = try getRegister(registers, op.c);
-    if (left == .number and right == .number) {
-        try setRegister(registers, op.a, JSValue.fromNumber(left.number + right.number));
+    if (left.isNumber() and right.isNumber()) {
+        try setRegister(registers, op.a, JSValue.fromNumber(left.asNumber() + right.asNumber()));
         return;
     }
-    if (left == .string or right == .string) {
+    if (left.isString() or right.isString()) {
         var buf_l: [32]u8 = undefined;
         var buf_r: [32]u8 = undefined;
         const sl = stringSlice(left, &buf_l) orelse return error.UnsupportedOpcode;
@@ -1157,14 +1155,15 @@ fn arithmeticLocalConst(registers: []JSValue, block: *const codeblock.CodeBlock,
     const left = try getRegister(registers, op.b);
     if (op.c >= block.constants.len) return error.InvalidConstant;
     const c = block.constants[op.c];
-    if (left == .number and c == .number) {
+    if (left.isNumber() and c == .number) {
+        const lnum = left.asNumber();
         const result = switch (kind) {
-            .add => left.number + c.number,
-            .sub => left.number - c.number,
-            .mul => left.number * c.number,
-            .div => left.number / c.number,
-            .mod => @mod(left.number, c.number),
-            .pow => zmath.pow(left.number, c.number),
+            .add => lnum + c.number,
+            .sub => lnum - c.number,
+            .mul => lnum * c.number,
+            .div => lnum / c.number,
+            .mod => @mod(lnum, c.number),
+            .pow => zmath.pow(lnum, c.number),
         };
         try setRegister(registers, op.a, JSValue.fromNumber(result));
     } else return error.UnsupportedOpcode;
@@ -1174,26 +1173,27 @@ fn comparisonLocalConst(registers: []JSValue, block: *const codeblock.CodeBlock,
     const left = try getRegister(registers, op.b);
     if (op.c >= block.constants.len) return error.InvalidConstant;
     const c = block.constants[op.c];
-    if (left == .number and c == .number) {
+    if (left.isNumber() and c == .number) {
+        const lnum = left.asNumber();
         const result = switch (kind) {
-            .lt => left.number < c.number,
-            .gt => left.number > c.number,
-            .le => left.number <= c.number,
-            .ge => left.number >= c.number,
-            .eq => left.number == c.number,
-            .ne => left.number != c.number,
+            .lt => lnum < c.number,
+            .gt => lnum > c.number,
+            .le => lnum <= c.number,
+            .ge => lnum >= c.number,
+            .eq => lnum == c.number,
+            .ne => lnum != c.number,
         };
         try setRegister(registers, op.a, JSValue.fromBool(result));
-    } else if (left == .string and c == .string) {
-        const eq = std.mem.eql(u8, left.string.value.data, c.string);
+    } else if (left.isString() and c == .string) {
+        const eq = std.mem.eql(u8, left.asString().value.data, c.string);
         const result = switch (kind) {
             .eq => eq,
             .ne => !eq,
             else => return error.UnsupportedOpcode,
         };
         try setRegister(registers, op.a, JSValue.fromBool(result));
-    } else if (left == .boolean and c == .boolean) {
-        const eq = (left.boolean == c.boolean);
+    } else if (left.isBool() and c == .boolean) {
+        const eq = (left.asBool() == c.boolean);
         const result = switch (kind) {
             .eq => eq,
             .ne => !eq,
@@ -1207,13 +1207,13 @@ fn addLocalConst(registers: []JSValue, allocator: Allocator, block: *const codeb
     const left = try getRegister(registers, op.b);
     if (op.c >= block.constants.len) return error.InvalidConstant;
     const c = block.constants[op.c];
-    if (left == .number and c == .number) {
-        try setRegister(registers, op.a, JSValue.fromNumber(left.number + c.number));
+    if (left.isNumber() and c == .number) {
+        try setRegister(registers, op.a, JSValue.fromNumber(left.asNumber() + c.number));
         return;
     }
     const right = try constantValue(allocator, block, op.c);
     defer right.deinit();
-    if (left == .string or right == .string) {
+    if (left.isString() or right.isString()) {
         var buf_l: [32]u8 = undefined;
         var buf_r: [32]u8 = undefined;
         const sl = stringSlice(left, &buf_l) orelse return error.UnsupportedOpcode;
@@ -1228,25 +1228,24 @@ fn addLocalConst(registers: []JSValue, allocator: Allocator, block: *const codeb
 }
 
 fn stringSlice(v: JSValue, buf: *[32]u8) ?[]const u8 {
-    return switch (v) {
-        .string => |s| s.value.data,
-        .number => |n| std.fmt.bufPrint(buf, "{d}", .{n}) catch null,
-        .boolean => |b| if (b) "true" else "false",
-        .null => "null",
-        .undefined => "undefined",
-        else => null,
-    };
+    if (v.isString()) return v.asString().value.data;
+    if (v.isNumber()) return std.fmt.bufPrint(buf, "{d}", .{v.asNumber()}) catch null;
+    if (v.isBool()) return if (v.asBool()) "true" else "false";
+    if (v.isNull()) return "null";
+    if (v.isUndefined()) return "undefined";
+    return null;
 }
 
 fn isTruthy(registers: []const JSValue, index: u8) !bool {
     const value = try getRegister(registers, index);
-    return switch (value) {
-        .undefined, .null => false,
-        .boolean => value.boolean,
-        .number => value.number != 0 and !std.math.isNan(value.number),
-        .string => |s| s.value.data.len > 0,
-        else => return error.UnsupportedOpcode,
-    };
+    if (value.isUndefined() or value.isNull()) return false;
+    if (value.isBool()) return value.asBool();
+    if (value.isNumber()) {
+        const n = value.asNumber();
+        return n != 0 and !std.math.isNan(n);
+    }
+    if (value.isString()) return value.asString().value.data.len > 0;
+    return error.UnsupportedOpcode;
 }
 
 const GlobalCacheEntry = struct {
@@ -1354,6 +1353,6 @@ test "vm executes arithmetic and retains its result" {
     };
     const value = try vmCall(std.testing.allocator, &block, null, &.{ JSValue.fromNumber(2), JSValue.fromNumber(3) }, null);
     defer value.deinit();
-    try std.testing.expect(value == .number);
-    try std.testing.expectEqual(@as(f64, 5), value.number);
+    try std.testing.expect(value.isNumber());
+    try std.testing.expectEqual(@as(f64, 5), value.asNumber());
 }

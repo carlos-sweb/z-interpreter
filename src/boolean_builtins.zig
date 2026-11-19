@@ -31,7 +31,7 @@ pub const boolean_methods = std.StaticStringMap(MethodSpec).initComptime(.{
 });
 
 fn requireBoolean(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!bool {
-    return (try requirePrimitive(ctx, this_value, .boolean, "Boolean.prototype.{s} called on a non-boolean", method)).boolean;
+    return (try requirePrimitive(ctx, this_value, .boolean, "Boolean.prototype.{s} called on a non-boolean", method)).asBool();
 }
 
 fn booleanToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {

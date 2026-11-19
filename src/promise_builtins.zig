@@ -59,7 +59,7 @@ fn capReject(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
 }
 
 pub fn isPromiseConstructor(v: JSValue) bool {
-    return v == .function and v.function.value.call == promiseConstructor;
+    return v.isFunction() and v.asFunction().value.call == promiseConstructor;
 }
 
 /// `new Promise(executor)`: executor runs SYNCHRONOUSLY (real spec
@@ -70,7 +70,7 @@ fn promiseConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     _ = this_value;
     const self = interp(ctx);
     const executor = arg(args, 0);
-    if (executor != .function) {
+    if (!executor.isFunction()) {
         return self.throwError(.type_error, "Promise resolver {s} is not a function", .{executor.typeOf()});
     }
     const p = try interp(ctx).gcNewPromise();
@@ -86,7 +86,7 @@ fn promiseConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     const resolve_fn = try interp(ctx).gcNewFunction(.{ .ctx = cap, .name = "resolve", .arity = 1, .call = capResolve });
     const reject_fn = try interp(ctx).gcNewFunction(.{ .ctx = cap, .name = "reject", .arity = 1, .call = capReject });
 
-    _ = executor.function.value.call(executor.function.value.ctx, allocator, JSValue.UNDEFINED, &.{ resolve_fn, reject_fn }) catch |err0| {
+    _ = executor.asFunction().value.call(executor.asFunction().value.ctx, allocator, JSValue.UNDEFINED, &.{ resolve_fn, reject_fn }) catch |err0| {
         const err = self.throwIfGap(err0);
         if (err != error.JsThrow) return err;
         const ex = self.pending_exception.?;
@@ -102,7 +102,7 @@ fn requirePromise(ctx: *anyopaque, this_value: JSValue, method: []const u8) anye
 
 /// Non-callable handlers are the spec's pass-through (then(null, f) etc).
 fn handlerOrNull(v: JSValue) ?JSValue {
-    return if (v == .function) v else null;
+    return if (v.isFunction()) v else null;
 }
 
 fn promiseThen(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -134,14 +134,14 @@ fn finallyCtx(ctx: *anyopaque) *FinallyCtx {
 fn finallyOnFulfilled(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
     const c = finallyCtx(ctx);
-    _ = try c.handler.function.value.call(c.handler.function.value.ctx, allocator, JSValue.UNDEFINED, &.{});
+    _ = try c.handler.asFunction().value.call(c.handler.asFunction().value.ctx, allocator, JSValue.UNDEFINED, &.{});
     return arg(args, 0);
 }
 
 fn finallyOnRejected(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
     const c = finallyCtx(ctx);
-    _ = try c.handler.function.value.call(c.handler.function.value.ctx, allocator, JSValue.UNDEFINED, &.{});
+    _ = try c.handler.asFunction().value.call(c.handler.asFunction().value.ctx, allocator, JSValue.UNDEFINED, &.{});
     return c.interp.throwValue(arg(args, 0).retain());
 }
 
@@ -164,7 +164,7 @@ fn promiseResolveStatic(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     const v = arg(args, 0);
     // Promise.resolve(promise) returns it unchanged (real behavior);
     // the argument is borrowed, so the result is a new reference.
-    if (v == .promise) return v.retain();
+    if (v.isPromise()) return v.retain();
     return interp(ctx).fulfilledPromise(v);
 }
 
@@ -193,7 +193,7 @@ pub const AllCtx = struct {
             return;
         }
         var array = try c.interp.gcNewArray();
-        for (c.results) |r| _ = try array.array.value.push(r.retain());
+        for (c.results) |r| _ = try array.asArray().value.push(r.retain());
         try c.interp.resolvePromise(c.derived, array);
     }
 };
@@ -234,8 +234,8 @@ fn promiseAll(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     _ = this_value;
     const self = interp(ctx);
     const input = arg(args, 0);
-    if (input != .array) return self.throwError(.type_error, "{s} is not iterable", .{input.typeOf()});
-    const items = input.array.value.toSlice();
+    if (!input.isArray()) return self.throwError(.type_error, "{s} is not iterable", .{input.typeOf()});
+    const items = input.asArray().value.toSlice();
 
     const derived = try interp(ctx).gcNewPromise();
     const all = try allocator.create(AllCtx);
@@ -261,7 +261,7 @@ fn promiseAll(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
         elem.* = .{ .all = all, .index = i };
         try self.gcTrackAllElemCtx(elem);
         const on_f = try interp(ctx).gcNewFunction(.{ .ctx = elem, .name = "", .call = allElemFulfilled });
-        const p = if (item == .promise) item else try self.fulfilledPromise(item);
+        const p = if (item.isPromise()) item else try self.fulfilledPromise(item);
         _ = try self.promiseThen(p, on_f, on_r);
     }
     return derived;
@@ -270,8 +270,8 @@ fn promiseAll(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 /// `{ status, value }` / `{ status, reason }` for Promise.allSettled.
 fn settledRecord(self: *Interpreter, fulfilled: bool, v: JSValue) anyerror!JSValue {
     var o = try self.ordinaryObject();
-    try o.object.value.set("status", try self.gcNewString(if (fulfilled) "fulfilled" else "rejected"));
-    try o.object.value.set(if (fulfilled) "value" else "reason", v.retain());
+    try o.asObject().value.set("status", try self.gcNewString(if (fulfilled) "fulfilled" else "rejected"));
+    try o.asObject().value.set(if (fulfilled) "value" else "reason", v.retain());
     return o;
 }
 
@@ -341,7 +341,7 @@ fn settleCombinator(comptime mode: @TypeOf(@as(AllCtx, undefined).mode)) NativeF
                 try self.gcTrackAllElemCtx(elem);
                 const on_f = shared_f orelse try self.gcNewFunction(.{ .ctx = elem, .name = "", .arity = 1, .call = settleElem(true) });
                 const on_r = try self.gcNewFunction(.{ .ctx = elem, .name = "", .arity = 1, .call = settleElem(false) });
-                const p = if (item == .promise) item else try self.fulfilledPromise(item);
+                const p = if (item.isPromise()) item else try self.fulfilledPromise(item);
                 _ = try self.promiseThen(p, on_f, on_r);
             }
             return derived;
@@ -376,7 +376,7 @@ fn promiseRace(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     _ = this_value;
     const self = interp(ctx);
     const input = arg(args, 0);
-    if (input != .array) return self.throwError(.type_error, "{s} is not iterable", .{input.typeOf()});
+    if (!input.isArray()) return self.throwError(.type_error, "{s} is not iterable", .{input.typeOf()});
 
     const derived = try interp(ctx).gcNewPromise();
     const rc = try allocator.create(RaceCtx);
@@ -384,8 +384,8 @@ fn promiseRace(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     try self.gcTrackRaceCtx(rc);
     const on_f = try interp(ctx).gcNewFunction(.{ .ctx = rc, .name = "", .call = raceFulfilled });
     const on_r = try interp(ctx).gcNewFunction(.{ .ctx = rc, .name = "", .call = raceRejected });
-    for (input.array.value.toSlice()) |item| {
-        const p = if (item == .promise) item else try self.fulfilledPromise(item);
+    for (input.asArray().value.toSlice()) |item| {
+        const p = if (item.isPromise()) item else try self.fulfilledPromise(item);
         _ = try self.promiseThen(p, on_f, on_r);
     }
     return derived;
@@ -396,15 +396,15 @@ fn globalSetTimeout(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     _ = this_value;
     const self = interp(ctx);
     const cb = arg(args, 0);
-    if (cb != .function) return self.throwError(.type_error, "The \"callback\" argument must be of type function", .{});
-    const delay = if (arg(args, 1) == .number) arg(args, 1).number else 0;
+    if (!cb.isFunction()) return self.throwError(.type_error, "The \"callback\" argument must be of type function", .{});
+    const delay = if (arg(args, 1).isNumber()) arg(args, 1).asNumber() else 0;
     return JSValue.fromNumber(try self.addTimer(cb, delay));
 }
 
 fn globalClearTimeout(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     _ = this_value;
-    if (arg(args, 0) == .number) interp(ctx).clearTimer(arg(args, 0).number);
+    if (arg(args, 0).isNumber()) interp(ctx).clearTimer(arg(args, 0).asNumber());
     return JSValue.UNDEFINED;
 }
 

@@ -38,19 +38,19 @@ fn fnCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     const target = try requireFunction(ctx, this_value, "call");
     const this_arg = arg(args, 0);
     const rest = if (args.len > 1) args[1..] else &[_]JSValue{};
-    return target.function.value.call(target.function.value.ctx, allocator, this_arg, rest);
+    return target.asFunction().value.call(target.asFunction().value.ctx, allocator, this_arg, rest);
 }
 
 fn fnApply(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const target = try requireFunction(ctx, this_value, "apply");
     const this_arg = arg(args, 0);
     const arg_list = arg(args, 1);
-    const call_args: []const JSValue = switch (arg_list) {
+    const call_args: []const JSValue = switch (arg_list.unpack()) {
         .undefined, .null => &.{},
         .array => |box| box.value.toSlice(),
         else => return interp(ctx).throwError(.type_error, "CreateListFromArrayLike called on non-object", .{}),
     };
-    return target.function.value.call(target.function.value.ctx, allocator, this_arg, call_args);
+    return target.asFunction().value.call(target.asFunction().value.ctx, allocator, this_arg, call_args);
 }
 
 /// ctx for one bound function: the target, the fixed this, and any
@@ -74,15 +74,15 @@ fn boundCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     defer allocator.free(total);
     @memcpy(total[0..bc.pre_args.len], bc.pre_args);
     @memcpy(total[bc.pre_args.len..], args);
-    return bc.target.function.value.call(bc.target.function.value.ctx, allocator, bc.bound_this, total);
+    return bc.target.asFunction().value.call(bc.target.asFunction().value.ctx, allocator, bc.bound_this, total);
 }
 
 /// Internal bound-function identity used by [[Construct]] dispatch. This is
 /// deliberately not a JS-visible marker: only our own `boundCall` callback
 /// may expose a `BoundCtx` through this helper.
 pub fn boundContext(value: JSValue) ?*BoundCtx {
-    if (value == .function and value.function.value.call == boundCall) {
-        return @ptrCast(@alignCast(value.function.value.ctx));
+    if (value.isFunction() and value.asFunction().value.call == boundCall) {
+        return @ptrCast(@alignCast(value.asFunction().value.ctx));
     }
     return null;
 }
@@ -102,7 +102,7 @@ fn fnBind(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     // isn't a string (e.g. deleted, or overwritten with a non-string).
     const target_name = try interp(ctx).getProperty(target, "name");
     defer target_name.deinit();
-    const target_name_str = if (target_name == .string) target_name.string.value.data else "";
+    const target_name_str = if (target_name.isString()) target_name.asString().value.data else "";
     const name = try std.fmt.allocPrint(allocator, "bound {s}", .{target_name_str});
     bc.* = .{
         .target = target.retain(),
@@ -111,7 +111,7 @@ fn fnBind(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
         .name = name,
     };
     try interp(ctx).gcTrackBoundCtx(bc);
-    const target_arity = target.function.value.arity;
+    const target_arity = target.asFunction().value.arity;
     const bound_arity = if (target_arity > pre.len) target_arity - pre.len else 0;
     return interp(ctx).gcNewFunction(.{
         .ctx = bc,

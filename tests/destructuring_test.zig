@@ -37,7 +37,7 @@ test "object pattern: shorthand, rename, defaults, nesting, rest" {
 test "object pattern default fires only on undefined, not null (Node-verified)" {
     try helpers.runAndCheck("const {q = 9} = {q: null}; q;", {}, struct {
         fn check(_: void, result: helpers.Result) !void {
-            try testing.expect(result.value == .@"null");
+            try testing.expect(result.value.isNull());
         }
     }.check);
 }
