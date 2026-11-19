@@ -34,10 +34,10 @@ const installBuiltin = builtin_helpers.installBuiltin;
 /// Symbol.for registry.
 pub fn canBeHeldWeakly(self: *Interpreter, v: JSValue) bool {
     if (isObjectLike(v)) return true;
-    if (v != .symbol) return false;
+    if (v.tag() != .symbol) return false;
     var it = self.symbol_registry.valueIterator();
     while (it.next()) |s| {
-        if (s.* == .symbol and s.symbol == v.symbol) return false;
+        if (s.isSymbol() and s.asSymbol() == v.asSymbol()) return false;
     }
     return true;
 }
@@ -49,8 +49,8 @@ fn identity(v: JSValue) usize {
 
 /// The slots of `this` if it is an instance of the given kind.
 fn slotsOf(self: *Interpreter, this_value: JSValue, comptime kind: std.meta.Tag(ObjectSlots)) ?*ObjectSlots {
-    if (this_value != .object) return null;
-    const slots = self.object_slots.getPtr(@intFromPtr(this_value.object)) orelse return null;
+    if (this_value.tag() != .object) return null;
+    const slots = self.object_slots.getPtr(@intFromPtr(this_value.asObject())) orelse return null;
     if (slots.* != kind) return null;
     return slots;
 }
@@ -62,7 +62,7 @@ fn incompatible(self: *Interpreter, comptime what: []const u8) anyerror {
 /// The instance a constructor initializes: `this` when called by `new`
 /// (constructValue armed construct_target), else a TypeError.
 fn newInstance(self: *Interpreter, ctx: *anyopaque, this_value: JSValue, comptime name: []const u8) anyerror!JSValue {
-    if (self.construct_target != ctx or this_value != .object)
+    if (self.construct_target != ctx or this_value.tag() != .object)
         return self.throwError(.type_error, "Constructor " ++ name ++ " requires 'new'", .{});
     return this_value;
 }
@@ -77,14 +77,14 @@ fn weakCollectionConstructor(comptime is_map: bool) NativeFn {
             const self = interp(ctx);
             const o = try newInstance(self, ctx, this_value, name);
             const empty: interpreter_mod.WeakTable = .empty;
-            try self.object_slots.put(self.gc_allocator, @intFromPtr(o.object), if (is_map) .{ .weak_map = empty } else .{ .weak_set = empty });
+            try self.object_slots.put(self.gc_allocator, @intFromPtr(o.asObject()), if (is_map) .{ .weak_map = empty } else .{ .weak_set = empty });
             const iterable = arg(args, 0);
-            if (iterable == .undefined or iterable == .null) return o.retain();
+            if (iterable.tag() == .undefined or iterable.tag() == .null) return o.retain();
             // AddEntriesFromIterable / the WeakSet loop: the adder is looked
             // up once, on the new object, and called per element.
             const adder = try self.getProperty(o, if (is_map) "set" else "add");
             defer adder.deinit();
-            if (adder != .function) return self.throwError(.type_error, "'" ++ (if (is_map) "set" else "add") ++ "' returned for " ++ name ++ " is not a function", .{});
+            if (adder.tag() != .function) return self.throwError(.type_error, "'" ++ (if (is_map) "set" else "add") ++ "' returned for " ++ name ++ " is not a function", .{});
             const items = try self.iterableItems(iterable);
             defer self.gc_allocator.free(items);
             for (items) |item| {
@@ -180,7 +180,7 @@ fn weakRefConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     const o = try newInstance(self, ctx, this_value, "WeakRef");
     const target = arg(args, 0);
     if (!canBeHeldWeakly(self, target)) return self.throwError(.type_error, "WeakRef: invalid target", .{});
-    try self.object_slots.put(self.gc_allocator, @intFromPtr(o.object), .{ .weak_ref = target.retain() });
+    try self.object_slots.put(self.gc_allocator, @intFromPtr(o.asObject()), .{ .weak_ref = target.retain() });
     return o.retain();
 }
 
@@ -199,8 +199,8 @@ fn finRegConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     const self = interp(ctx);
     const o = try newInstance(self, ctx, this_value, "FinalizationRegistry");
     const cleanup = arg(args, 0);
-    if (cleanup != .function) return self.throwError(.type_error, "FinalizationRegistry: cleanup must be callable", .{});
-    try self.object_slots.put(self.gc_allocator, @intFromPtr(o.object), .{ .finalization_registry = .{ .cleanup = cleanup.retain(), .cells = .empty } });
+    if (cleanup.tag() != .function) return self.throwError(.type_error, "FinalizationRegistry: cleanup must be callable", .{});
+    try self.object_slots.put(self.gc_allocator, @intFromPtr(o.asObject()), .{ .finalization_registry = .{ .cleanup = cleanup.retain(), .cells = .empty } });
     return o.retain();
 }
 
@@ -213,7 +213,7 @@ fn finRegRegister(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     const token = arg(args, 2);
     if (!canBeHeldWeakly(self, target)) return self.throwError(.type_error, "FinalizationRegistry.prototype.register: invalid target", .{});
     if (regex_builtins.sameValue(target, held)) return self.throwError(.type_error, "FinalizationRegistry.prototype.register: target and holdings must not be same", .{});
-    if (token != .undefined and !canBeHeldWeakly(self, token)) return self.throwError(.type_error, "FinalizationRegistry.prototype.register: invalid unregister token", .{});
+    if (token.tag() != .undefined and !canBeHeldWeakly(self, token)) return self.throwError(.type_error, "FinalizationRegistry.prototype.register: invalid unregister token", .{});
     try s.finalization_registry.cells.append(self.gc_allocator, .{ .target = target.retain(), .held = held.retain(), .token = token.retain() });
     return JSValue.UNDEFINED;
 }
@@ -229,7 +229,7 @@ fn finRegUnregister(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     var i: usize = 0;
     while (i < cells.items.len) {
         const c = cells.items[i];
-        if (c.token != .undefined and regex_builtins.sameValue(c.token, token)) {
+        if (c.token.tag() != .undefined and regex_builtins.sameValue(c.token, token)) {
             c.target.deinit();
             c.held.deinit();
             c.token.deinit();
@@ -249,11 +249,11 @@ const method_attrs = zvalue.PropertyDescriptor{ .writable = true, .enumerable = 
 fn installClass(self: *Interpreter, comptime name: []const u8, comptime arity: usize, comptime call: NativeFn, methods: anytype, tag_key: []const u8) !void {
     const ctor = try installBuiltin(self, .{ .name = name, .ctor = .{ .arity = arity, .call = call, .constructable = true } });
     const proto = try self.functionPrototype(ctor);
-    try proto.object.value.defineProperty("constructor", ctor.retain(), method_attrs);
+    try proto.asObject().value.defineProperty("constructor", ctor.retain(), method_attrs);
     inline for (methods) |m| {
-        try proto.object.value.defineProperty(m[0], try native(self, m[0], m[1], m[2]), method_attrs);
+        try proto.asObject().value.defineProperty(m[0], try native(self, m[0], m[1], m[2]), method_attrs);
     }
-    try proto.object.value.defineProperty(tag_key, try self.gcNewString(name), .{ .writable = false, .enumerable = false, .configurable = true });
+    try proto.asObject().value.defineProperty(tag_key, try self.gcNewString(name), .{ .writable = false, .enumerable = false, .configurable = true });
     // The constructor's `prototype` is non-writable, non-enumerable,
     // non-configurable; this engine keeps it on the Callable itself.
 }

@@ -32,8 +32,8 @@ const isObjectLike = builtin_helpers.isObjectLike;
 fn defineAccessor(self: *Interpreter, target: JSValue, key: []const u8, comptime name: []const u8, getter: NativeFn, setter: ?NativeFn) !void {
     const g = try native(self, "get " ++ name, 0, getter);
     const s: ?JSValue = if (setter) |f| try native(self, "set " ++ name, 1, f) else null;
-    try target.object.value.defineAccessor(key, g, s, JSValue.UNDEFINED);
-    const rec = target.object.value.getOwnRecordMut(key).?;
+    try target.asObject().value.defineAccessor(key, g, s, JSValue.UNDEFINED);
+    const rec = target.asObject().value.getOwnRecordMut(key).?;
     rec.descriptor.enumerable = false;
     rec.descriptor.configurable = true;
 }
@@ -51,15 +51,15 @@ fn num(n: usize) JSValue {
 fn mapSize(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     _ = args;
-    if (this_value != .map) return incompatible(interp(ctx), "Map.prototype.size");
-    return num(this_value.map.value.size());
+    if (this_value.tag() != .map) return incompatible(interp(ctx), "Map.prototype.size");
+    return num(this_value.asMap().value.size());
 }
 
 fn setSize(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     _ = args;
-    if (this_value != .set) return incompatible(interp(ctx), "Set.prototype.size");
-    return num(this_value.set.value.size());
+    if (this_value.tag() != .set) return incompatible(interp(ctx), "Set.prototype.size");
+    return num(this_value.asSet().value.size());
 }
 
 // ===== ArrayBuffer / SharedArrayBuffer =====
@@ -70,8 +70,8 @@ fn setSize(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
 
 /// The receiver as an ArrayBuffer (`shared` false) or SharedArrayBuffer.
 fn bufferOf(self: *Interpreter, this_value: JSValue, comptime shared: bool, comptime what: []const u8) anyerror!*zvalue.ArrayBuffer {
-    if (this_value != .array_buffer or this_value.array_buffer.value.is_shared != shared) return incompatible(self, what);
-    return &this_value.array_buffer.value;
+    if (this_value.tag() != .array_buffer or this_value.asArrayBuffer().value.is_shared != shared) return incompatible(self, what);
+    return &this_value.asArrayBuffer().value;
 }
 
 fn bufferGetter(comptime shared: bool, comptime field: enum { byte_length, max_byte_length, flag_false, detached }, comptime what: []const u8) NativeFn {
@@ -96,8 +96,8 @@ fn dataViewGetter(comptime field: enum { buffer, byte_length, byte_offset }, com
         fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
             _ = allocator;
             _ = args;
-            if (this_value != .data_view) return incompatible(interp(ctx), what);
-            const dv = &this_value.data_view.value;
+            if (this_value.tag() != .data_view) return incompatible(interp(ctx), what);
+            const dv = &this_value.asDataView().value;
             return switch (field) {
                 .buffer => dv.owner.retain(),
                 .byte_length => num(dv.view.byte_length),
@@ -114,8 +114,8 @@ fn typedArrayGetter(comptime field: enum { buffer, byte_length, byte_offset, len
         fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
             _ = allocator;
             _ = args;
-            if (this_value != .typed_array) return incompatible(interp(ctx), what);
-            const ta = &this_value.typed_array.value;
+            if (this_value.tag() != .typed_array) return incompatible(interp(ctx), what);
+            const ta = &this_value.asTypedArray().value;
             const is_detached = builtin_helpers.isTypedArrayDetached(ta);
             return switch (field) {
                 .buffer => ta.owner.retain(),
@@ -130,8 +130,8 @@ fn typedArrayGetter(comptime field: enum { buffer, byte_length, byte_offset, len
 fn typedArrayToStringTag(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     _ = args;
-    if (this_value != .typed_array) return JSValue.UNDEFINED;
-    const name: []const u8 = switch (this_value.typed_array.value.kind) {
+    if (this_value.tag() != .typed_array) return JSValue.UNDEFINED;
+    const name: []const u8 = switch (this_value.asTypedArray().value.kind) {
         .i8 => "Int8Array",
         .u8 => "Uint8Array",
         .u8_clamped => "Uint8ClampedArray",
@@ -153,9 +153,9 @@ fn symbolDescription(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     _ = allocator;
     _ = args;
     const self = interp(ctx);
-    const sym = if (this_value == .symbol) this_value else self.unboxPrimitiveWrapper(this_value) orelse JSValue.UNDEFINED;
-    if (sym != .symbol) return incompatible(self, "Symbol.prototype.description");
-    const d = sym.symbol.value.description orelse return JSValue.UNDEFINED;
+    const sym = if (this_value.tag() == .symbol) this_value else self.unboxPrimitiveWrapper(this_value) orelse JSValue.UNDEFINED;
+    if (sym.tag() != .symbol) return incompatible(self, "Symbol.prototype.description");
+    const d = sym.asSymbol().value.description orelse return JSValue.UNDEFINED;
     return self.gcNewString(d);
 }
 
@@ -177,7 +177,7 @@ fn getPrototypeOfWithTypedArray(ctx: *anyopaque, allocator: Allocator, this_valu
         if (Interpreter.heapBoxAddress(obj)) |addr| {
             if (self.proto_refs.get(addr)) |p| return p.retain();
         }
-        if (self.protos.typed_array_base.object.value.get("constructor")) |ta_ctor| {
+        if (self.protos.typed_array_base.asObject().value.get("constructor")) |ta_ctor| {
             return ta_ctor.retain();
         }
     }
@@ -200,11 +200,11 @@ fn protoGetter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
 fn protoSetter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const self = interp(ctx);
-    if (this_value == .undefined or this_value == .null)
+    if (this_value.tag() == .undefined or this_value.tag() == .null)
         return self.throwError(.type_error, "Object.prototype.__proto__ called on null or undefined", .{});
     const proto = arg(args, 0);
     // A non-object, non-null value is ignored; so is a primitive receiver.
-    if (proto != .null and !isObjectLike(proto)) return JSValue.UNDEFINED;
+    if (proto.tag() != .null and !isObjectLike(proto)) return JSValue.UNDEFINED;
     if (!isObjectLike(this_value)) return JSValue.UNDEFINED;
     const ok = object_builtins.setPrototypeOfInternal(self, this_value, proto) catch |err| switch (err) {
         error.PrototypeCycle => return self.throwError(.type_error, "Cyclic __proto__ value", .{}),
@@ -250,7 +250,7 @@ pub fn install(self: *Interpreter) !void {
     // get [Symbol.species] on the constructors that have one (RegExp's
     // is installed with the rest of RegExp; %TypedArray%'s is installed
     // on the intrinsic %TypedArray% statics bag).
-    const species_sym = (try self.functionStatics(self.global_env.get("Symbol").?)).object.value.get("species").?;
+    const species_sym = (try self.functionStatics(self.global_env.get("Symbol").?)).asObject().value.get("species").?;
     const species_key = try self.encodeKey(species_sym);
     defer self.gc_allocator.free(species_key);
     inline for (.{ "Array", "ArrayBuffer", "SharedArrayBuffer", "Map", "Set", "Promise" }) |name| {
@@ -260,11 +260,11 @@ pub fn install(self: *Interpreter) !void {
     const ta_statics = try @import("arraybuffer_builtins.zig").installHierarchy(self);
     try defineAccessor(self, ta_statics, species_key, "[Symbol.species]", speciesGetter, null);
     const object_statics = try self.functionStatics(self.global_env.get("Object").?);
-    const old_obj_gpo = object_statics.object.value.get("getPrototypeOf");
+    const old_obj_gpo = object_statics.asObject().value.get("getPrototypeOf");
     try builtin_helpers.dneMethod(object_statics, "getPrototypeOf", try native(self, "getPrototypeOf", 1, getPrototypeOfWithTypedArray));
     if (old_obj_gpo) |old| old.deinit();
     if (self.global_env.get("Reflect")) |reflect_obj| {
-        const old_ref_gpo = reflect_obj.object.value.get("getPrototypeOf");
+        const old_ref_gpo = reflect_obj.asObject().value.get("getPrototypeOf");
         try builtin_helpers.dneMethod(reflect_obj, "getPrototypeOf", try native(self, "getPrototypeOf", 1, reflectGetPrototypeOfWithTypedArray));
         if (old_ref_gpo) |old| old.deinit();
     }

@@ -44,7 +44,7 @@ pub const ParsedDesc = struct {
 };
 
 pub fn isCallable(v: JSValue) bool {
-    return switch (v) {
+    return switch (v.unpack()) {
         .function => true,
         .proxy => |box| isCallable(box.value.target),
         else => false,
@@ -52,9 +52,9 @@ pub fn isCallable(v: JSValue) bool {
 }
 
 pub fn sameValue(a: JSValue, b: JSValue) bool {
-    if (a == .number and b == .number) {
-        const x = a.number;
-        const y = b.number;
+    if (a.isNumber() and b.isNumber()) {
+        const x = a.asNumber();
+        const y = b.asNumber();
         if (std.math.isNan(x) and std.math.isNan(y)) return true;
         if (x == 0 and y == 0) return std.math.signbit(x) == std.math.signbit(y);
         return x == y;
@@ -76,10 +76,10 @@ pub fn isProxyConstructor(self: *Interpreter, v: JSValue) bool {
 }
 
 pub fn hasProperty(self: *Interpreter, v: JSValue, key: []const u8) anyerror!bool {
-    switch (v) {
+    switch (v.unpack()) {
         .object => |box| {
             if (self.global_object) |go| {
-                if (v.object == go.object) {
+                if (v.asObject() == go.asObject()) {
                     if (self.global_var_names.contains(key) or self.global_env.declaresLocally(key) or box.value.hasOwnProperty(key)) return true;
                 }
             }
@@ -96,13 +96,13 @@ pub fn hasProperty(self: *Interpreter, v: JSValue, key: []const u8) anyerror!boo
     var cur = v.retain();
     defer cur.deinit();
     while (true) {
-        switch (cur) {
+        switch (cur.unpack()) {
             .object => |box| {
                 if (box.value.hasOwnProperty(key)) return true;
                 const p = box.value.getPrototype() orelse return false;
                 const Box = @TypeOf(box.*);
                 const p_box: *Box = @fieldParentPtr("value", p);
-                const next = (JSValue{ .object = p_box }).retain();
+                const next = (JSValue.fromObject(p_box)).retain();
                 cur.deinit();
                 cur = next;
             },
@@ -112,7 +112,7 @@ pub fn hasProperty(self: *Interpreter, v: JSValue, key: []const u8) anyerror!boo
                     if (idx < box.value.length() and !box.value.isHole(idx)) return true;
                 }
                 if (self.array_props.get(@intFromPtr(box))) |bag| {
-                    if (bag.object.value.hasOwnProperty(key)) return true;
+                    if (bag.asObject().value.hasOwnProperty(key)) return true;
                 }
                 const next = self.protos.array.retain();
                 cur.deinit();
@@ -121,7 +121,7 @@ pub fn hasProperty(self: *Interpreter, v: JSValue, key: []const u8) anyerror!boo
             .regex => {
                 if (std.mem.eql(u8, key, "lastIndex")) return true;
                 if (self.regexProps(cur)) |bag| {
-                    if (bag.object.value.hasOwnProperty(key)) return true;
+                    if (bag.asObject().value.hasOwnProperty(key)) return true;
                 }
                 const next = self.protos.regex.retain();
                 cur.deinit();
@@ -129,7 +129,7 @@ pub fn hasProperty(self: *Interpreter, v: JSValue, key: []const u8) anyerror!boo
             },
             .temporal => |box| {
                 if (self.temporalProps(cur)) |bag| {
-                    if (bag.object.value.hasOwnProperty(key)) return true;
+                    if (bag.asObject().value.hasOwnProperty(key)) return true;
                 }
                 const next = self.protos.temporalProtoFor(box.value).retain();
                 cur.deinit();
@@ -138,7 +138,7 @@ pub fn hasProperty(self: *Interpreter, v: JSValue, key: []const u8) anyerror!boo
             .@"error" => {
                 if (std.mem.eql(u8, key, "name") or std.mem.eql(u8, key, "message") or std.mem.eql(u8, key, "constructor")) return true;
                 if (self.extraProps(cur)) |bag| {
-                    if (bag.object.value.hasOwnProperty(key)) return true;
+                    if (bag.asObject().value.hasOwnProperty(key)) return true;
                 }
                 const next = self.protos.@"error".retain();
                 cur.deinit();
@@ -146,14 +146,14 @@ pub fn hasProperty(self: *Interpreter, v: JSValue, key: []const u8) anyerror!boo
             },
             .date, .map, .set, .promise, .array_buffer, .data_view => {
                 if (self.extraProps(cur)) |bag| {
-                    if (bag.object.value.hasOwnProperty(key)) return true;
+                    if (bag.asObject().value.hasOwnProperty(key)) return true;
                 }
-                const proto = switch (cur) {
+                const proto = switch (cur.tag()) {
                     .date => self.protos.date,
                     .map => self.protos.map,
                     .set => self.protos.set,
                     .promise => self.protos.promise,
-                    .array_buffer => |box| self.arrayBufferProto(box.value.is_shared),
+                    .array_buffer => self.arrayBufferProto(cur.asArrayBuffer().value.is_shared),
                     .data_view => self.protos.data_view,
                     else => unreachable,
                 };
@@ -168,15 +168,15 @@ pub fn hasProperty(self: *Interpreter, v: JSValue, key: []const u8) anyerror!boo
                     .not_numeric => {},
                 }
                 if (self.extraProps(cur)) |bag| {
-                    if (bag.object.value.hasOwnProperty(key)) return true;
+                    if (bag.asObject().value.hasOwnProperty(key)) return true;
                 }
                 const next = self.typedArrayProto(box.value.kind).retain();
                 cur.deinit();
                 cur = next;
             },
             .function => {
-                if (cur.function.value.statics) |bag| {
-                    if (bag.object.value.hasOwnProperty(key)) return true;
+                if (cur.asFunction().value.statics) |bag| {
+                    if (bag.asObject().value.hasOwnProperty(key)) return true;
                 }
                 const next = self.protos.function.retain();
                 cur.deinit();
@@ -216,12 +216,12 @@ pub fn toPropertyDescriptor(self: *Interpreter, desc: JSValue) anyerror!ParsedDe
     if (try hasProperty(self, desc, "get")) {
         d.has_get = true;
         d.get = try self.getProperty(desc, "get");
-        if (d.get != .undefined and !isCallable(d.get)) return self.throwError(.type_error, "Getter must be a function", .{});
+        if (!d.get.isUndefined() and !isCallable(d.get)) return self.throwError(.type_error, "Getter must be a function", .{});
     }
     if (try hasProperty(self, desc, "set")) {
         d.has_set = true;
         d.set = try self.getProperty(desc, "set");
-        if (d.set != .undefined and !isCallable(d.set)) return self.throwError(.type_error, "Setter must be a function", .{});
+        if (!d.set.isUndefined() and !isCallable(d.set)) return self.throwError(.type_error, "Setter must be a function", .{});
     }
     if (d.isAccessor() and d.isData()) {
         return self.throwError(.type_error, "Invalid property descriptor. Cannot both specify accessors and a value or writable attribute", .{});
@@ -232,23 +232,23 @@ pub fn toPropertyDescriptor(self: *Interpreter, desc: JSValue) anyerror!ParsedDe
 pub fn fromParsedDesc(self: *Interpreter, d: *const ParsedDesc) anyerror!JSValue {
     var out = try self.ordinaryObject();
     errdefer out.deinit();
-    if (d.has_value) try out.object.value.set("value", d.value.retain());
-    if (d.has_writable) try out.object.value.set("writable", JSValue.fromBool(d.writable));
-    if (d.has_get) try out.object.value.set("get", d.get.retain());
-    if (d.has_set) try out.object.value.set("set", d.set.retain());
-    if (d.has_enumerable) try out.object.value.set("enumerable", JSValue.fromBool(d.enumerable));
-    if (d.has_configurable) try out.object.value.set("configurable", JSValue.fromBool(d.configurable));
+    if (d.has_value) try out.asObject().value.set("value", d.value.retain());
+    if (d.has_writable) try out.asObject().value.set("writable", JSValue.fromBool(d.writable));
+    if (d.has_get) try out.asObject().value.set("get", d.get.retain());
+    if (d.has_set) try out.asObject().value.set("set", d.set.retain());
+    if (d.has_enumerable) try out.asObject().value.set("enumerable", JSValue.fromBool(d.enumerable));
+    if (d.has_configurable) try out.asObject().value.set("configurable", JSValue.fromBool(d.configurable));
     return out;
 }
 
 pub fn validateAndApply(self: *Interpreter, obj: JSValue, key: []const u8, d: *const ParsedDesc) anyerror!bool {
     _ = self;
-    const zo = &obj.object.value;
+    const zo = &obj.asObject().value;
     const existing = zo.getOwnRecordMut(key) orelse {
         if (!zo.is_extensible) return false;
         if (d.isAccessor()) {
-            const g: ?JSValue = if (d.has_get and d.get != .undefined) d.get.retain() else null;
-            const s: ?JSValue = if (d.has_set and d.set != .undefined) d.set.retain() else null;
+            const g: ?JSValue = if (d.has_get and !d.get.isUndefined()) d.get.retain() else null;
+            const s: ?JSValue = if (d.has_set and !d.set.isUndefined()) d.set.retain() else null;
             zo.defineAccessor(key, g, s, JSValue.UNDEFINED) catch |err| {
                 if (g) |x| x.deinit();
                 if (s) |x| x.deinit();
@@ -313,12 +313,12 @@ pub fn validateAndApply(self: *Interpreter, obj: JSValue, key: []const u8, d: *c
     if (d.has_writable) rec.descriptor.writable = d.writable;
     if (d.has_get) {
         const old = rec.getter;
-        rec.getter = if (d.get != .undefined) d.get.retain() else null;
+        rec.getter = if (!d.get.isUndefined()) d.get.retain() else null;
         if (old) |x| x.deinit();
     }
     if (d.has_set) {
         const old = rec.setter;
-        rec.setter = if (d.set != .undefined) d.set.retain() else null;
+        rec.setter = if (!d.set.isUndefined()) d.set.retain() else null;
         if (old) |x| x.deinit();
     }
     if (d.has_enumerable) rec.descriptor.enumerable = d.enumerable;
@@ -339,7 +339,7 @@ fn virtualDataAllows(d: *const ParsedDesc, cur: JSValue, writable: bool, enumera
 }
 
 fn bagInsertRaw(bag: JSValue, key: []const u8, value: JSValue, desc: zvalue.PropertyDescriptor) !void {
-    const zo = &bag.object.value;
+    const zo = &bag.asObject().value;
     const saved = zo.is_extensible;
     zo.is_extensible = true;
     defer zo.is_extensible = saved;
@@ -351,8 +351,8 @@ fn bagInsertRaw(bag: JSValue, key: []const u8, value: JSValue, desc: zvalue.Prop
 
 pub fn materializeFnVirtual(self: *Interpreter, f: JSValue, key: []const u8) anyerror!void {
     const bag = try self.functionStatics(f);
-    if (bag.object.value.hasOwnProperty(key)) return;
-    const box = f.function;
+    if (bag.asObject().value.hasOwnProperty(key)) return;
+    const box = f.asFunction();
     const deleted = self.deletedFnProps(f);
     const ro = zvalue.PropertyDescriptor{ .writable = false, .enumerable = false, .configurable = true };
     if (std.mem.eql(u8, key, "length")) {
@@ -364,26 +364,26 @@ pub fn materializeFnVirtual(self: *Interpreter, f: JSValue, key: []const u8) any
     } else if (std.mem.eql(u8, key, "prototype")) {
         if (isProxyConstructor(self, f) or function_builtins.boundContext(f) != null or !(box.value.prototype != null or box.value.constructable)) return;
         const p = (try self.functionPrototype(f)).retain();
-        const is_builtin = f.function.value.constructable and f.function.value.ctx == @as(*anyopaque, @ptrCast(self));
+        const is_builtin = f.asFunction().value.constructable and f.asFunction().value.ctx == @as(*anyopaque, @ptrCast(self));
         try bagInsertRaw(bag, key, p, .{ .writable = !is_builtin, .enumerable = false, .configurable = false });
     }
 }
 
 pub fn syncFnPrototypeSlot(f: JSValue) void {
-    const bag = f.function.value.statics orelse return;
-    const rec = bag.object.value.getOwnRecord("prototype") orelse return;
+    const bag = f.asFunction().value.statics orelse return;
+    const rec = bag.asObject().value.getOwnRecord("prototype") orelse return;
     if (rec.isAccessor()) return;
-    if (rec.value != .object) return;
-    const old = f.function.value.prototype;
-    f.function.value.prototype = rec.value.retain();
+    if (!rec.value.isObject()) return;
+    const old = f.asFunction().value.prototype;
+    f.asFunction().value.prototype = rec.value.retain();
     if (old) |o| o.deinit();
 }
 
 pub fn defineOwnProperty(self: *Interpreter, obj: JSValue, key: []const u8, d: *const ParsedDesc) anyerror!bool {
-    switch (obj) {
+    switch (obj.unpack()) {
         .object => return validateAndApply(self, obj, key, d),
         .function => {
-            if (std.mem.eql(u8, key, "prototype") and obj.function.value.constructable and obj.function.value.ctx == @as(*anyopaque, @ptrCast(self))) {
+            if (std.mem.eql(u8, key, "prototype") and obj.asFunction().value.constructable and obj.asFunction().value.ctx == @as(*anyopaque, @ptrCast(self))) {
                 const proto = try self.functionPrototype(obj);
                 return virtualDataAllows(d, proto, false, false, false);
             }
@@ -413,7 +413,7 @@ pub fn defineOwnProperty(self: *Interpreter, obj: JSValue, key: []const u8, d: *
                 defer key_val.deinit();
                 const desc_obj = try fromParsedDesc(self, d);
                 defer desc_obj.deinit();
-                const result = try trap_fn.function.value.call(trap_fn.function.value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, key_val, desc_obj });
+                const result = try trap_fn.asFunction().value.call(trap_fn.asFunction().value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, key_val, desc_obj });
                 defer result.deinit();
                 if (!coercion.isTruthy(result)) return false;
                 const object_builtins = @import("object_builtins.zig");
@@ -421,15 +421,15 @@ pub fn defineOwnProperty(self: *Interpreter, obj: JSValue, key: []const u8, d: *
                 defer target_desc.deinit();
                 const ext = try object_builtins.isExtensibleInternal(self, box.value.target);
                 const setting_config_false = d.has_configurable and !d.configurable;
-                if (target_desc == .undefined) {
+                if (target_desc.isUndefined()) {
                     if (!ext) {
                         return self.throwError(.type_error, "'defineProperty' on proxy: trap returned truish for adding property '{s}' to the non-extensible proxy target", .{displayKey(key)});
                     }
                     if (setting_config_false) {
                         return self.throwError(.type_error, "'defineProperty' on proxy: trap returned truish for defining non-configurable property '{s}' which is non-existent in the proxy target", .{displayKey(key)});
                     }
-                } else if (target_desc == .object) {
-                    const target_cfg = if (target_desc.object.value.get("configurable")) |c| c == .boolean and c.boolean else false;
+                } else if (target_desc.isObject()) {
+                    const target_cfg = if (target_desc.asObject().value.get("configurable")) |c| c.isBool() and c.asBool() else false;
                     if (!target_cfg and d.has_configurable and d.configurable) {
                         return self.throwError(.type_error, "'defineProperty' on proxy: trap returned truish for defining configurable property '{s}' which is non-configurable in the proxy target", .{displayKey(key)});
                     }
@@ -458,19 +458,19 @@ pub fn definePropertyOn(self: *Interpreter, what: []const u8, obj: JSValue, key:
     var d = try toPropertyDescriptor(self, desc);
     defer d.deinit();
     if (!try defineOwnProperty(self, obj, key, &d)) {
-        if (obj == .proxy) return self.throwError(.type_error, "'defineProperty' on proxy: trap returned falsish for property '{s}'", .{displayKey(key)});
+        if (obj.isProxy()) return self.throwError(.type_error, "'defineProperty' on proxy: trap returned falsish for property '{s}'", .{displayKey(key)});
         return self.throwError(.type_error, "Cannot redefine property: {s}", .{displayKey(key)});
     }
 }
 
 pub fn arrayDefineOwnProperty(self: *Interpreter, obj: JSValue, key: []const u8, d: *const ParsedDesc) anyerror!bool {
-    const arr = &obj.array.value;
+    const arr = &obj.asArray().value;
     if (std.mem.eql(u8, key, "length")) return arraySetLengthDesc(self, obj, d);
     const idx = zarray.CanonicalNumericIndexString(key) orelse
         return validateAndApply(self, try self.arrayPropsObject(obj), key, d);
     if (idx >= arr.length() and !arr.isLengthWritable()) return false;
     const bag = try self.arrayPropsObject(obj);
-    const zo = &bag.object.value;
+    const zo = &bag.asObject().value;
     if (zo.getOwnRecord(key) == null) {
         if (arr.getOpt(idx)) |cur| {
             try bagInsertRaw(bag, key, cur.retain(), .{
@@ -494,7 +494,7 @@ pub fn arrayDefineOwnProperty(self: *Interpreter, obj: JSValue, key: []const u8,
 }
 
 pub fn arraySetLengthDesc(self: *Interpreter, obj: JSValue, d: *const ParsedDesc) anyerror!bool {
-    const arr = &obj.array.value;
+    const arr = &obj.asArray().value;
     var new_len: u32 = @intCast(arr.length());
     if (d.has_value) {
         new_len = try self.toUint32JS(d.value);
@@ -514,7 +514,7 @@ pub fn arraySetLengthDesc(self: *Interpreter, obj: JSValue, d: *const ParsedDesc
 }
 
 pub fn arraySetLengthRaw(self: *Interpreter, obj: JSValue, new_len: u32) anyerror!bool {
-    const arr = &obj.array.value;
+    const arr = &obj.asArray().value;
     const cur = arr.length();
     if (new_len >= cur) {
         if (new_len - cur <= 1024 and !arr.isSparse() and arr.items.items.len == cur) {
@@ -525,9 +525,9 @@ pub fn arraySetLengthRaw(self: *Interpreter, obj: JSValue, new_len: u32) anyerro
     }
     var stop: usize = new_len;
     var ok = true;
-    const bag_opt = self.array_props.get(@intFromPtr(obj.array));
+    const bag_opt = self.array_props.get(@intFromPtr(obj.asArray()));
     if (bag_opt) |bag| {
-        const zo = &bag.object.value;
+        const zo = &bag.asObject().value;
         for (zo.properties.keys(), zo.properties.values()) |k, p| {
             const i = zarray.CanonicalNumericIndexString(k) orelse continue;
             if (i >= new_len and i < cur and !p.descriptor.configurable and i + 1 > stop) {
@@ -573,7 +573,7 @@ pub fn arraySetLengthRaw(self: *Interpreter, obj: JSValue, new_len: u32) anyerro
 }
 
 pub fn typedArrayDefineOwnProperty(self: *Interpreter, obj: JSValue, key: []const u8, d: *const ParsedDesc) anyerror!bool {
-    const box = obj.typed_array;
+    const box = obj.asTypedArray();
     switch (@import("interpreter_props.zig").canonicalNumericIndex(self.gc_allocator, key, box.value.len)) {
         .valid_index => |idx| {
             if (d.has_configurable and !d.configurable) return false;
@@ -581,7 +581,7 @@ pub fn typedArrayDefineOwnProperty(self: *Interpreter, obj: JSValue, key: []cons
             if (d.isAccessor()) return false;
             if (d.has_writable and !d.writable) return false;
             if (d.has_value) {
-                try builtin_helpers.typedElemSet(self, box.value.kind, &box.value.owner.array_buffer.value, box.value.byte_offset, box.value.len, idx, d.value);
+                try builtin_helpers.typedElemSet(self, box.value.kind, &box.value.owner.asArrayBuffer().value, box.value.byte_offset, box.value.len, idx, d.value);
             }
             return true;
         },
@@ -591,7 +591,7 @@ pub fn typedArrayDefineOwnProperty(self: *Interpreter, obj: JSValue, key: []cons
 }
 
 pub fn toObject(self: *Interpreter, v: JSValue) anyerror!JSValue {
-    if (v == .undefined or v == .null) return self.throwError(.type_error, "Cannot convert undefined or null to object", .{});
+    if (v.isUndefined() or v.isNull()) return self.throwError(.type_error, "Cannot convert undefined or null to object", .{});
     if (builtin_helpers.isObjectLike(v)) return v.retain();
     const object_builtins = @import("object_builtins.zig");
     return object_builtins.objectConstructor(self, self.gc_allocator, JSValue.UNDEFINED, &.{v});

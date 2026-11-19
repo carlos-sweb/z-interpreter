@@ -139,7 +139,7 @@ pub fn makeRegex(self: *Interpreter, pattern: []const u8, flags: []const u8) any
     const value = try JSValue.fromRegex(arena, c.re);
     errdefer value.deinit();
     try self.gcTrack(value);
-    try self.regex_state.put(arena, @intFromPtr(value.regex), c.state);
+    try self.regex_state.put(arena, @intFromPtr(value.asRegex()), c.state);
     return value;
 }
 
@@ -152,8 +152,8 @@ pub fn recompileRegex(self: *Interpreter, value: JSValue, pattern: []const u8, f
     const st = self.regexState(value);
     arena.free(st.source);
     arena.free(st.flags);
-    value.regex.value.deinit();
-    value.regex.value = c.re;
+    value.asRegex().value.deinit();
+    value.asRegex().value = c.re;
     var next = c.state;
     next.last_index = st.last_index;
     next.last_index_writable = st.last_index_writable;
@@ -164,22 +164,22 @@ pub fn recompileRegex(self: *Interpreter, value: JSValue, pattern: []const u8, f
 /// The RegexState for a `.regex` value (always present -- every
 /// `.regex` is created through makeRegex).
 pub fn regexState(self: *Interpreter, value: JSValue) *RegexState {
-    return self.regex_state.getPtr(@intFromPtr(value.regex)).?;
+    return self.regex_state.getPtr(@intFromPtr(value.asRegex())).?;
 }
 
 /// Stores a named own property on an array (via the array_props side
 /// table) -- exec/match result arrays' index/input/groups.
 pub fn setArrayExtra(self: *Interpreter, array: JSValue, key: []const u8, value: JSValue) anyerror!void {
     const arena = self.gc_allocator;
-    const gop = try self.array_props.getOrPut(arena, @intFromPtr(array.array));
+    const gop = try self.array_props.getOrPut(arena, @intFromPtr(array.asArray()));
     if (!gop.found_existing) gop.value_ptr.* = try self.gcNewObject();
-    try gop.value_ptr.object.value.set(key, value.retain());
+    try gop.value_ptr.asObject().value.set(key, value.retain());
 }
 
 /// A named own property of an array, if any (array_props side table).
 pub fn arrayExtra(self: *Interpreter, array: JSValue, key: []const u8) ?JSValue {
-    const extras = self.array_props.get(@intFromPtr(array.array)) orelse return null;
-    return extras.object.value.get(key);
+    const extras = self.array_props.get(@intFromPtr(array.asArray())) orelse return null;
+    return extras.asObject().value.get(key);
 }
 
 /// The array's named-own-property object (array_props side table),
@@ -188,20 +188,20 @@ pub fn arrayExtra(self: *Interpreter, array: JSValue, key: []const u8) ?JSValue 
 /// named keys.
 pub fn arrayPropsObject(self: *Interpreter, array: JSValue) !JSValue {
     const arena = self.gc_allocator;
-    const gop = try self.array_props.getOrPut(arena, @intFromPtr(array.array));
+    const gop = try self.array_props.getOrPut(arena, @intFromPtr(array.asArray()));
     if (!gop.found_existing) gop.value_ptr.* = try self.ordinaryObject();
     return gop.value_ptr.*;
 }
 
 pub fn temporalProps(self: *Interpreter, value: JSValue) ?JSValue {
-    return self.temporal_props.get(@intFromPtr(value.temporal));
+    return self.temporal_props.get(@intFromPtr(value.asTemporal()));
 }
 
 pub fn temporalPropsObject(self: *Interpreter, value: JSValue) !JSValue {
     if (self.temporalProps(value)) |bag| return bag;
     const bag = try self.gcNewObject();
     errdefer bag.deinit();
-    try self.temporal_props.put(self.gc_allocator, @intFromPtr(value.temporal), bag);
+    try self.temporal_props.put(self.gc_allocator, @intFromPtr(value.asTemporal()), bag);
     return bag;
 }
 
@@ -253,16 +253,16 @@ pub fn extraPropsObject(self: *Interpreter, value: JSValue) !JSValue {
 /// both. See /home/sweb/.plans/primitive-wrapper-objects.md.
 pub fn boxPrimitiveIfConstructed(self: *Interpreter, ctx: *anyopaque, this_value: JSValue, primitive: JSValue) anyerror!JSValue {
     if (self.construct_target != ctx) return primitive;
-    try self.primitive_wrapper_data.put(self.gc_allocator, @intFromPtr(this_value.object), primitive);
-    if (primitive == .string) {
+    try self.primitive_wrapper_data.put(self.gc_allocator, @intFromPtr(this_value.asObject()), primitive);
+    if (primitive.isString()) {
         try self.initStringWrapperProperties(this_value, primitive);
     }
     return this_value;
 }
 
 pub fn initStringWrapperProperties(self: *Interpreter, obj: JSValue, str_prim: JSValue) anyerror!void {
-    if (obj != .object or str_prim != .string) return;
-    const raw = str_prim.string.value.data;
+    if (!obj.isObject() or !str_prim.isString()) return;
+    const raw = str_prim.asString().value.data;
     const len = zstring.utf16.lengthUtf16(raw);
     var buf: [32]u8 = undefined;
     var i: usize = 0;
@@ -271,7 +271,7 @@ pub fn initStringWrapperProperties(self: *Interpreter, obj: JSValue, str_prim: J
         defer self.gc_allocator.free(ch);
         const ch_str = try self.gcNewString(ch);
         const key_str = std.fmt.bufPrint(&buf, "{d}", .{i}) catch continue;
-        obj.object.value.defineProperty(key_str, ch_str, .{
+        obj.asObject().value.defineProperty(key_str, ch_str, .{
             .writable = false,
             .enumerable = true,
             .configurable = false,
@@ -280,7 +280,7 @@ pub fn initStringWrapperProperties(self: *Interpreter, obj: JSValue, str_prim: J
             return err;
         };
     }
-    obj.object.value.defineProperty("length", JSValue.fromNumber(@floatFromInt(len)), .{
+    obj.asObject().value.defineProperty("length", JSValue.fromNumber(@floatFromInt(len)), .{
         .writable = false,
         .enumerable = false,
         .configurable = false,
@@ -292,20 +292,20 @@ pub fn initStringWrapperProperties(self: *Interpreter, obj: JSValue, str_prim: J
 /// side table). Used by requireString/requireNumber/requireBoolean to
 /// unwrap `new String(x)`/etc. before falling back to a TypeError.
 pub fn unboxPrimitiveWrapper(self: *Interpreter, value: JSValue) ?JSValue {
-    if (value != .object) return null;
-    return self.primitive_wrapper_data.get(@intFromPtr(value.object));
+    if (!value.isObject()) return null;
+    return self.primitive_wrapper_data.get(@intFromPtr(value.asObject()));
 }
 
 /// `delete f.name`/`delete f.length`'s deletion state (deleted_fn_props
 /// side table), defaulting to "not deleted" for a function never touched.
 pub fn deletedFnProps(self: *Interpreter, fn_val: JSValue) interpreter_mod.DeletedFnProps {
-    return self.deleted_fn_props.get(@intFromPtr(fn_val.function)) orelse .{};
+    return self.deleted_fn_props.get(@intFromPtr(fn_val.asFunction())) orelse .{};
 }
 
 /// Marks one of `name`/`length` as deleted on `fn_val` (deleted_fn_props
 /// side table) -- called by `deletePropertyOnValue`'s `.function` case.
 pub fn markFnPropDeleted(self: *Interpreter, fn_val: JSValue, comptime field: []const u8) anyerror!void {
-    const gop = try self.deleted_fn_props.getOrPut(self.gc_allocator, @intFromPtr(fn_val.function));
+    const gop = try self.deleted_fn_props.getOrPut(self.gc_allocator, @intFromPtr(fn_val.asFunction()));
     if (!gop.found_existing) gop.value_ptr.* = .{};
     @field(gop.value_ptr.*, field) = true;
 }
@@ -342,10 +342,10 @@ pub fn nativeMethod(self: *Interpreter, comptime type_prefix: []const u8, name: 
 /// `null` result has already released it).
 pub fn proxyTrap(self: *Interpreter, proxy: *zvalue.Rc(zvalue.Proxy), trap_name: []const u8) anyerror!?JSValue {
     // A revoked proxy (Proxy.revocable) has a null [[ProxyHandler]].
-    if (proxy.value.handler == .null)
+    if (proxy.value.handler.isNull())
         return self.throwError(.type_error, "Cannot perform '{s}' on a proxy that has been revoked", .{trap_name});
     const fn_val = try self.getProperty(proxy.value.handler, trap_name);
-    if (fn_val == .undefined or fn_val == .null) {
+    if (fn_val.isUndefined() or fn_val.isNull()) {
         return null;
     }
     if (!std.mem.eql(u8, fn_val.typeOf(), "function")) {
@@ -361,7 +361,7 @@ pub fn proxyTrap(self: *Interpreter, proxy: *zvalue.Rc(zvalue.Proxy), trap_name:
 /// every other array-building site.
 pub fn argsToArray(self: *Interpreter, args: []const JSValue) anyerror!JSValue {
     var arr = try self.gcNewArray();
-    for (args) |a| _ = try arr.array.value.push(a.retain());
+    for (args) |a| _ = try arr.asArray().value.push(a.retain());
     return arr;
 }
 
@@ -378,7 +378,7 @@ pub fn argsToArray(self: *Interpreter, args: []const JSValue) anyerror!JSValue {
 /// operand is a string, so the caller falls through to
 /// `coercion.binaryOp`'s plain numeric `+`.
 pub fn stringConcat(self: *Interpreter, left: JSValue, right: JSValue) anyerror!?JSValue {
-    if (left != .string and right != .string) return null;
+    if (!left.isString() and !right.isString()) return null;
     const ls = try toDisplayStringJS(self, self.gc_allocator, left);
     defer self.gc_allocator.free(ls);
     const rs = try toDisplayStringJS(self, self.gc_allocator, right);
@@ -418,8 +418,8 @@ pub fn toPrimitive(self: *Interpreter, v: JSValue, hint: PrimitiveHint) anyerror
         defer self.gc_allocator.free(key);
         const exotic = try self.getProperty(v, key);
         defer exotic.deinit();
-        if (exotic != .undefined and exotic != .null) {
-            if (exotic != .function and exotic != .proxy) {
+        if (!exotic.isUndefined() and !exotic.isNull()) {
+            if (!exotic.isFunction() and !exotic.isProxy()) {
                 return self.throwError(.type_error, "Symbol.toPrimitive is not a function", .{});
             }
             const hint_str = try self.gcNewString(@tagName(hint));
@@ -457,7 +457,7 @@ pub fn ordinaryToPrimitive(self: *Interpreter, v: JSValue, hint: OrdinaryHint) a
         // passes clean, and the full suite stays at 533/543 (same
         // known leak groups), 0 crashes.
         defer method.deinit();
-        if (method != .function and method != .proxy) continue;
+        if (!method.isFunction() and !method.isProxy()) continue;
         const result = try self.callValue(method, v, &.{}, method_name);
         if (isPrimitiveTag(result)) return result.retain();
     }
@@ -465,7 +465,7 @@ pub fn ordinaryToPrimitive(self: *Interpreter, v: JSValue, hint: OrdinaryHint) a
 }
 
 pub fn isPrimitiveTag(v: JSValue) bool {
-    return switch (v) {
+    return switch (v.tag()) {
         .undefined, .null, .boolean, .number, .string, .bigint, .symbol => true,
         else => false,
     };
@@ -478,10 +478,8 @@ pub fn isPrimitiveTag(v: JSValue) bool {
 /// toString) instead of `void` (the pure `coercion.toDisplayString`
 /// caller, which can't run user code).
 pub fn joinElementToStringJS(self: *Interpreter, item: JSValue, allocator: std.mem.Allocator) anyerror![]u8 {
-    return switch (item) {
-        .undefined, .null => try allocator.dupe(u8, ""),
-        else => self.toDisplayStringJS(allocator, item),
-    };
+    if (item.isUndefined() or item.isNull()) return try allocator.dupe(u8, "");
+    return self.toDisplayStringJS(allocator, item);
 }
 
 /// `coercion.toDisplayString` plus a real ToPrimitive fallback for the
@@ -494,10 +492,10 @@ pub fn toDisplayStringJS(self: *Interpreter, allocator: std.mem.Allocator, v: JS
         error.NotImplemented => blk: {
             // Implicit ToString(Symbol) is a real TypeError (explicit
             // `String(sym)` never reaches here -- globalString handles it).
-            if (v == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a string", .{});
+            if (v.isSymbol()) return self.throwError(.type_error, "Cannot convert a Symbol value to a string", .{});
             const prim = try toPrimitive(self, v, .string);
             defer prim.deinit();
-            if (prim == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a string", .{});
+            if (prim.isSymbol()) return self.throwError(.type_error, "Cannot convert a Symbol value to a string", .{});
             break :blk try coercion.toDisplayString(allocator, prim);
         },
         else => err,
@@ -511,10 +509,10 @@ pub fn toNumberJS(self: *Interpreter, v: JSValue) anyerror!f64 {
     // (no allocation in its body, unlike toDisplayString) -- a bare `catch`
     // covers it without an unreachable `else` prong.
     return coercion.toNumber(v) catch {
-        if (v == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a number", .{});
+        if (v.isSymbol()) return self.throwError(.type_error, "Cannot convert a Symbol value to a number", .{});
         const prim = try toPrimitive(self, v, .number);
         defer prim.deinit();
-        if (prim == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a number", .{});
+        if (prim.isSymbol()) return self.throwError(.type_error, "Cannot convert a Symbol value to a number", .{});
         return try coercion.toNumber(prim);
     };
 }
@@ -538,12 +536,12 @@ pub fn toInt32JS(self: *Interpreter, v: JSValue) anyerror!i32 {
 /// stays a BigInt and anything else goes through ToNumber (a Symbol is a
 /// TypeError). Always returns an owned `.number` or `.bigint`.
 pub fn toNumericJS(self: *Interpreter, v: JSValue) anyerror!JSValue {
-    if (v == .number) return v;
-    if (v == .bigint) return v.retain();
+    if (v.isNumber()) return v;
+    if (v.isBigInt()) return v.retain();
     const prim = try toPrimitive(self, v, .number);
-    if (prim == .bigint) return prim;
+    if (prim.isBigInt()) return prim;
     defer prim.deinit();
-    if (prim == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a number", .{});
+    if (prim.isSymbol()) return self.throwError(.type_error, "Cannot convert a Symbol value to a number", .{});
     return JSValue.fromNumber(try coercion.toNumber(prim));
 }
 
@@ -586,11 +584,11 @@ pub fn looseEqualsJS(self: *Interpreter, allocator: std.mem.Allocator, a: JSValu
 /// throwing, and `coercion.zig` already handles that mixing itself
 /// (no throw machinery needed for a comparison).
 pub fn bigintArithmetic(self: *Interpreter, op: zparser.BinaryOp, left: JSValue, right: JSValue) anyerror!?JSValue {
-    const l_big = left == .bigint;
-    const r_big = right == .bigint;
+    const l_big = left.isBigInt();
+    const r_big = right.isBigInt();
     if (!l_big and !r_big) return null;
     switch (op) {
-        .add => if (left == .string or right == .string) return null,
+        .add => if (left.isString() or right.isString()) return null,
         .lt, .gt, .le, .ge, .eq, .ne, .eqeqeq, .noteqeq => return null,
         .instanceof, .in => unreachable, // intercepted by the caller before this is ever reached
         else => {},
@@ -604,8 +602,8 @@ pub fn bigintArithmetic(self: *Interpreter, op: zparser.BinaryOp, left: JSValue,
     if (!l_big or !r_big) {
         return self.throwError(.type_error, "Cannot mix BigInt and other types, use explicit conversions", .{});
     }
-    const a = left.bigint.value;
-    const b = right.bigint.value;
+    const a = left.asBigInt().value;
+    const b = right.asBigInt().value;
     const result: zbigint.ZBigInt = switch (op) {
         .add => zbigint.ZBigInt.add(self.gc_allocator, a, b) catch |e| return try self.bigintErr(e),
         .sub => zbigint.ZBigInt.sub(self.gc_allocator, a, b) catch |e| return try self.bigintErr(e),
@@ -667,13 +665,13 @@ pub fn bufferErr(self: *Interpreter, e: zbuffer.BufferError) anyerror!JSValue {
 /// stays bigint (`1n++` must not silently become a Number), anything
 /// else goes through the existing ToNumber-based path unchanged.
 pub fn incDecOne(self: *Interpreter, current: JSValue, increment: bool) anyerror!JSValue {
-    if (current == .bigint) {
+    if (current.isBigInt()) {
         var one = try zbigint.ZBigInt.fromInt(self.gc_allocator, 1);
         defer one.deinit();
         const result = if (increment)
-            try zbigint.ZBigInt.add(self.gc_allocator, current.bigint.value, one)
+            try zbigint.ZBigInt.add(self.gc_allocator, current.asBigInt().value, one)
         else
-            try zbigint.ZBigInt.sub(self.gc_allocator, current.bigint.value, one);
+            try zbigint.ZBigInt.sub(self.gc_allocator, current.asBigInt().value, one);
         return try self.gcNewBigIntValue(result);
     }
     const n = try coercion.toNumber(current);

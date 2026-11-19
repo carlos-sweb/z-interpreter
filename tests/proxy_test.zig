@@ -54,7 +54,7 @@ test "property read with no `get` trap delegates transparently to the target" {
     var ctx = try Ctx.init();
     defer ctx.deinit();
     const target = try ctx.interp.gcNewObject();
-    try target.object.value.set("greeting", try ctx.interp.gcNewString("hi"));
+    try target.asObject().value.set("greeting", try ctx.interp.gcNewString("hi"));
     const handler = try ctx.interp.gcNewObject();
     const p = try ctx.interp.gcNewProxy(target, handler);
     try ctx.interp.defineGlobal("p", p);
@@ -202,7 +202,7 @@ test "'in' with no `has` trap delegates transparently to the target" {
     var ctx = try Ctx.init();
     defer ctx.deinit();
     const target = try ctx.interp.gcNewObject();
-    try target.object.value.set("x", JSValue.fromNumber(1));
+    try target.asObject().value.set("x", JSValue.fromNumber(1));
     const handler = try ctx.interp.gcNewObject();
     const p = try ctx.interp.gcNewProxy(target, handler);
     try ctx.interp.defineGlobal("p", p);

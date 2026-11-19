@@ -11,7 +11,7 @@ test "arithmetic" {
 test "string concatenation via +" {
     try helpers.runAndCheck("'a' + 1;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expectEqualStrings("a1", r.value.string.value.data);
+            try testing.expectEqualStrings("a1", r.value.asString().value.data);
         }
     }.check);
 }
@@ -19,7 +19,7 @@ test "string concatenation via +" {
 test "comparisons" {
     try helpers.runAndCheck("1 < 2;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expect(r.value.boolean == true);
+            try testing.expect(r.value.asBool() == true);
         }
     }.check);
 }
@@ -27,22 +27,22 @@ test "comparisons" {
 test "strict vs loose equality" {
     try helpers.runAndCheck("1 === '1';", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expect(r.value.boolean == false);
+            try testing.expect(r.value.asBool() == false);
         }
     }.check);
     try helpers.runAndCheck("1 == '1';", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expect(r.value.boolean == true);
+            try testing.expect(r.value.asBool() == true);
         }
     }.check);
     try helpers.runAndCheck("null == undefined;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expect(r.value.boolean == true);
+            try testing.expect(r.value.asBool() == true);
         }
     }.check);
     try helpers.runAndCheck("true == 1;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expect(r.value.boolean == true);
+            try testing.expect(r.value.asBool() == true);
         }
     }.check);
 }
@@ -52,7 +52,7 @@ test "logical operators" {
     try helpers.expectNumber("1 && 5;", 5);
     try helpers.runAndCheck("null ?? 'd';", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expectEqualStrings("d", r.value.string.value.data);
+            try testing.expectEqualStrings("d", r.value.asString().value.data);
         }
     }.check);
 }
@@ -63,7 +63,7 @@ test "logical short-circuit actually short-circuits (side effect proof)" {
         {},
         struct {
             fn check(_: void, r: helpers.Result) !void {
-                try testing.expect(r.value.number == 0);
+                try testing.expect(r.value.asNumber() == 0);
             }
         }.check,
     );
@@ -72,7 +72,7 @@ test "logical short-circuit actually short-circuits (side effect proof)" {
         {},
         struct {
             fn check(_: void, r: helpers.Result) !void {
-                try testing.expect(r.value.number == 0);
+                try testing.expect(r.value.asNumber() == 0);
             }
         }.check,
     );

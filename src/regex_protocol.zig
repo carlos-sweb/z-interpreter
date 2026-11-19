@@ -34,7 +34,7 @@ const appendWtf8Merged = string_builtins.appendWtf8Merged;
 
 /// ToString(v) as a string JSValue (owned by the caller).
 fn toStringValue(self: *Interpreter, allocator: Allocator, v: JSValue) anyerror!JSValue {
-    if (v == .string) return v.retain();
+    if (v.tag() == .string) return v.retain();
     const s = try self.toDisplayStringJS(allocator, v);
     defer allocator.free(s);
     return self.gcNewString(s);
@@ -60,7 +60,7 @@ fn setNumber(self: *Interpreter, o: JSValue, key: []const u8, n: usize) anyerror
 }
 
 fn isCallable(v: JSValue) bool {
-    return switch (v) {
+    return switch (v.unpack()) {
         .function => true,
         .proxy => |p| isCallable(p.value.target),
         else => false,
@@ -68,12 +68,12 @@ fn isCallable(v: JSValue) bool {
 }
 
 fn hasFlag(flags: JSValue, c: u8) bool {
-    return std.mem.indexOfScalar(u8, flags.string.value.data, c) != null;
+    return std.mem.indexOfScalar(u8, flags.asString().value.data, c) != null;
 }
 
 /// UTF-16 length of a string JSValue.
 fn len16(s: JSValue) usize {
-    return zstring.utf16.lengthUtf16(s.string.value.data);
+    return zstring.utf16.lengthUtf16(s.asString().value.data);
 }
 
 /// The subject position of UTF-16 index `i` (the end past the length).
@@ -83,7 +83,7 @@ fn posOf(data: []const u8, i: usize) usize {
 
 /// The substring [from, to) of `s`, in UTF-16 units.
 fn substring(self: *Interpreter, allocator: Allocator, s: JSValue, from: usize, to: usize) anyerror!JSValue {
-    const data = s.string.value.data;
+    const data = s.asString().value.data;
     return rb.sliceValue(self, allocator, data, posOf(data, from), posOf(data, to));
 }
 
@@ -111,7 +111,7 @@ fn getMethod(self: *Interpreter, v: JSValue, comptime name: []const u8) anyerror
     const key = try rb.wellKnownKey(self, name);
     defer self.gc_allocator.free(key);
     const f = try self.getProperty(v, key);
-    if (f == .undefined or f == .null) return null;
+    if (f.tag() == .undefined or f.tag() == .null) return null;
     if (!isCallable(f)) {
         f.deinit();
         return self.throwError(.type_error, "Symbol." ++ name ++ " is not a function", .{});
@@ -127,8 +127,8 @@ fn isRegExp(self: *Interpreter, v: JSValue) anyerror!bool {
     defer self.gc_allocator.free(key);
     const m = try self.getProperty(v, key);
     defer m.deinit();
-    if (m != .undefined) return coercion.isTruthy(m);
-    return v == .regex;
+    if (m.tag() != .undefined) return coercion.isTruthy(m);
+    return v.tag() == .regex;
 }
 
 /// The %RegExp% intrinsic (the original constructor, whatever the global
@@ -140,13 +140,13 @@ fn regExpIntrinsic(self: *Interpreter) JSValue {
 /// SpeciesConstructor(o, %RegExp%) (owned).
 fn speciesConstructor(self: *Interpreter, o: JSValue) anyerror!JSValue {
     const c = try self.getProperty(o, "constructor");
-    if (c == .undefined) return regExpIntrinsic(self).retain();
+    if (c.tag() == .undefined) return regExpIntrinsic(self).retain();
     defer c.deinit();
     if (!isObjectLike(c)) return self.throwError(.type_error, "object.constructor is not an object", .{});
     const key = try rb.wellKnownKey(self, "species");
     defer self.gc_allocator.free(key);
     const s = try self.getProperty(c, key);
-    if (s == .undefined or s == .null) return regExpIntrinsic(self).retain();
+    if (s.tag() == .undefined or s.tag() == .null) return regExpIntrinsic(self).retain();
     if (self.isConstructor(s)) return s;
     s.deinit();
     return self.throwError(.type_error, "object.constructor[Symbol.species] is not a constructor", .{});
@@ -154,7 +154,7 @@ fn speciesConstructor(self: *Interpreter, o: JSValue) anyerror!JSValue {
 
 /// RegExpCreate(p, flags): `p` and `flags` undefined are "".
 fn regExpCreate(self: *Interpreter, allocator: Allocator, p: JSValue, flags: []const u8) anyerror!JSValue {
-    const src = if (p == .undefined) try allocator.dupe(u8, "") else try self.toDisplayStringJS(allocator, p);
+    const src = if (p.tag() == .undefined) try allocator.dupe(u8, "") else try self.toDisplayStringJS(allocator, p);
     defer allocator.free(src);
     return self.makeRegex(src, flags);
 }
@@ -167,23 +167,23 @@ pub fn regExpExec(self: *Interpreter, allocator: Allocator, r: JSValue, s: JSVal
     defer exec.deinit();
     // The original RegExp.prototype.exec on a RegExp is RegExpBuiltinExec
     // itself: skip the call.
-    if (r == .regex and exec == .function and exec.function.value.call == rb.regexExecFn) {
+    if (r.tag() == .regex and exec.tag() == .function and exec.asFunction().value.call == rb.regexExecFn) {
         return builtinExecValue(self, allocator, r, s);
     }
     if (isCallable(exec)) {
         const result = try self.callValue(exec, r, &.{s}, "exec");
-        if (result != .null and !isObjectLike(result)) {
+        if (result.tag() != .null and !isObjectLike(result)) {
             result.deinit();
             return self.throwError(.type_error, "exec result must be an object or null", .{});
         }
         return result;
     }
-    if (r != .regex) return self.throwError(.type_error, "RegExp exec method called on an incompatible receiver", .{});
+    if (r.tag() != .regex) return self.throwError(.type_error, "RegExp exec method called on an incompatible receiver", .{});
     return builtinExecValue(self, allocator, r, s);
 }
 
 fn builtinExecValue(self: *Interpreter, allocator: Allocator, r: JSValue, s: JSValue) anyerror!JSValue {
-    const m = try rb.builtinExec(self, allocator, r, s.string.value.data) orelse return JSValue.NULL;
+    const m = try rb.builtinExec(self, allocator, r, s.asString().value.data) orelse return JSValue.NULL;
     defer m.deinit();
     return rb.makeMatchArray(self, allocator, m, s);
 }
@@ -235,7 +235,7 @@ fn getSubstitution(self: *Interpreter, allocator: Allocator, buf: *std.ArrayList
                 }
                 if (index >= 1 and index <= captures.len) {
                     const cap = captures[index - 1];
-                    if (cap == .string) try appendWtf8Merged(buf, allocator, cap.string.value.data);
+                    if (cap.tag() == .string) try appendWtf8Merged(buf, allocator, cap.asString().value.data);
                 } else {
                     try appendWtf8Merged(buf, allocator, template[i .. i + 1 + digits]);
                 }
@@ -243,17 +243,17 @@ fn getSubstitution(self: *Interpreter, allocator: Allocator, buf: *std.ArrayList
             },
             '<' => {
                 const gt = std.mem.indexOfScalarPos(u8, template, i + 2, '>');
-                if (named == .undefined or gt == null) {
+                if (named.tag() == .undefined or gt == null) {
                     try appendWtf8Merged(buf, allocator, "$<");
                     i += 2;
                     continue;
                 }
                 const capture = try self.getProperty(named, template[i + 2 .. gt.?]);
                 defer capture.deinit();
-                if (capture != .undefined) {
+                if (capture.tag() != .undefined) {
                     const cs = try toStringValue(self, allocator, capture);
                     defer cs.deinit();
-                    try appendWtf8Merged(buf, allocator, cs.string.value.data);
+                    try appendWtf8Merged(buf, allocator, cs.asString().value.data);
                 }
                 i = gt.? + 1;
             },
@@ -270,7 +270,7 @@ fn appendValue(self: *Interpreter, allocator: Allocator, buf: *std.ArrayList(u8)
     if (a >= b) return;
     const v = try rb.sliceValue(self, allocator, data, a, b);
     defer v.deinit();
-    try appendWtf8Merged(buf, allocator, v.string.value.data);
+    try appendWtf8Merged(buf, allocator, v.asString().value.data);
 }
 
 fn requireObject(self: *Interpreter, v: JSValue, comptime method: []const u8) anyerror!void {
@@ -296,20 +296,20 @@ fn deinitList(allocator: Allocator, list: *std.ArrayList(JSValue)) void {
 fn pristine(self: *Interpreter, rx: JSValue, flags: JSValue) bool {
     if (!pristineExec(self, rx)) return false;
     var buf: [8]u8 = undefined;
-    return std.mem.eql(u8, Interpreter.canonicalFlags(self.regexState(rx), &buf), flags.string.value.data);
+    return std.mem.eql(u8, Interpreter.canonicalFlags(self.regexState(rx), &buf), flags.asString().value.data);
 }
 
 /// A RegExp whose `exec` is the original builtin (inherited as a data
 /// property, not overridden on it) and whose lastIndex is writable.
 fn pristineExec(self: *Interpreter, rx: JSValue) bool {
-    if (rx != .regex) return false;
+    if (rx.tag() != .regex) return false;
     const st = self.regexState(rx);
     if (!st.last_index_writable) return false;
     if (st.props) |bag| {
-        if (bag.object.value.getOwnRecord("exec") != null) return false;
+        if (bag.asObject().value.getOwnRecord("exec") != null) return false;
     }
-    const rec = self.protos.regex.object.value.getOwnRecord("exec") orelse return false;
-    return !rec.isAccessor() and rec.value == .function and rec.value.function.value.call == rb.regexExecFn;
+    const rec = self.protos.regex.asObject().value.getOwnRecord("exec") orelse return false;
+    return !rec.isAccessor() and rec.value.tag() == .function and rec.value.asFunction().value.call == rb.regexExecFn;
 }
 
 /// Every match of a global search from position 0 (RegexMatch slots in
@@ -329,19 +329,19 @@ fn deinitMatches(allocator: Allocator, list: *std.ArrayList(rb.RegexMatch)) void
 }
 
 fn matchFast(self: *Interpreter, allocator: Allocator, rx: JSValue, s: JSValue) anyerror!JSValue {
-    const data = s.string.value.data;
+    const data = s.asString().value.data;
     var list: std.ArrayList(rb.RegexMatch) = .empty;
     defer deinitMatches(allocator, &list);
     try allMatches(self, allocator, rx, data, &list);
     if (list.items.len == 0) return JSValue.NULL;
     var a = try self.gcNewArray();
     errdefer a.deinit();
-    for (list.items) |m| _ = try a.array.value.push(try rb.sliceValue(self, allocator, data, m.start(), m.end()));
+    for (list.items) |m| _ = try a.asArray().value.push(try rb.sliceValue(self, allocator, data, m.start(), m.end()));
     return a;
 }
 
 fn replaceFast(self: *Interpreter, allocator: Allocator, rx: JSValue, s: JSValue, repl: JSValue, functional: bool) anyerror!JSValue {
-    const data = s.string.value.data;
+    const data = s.asString().value.data;
     var list: std.ArrayList(rb.RegexMatch) = .empty;
     defer deinitMatches(allocator, &list);
     try allMatches(self, allocator, rx, data, &list);
@@ -377,14 +377,14 @@ fn replaceFast(self: *Interpreter, allocator: Allocator, rx: JSValue, s: JSValue
             try call_args.appendSlice(allocator, pr.captures);
             try call_args.append(allocator, JSValue.fromNumber(@floatFromInt(pr.position)));
             try call_args.append(allocator, s);
-            if (pr.named != .undefined) try call_args.append(allocator, pr.named);
+            if (pr.named.tag() != .undefined) try call_args.append(allocator, pr.named);
             const r = try self.callValue(repl, JSValue.UNDEFINED, call_args.items, "replacer");
             defer r.deinit();
             const rs = try toStringValue(self, allocator, r);
             defer rs.deinit();
-            try appendWtf8Merged(&buf, allocator, rs.string.value.data);
+            try appendWtf8Merged(&buf, allocator, rs.asString().value.data);
         } else {
-            try getSubstitution(self, allocator, &buf, repl.string.value.data, pr.captures[0].string.value.data, data, m.start(), m.end(), pr.captures[1..], pr.named);
+            try getSubstitution(self, allocator, &buf, repl.asString().value.data, pr.captures[0].asString().value.data, data, m.start(), m.end(), pr.captures[1..], pr.named);
         }
         last = m.end();
     }
@@ -402,7 +402,7 @@ pub fn regexTest(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     defer s.deinit();
     const m = try regExpExec(self, allocator, this_value, s);
     defer m.deinit();
-    return JSValue.fromBool(m != .null);
+    return JSValue.fromBool(m.tag() != .null);
 }
 
 /// RegExp.prototype[@@match](string).
@@ -422,14 +422,14 @@ pub fn symbolMatch(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     errdefer if (result) |a| a.deinit();
     while (true) {
         const m = try regExpExec(self, allocator, rx, s);
-        if (m == .null) return result orelse JSValue.NULL;
+        if (m.tag() == .null) return result orelse JSValue.NULL;
         defer m.deinit();
         const match_str = try getString(self, allocator, m, "0");
         if (result == null) result = try self.gcNewArray();
-        _ = try result.?.array.value.push(match_str);
-        if (match_str.string.value.data.len == 0) {
+        _ = try result.?.asArray().value.push(match_str);
+        if (match_str.asString().value.data.len == 0) {
             const this_index = try getLength(self, rx, "lastIndex");
-            try setNumber(self, rx, "lastIndex", advanceStringIndex(s.string.value.data, this_index, full_unicode));
+            try setNumber(self, rx, "lastIndex", advanceStringIndex(s.asString().value.data, this_index, full_unicode));
         }
     }
 }
@@ -450,7 +450,7 @@ pub fn symbolSearch(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     const current = try self.getProperty(rx, "lastIndex");
     defer current.deinit();
     if (!rb.sameValue(current, previous)) try self.setPropertyOnValue(rx, "lastIndex", previous);
-    if (m == .null) return JSValue.fromNumber(-1);
+    if (m.tag() == .null) return JSValue.fromNumber(-1);
     return self.getProperty(m, "index");
 }
 
@@ -461,7 +461,7 @@ pub fn symbolReplace(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     try requireObject(self, rx, "[Symbol.replace]");
     const s = try toStringValue(self, allocator, arg(args, 0));
     defer s.deinit();
-    const data = s.string.value.data;
+    const data = s.asString().value.data;
     const length_s = len16(s);
     const functional = isCallable(arg(args, 1));
     const repl = if (functional) arg(args, 1).retain() else try toStringValue(self, allocator, arg(args, 1));
@@ -480,12 +480,12 @@ pub fn symbolReplace(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     defer deinitList(allocator, &results);
     while (true) {
         const m = try regExpExec(self, allocator, rx, s);
-        if (m == .null) break;
+        if (m.tag() == .null) break;
         try results.append(allocator, m);
         if (!global) break;
         const match_str = try getString(self, allocator, m, "0");
         defer match_str.deinit();
-        if (match_str.string.value.data.len == 0) {
+        if (match_str.asString().value.data.len == 0) {
             const this_index = try getLength(self, rx, "lastIndex");
             try setNumber(self, rx, "lastIndex", advanceStringIndex(data, this_index, full_unicode));
         }
@@ -509,7 +509,7 @@ pub fn symbolReplace(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
             var key_buf: [24]u8 = undefined;
             const key = try std.fmt.bufPrint(&key_buf, "{d}", .{n});
             const cap = try self.getProperty(result, key);
-            if (cap == .undefined) {
+            if (cap.tag() == .undefined) {
                 try captures.append(allocator, cap);
             } else {
                 defer cap.deinit();
@@ -528,19 +528,19 @@ pub fn symbolReplace(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
             try call_args.appendSlice(allocator, captures.items);
             try call_args.append(allocator, JSValue.fromNumber(@floatFromInt(position)));
             try call_args.append(allocator, s);
-            if (named != .undefined) try call_args.append(allocator, named);
+            if (named.tag() != .undefined) try call_args.append(allocator, named);
             const r = try self.callValue(repl, JSValue.UNDEFINED, call_args.items, "replacer");
             defer r.deinit();
             const rs = try toStringValue(self, allocator, r);
             defer rs.deinit();
-            try replacement.appendSlice(allocator, rs.string.value.data);
+            try replacement.appendSlice(allocator, rs.asString().value.data);
         } else {
-            if (named != .undefined and !isObjectLike(named)) {
+            if (named.tag() != .undefined and !isObjectLike(named)) {
                 // ToObject(namedCaptures): null throws, a primitive boxes
                 // (its properties are read through Get either way).
-                if (named == .null) return self.throwError(.type_error, "Cannot convert undefined or null to object", .{});
+                if (named.tag() == .null) return self.throwError(.type_error, "Cannot convert undefined or null to object", .{});
             }
-            try getSubstitution(self, allocator, &replacement, repl.string.value.data, matched.string.value.data, data, posOf(data, position), posOf(data, @min(position + match_length, length_s)), captures.items, named);
+            try getSubstitution(self, allocator, &replacement, repl.asString().value.data, matched.asString().value.data, data, posOf(data, position), posOf(data, @min(position + match_length, length_s)), captures.items, named);
         }
         if (position >= next_source) {
             try appendValue(self, allocator, &buf, data, posOf(data, next_source), posOf(data, position));
@@ -559,14 +559,14 @@ pub fn symbolSplit(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     try requireObject(self, rx, "[Symbol.split]");
     const s = try toStringValue(self, allocator, arg(args, 0));
     defer s.deinit();
-    const data = s.string.value.data;
+    const data = s.asString().value.data;
     const c = try speciesConstructor(self, rx);
     defer c.deinit();
     const flags = try getString(self, allocator, rx, "flags");
     defer flags.deinit();
     const unicode_matching = hasFlag(flags, 'u') or hasFlag(flags, 'v');
     const new_flags = if (hasFlag(flags, 'y')) flags.retain() else blk: {
-        const f = try std.mem.concat(allocator, u8, &.{ flags.string.value.data, "y" });
+        const f = try std.mem.concat(allocator, u8, &.{ flags.asString().value.data, "y" });
         defer allocator.free(f);
         break :blk try self.gcNewString(f);
     };
@@ -576,13 +576,13 @@ pub fn symbolSplit(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
 
     var a = try self.gcNewArray();
     errdefer a.deinit();
-    const lim: u32 = if (arg(args, 1) == .undefined) std.math.maxInt(u32) else try self.toUint32JS(arg(args, 1));
+    const lim: u32 = if (arg(args, 1).tag() == .undefined) std.math.maxInt(u32) else try self.toUint32JS(arg(args, 1));
     if (lim == 0) return a;
     const size = len16(s);
     if (size == 0) {
         const z = try regExpExec(self, allocator, splitter, s);
         defer z.deinit();
-        if (z == .null) _ = try a.array.value.push(s.retain());
+        if (z.tag() == .null) _ = try a.asArray().value.push(s.retain());
         return a;
     }
     if (try pristineSplitter(self, splitter, c)) |plain| {
@@ -596,7 +596,7 @@ pub fn symbolSplit(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     while (q < size) {
         try setNumber(self, splitter, "lastIndex", q);
         const z = try regExpExec(self, allocator, splitter, s);
-        if (z == .null) {
+        if (z.tag() == .null) {
             q = advanceStringIndex(data, q, unicode_matching);
             continue;
         }
@@ -606,7 +606,7 @@ pub fn symbolSplit(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
             q = advanceStringIndex(data, q, unicode_matching);
             continue;
         }
-        _ = try a.array.value.push(try substring(self, allocator, s, p, q));
+        _ = try a.asArray().value.push(try substring(self, allocator, s, p, q));
         length_a += 1;
         if (length_a == lim) return a;
         p = e;
@@ -614,13 +614,13 @@ pub fn symbolSplit(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
         var i: usize = 1;
         while (i <= n_captures) : (i += 1) {
             var key_buf: [24]u8 = undefined;
-            _ = try a.array.value.push(try self.getProperty(z, try std.fmt.bufPrint(&key_buf, "{d}", .{i})));
+            _ = try a.asArray().value.push(try self.getProperty(z, try std.fmt.bufPrint(&key_buf, "{d}", .{i})));
             length_a += 1;
             if (length_a == lim) return a;
         }
         q = p;
     }
-    _ = try a.array.value.push(try substring(self, allocator, s, p, size));
+    _ = try a.asArray().value.push(try substring(self, allocator, s, p, size));
     return a;
 }
 
@@ -630,10 +630,10 @@ pub fn symbolSplit(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
 /// else holds the splitter). Returns a non-sticky copy of it to search
 /// with, or null to take the generic path.
 fn pristineSplitter(self: *Interpreter, splitter: JSValue, c: JSValue) anyerror!?JSValue {
-    if (splitter != .regex or c != .function or c.function != regExpIntrinsic(self).function) return null;
+    if (splitter.tag() != .regex or c.tag() != .function or c.asFunction() != regExpIntrinsic(self).asFunction()) return null;
     const exec = try self.getProperty(splitter, "exec");
     defer exec.deinit();
-    if (exec != .function or exec.function.value.call != rb.regexExecFn) return null;
+    if (exec.tag() != .function or exec.asFunction().value.call != rb.regexExecFn) return null;
     const st = self.regexState(splitter);
     var flags_buf: [8]u8 = undefined;
     var n: usize = 0;
@@ -660,19 +660,19 @@ fn splitFast(self: *Interpreter, allocator: Allocator, a: *JSValue, re: JSValue,
             q = rb.advancePos(re, data, m.start());
             continue;
         }
-        _ = try a.array.value.push(try rb.sliceValue(self, allocator, data, p, m.start()));
+        _ = try a.asArray().value.push(try rb.sliceValue(self, allocator, data, p, m.start()));
         length_a += 1;
         if (length_a == lim) return;
         var g: usize = 1;
         while (g <= m.groupCount()) : (g += 1) {
-            _ = try a.array.value.push(try m.capture(self, g));
+            _ = try a.asArray().value.push(try m.capture(self, g));
             length_a += 1;
             if (length_a == lim) return;
         }
         p = e;
         q = p;
     }
-    _ = try a.array.value.push(try rb.sliceValue(self, allocator, data, p, data.len));
+    _ = try a.asArray().value.push(try rb.sliceValue(self, allocator, data, p, data.len));
 }
 
 /// RegExp.prototype[@@matchAll](string). The %RegExpStringIterator% it
@@ -703,16 +703,16 @@ pub fn symbolMatchAll(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
 fn createRegExpStringIterator(self: *Interpreter, r: JSValue, s: JSValue, global: bool, unicode: bool) anyerror!JSValue {
     const it = try self.gcNewObject();
     errdefer it.deinit();
-    try it.object.value.setPrototype(&self.regexp_string_iterator_proto.?.object.value);
-    try self.regexp_string_iters.put(self.gc_allocator, @intFromPtr(it.object), .{ .r = r.retain(), .s = s.retain(), .global = global, .unicode = unicode });
+    try it.asObject().value.setPrototype(&self.regexp_string_iterator_proto.?.asObject().value);
+    try self.regexp_string_iters.put(self.gc_allocator, @intFromPtr(it.asObject()), .{ .r = r.retain(), .s = s.retain(), .global = global, .unicode = unicode });
     return it;
 }
 
 /// CreateIterResultObject(value, done); takes ownership of `value`.
 fn iterResult(self: *Interpreter, value: JSValue, done: bool) anyerror!JSValue {
     const o = try self.ordinaryObject();
-    try o.object.value.set("value", value);
-    try o.object.value.set("done", JSValue.fromBool(done));
+    try o.asObject().value.set("value", value);
+    try o.asObject().value.set("done", JSValue.fromBool(done));
     return o;
 }
 
@@ -726,14 +726,14 @@ pub fn regExpStringIteratorNext(ctx: *anyopaque, allocator: Allocator, this_valu
     _ = args;
     const self = interp(ctx);
     if (!isObjectLike(this_value)) return self.throwError(.type_error, "%RegExpStringIterator%.next called on a non-object", .{});
-    if (this_value != .object or self.regexp_string_iters.getPtr(@intFromPtr(this_value.object)) == null)
+    if (this_value.tag() != .object or self.regexp_string_iters.getPtr(@intFromPtr(this_value.asObject())) == null)
         return self.throwError(.type_error, "%RegExpStringIterator%.next called on an incompatible receiver", .{});
-    const key = @intFromPtr(this_value.object);
+    const key = @intFromPtr(this_value.asObject());
     const snap = self.regexp_string_iters.get(key).?;
     if (snap.done) return iterResult(self, JSValue.UNDEFINED, true);
     const r = snap.r;
     const s = snap.s;
-    const data = s.string.value.data;
+    const data = s.asString().value.data;
 
     if (snap.global and pristineExec(self, r)) {
         const st = self.regexp_string_iters.getPtr(key).?;
@@ -763,7 +763,7 @@ pub fn regExpStringIteratorNext(ctx: *anyopaque, allocator: Allocator, this_valu
         try setNumber(self, r, "lastIndex", rb.posToUtf16(data, pos));
     }
     const match = try regExpExec(self, allocator, r, s);
-    if (match == .null) {
+    if (match.tag() == .null) {
         self.regexp_string_iters.getPtr(key).?.done = true;
         return iterResult(self, JSValue.UNDEFINED, true);
     }
@@ -771,7 +771,7 @@ pub fn regExpStringIteratorNext(ctx: *anyopaque, allocator: Allocator, this_valu
     if (snap.global) {
         const match_str = try getString(self, allocator, match, "0");
         defer match_str.deinit();
-        if (match_str.string.value.data.len == 0) {
+        if (match_str.asString().value.data.len == 0) {
             const this_index = try getLength(self, r, "lastIndex");
             try setNumber(self, r, "lastIndex", advanceStringIndex(data, this_index, snap.unicode));
         }
@@ -784,7 +784,7 @@ pub fn regExpStringIteratorNext(ctx: *anyopaque, allocator: Allocator, this_valu
 // ===== String.prototype methods =====
 
 fn requireCoercible(self: *Interpreter, v: JSValue, comptime method: []const u8) anyerror!void {
-    if (v == .undefined or v == .null) return self.throwError(.type_error, "String.prototype." ++ method ++ " called on null or undefined", .{});
+    if (v.tag() == .undefined or v.tag() == .null) return self.throwError(.type_error, "String.prototype." ++ method ++ " called on null or undefined", .{});
 }
 
 /// ToString(this) for a String.prototype method (owned).
@@ -851,7 +851,7 @@ pub fn stringMatchAll(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
 fn requireGlobalFlags(self: *Interpreter, allocator: Allocator, regexp: JSValue, comptime method: []const u8) anyerror!void {
     const flags = try self.getProperty(regexp, "flags");
     defer flags.deinit();
-    if (flags == .undefined or flags == .null) return self.throwError(.type_error, "String.prototype." ++ method ++ " called with a RegExp whose flags are null or undefined", .{});
+    if (flags.tag() == .undefined or flags.tag() == .null) return self.throwError(.type_error, "String.prototype." ++ method ++ " called with a RegExp whose flags are null or undefined", .{});
     const fs = try toStringValue(self, allocator, flags);
     defer fs.deinit();
     if (!hasFlag(fs, 'g')) return self.throwError(.type_error, "String.prototype." ++ method ++ " called with a non-global RegExp argument", .{});
@@ -892,8 +892,8 @@ pub const stringReplaceAll = replaceImpl(true);
 /// occurrence of `search` in `s`, by StringIndexOf, replaced through the
 /// replacer or GetSubstitution.
 fn stringReplaceSearch(self: *Interpreter, allocator: Allocator, s: JSValue, search: JSValue, repl: JSValue, functional: bool, all: bool) anyerror!JSValue {
-    const data = s.string.value.data;
-    const needle = search.string.value.data;
+    const data = s.asString().value.data;
+    const needle = search.asString().value.data;
     // Match positions (subject positions). An empty search matches at
     // every code-unit boundary, between a surrogate pair's halves too.
     var positions: std.ArrayList(usize) = .empty;
@@ -918,9 +918,9 @@ fn stringReplaceSearch(self: *Interpreter, allocator: Allocator, s: JSValue, sea
             defer r.deinit();
             const rs = try toStringValue(self, allocator, r);
             defer rs.deinit();
-            try appendWtf8Merged(&buf, allocator, rs.string.value.data);
+            try appendWtf8Merged(&buf, allocator, rs.asString().value.data);
         } else {
-            try getSubstitution(self, allocator, &buf, repl.string.value.data, needle, data, p, p + needle.len, &.{}, JSValue.UNDEFINED);
+            try getSubstitution(self, allocator, &buf, repl.asString().value.data, needle, data, p, p + needle.len, &.{}, JSValue.UNDEFINED);
         }
         end_of_last = p + needle.len;
     }
@@ -942,18 +942,18 @@ pub fn stringSplit(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     }
     const s = try thisString(self, allocator, this_value);
     defer s.deinit();
-    const data = s.string.value.data;
-    const lim: u32 = if (limit == .undefined) std.math.maxInt(u32) else try self.toUint32JS(limit);
+    const data = s.asString().value.data;
+    const lim: u32 = if (limit.tag() == .undefined) std.math.maxInt(u32) else try self.toUint32JS(limit);
     const r = try toStringValue(self, allocator, separator);
     defer r.deinit();
     var a = try self.gcNewArray();
     errdefer a.deinit();
     if (lim == 0) return a;
-    if (separator == .undefined) {
-        _ = try a.array.value.push(s.retain());
+    if (separator.tag() == .undefined) {
+        _ = try a.asArray().value.push(s.retain());
         return a;
     }
-    const sep = r.string.value.data;
+    const sep = r.asString().value.data;
     if (sep.len == 0) {
         // Each code unit of the first `lim` (a lone surrogate for each
         // half of a pair).
@@ -962,23 +962,23 @@ pub fn stringSplit(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
         var n: usize = 0;
         while (p < data.len and n < lim) : (n += 1) {
             const next = subject.advanceIndex(.code_unit, p);
-            _ = try a.array.value.push(try rb.sliceValue(self, allocator, data, p, next));
+            _ = try a.asArray().value.push(try rb.sliceValue(self, allocator, data, p, next));
             p = next;
         }
         return a;
     }
     if (data.len == 0) {
-        _ = try a.array.value.push(s.retain());
+        _ = try a.asArray().value.push(s.retain());
         return a;
     }
     var i: usize = 0;
     var count: usize = 0;
     while (std.mem.indexOfPos(u8, data, i, sep)) |j| {
-        _ = try a.array.value.push(try rb.sliceValue(self, allocator, data, i, j));
+        _ = try a.asArray().value.push(try rb.sliceValue(self, allocator, data, i, j));
         count += 1;
         if (count == lim) return a;
         i = j + sep.len;
     }
-    _ = try a.array.value.push(try rb.sliceValue(self, allocator, data, i, data.len));
+    _ = try a.asArray().value.push(try rb.sliceValue(self, allocator, data, i, data.len));
     return a;
 }

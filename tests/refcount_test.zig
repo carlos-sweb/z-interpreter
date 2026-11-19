@@ -16,8 +16,8 @@ const helpers = @import("helpers.zig");
 fn expectObjectRefcount(source: []const u8, expected: usize) !void {
     try helpers.runAndCheck(source, expected, struct {
         fn check(want: usize, result: helpers.Result) !void {
-            try testing.expect(result.value == .object);
-            try testing.expectEqual(want, result.value.object.refCount());
+            try testing.expect(result.value.isObject());
+            try testing.expectEqual(want, result.value.asObject().refCount());
         }
     }.check);
 }
@@ -491,8 +491,8 @@ fn functionRefcountOf(source: []const u8) !usize {
     defer interp.deinit();
     const value = try interp.run(source);
     defer value.deinit();
-    try testing.expect(value == .function);
-    return value.function.refCount();
+    try testing.expect(value.isFunction());
+    return value.asFunction().refCount();
 }
 
 test "an instance field holds exactly one reference to its value" {
@@ -647,9 +647,9 @@ fn objectRefcountAfterGc(source: []const u8) !usize {
     defer interp.deinit();
     const value = try interp.run(source);
     defer value.deinit();
-    try testing.expect(value == .object);
+    try testing.expect(value.isObject());
     interp.collectGarbage();
-    return value.object.refCount();
+    return value.asObject().refCount();
 }
 
 test "new F() does not leak a reference to F" {
@@ -668,8 +668,8 @@ fn arrayRefcountOf(source: []const u8) !usize {
     defer interp.deinit();
     const value = try interp.run(source);
     defer value.deinit();
-    try testing.expect(value == .array);
-    return value.array.refCount();
+    try testing.expect(value.isArray());
+    return value.asArray().refCount();
 }
 
 test "reading a member does not leak a reference to the object" {
@@ -714,8 +714,8 @@ fn objectRefcountOf(source: []const u8) !usize {
     defer interp.deinit();
     const value = try interp.run(source);
     defer value.deinit();
-    try testing.expect(value == .object);
-    return value.object.refCount();
+    try testing.expect(value.isObject());
+    return value.asObject().refCount();
 }
 
 test "a constructor that throws does not leak the instance" {

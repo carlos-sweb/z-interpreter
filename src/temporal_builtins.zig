@@ -45,8 +45,8 @@ const native = native_helpers.native;
 fn dneMethod(obj: JSValue, name: []const u8, value: JSValue) !void {
     var v = value;
     errdefer v.deinit();
-    try obj.object.value.set(name, v);
-    const rec = obj.object.value.getOwnRecordMut(name).?;
+    try obj.asObject().value.set(name, v);
+    const rec = obj.asObject().value.getOwnRecordMut(name).?;
     rec.descriptor.enumerable = false;
 }
 
@@ -71,8 +71,8 @@ fn constructedTemporal(self: *Interpreter, value: TemporalValue) anyerror!JSValu
     const result = try self.gcNewTemporal(value);
     errdefer result.deinit();
     if (self.construct_proto) |proto| {
-        const intrinsic = self.protos.temporalProtoFor(result.temporal.value);
-        if (proto != .object or proto.object != intrinsic.object) {
+        const intrinsic = self.protos.temporalProtoFor(result.asTemporal().value);
+        if (!proto.isObject() or proto.asObject() != intrinsic.asObject()) {
             try self.setTemporalPrototype(result, proto);
         }
     }
@@ -80,7 +80,7 @@ fn constructedTemporal(self: *Interpreter, value: TemporalValue) anyerror!JSValu
 }
 
 fn requireI32(self: *Interpreter, v: JSValue, what: []const u8) anyerror!i32 {
-    if (v == .bigint) return self.throwError(.type_error, "{s} must be a number", .{what});
+    if (v.isBigInt()) return self.throwError(.type_error, "{s} must be a number", .{what});
     const n = try self.toNumberJS(v);
     if (!std.math.isFinite(n) or n != @trunc(n)) return self.throwError(.range_error, "{s} must be an integer", .{what});
     if (n < std.math.minInt(i32) or n > std.math.maxInt(i32)) return self.throwError(.range_error, "{s} out of range", .{what});
@@ -88,7 +88,7 @@ fn requireI32(self: *Interpreter, v: JSValue, what: []const u8) anyerror!i32 {
 }
 
 fn coerceConstructorI32(self: *Interpreter, v: JSValue, what: []const u8) anyerror!i32 {
-    if (v == .bigint) return self.throwError(.type_error, "{s} must be a number", .{what});
+    if (v.isBigInt()) return self.throwError(.type_error, "{s} must be a number", .{what});
     const n = try self.toNumberJS(v);
     if (!std.math.isFinite(n)) return self.throwError(.range_error, "{s} must be an integer", .{what});
     const integer = @trunc(n);
@@ -104,7 +104,7 @@ fn coerceConstructorI32(self: *Interpreter, v: JSValue, what: []const u8) anyerr
 /// values.js`, which found this the hard way: a real crash, caught and
 /// fixed after a Test262 sweep showed 28 new CRASHes from this exact gap).
 fn requireI64(self: *Interpreter, v: JSValue, what: []const u8) anyerror!i64 {
-    if (v != .number) return self.throwError(.type_error, "{s} must be a number", .{what});
+    if (v.tag() != .number) return self.throwError(.type_error, "{s} must be a number", .{what});
     const n = v.number;
     if (!std.math.isFinite(n) or n != @trunc(n)) return self.throwError(.range_error, "{s} must be an integer", .{what});
     const maxf: f64 = @floatFromInt(std.math.maxInt(i64));
@@ -125,18 +125,18 @@ fn requireU32(self: *Interpreter, v: JSValue, what: []const u8) anyerror!u32 {
 }
 
 fn optionalI32(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!?i32 {
-    if (obj != .object) return null;
-    const v = obj.object.value.get(key) orelse return null;
-    if (v == .undefined) return null;
+    if (obj.tag() != .object) return null;
+    const v = obj.asObject().value.get(key) orelse return null;
+    if (v.tag() == .undefined) return null;
     return try requireI32(self, v, key);
 }
 
 fn optionalTemporalString(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!?[]const u8 {
-    if (obj != .object) return null;
-    const v = obj.object.value.get(key) orelse return null;
-    if (v == .undefined) return null;
-    if (v != .string) return self.throwError(.type_error, "{s} must be a string", .{key});
-    return v.string.value.data;
+    if (obj.tag() != .object) return null;
+    const v = obj.asObject().value.get(key) orelse return null;
+    if (v.tag() == .undefined) return null;
+    if (v.tag() != .string) return self.throwError(.type_error, "{s} must be a string", .{key});
+    return v.asString().value.data;
 }
 
 /// Plain `with()` methods use Get so proxies and accessors remain observable.
@@ -144,7 +144,7 @@ fn optionalTemporalString(self: *Interpreter, obj: JSValue, key: []const u8) any
 fn plainOptionalI32(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!?i32 {
     const value = try self.getProperty(obj, key);
     defer value.deinit();
-    if (value == .undefined) return null;
+    if (value.tag() == .undefined) return null;
     // PrepareTemporalFields uses ToNumber with truncation for Plain `with()` fields.
     return try coerceConstructorI32(self, value, key);
 }
@@ -152,7 +152,7 @@ fn plainOptionalI32(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!
 fn plainOptionalString(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!?[]u8 {
     const value = try self.getProperty(obj, key);
     defer value.deinit();
-    if (value == .undefined) return null;
+    if (value.tag() == .undefined) return null;
     return try self.toDisplayStringJS(self.gc_allocator, value);
 }
 
@@ -171,10 +171,10 @@ fn optionalBagMonthCode(self: *Interpreter, obj: JSValue) anyerror!?[]const u8 {
 fn rejectWithCalendarOrTimeZone(self: *Interpreter, fields: JSValue) anyerror!void {
     const calendar = try self.getProperty(fields, "calendar");
     defer calendar.deinit();
-    if (calendar != .undefined) return self.throwError(.type_error, "with forbids calendar", .{});
+    if (calendar.tag() != .undefined) return self.throwError(.type_error, "with forbids calendar", .{});
     const time_zone = try self.getProperty(fields, "timeZone");
     defer time_zone.deinit();
-    if (time_zone != .undefined) return self.throwError(.type_error, "with forbids timeZone", .{});
+    if (time_zone.tag() != .undefined) return self.throwError(.type_error, "with forbids timeZone", .{});
 }
 
 fn optionalBagCalendar(self: *Interpreter, obj: JSValue) anyerror!?[]const u8 {
@@ -184,9 +184,9 @@ fn optionalBagCalendar(self: *Interpreter, obj: JSValue) anyerror!?[]const u8 {
 }
 
 fn calendarFromValue(self: *Interpreter, value: JSValue) anyerror!?[]const u8 {
-    if (value == .undefined) return null;
-    if (value == .string) return try surfaceCalendar(self, value.string.value.data);
-    if (value == .temporal) switch (value.temporal.value) {
+    if (value.isUndefined()) return null;
+    if (value.isString()) return try surfaceCalendar(self, value.asString().value.data);
+    if (value.isTemporal()) switch (value.asTemporal().value) {
         .plain_date => |date| return date.calendarId(),
         .plain_date_time => |date_time| return date_time.calendarId(),
         .plain_year_month => |year_month| return year_month.calendarId(),
@@ -198,9 +198,9 @@ fn calendarFromValue(self: *Interpreter, value: JSValue) anyerror!?[]const u8 {
 }
 
 fn optionalConstructorCalendar(self: *Interpreter, value: JSValue) anyerror!?[]const u8 {
-    if (value == .undefined) return null;
-    if (value != .string) return self.throwError(.type_error, "calendar must be a string", .{});
-    return value.string.value.data;
+    if (value.isUndefined()) return null;
+    if (!value.isString()) return self.throwError(.type_error, "calendar must be a string", .{});
+    return value.asString().value.data;
 }
 
 fn validateConstructorCalendar(self: *Interpreter, calendar: ?[]const u8) anyerror!void {
@@ -212,24 +212,24 @@ fn validateConstructorCalendar(self: *Interpreter, calendar: ?[]const u8) anyerr
 /// Duration stores integral JavaScript Numbers, including values outside i64.
 /// Let z-temporal validate component magnitudes and mixed signs.
 fn requireDurationNumber(self: *Interpreter, v: JSValue, what: []const u8) anyerror!f64 {
-    if (v == .bigint) return self.throwError(.type_error, "{s} must be a number", .{what});
+    if (v.tag() == .bigint) return self.throwError(.type_error, "{s} must be a number", .{what});
     const n = try self.toNumberJS(v);
     if (!std.math.isFinite(n) or n != @trunc(n)) return self.throwError(.range_error, "{s} must be an integer", .{what});
     return n;
 }
 
 fn optionalDurationNumber(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!?f64 {
-    if (obj != .object) return null;
-    const v = obj.object.value.get(key) orelse return null;
-    if (v == .undefined) return null;
-    if (v == .bigint) return self.throwError(.type_error, "{s} must be a number", .{key});
+    if (obj.tag() != .object) return null;
+    const v = obj.asObject().value.get(key) orelse return null;
+    if (v.tag() == .undefined) return null;
+    if (v.tag() == .bigint) return self.throwError(.type_error, "{s} must be a number", .{key});
     return try requireDurationNumber(self, JSValue.fromNumber(try self.toNumberJS(v)), key);
 }
 
 fn observableDurationNumber(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!?f64 {
     const value = try self.getProperty(obj, key);
     defer value.deinit();
-    if (value == .undefined) return null;
+    if (value.tag() == .undefined) return null;
     return try requireDurationNumber(self, JSValue.fromNumber(try self.toNumberJS(value)), key);
 }
 
@@ -238,10 +238,10 @@ fn observableDurationNumber(self: *Interpreter, obj: JSValue, key: []const u8) a
 /// `undefined`.
 fn readOverflow(self: *Interpreter, options: JSValue) anyerror!Overflow {
     try surfaceOptions(self, options);
-    if (options != .object) return .constrain;
+    if (options.tag() != .object) return .constrain;
     const v = try self.getProperty(options, "overflow");
     defer v.deinit();
-    if (v == .undefined) return .constrain;
+    if (v.tag() == .undefined) return .constrain;
     const s = try self.toDisplayStringJS(self.gc_allocator, v);
     defer self.gc_allocator.free(s);
     if (std.mem.eql(u8, s, "constrain")) return .constrain;
@@ -252,10 +252,10 @@ fn readOverflow(self: *Interpreter, options: JSValue) anyerror!Overflow {
 /// Plain operations must observe `overflow` after their field reads.
 fn readPlainOverflow(self: *Interpreter, options: JSValue) anyerror!Overflow {
     try surfaceOptions(self, options);
-    if (options == .undefined) return .constrain;
+    if (options.tag() == .undefined) return .constrain;
     const v = try self.getProperty(options, "overflow");
     defer v.deinit();
-    if (v == .undefined) return .constrain;
+    if (v.tag() == .undefined) return .constrain;
     const s = try self.toDisplayStringJS(self.gc_allocator, v);
     defer self.gc_allocator.free(s);
     if (std.mem.eql(u8, s, "constrain")) return .constrain;
@@ -287,11 +287,11 @@ fn ioHandle() std.Io {
 /// may be `undefined`.
 fn readDisambiguation(self: *Interpreter, options: JSValue) anyerror!ztemporal.Disambiguation {
     try surfaceOptions(self, options);
-    if (options != .object) return .compatible;
-    const v = options.object.value.get("disambiguation") orelse return .compatible;
-    if (v == .undefined) return .compatible;
-    if (v != .string) return self.throwError(.type_error, "disambiguation must be a string", .{});
-    const s = v.string.value.data;
+    if (options.tag() != .object) return .compatible;
+    const v = options.asObject().value.get("disambiguation") orelse return .compatible;
+    if (v.tag() == .undefined) return .compatible;
+    if (v.tag() != .string) return self.throwError(.type_error, "disambiguation must be a string", .{});
+    const s = v.asString().value.data;
     if (std.mem.eql(u8, s, "compatible")) return .compatible;
     if (std.mem.eql(u8, s, "earlier")) return .earlier;
     if (std.mem.eql(u8, s, "later")) return .later;
@@ -304,11 +304,11 @@ fn readDisambiguation(self: *Interpreter, options: JSValue) anyerror!ztemporal.D
 /// `disambiguation`'s own). `options` may be `undefined`.
 fn readOffsetOption(self: *Interpreter, options: JSValue) anyerror!ztemporal.OffsetOption {
     try surfaceOptions(self, options);
-    if (options != .object) return .reject;
-    const v = options.object.value.get("offset") orelse return .reject;
-    if (v == .undefined) return .reject;
-    if (v != .string) return self.throwError(.type_error, "offset must be a string", .{});
-    const s = v.string.value.data;
+    if (options.tag() != .object) return .reject;
+    const v = options.asObject().value.get("offset") orelse return .reject;
+    if (v.tag() == .undefined) return .reject;
+    if (v.tag() != .string) return self.throwError(.type_error, "offset must be a string", .{});
+    const s = v.asString().value.data;
     if (std.mem.eql(u8, s, "use")) return .use;
     if (std.mem.eql(u8, s, "prefer")) return .prefer;
     if (std.mem.eql(u8, s, "ignore")) return .ignore;
@@ -370,15 +370,15 @@ const RoundingOptionValues = struct {
 fn readRoundingOptionString(self: *Interpreter, options: JSValue, key: []const u8) anyerror!?[]u8 {
     const value = try self.getProperty(options, key);
     defer value.deinit();
-    if (value == .undefined) return null;
+    if (value.tag() == .undefined) return null;
     return try self.toDisplayStringJS(self.gc_allocator, value);
 }
 
 fn readRoundingOptionNumber(self: *Interpreter, options: JSValue, key: []const u8) anyerror!?f64 {
     const value = try self.getProperty(options, key);
     defer value.deinit();
-    if (value == .undefined) return null;
-    if (value == .bigint) return self.throwError(.type_error, "{s} must be a number", .{key});
+    if (value.tag() == .undefined) return null;
+    if (value.tag() == .bigint) return self.throwError(.type_error, "{s} must be a number", .{key});
     return try self.toNumberJS(value);
 }
 
@@ -387,13 +387,13 @@ fn readRoundingOptionNumber(self: *Interpreter, options: JSValue, key: []const u
 /// has no largestUnit and starts with roundingIncrement.
 fn readPlainRoundingOptionsGeneric(self: *Interpreter, comptime T: type, options: JSValue, default_mode: RoundingMode, comptime is_difference: bool) anyerror!T {
     var out: T = .{ .roundingMode = default_mode };
-    if (!is_difference and options == .string) {
+    if (!is_difference and options.tag() == .string) {
         // A bare unit string is shorthand for { smallestUnit: options }.
-        out.smallestUnit = try unitFromString(self, options.string.value.data, "smallestUnit");
+        out.smallestUnit = try unitFromString(self, options.asString().value.data, "smallestUnit");
         return out;
     }
     try surfaceOptions(self, options);
-    if (options == .undefined) return out;
+    if (options.tag() == .undefined) return out;
 
     var raw: RoundingOptionValues = .{};
     defer raw.deinit(self.gc_allocator);
@@ -427,10 +427,10 @@ fn readPlainRoundOptions(self: *Interpreter, options: JSValue) anyerror!RoundOpt
 /// smallestUnit. Keep their observable option reads separate from the shared
 /// reader, whose callers have different required fields and read orders.
 fn readRequiredPlainRoundOptions(self: *Interpreter, options: JSValue) anyerror!RoundOptions {
-    if (options == .undefined)
+    if (options.tag() == .undefined)
         return self.throwError(.type_error, "round() requires an options object", .{});
-    if (options == .string) {
-        return .{ .smallestUnit = try unitFromString(self, options.string.value.data, "smallestUnit") };
+    if (options.tag() == .string) {
+        return .{ .smallestUnit = try unitFromString(self, options.asString().value.data, "smallestUnit") };
     }
     try surfaceOptions(self, options);
 
@@ -468,19 +468,19 @@ fn readPlainDateTimeRoundOptions(self: *Interpreter, options: JSValue) anyerror!
 /// be exactly `tag`, else a catchable TypeError -- the per-type analogue
 /// of `crypto_globals.zig`'s `coerceBytes`/os_globals's `requireString`.
 fn requireTemporal(self: *Interpreter, v: JSValue, comptime tag: std.meta.Tag(TemporalValue), what: []const u8) anyerror!@FieldType(TemporalValue, @tagName(tag)) {
-    if (v != .temporal or v.temporal.value != tag) {
+    if (!v.isTemporal() or v.asTemporal().value != tag) {
         return self.throwError(.type_error, "this is not a {s}", .{what});
     }
-    return @field(v.temporal.value, @tagName(tag));
+    return @field(v.asTemporal().value, @tagName(tag));
 }
 
 /// Extracts a `Duration` from a duration-like JS argument: another
 /// `Temporal.Duration` instance, an ISO 8601 duration string, or a plain
 /// object with any of the 10 duration fields (missing ones default to 0).
 fn coerceDuration(self: *Interpreter, v: JSValue) anyerror!ztemporal.Duration {
-    if (v == .temporal and v.temporal.value == .duration) return v.temporal.value.duration;
-    if (v == .string) return ztemporal.Duration.from(.{ .string = v.string.value.data }) catch |e| temporalErr(self, e);
-    if (v == .proxy) {
+    if (v.tag() == .temporal and v.asTemporal().value == .duration) return v.asTemporal().value.duration;
+    if (v.tag() == .string) return ztemporal.Duration.from(.{ .string = v.asString().value.data }) catch |e| temporalErr(self, e);
+    if (v.tag() == .proxy) {
         const days = try observableDurationNumber(self, v, "days");
         const hours = try observableDurationNumber(self, v, "hours");
         const microseconds = try observableDurationNumber(self, v, "microseconds");
@@ -504,7 +504,7 @@ fn coerceDuration(self: *Interpreter, v: JSValue) anyerror!ztemporal.Duration {
             .nanoseconds = nanoseconds,
         } }) catch |e| temporalErr(self, e);
     }
-    if (v != .object) return self.throwError(.type_error, "Duration-like value required", .{});
+    if (v.tag() != .object) return self.throwError(.type_error, "Duration-like value required", .{});
     return ztemporal.Duration.from(.{ .fields = .{
         .years = try optionalDurationNumber(self, v, "years"),
         .months = try optionalDurationNumber(self, v, "months"),
@@ -529,15 +529,15 @@ fn coerceDuration(self: *Interpreter, v: JSValue) anyerror!ztemporal.Duration {
 /// `pd.equals({year:2024,month:13,day:1})` returns `false`, doesn't
 /// throw -- month 13 constrains to 12).
 fn coercePlainDate(self: *Interpreter, v: JSValue, overflow: Overflow) anyerror!ztemporal.PlainDate {
-    if (v == .temporal and v.temporal.value == .plain_date) return v.temporal.value.plain_date;
-    if (v == .temporal) switch (v.temporal.value) {
+    if (v.isTemporal() and v.asTemporal().value == .plain_date) return v.asTemporal().value.plain_date;
+    if (v.isTemporal()) switch (v.asTemporal().value) {
         .plain_date_time => |date_time| return date_time.toPlainDate(),
         .zoned_date_time => |zoned| return zoned.toPlainDate(self.gc_allocator, ioHandle()) catch |e| temporalErr(self, e),
         else => {},
     };
-    if (v == .string) return ztemporal.PlainDate.from(.{ .string = v.string.value.data }, .{}) catch |e| temporalErr(self, e);
-    if (v == .proxy) return plainDateFromObservedBag(self, v, JSValue.UNDEFINED);
-    if (v != .object) return self.throwError(.type_error, "Temporal.PlainDate.from requires a string or an object", .{});
+    if (v.tag() == .string) return ztemporal.PlainDate.from(.{ .string = v.asString().value.data }, .{}) catch |e| temporalErr(self, e);
+    if (v.tag() == .proxy) return plainDateFromObservedBag(self, v, JSValue.UNDEFINED);
+    if (v.tag() != .object) return self.throwError(.type_error, "Temporal.PlainDate.from requires a string or an object", .{});
     const month_code = try optionalBagMonthCode(self, v);
     const year = (try optionalI32(self, v, "year")) orelse return self.throwError(.type_error, "year is required", .{});
     const month = try optionalI32(self, v, "month");
@@ -565,15 +565,15 @@ fn plainTimeFromObservedBag(self: *Interpreter, fields: JSValue, overflow: Overf
 }
 
 fn coercePlainTime(self: *Interpreter, v: JSValue, overflow: Overflow) anyerror!ztemporal.PlainTime {
-    if (v == .temporal and v.temporal.value == .plain_time) return v.temporal.value.plain_time;
-    if (v == .temporal) switch (v.temporal.value) {
+    if (v.tag() == .temporal and v.asTemporal().value == .plain_time) return v.asTemporal().value.plain_time;
+    if (v.tag() == .temporal) switch (v.asTemporal().value) {
         .plain_date_time => |date_time| return date_time.toPlainTime(),
         .zoned_date_time => |zoned| return zoned.toPlainTime(self.gc_allocator, ioHandle()) catch |e| temporalErr(self, e),
         else => {},
     };
-    if (v == .string) return ztemporal.PlainTime.from(.{ .string = v.string.value.data }, .{}) catch |e| temporalErr(self, e);
-    if (v == .proxy) return plainTimeFromObservedBag(self, v, overflow);
-    if (v != .object) return self.throwError(.type_error, "Temporal.PlainTime.from requires a string or an object", .{});
+    if (v.tag() == .string) return ztemporal.PlainTime.from(.{ .string = v.asString().value.data }, .{}) catch |e| temporalErr(self, e);
+    if (v.tag() == .proxy) return plainTimeFromObservedBag(self, v, overflow);
+    if (v.tag() != .object) return self.throwError(.type_error, "Temporal.PlainTime.from requires a string or an object", .{});
     return ztemporal.PlainTime.from(.{
         .fields = .{
             .hour = try optionalI32(self, v, "hour"),
@@ -589,15 +589,15 @@ fn coercePlainTime(self: *Interpreter, v: JSValue, overflow: Overflow) anyerror!
 }
 
 fn coercePlainDateTime(self: *Interpreter, v: JSValue, overflow: Overflow) anyerror!ztemporal.PlainDateTime {
-    if (v == .temporal and v.temporal.value == .plain_date_time) return v.temporal.value.plain_date_time;
-    if (v == .temporal) switch (v.temporal.value) {
+    if (v.tag() == .temporal and v.asTemporal().value == .plain_date_time) return v.asTemporal().value.plain_date_time;
+    if (v.tag() == .temporal) switch (v.asTemporal().value) {
         .plain_date => |date| return date.toPlainDateTime(null) catch |e| temporalErr(self, e),
         .zoned_date_time => |zoned| return zoned.toPlainDateTime(self.gc_allocator, ioHandle()) catch |e| temporalErr(self, e),
         else => {},
     };
-    if (v == .string) return ztemporal.PlainDateTime.from(.{ .string = v.string.value.data }, .{}) catch |e| temporalErr(self, e);
-    if (v == .proxy) return plainDateTimeFromObservedBag(self, v, JSValue.UNDEFINED, false);
-    if (v != .object) return self.throwError(.type_error, "Temporal.PlainDateTime.from requires a string or an object", .{});
+    if (v.tag() == .string) return ztemporal.PlainDateTime.from(.{ .string = v.asString().value.data }, .{}) catch |e| temporalErr(self, e);
+    if (v.tag() == .proxy) return plainDateTimeFromObservedBag(self, v, JSValue.UNDEFINED, false);
+    if (v.tag() != .object) return self.throwError(.type_error, "Temporal.PlainDateTime.from requires a string or an object", .{});
     const month_code = try optionalBagMonthCode(self, v);
     const year = (try optionalI32(self, v, "year")) orelse return self.throwError(.type_error, "year is required", .{});
     const month = try optionalI32(self, v, "month");
@@ -632,8 +632,8 @@ fn coercePlainDateTime(self: *Interpreter, v: JSValue, overflow: Overflow) anyer
 /// every other non-string/non-instance type gets. Found via this
 /// plan's own Node cross-check, not anticipated in the design.
 fn coerceInstant(self: *Interpreter, allocator: Allocator, v: JSValue) anyerror!ztemporal.Instant {
-    if (v == .temporal and v.temporal.value == .instant) return v.temporal.value.instant;
-    if (v == .temporal and v.temporal.value == .zoned_date_time) return v.temporal.value.zoned_date_time.toInstant();
+    if (v.tag() == .temporal and v.asTemporal().value == .instant) return v.asTemporal().value.instant;
+    if (v.tag() == .temporal and v.asTemporal().value == .zoned_date_time) return v.asTemporal().value.zoned_date_time.toInstant();
     // ToTemporalInstant applies ToString to every remaining Object value.
     // This includes Proxy and callable objects, not just ordinary objects.
     if (!Interpreter.isPrimitiveTag(v)) {
@@ -641,21 +641,21 @@ fn coerceInstant(self: *Interpreter, allocator: Allocator, v: JSValue) anyerror!
         defer allocator.free(s);
         return ztemporal.Instant.from(.{ .string = s }) catch |e| temporalErr(self, e);
     }
-    if (v != .string) return self.throwError(.type_error, "Temporal.Instant.from requires a string", .{});
-    return ztemporal.Instant.from(.{ .string = v.string.value.data }) catch |e| temporalErr(self, e);
+    if (v.tag() != .string) return self.throwError(.type_error, "Temporal.Instant.from requires a string", .{});
+    return ztemporal.Instant.from(.{ .string = v.asString().value.data }) catch |e| temporalErr(self, e);
 }
 
 fn coercePlainYearMonth(self: *Interpreter, v: JSValue, overflow: Overflow) anyerror!ztemporal.PlainYearMonth {
-    if (v == .temporal and v.temporal.value == .plain_year_month) return v.temporal.value.plain_year_month;
-    if (v == .temporal) switch (v.temporal.value) {
+    if (v.tag() == .temporal and v.asTemporal().value == .plain_year_month) return v.asTemporal().value.plain_year_month;
+    if (v.tag() == .temporal) switch (v.asTemporal().value) {
         .plain_date => |date| return date.toPlainYearMonth() catch |e| temporalErr(self, e),
         .plain_date_time => |date_time| return date_time.toPlainYearMonth() catch |e| temporalErr(self, e),
         .zoned_date_time => |zoned| return zoned.toPlainYearMonth(self.gc_allocator, ioHandle()) catch |e| temporalErr(self, e),
         else => {},
     };
-    if (v == .string) return ztemporal.PlainYearMonth.from(.{ .string = v.string.value.data }, .{}) catch |e| temporalErr(self, e);
-    if (v == .proxy) return plainYearMonthFromObservedBag(self, v, JSValue.UNDEFINED, false);
-    if (v != .object) return self.throwError(.type_error, "Temporal.PlainYearMonth.from requires a string or an object", .{});
+    if (v.tag() == .string) return ztemporal.PlainYearMonth.from(.{ .string = v.asString().value.data }, .{}) catch |e| temporalErr(self, e);
+    if (v.tag() == .proxy) return plainYearMonthFromObservedBag(self, v, JSValue.UNDEFINED, false);
+    if (v.tag() != .object) return self.throwError(.type_error, "Temporal.PlainYearMonth.from requires a string or an object", .{});
     const month_code = try optionalBagMonthCode(self, v);
     const year = (try optionalI32(self, v, "year")) orelse return self.throwError(.type_error, "year is required", .{});
     const month = try optionalI32(self, v, "month");
@@ -664,15 +664,15 @@ fn coercePlainYearMonth(self: *Interpreter, v: JSValue, overflow: Overflow) anye
 }
 
 fn coercePlainMonthDay(self: *Interpreter, v: JSValue, overflow: Overflow) anyerror!ztemporal.PlainMonthDay {
-    if (v == .temporal and v.temporal.value == .plain_month_day) return v.temporal.value.plain_month_day;
-    if (v == .temporal) switch (v.temporal.value) {
+    if (v.tag() == .temporal and v.asTemporal().value == .plain_month_day) return v.asTemporal().value.plain_month_day;
+    if (v.tag() == .temporal) switch (v.asTemporal().value) {
         .plain_date => |date| return date.toPlainMonthDay() catch |e| temporalErr(self, e),
         .plain_date_time => |date_time| return date_time.toPlainMonthDay() catch |e| temporalErr(self, e),
         .zoned_date_time => |zoned| return zoned.toPlainMonthDay(self.gc_allocator, ioHandle()) catch |e| temporalErr(self, e),
         else => {},
     };
-    if (v == .string) return ztemporal.PlainMonthDay.from(.{ .string = v.string.value.data }, .{}) catch |e| temporalErr(self, e);
-    if (v != .object) return self.throwError(.type_error, "Temporal.PlainMonthDay.from requires a string or an object", .{});
+    if (v.tag() == .string) return ztemporal.PlainMonthDay.from(.{ .string = v.asString().value.data }, .{}) catch |e| temporalErr(self, e);
+    if (v.tag() != .object) return self.throwError(.type_error, "Temporal.PlainMonthDay.from requires a string or an object", .{});
     const month_code = try optionalBagMonthCode(self, v);
     const month = try optionalI32(self, v, "month");
     if (month == null and month_code == null) return self.throwError(.type_error, "month or monthCode is required", .{});
@@ -700,8 +700,8 @@ fn installGetter(self: *Interpreter, proto: JSValue, name: []const u8, call_fn: 
     // Real spec: every accessor getter has arity 0 (takes no arguments).
     const getter_name = try std.fmt.allocPrint(self.arena_state.allocator(), "get {s}", .{name});
     const getter = try native(self, getter_name, 0, call_fn);
-    try proto.object.value.defineAccessor(name, getter, null, JSValue.UNDEFINED);
-    const rec = proto.object.value.getOwnRecordMut(name).?;
+    try proto.asObject().value.defineAccessor(name, getter, null, JSValue.UNDEFINED);
+    const rec = proto.asObject().value.getOwnRecordMut(name).?;
     rec.descriptor.enumerable = false;
     rec.descriptor.configurable = true;
 }
@@ -726,10 +726,10 @@ fn plainDateConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
 
 fn observableFromOverflow(self: *Interpreter, options: JSValue) anyerror!Overflow {
     try surfaceOptions(self, options);
-    if (options != .proxy) return readOverflow(self, options);
+    if (!options.isProxy()) return readOverflow(self, options);
     const value = try self.getProperty(options, "overflow");
     defer value.deinit();
-    if (value == .undefined) return .constrain;
+    if (value.isUndefined()) return .constrain;
     const text = try self.toDisplayStringJS(self.gc_allocator, value);
     defer self.gc_allocator.free(text);
     if (std.mem.eql(u8, text, "constrain")) return .constrain;
@@ -740,7 +740,7 @@ fn observableFromOverflow(self: *Interpreter, options: JSValue) anyerror!Overflo
 fn observedTemporalIntegerField(self: *Interpreter, fields: JSValue, key: []const u8) anyerror!?i32 {
     const value = try self.getProperty(fields, key);
     defer value.deinit();
-    if (value == .undefined) return null;
+    if (value.isUndefined()) return null;
     const number = try self.toNumberJS(value);
     if (!std.math.isFinite(number)) return self.throwError(.range_error, "{s} must be finite", .{key});
     const integer = @trunc(number);
@@ -757,7 +757,7 @@ fn plainDateFromObservedBag(self: *Interpreter, fields: JSValue, options: JSValu
     const month = try observedTemporalIntegerField(self, fields, "month");
     const month_code_value = try self.getProperty(fields, "monthCode");
     defer month_code_value.deinit();
-    const month_code = if (month_code_value == .undefined) null else try self.toDisplayStringJS(self.gc_allocator, month_code_value);
+    const month_code = if (month_code_value.isUndefined()) null else try self.toDisplayStringJS(self.gc_allocator, month_code_value);
     defer if (month_code) |code| self.gc_allocator.free(code);
     const year = try observedTemporalIntegerField(self, fields, "year");
     const overflow = try observableFromOverflow(self, options);
@@ -776,11 +776,11 @@ fn plainDateFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     const self = interp(ctx);
     const value = arg(args, 0);
     const options = arg(args, 1);
-    if (Interpreter.isPrimitiveTag(value) and value != .string)
+    if (Interpreter.isPrimitiveTag(value) and !value.isString())
         return self.throwError(.type_error, "Temporal.PlainDate.from requires a string or an object", .{});
-    if (value == .string)
-        _ = ztemporal.iso_string.parsePlainDate(value.string.value.data) catch |e| return temporalErr(self, e);
-    const pd = if (value == .proxy)
+    if (value.isString())
+        _ = ztemporal.iso_string.parsePlainDate(value.asString().value.data) catch |e| return temporalErr(self, e);
+    const pd = if (value.isProxy())
         try plainDateFromObservedBag(self, value, options)
     else blk: {
         const overflow = try observableFromOverflow(self, options);
@@ -868,7 +868,7 @@ fn pdWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     const self = interp(ctx);
     const pd = try pdSelf(self, this_value);
     const fields = arg(args, 0);
-    if (fields != .object and fields != .proxy) return self.throwError(.type_error, "with() requires an object", .{});
+    if (fields.tag() != .object and fields.tag() != .proxy) return self.throwError(.type_error, "with() requires an object", .{});
     try rejectWithCalendarOrTimeZone(self, fields);
     const day = try plainOptionalI32(self, fields, "day");
     const month = try plainOptionalI32(self, fields, "month");
@@ -876,7 +876,7 @@ fn pdWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     defer if (month_code) |value| self.gc_allocator.free(value);
     const year = try plainOptionalI32(self, fields, "year");
     const options = arg(args, 1);
-    if (options != .undefined and Interpreter.isPrimitiveTag(options))
+    if (options.tag() != .undefined and Interpreter.isPrimitiveTag(options))
         _ = pd.with(.{ .year = year, .month = month, .monthCode = month_code, .day = day }, .{}) catch |e| return temporalErr(self, e);
     const overflow = try readPlainOverflow(self, options);
     const result = pd.with(.{
@@ -989,12 +989,12 @@ fn plainTimeConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     _ = this_value;
     const self = interp(ctx);
     if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor Temporal.PlainTime requires 'new'", .{});
-    const hour = if (arg(args, 0) != .undefined) try coerceConstructorI32(self, arg(args, 0), "hour") else 0;
-    const minute = if (arg(args, 1) != .undefined) try coerceConstructorI32(self, arg(args, 1), "minute") else 0;
-    const second = if (arg(args, 2) != .undefined) try coerceConstructorI32(self, arg(args, 2), "second") else 0;
-    const ms = if (arg(args, 3) != .undefined) try coerceConstructorI32(self, arg(args, 3), "millisecond") else 0;
-    const us = if (arg(args, 4) != .undefined) try coerceConstructorI32(self, arg(args, 4), "microsecond") else 0;
-    const ns = if (arg(args, 5) != .undefined) try coerceConstructorI32(self, arg(args, 5), "nanosecond") else 0;
+    const hour = if (arg(args, 0).tag() != .undefined) try coerceConstructorI32(self, arg(args, 0), "hour") else 0;
+    const minute = if (arg(args, 1).tag() != .undefined) try coerceConstructorI32(self, arg(args, 1), "minute") else 0;
+    const second = if (arg(args, 2).tag() != .undefined) try coerceConstructorI32(self, arg(args, 2), "second") else 0;
+    const ms = if (arg(args, 3).tag() != .undefined) try coerceConstructorI32(self, arg(args, 3), "millisecond") else 0;
+    const us = if (arg(args, 4).tag() != .undefined) try coerceConstructorI32(self, arg(args, 4), "microsecond") else 0;
+    const ns = if (arg(args, 5).tag() != .undefined) try coerceConstructorI32(self, arg(args, 5), "nanosecond") else 0;
     const pt = ztemporal.PlainTime.init(hour, minute, second, ms, us, ns) catch |e| return temporalErr(self, e);
     return constructedTemporal(self, .{ .plain_time = pt });
 }
@@ -1004,9 +1004,9 @@ fn plainTimeFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     _ = this_value;
     const self = interp(ctx);
     const value = arg(args, 0);
-    const parsed_string: ?ztemporal.PlainTime = if (value == .string) try coercePlainTime(self, value, .constrain) else null;
+    const parsed_string: ?ztemporal.PlainTime = if (value.tag() == .string) try coercePlainTime(self, value, .constrain) else null;
     const options = arg(args, 1);
-    const pt = if (value == .object or value == .proxy) blk: {
+    const pt = if (value.tag() == .object or value.tag() == .proxy) blk: {
         const hour = try observedTemporalIntegerField(self, value, "hour");
         const microsecond = try observedTemporalIntegerField(self, value, "microsecond");
         const millisecond = try observedTemporalIntegerField(self, value, "millisecond");
@@ -1074,7 +1074,7 @@ fn ptWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     const self = interp(ctx);
     const pt = try ptSelf(self, this_value);
     const fields = arg(args, 0);
-    if (fields != .object and fields != .proxy) return self.throwError(.type_error, "with() requires an object", .{});
+    if (fields.tag() != .object and fields.tag() != .proxy) return self.throwError(.type_error, "with() requires an object", .{});
     try rejectWithCalendarOrTimeZone(self, fields);
     const hour = try plainOptionalI32(self, fields, "hour");
     const microsecond = try plainOptionalI32(self, fields, "microsecond");
@@ -1198,12 +1198,12 @@ fn plainDateTimeConstructor(ctx: *anyopaque, allocator: Allocator, this_value: J
     const year = try coerceConstructorI32(self, arg(args, 0), "year");
     const month = try coerceConstructorI32(self, arg(args, 1), "month");
     const day = try coerceConstructorI32(self, arg(args, 2), "day");
-    const hour = if (arg(args, 3) != .undefined) try coerceConstructorI32(self, arg(args, 3), "hour") else 0;
-    const minute = if (arg(args, 4) != .undefined) try coerceConstructorI32(self, arg(args, 4), "minute") else 0;
-    const second = if (arg(args, 5) != .undefined) try coerceConstructorI32(self, arg(args, 5), "second") else 0;
-    const ms = if (arg(args, 6) != .undefined) try coerceConstructorI32(self, arg(args, 6), "millisecond") else 0;
-    const us = if (arg(args, 7) != .undefined) try coerceConstructorI32(self, arg(args, 7), "microsecond") else 0;
-    const ns = if (arg(args, 8) != .undefined) try coerceConstructorI32(self, arg(args, 8), "nanosecond") else 0;
+    const hour = if (arg(args, 3).tag() != .undefined) try coerceConstructorI32(self, arg(args, 3), "hour") else 0;
+    const minute = if (arg(args, 4).tag() != .undefined) try coerceConstructorI32(self, arg(args, 4), "minute") else 0;
+    const second = if (arg(args, 5).tag() != .undefined) try coerceConstructorI32(self, arg(args, 5), "second") else 0;
+    const ms = if (arg(args, 6).tag() != .undefined) try coerceConstructorI32(self, arg(args, 6), "millisecond") else 0;
+    const us = if (arg(args, 7).tag() != .undefined) try coerceConstructorI32(self, arg(args, 7), "microsecond") else 0;
+    const ns = if (arg(args, 8).tag() != .undefined) try coerceConstructorI32(self, arg(args, 8), "nanosecond") else 0;
     const pdt = ztemporal.PlainDateTime.init(year, month, day, hour, minute, second, ms, us, ns, try optionalConstructorCalendar(self, arg(args, 9))) catch |e| return temporalErr(self, e);
     return constructedTemporal(self, .{ .plain_date_time = pdt });
 }
@@ -1222,11 +1222,11 @@ fn plainDateTimeFromObservedBag(self: *Interpreter, fields: JSValue, options: JS
     defer month_code_value.deinit();
     var owned_month_code: ?[]u8 = null;
     defer if (owned_month_code) |code| self.gc_allocator.free(code);
-    const month_code: ?[]const u8 = if (month_code_value == .undefined) null else if (strict_month_code) blk: {
+    const month_code: ?[]const u8 = if (month_code_value.tag() == .undefined) null else if (strict_month_code) blk: {
         const primitive = try self.toPrimitive(month_code_value, .string);
         defer primitive.deinit();
-        if (primitive != .string) return self.throwError(.type_error, "monthCode must be a string", .{});
-        const code = try self.gc_allocator.dupe(u8, primitive.string.value.data);
+        if (primitive.tag() != .string) return self.throwError(.type_error, "monthCode must be a string", .{});
+        const code = try self.gc_allocator.dupe(u8, primitive.asString().value.data);
         owned_month_code = code;
         // Syntax precedes year coercion; suitability remains native validation.
         if ((code.len != 3 and code.len != 4) or code[0] != 'M' or
@@ -1266,11 +1266,11 @@ fn plainDateTimeFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     const self = interp(ctx);
     const value = arg(args, 0);
     const options = arg(args, 1);
-    if (Interpreter.isPrimitiveTag(value) and value != .string)
+    if (Interpreter.isPrimitiveTag(value) and value.tag() != .string)
         return self.throwError(.type_error, "Temporal.PlainDateTime.from requires a string or an object", .{});
-    if (value == .string)
-        _ = ztemporal.iso_string.parsePlainDateTime(value.string.value.data) catch |e| return temporalErr(self, e);
-    const pdt = if (value == .object or value == .proxy)
+    if (value.tag() == .string)
+        _ = ztemporal.iso_string.parsePlainDateTime(value.asString().value.data) catch |e| return temporalErr(self, e);
+    const pdt = if (value.tag() == .object or value.tag() == .proxy)
         try plainDateTimeFromObservedBag(self, value, options, true)
     else blk: {
         const overflow = try observableFromOverflow(self, options);
@@ -1381,7 +1381,7 @@ fn pdtWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const self = interp(ctx);
     const pdt = try pdtSelf(self, this_value);
     const fields = arg(args, 0);
-    if (fields != .object and fields != .proxy) return self.throwError(.type_error, "with() requires an object", .{});
+    if (fields.tag() != .object and fields.tag() != .proxy) return self.throwError(.type_error, "with() requires an object", .{});
     try rejectWithCalendarOrTimeZone(self, fields);
     const day = try plainOptionalI32(self, fields, "day");
     const hour = try plainOptionalI32(self, fields, "hour");
@@ -1395,7 +1395,7 @@ fn pdtWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const second = try plainOptionalI32(self, fields, "second");
     const year = try plainOptionalI32(self, fields, "year");
     const options = arg(args, 1);
-    if (options != .undefined and Interpreter.isPrimitiveTag(options))
+    if (options.tag() != .undefined and Interpreter.isPrimitiveTag(options))
         _ = pdt.with(.{ .year = year, .month = month, .monthCode = month_code, .day = day, .hour = hour, .minute = minute, .second = second, .millisecond = millisecond, .microsecond = microsecond, .nanosecond = nanosecond }, .{}) catch |e| return temporalErr(self, e);
     const overflow = try readPlainOverflow(self, options);
     const result = pdt.with(.{
@@ -1526,7 +1526,7 @@ fn instSelf(self: *Interpreter, this_value: JSValue) anyerror!ztemporal.Instant 
 fn coerceEpochNanoseconds(self: *Interpreter, v: JSValue, what: []const u8) anyerror!i128 {
     const bigint_value = try @import("builtin_helpers.zig").toBigIntValue(self, self.gc_allocator, v);
     defer bigint_value.deinit();
-    return bigint_value.bigint.value.toI128() catch return self.throwError(.range_error, "{s} out of range", .{what});
+    return bigint_value.asBigInt().value.toI128() catch return self.throwError(.range_error, "{s} out of range", .{what});
 }
 
 fn instantConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1544,7 +1544,7 @@ fn instantFromEpochMilliseconds(ctx: *anyopaque, allocator: Allocator, this_valu
     _ = this_value;
     const self = interp(ctx);
     const epoch_milliseconds = arg(args, 0);
-    if (epoch_milliseconds == .bigint or epoch_milliseconds == .symbol)
+    if (epoch_milliseconds.tag() == .bigint or epoch_milliseconds.tag() == .symbol)
         return self.throwError(.type_error, "Cannot convert epochMilliseconds to a number", .{});
     const number = try self.toNumberJS(epoch_milliseconds);
     const maxf: f64 = @floatFromInt(std.math.maxInt(i64));
@@ -1616,7 +1616,7 @@ fn instSubtract(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 /// share the historical round-option reader.
 fn readInstantDifferenceOptions(self: *Interpreter, options: JSValue) anyerror!RoundingOptions {
     try surfaceOptions(self, options);
-    if (options == .undefined) return .{};
+    if (options.tag() == .undefined) return .{};
 
     const largest_unit = try readRoundingOptionString(self, options, "largestUnit");
     defer if (largest_unit) |value| self.gc_allocator.free(value);
@@ -1663,10 +1663,10 @@ fn instSince(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
 /// shared reader: its properties are read in alphabetical order and all
 /// algorithmic validation happens after those observable conversions.
 fn readInstantRoundOptions(self: *Interpreter, options: JSValue) anyerror!RoundOptions {
-    if (options == .undefined)
+    if (options.tag() == .undefined)
         return self.throwError(.type_error, "round() requires an options object", .{});
-    if (options == .string) {
-        return .{ .smallestUnit = try unitFromString(self, options.string.value.data, "smallestUnit") };
+    if (options.tag() == .string) {
+        return .{ .smallestUnit = try unitFromString(self, options.asString().value.data, "smallestUnit") };
     }
     try surfaceOptions(self, options);
 
@@ -1726,8 +1726,8 @@ fn instToZonedDateTimeISO(ctx: *anyopaque, allocator: Allocator, this_value: JSV
     const self = interp(ctx);
     const inst = try instSelf(self, this_value);
     const tz_arg = arg(args, 0);
-    if (tz_arg != .string) return self.throwError(.type_error, "timeZone must be a string", .{});
-    const zdt = inst.toZonedDateTimeISO(allocator, ioHandle(), tz_arg.string.value.data) catch |e| return temporalErr(self, e);
+    if (tz_arg.tag() != .string) return self.throwError(.type_error, "timeZone must be a string", .{});
+    const zdt = inst.toZonedDateTimeISO(allocator, ioHandle(), tz_arg.asString().value.data) catch |e| return temporalErr(self, e);
     return self.gcNewTemporal(.{ .zoned_date_time = zdt });
 }
 
@@ -1768,7 +1768,7 @@ fn durationConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
     if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor Temporal.Duration requires 'new'", .{});
     var vals: [10]f64 = @splat(0);
     for (0..@min(args.len, 10)) |i| {
-        if (args[i] != .undefined) vals[i] = try requireDurationNumber(self, args[i], "duration field");
+        if (!args[i].isUndefined()) vals[i] = try requireDurationNumber(self, args[i], "duration field");
     }
     const d = ztemporal.Duration.init(vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7], vals[8], vals[9]) catch |e| return temporalErr(self, e);
     return constructedTemporal(self, .{ .duration = d });
@@ -1790,8 +1790,8 @@ const DurationFromRaw = struct {
 fn readDurationFromField(self: *Interpreter, item: JSValue, key: []const u8) anyerror!?f64 {
     const value = try self.getProperty(item, key);
     defer value.deinit();
-    if (value == .undefined) return null;
-    if (value == .bigint) return self.throwError(.type_error, "{s} must be a number", .{key});
+    if (value.tag() == .undefined) return null;
+    if (value.tag() == .bigint) return self.throwError(.type_error, "{s} must be a number", .{key});
     return try self.toNumberJS(value);
 }
 
@@ -1834,7 +1834,7 @@ fn durationFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     _ = this_value;
     const self = interp(ctx);
     const item = arg(args, 0);
-    const d = if (item == .object or item == .proxy) try durationFromObservedBag(self, item) else try coerceDuration(self, item);
+    const d = if (item.tag() == .object or item.tag() == .proxy) try durationFromObservedBag(self, item) else try coerceDuration(self, item);
     return self.gcNewTemporal(.{ .duration = d });
 }
 
@@ -1856,22 +1856,22 @@ fn durationCompare(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
 /// options, as ToTemporalDuration precedes GetOptions in the specification.
 fn readDurationCompareOptions(self: *Interpreter, options: JSValue) anyerror!?ztemporal.Duration.RelativeTo {
     try surfaceOptions(self, options);
-    if (options == .undefined) return null;
+    if (options.tag() == .undefined) return null;
     const v = try self.getProperty(options, "relativeTo");
     defer v.deinit();
-    if (v == .undefined) return null;
-    if (v == .temporal) switch (v.temporal.value) {
+    if (v.tag() == .undefined) return null;
+    if (v.tag() == .temporal) switch (v.asTemporal().value) {
         .plain_date => |date| return .{ .plainDate = date },
         .plain_date_time => |dt| return .{ .plainDateTime = dt },
         .zoned_date_time => |dt| return .{ .zonedDateTime = dt },
         else => {},
     };
-    if (v == .string) {
-        if (relativeToHasTimeZoneAnnotation(v.string.value.data))
+    if (v.tag() == .string) {
+        if (relativeToHasTimeZoneAnnotation(v.asString().value.data))
             return .{ .zonedDateTime = try coerceZonedDateTime(self, self.gc_allocator, v, .constrain, .compatible, .reject) };
         return .{ .plainDateTime = try coercePlainDateTime(self, v, .constrain) };
     }
-    if (v == .object or v == .proxy) {
+    if (v.tag() == .object or v.tag() == .proxy) {
         return try relativeToZonedDateTimeFromObservedBag(self, v);
     }
     return .{ .plainDateTime = try coercePlainDateTime(self, v, .constrain) };
@@ -1930,8 +1930,8 @@ const DurationWithRaw = struct {
 fn readDurationWithField(self: *Interpreter, fields: JSValue, key: []const u8) anyerror!?f64 {
     const value = try self.getProperty(fields, key);
     defer value.deinit();
-    if (value == .undefined) return null;
-    if (value == .bigint) return self.throwError(.type_error, "{s} must be a number", .{key});
+    if (value.tag() == .undefined) return null;
+    if (value.tag() == .bigint) return self.throwError(.type_error, "{s} must be a number", .{key});
     return try self.toNumberJS(value);
 }
 
@@ -2000,26 +2000,26 @@ fn durSubtract(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
 /// PlainDate string/property-bag coercion and accept all three Temporal
 /// reference types supported by z-temporal v0.1.0.
 fn readRelativeTo(self: *Interpreter, options: JSValue) anyerror!?ztemporal.Duration.RelativeTo {
-    if (options != .object) return null;
+    if (options.tag() != .object) return null;
     const v = try self.getProperty(options, "relativeTo");
     defer v.deinit();
-    if (v == .undefined) return null;
-    if (v == .temporal) switch (v.temporal.value) {
+    if (v.tag() == .undefined) return null;
+    if (v.tag() == .temporal) switch (v.asTemporal().value) {
         .plain_date => |date| return .{ .plainDate = date },
         .plain_date_time => |dt| return .{ .plainDateTime = dt },
         .zoned_date_time => |dt| return .{ .zonedDateTime = dt },
         else => {},
     };
-    if (v == .string) {
+    if (v.tag() == .string) {
         // A bracket annotation without '=' is a time-zone annotation. A
         // calendar annotation remains a PlainDateTime relativeTo.
-        if (relativeToHasTimeZoneAnnotation(v.string.value.data))
+        if (relativeToHasTimeZoneAnnotation(v.asString().value.data))
             return .{ .zonedDateTime = try coerceZonedDateTime(self, self.gc_allocator, v, .constrain, .compatible, .reject) };
         return .{ .plainDateTime = try coercePlainDateTime(self, v, .constrain) };
     }
     // The shared selector observes a property bag incrementally, then chooses
     // PlainDateTime or ZonedDateTime only after reading timeZone and year.
-    if (v == .object) {
+    if (v.tag() == .object) {
         return try relativeToZonedDateTimeFromObservedBag(self, v);
     }
     // temporal-argument-coercion.md: `relativeTo` accepts a string or
@@ -2051,18 +2051,18 @@ fn relativeToZonedDateTimeFromObservedBag(self: *Interpreter, fields: JSValue) a
     const month = try observedTemporalIntegerField(self, fields, "month");
     const month_code_value = try self.getProperty(fields, "monthCode");
     defer month_code_value.deinit();
-    const month_code = if (month_code_value == .undefined) null else try self.toDisplayStringJS(self.gc_allocator, month_code_value);
+    const month_code = if (month_code_value.tag() == .undefined) null else try self.toDisplayStringJS(self.gc_allocator, month_code_value);
     defer if (month_code) |code| self.gc_allocator.free(code);
     const nanosecond = try observedTemporalIntegerField(self, fields, "nanosecond");
     const offset_value = try self.getProperty(fields, "offset");
     defer offset_value.deinit();
-    const offset = if (offset_value == .undefined) null else try self.toDisplayStringJS(self.gc_allocator, offset_value);
+    const offset = if (offset_value.tag() == .undefined) null else try self.toDisplayStringJS(self.gc_allocator, offset_value);
     defer if (offset) |text| self.gc_allocator.free(text);
     const second = try observedTemporalIntegerField(self, fields, "second");
     const time_zone_value = try self.getProperty(fields, "timeZone");
     defer time_zone_value.deinit();
     const year = try observedTemporalIntegerField(self, fields, "year");
-    if (time_zone_value == .undefined) {
+    if (time_zone_value.tag() == .undefined) {
         const plain_date_time = ztemporal.PlainDateTime.from(.{ .fields = .{
             .year = year orelse return self.throwError(.type_error, "year is required", .{}),
             .month = month,
@@ -2114,12 +2114,12 @@ const DurationRoundRaw = struct {
 /// Duration.round reads its option fields in the specification's alphabetical
 /// sequence. This is intentionally separate from the shared readers.
 fn readDurationRoundOptions(self: *Interpreter, options: JSValue, allocator: Allocator) anyerror!ztemporal.Duration.RoundOptions {
-    if (options == .undefined) return self.throwError(.type_error, "round() requires an options object", .{});
-    if (options == .string) {
+    if (options.tag() == .undefined) return self.throwError(.type_error, "round() requires an options object", .{});
+    if (options.tag() == .string) {
         // The specification creates a null-prototype { smallestUnit } record.
         // Do not inspect Object.prototype-backed option fields on this path.
         return .{
-            .smallestUnit = try unitFromString(self, options.string.value.data, "smallestUnit"),
+            .smallestUnit = try unitFromString(self, options.asString().value.data, "smallestUnit"),
             .allocator = allocator,
             .io = ioHandle(),
         };
@@ -2165,17 +2165,17 @@ fn durRound(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
 /// Duration.total observes relativeTo before unit, then performs the unit and
 /// relative-duration checks only after both values have been acquired.
 fn readDurationTotalOptions(self: *Interpreter, options: JSValue, allocator: Allocator) anyerror!ztemporal.Duration.TotalOptions {
-    if (options == .undefined) return self.throwError(.type_error, "total() requires an options object", .{});
-    if (options == .string) {
+    if (options.tag() == .undefined) return self.throwError(.type_error, "total() requires an options object", .{});
+    if (options.tag() == .string) {
         // The shorthand is a conceptual null-prototype { unit } object.
-        return .{ .unit = try unitFromString(self, options.string.value.data, "unit"), .allocator = allocator, .io = ioHandle() };
+        return .{ .unit = try unitFromString(self, options.asString().value.data, "unit"), .allocator = allocator, .io = ioHandle() };
     }
     try surfaceOptions(self, options);
 
     const relative_to = try readDurationCompareOptions(self, options);
     const unit_value = try self.getProperty(options, "unit");
     defer unit_value.deinit();
-    if (unit_value == .undefined) return self.throwError(.range_error, "total() requires a unit", .{});
+    if (unit_value.tag() == .undefined) return self.throwError(.range_error, "total() requires a unit", .{});
     const unit_text = try self.toDisplayStringJS(self.gc_allocator, unit_value);
     defer self.gc_allocator.free(unit_text);
     return .{
@@ -2249,7 +2249,7 @@ fn plainYearMonthConstructor(ctx: *anyopaque, allocator: Allocator, this_value: 
     const month = try coerceConstructorI32(self, arg(args, 1), "month");
     const calendar = try optionalConstructorCalendar(self, arg(args, 2));
     try validateConstructorCalendar(self, calendar);
-    const reference_day: ?i32 = if (arg(args, 3) == .undefined) null else try coerceConstructorI32(self, arg(args, 3), "referenceISODay");
+    const reference_day: ?i32 = if (arg(args, 3).tag() == .undefined) null else try coerceConstructorI32(self, arg(args, 3), "referenceISODay");
     const pym = ztemporal.PlainYearMonth.init(year, month, calendar, reference_day) catch |e| return temporalErr(self, e);
     return constructedTemporal(self, .{ .plain_year_month = pym });
 }
@@ -2263,11 +2263,11 @@ fn plainYearMonthFromObservedBag(self: *Interpreter, fields: JSValue, options: J
     defer month_code_value.deinit();
     var owned_month_code: ?[]u8 = null;
     defer if (owned_month_code) |code| self.gc_allocator.free(code);
-    const month_code: ?[]const u8 = if (month_code_value == .undefined) null else if (strict_month_code) blk: {
+    const month_code: ?[]const u8 = if (month_code_value.tag() == .undefined) null else if (strict_month_code) blk: {
         const primitive = try self.toPrimitive(month_code_value, .string);
         defer primitive.deinit();
-        if (primitive != .string) return self.throwError(.type_error, "monthCode must be a string", .{});
-        const code = try self.gc_allocator.dupe(u8, primitive.string.value.data);
+        if (primitive.tag() != .string) return self.throwError(.type_error, "monthCode must be a string", .{});
+        const code = try self.gc_allocator.dupe(u8, primitive.asString().value.data);
         owned_month_code = code;
         // Syntax precedes year coercion; suitability remains native validation.
         if ((code.len != 3 and code.len != 4) or code[0] != 'M' or
@@ -2298,11 +2298,11 @@ fn plainYearMonthFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     const self = interp(ctx);
     const value = arg(args, 0);
     const options = arg(args, 1);
-    if (Interpreter.isPrimitiveTag(value) and value != .string)
+    if (Interpreter.isPrimitiveTag(value) and value.tag() != .string)
         return self.throwError(.type_error, "Temporal.PlainYearMonth.from requires a string or an object", .{});
-    if (value == .string)
-        _ = ztemporal.iso_string.parsePlainYearMonth(value.string.value.data) catch |e| return temporalErr(self, e);
-    const pym = if (value == .object or value == .proxy)
+    if (value.tag() == .string)
+        _ = ztemporal.iso_string.parsePlainYearMonth(value.asString().value.data) catch |e| return temporalErr(self, e);
+    const pym = if (value.tag() == .object or value.tag() == .proxy)
         try plainYearMonthFromObservedBag(self, value, options, true)
     else blk: {
         const overflow = try observableFromOverflow(self, options);
@@ -2379,14 +2379,14 @@ fn pymWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const self = interp(ctx);
     const pym = try pymSelf(self, this_value);
     const fields = arg(args, 0);
-    if (fields != .object and fields != .proxy) return self.throwError(.type_error, "with() requires an object", .{});
+    if (fields.tag() != .object and fields.tag() != .proxy) return self.throwError(.type_error, "with() requires an object", .{});
     try rejectWithCalendarOrTimeZone(self, fields);
     const month = try plainOptionalI32(self, fields, "month");
     const month_code = try plainOptionalString(self, fields, "monthCode");
     defer if (month_code) |value| self.gc_allocator.free(value);
     const year = try plainOptionalI32(self, fields, "year");
     const options = arg(args, 1);
-    if (options != .undefined and Interpreter.isPrimitiveTag(options))
+    if (options.tag() != .undefined and Interpreter.isPrimitiveTag(options))
         _ = pym.with(.{ .year = year, .month = month, .monthCode = month_code }, .{}) catch |e| return temporalErr(self, e);
     const overflow = try readPlainOverflow(self, options);
     const result = pym.with(.{
@@ -2503,7 +2503,7 @@ fn plainMonthDayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: J
     const day = try coerceConstructorI32(self, arg(args, 1), "day");
     const calendar = try optionalConstructorCalendar(self, arg(args, 2));
     try validateConstructorCalendar(self, calendar);
-    const reference_year: ?i32 = if (arg(args, 3) == .undefined) null else try coerceConstructorI32(self, arg(args, 3), "referenceISOYear");
+    const reference_year: ?i32 = if (arg(args, 3).tag() == .undefined) null else try coerceConstructorI32(self, arg(args, 3), "referenceISOYear");
     const pmd = ztemporal.PlainMonthDay.init(month, day, calendar, reference_year) catch |e| return temporalErr(self, e);
     return constructedTemporal(self, .{ .plain_month_day = pmd });
 }
@@ -2535,7 +2535,7 @@ fn plainMonthDayFromObservedBag(self: *Interpreter, fields: JSValue, options: JS
     const month = try observedTemporalIntegerField(self, fields, "month");
     const month_code_value = try self.getProperty(fields, "monthCode");
     defer month_code_value.deinit();
-    const month_code = if (month_code_value == .undefined) null else try self.toDisplayStringJS(self.gc_allocator, month_code_value);
+    const month_code = if (month_code_value.tag() == .undefined) null else try self.toDisplayStringJS(self.gc_allocator, month_code_value);
     defer if (month_code) |code| self.gc_allocator.free(code);
     if (month == null and month_code == null)
         return self.throwError(.type_error, "month or monthCode is required", .{});
@@ -2559,11 +2559,11 @@ fn plainMonthDayFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     const self = interp(ctx);
     const value = arg(args, 0);
     const options = arg(args, 1);
-    const parsed_string: ?ztemporal.PlainMonthDay = if (value == .string) try coercePlainMonthDay(self, value, .constrain) else null;
+    const parsed_string: ?ztemporal.PlainMonthDay = if (value.tag() == .string) try coercePlainMonthDay(self, value, .constrain) else null;
     // PrepareTemporalFields accepts every ECMAScript Object. Keep Temporal
     // instances on their existing conversion path, but let Proxy, callable,
     // and other object-shaped bags use the observable field reader.
-    const pmd = if (!Interpreter.isPrimitiveTag(value) and value != .temporal)
+    const pmd = if (!Interpreter.isPrimitiveTag(value) and value.tag() != .temporal)
         try plainMonthDayFromObservedBag(self, value, options)
     else blk: {
         const result = parsed_string orelse try coercePlainMonthDay(self, value, .constrain);
@@ -2607,7 +2607,7 @@ fn pmdWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const self = interp(ctx);
     const pmd = try pmdSelf(self, this_value);
     const fields = arg(args, 0);
-    if (fields != .object and fields != .proxy) return self.throwError(.type_error, "with() requires an object", .{});
+    if (fields.tag() != .object and fields.tag() != .proxy) return self.throwError(.type_error, "with() requires an object", .{});
     try rejectWithCalendarOrTimeZone(self, fields);
     const day = try plainOptionalI32(self, fields, "day");
     const month = try plainOptionalI32(self, fields, "month");
@@ -2615,7 +2615,7 @@ fn pmdWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     defer if (month_code) |value| self.gc_allocator.free(value);
     const year = try plainOptionalI32(self, fields, "year");
     const options = arg(args, 1);
-    if (options != .undefined and Interpreter.isPrimitiveTag(options))
+    if (options.tag() != .undefined and Interpreter.isPrimitiveTag(options))
         _ = pmd.with(.{ .month = month, .day = day, .monthCode = month_code, .year = year }, .{}) catch |e| return temporalErr(self, e);
     const overflow = try readPlainOverflow(self, options);
     const result = pmd.with(.{
@@ -2678,9 +2678,9 @@ fn zonedDateTimeConstructor(ctx: *anyopaque, allocator: Allocator, this_value: J
     if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor Temporal.ZonedDateTime requires 'new'", .{});
     const ns = try coerceEpochNanoseconds(self, arg(args, 0), "epochNanoseconds");
     const tz_arg = arg(args, 1);
-    if (tz_arg != .string) return self.throwError(.type_error, "timeZone must be a string", .{});
+    if (tz_arg.tag() != .string) return self.throwError(.type_error, "timeZone must be a string", .{});
     const calendar = try optionalConstructorCalendar(self, arg(args, 2));
-    const zdt = ztemporal.ZonedDateTime.init(allocator, ioHandle(), ns, tz_arg.string.value.data, calendar) catch |e| return temporalErr(self, e);
+    const zdt = ztemporal.ZonedDateTime.init(allocator, ioHandle(), ns, tz_arg.asString().value.data, calendar) catch |e| return temporalErr(self, e);
     return constructedTemporal(self, .{ .zoned_date_time = zdt });
 }
 
@@ -2751,7 +2751,7 @@ fn readZonedDateTimeBagRaw(self: *Interpreter, fields: JSValue) anyerror!ZonedDa
 }
 
 fn zonedDateTimeIntegerFromValue(self: *Interpreter, value: JSValue, key: []const u8) anyerror!?i32 {
-    if (value == .undefined) return null;
+    if (value.tag() == .undefined) return null;
     const number = try self.toNumberJS(value);
     if (!std.math.isFinite(number)) return self.throwError(.range_error, "{s} must be finite", .{key});
     const integer = @trunc(number);
@@ -2761,10 +2761,10 @@ fn zonedDateTimeIntegerFromValue(self: *Interpreter, value: JSValue, key: []cons
 }
 
 fn zonedDateTimeMonthCodeFromValue(self: *Interpreter, value: JSValue, strict_month_code: bool) anyerror!?[]u8 {
-    if (value == .undefined) return null;
+    if (value.tag() == .undefined) return null;
     const code = if (strict_month_code) blk: {
-        if (value != .string) return self.throwError(.type_error, "monthCode must be a string", .{});
-        break :blk try self.gc_allocator.dupe(u8, value.string.value.data);
+        if (value.tag() != .string) return self.throwError(.type_error, "monthCode must be a string", .{});
+        break :blk try self.gc_allocator.dupe(u8, value.asString().value.data);
     } else try self.toDisplayStringJS(self.gc_allocator, value);
     errdefer self.gc_allocator.free(code);
     // Month-code syntax is checked before later field conversions. Its
@@ -2783,8 +2783,8 @@ fn zonedDateTimeMonthCodeFromValue(self: *Interpreter, value: JSValue, strict_mo
 /// ToTemporalZonedDateTime paths used by compare()/equals() require a string
 /// outright.  Keep that distinction at this local coercion boundary.
 fn zonedDateTimeOffsetFromValue(self: *Interpreter, value: JSValue, coerce_objects: bool) anyerror!?[]u8 {
-    if (value == .undefined) return null;
-    if (value == .string) return try self.gc_allocator.dupe(u8, value.string.value.data);
+    if (value.tag() == .undefined) return null;
+    if (value.tag() == .string) return try self.gc_allocator.dupe(u8, value.asString().value.data);
     if (coerce_objects and !Interpreter.isPrimitiveTag(value))
         return try self.toDisplayStringJS(self.gc_allocator, value);
     return self.throwError(.type_error, "Temporal offset must be a string", .{});
@@ -2803,7 +2803,7 @@ fn validateZonedDateTimeOffsetSyntax(self: *Interpreter, offset: []const u8) any
 }
 
 fn zonedDateTimeOptionFromValue(self: *Interpreter, value: JSValue, key: []const u8, comptime T: type, fallback: T) anyerror!T {
-    if (value == .undefined) return fallback;
+    if (value.tag() == .undefined) return fallback;
     const text = try self.toDisplayStringJS(self.gc_allocator, value);
     defer self.gc_allocator.free(text);
     inline for (@typeInfo(T).@"enum".field_names) |name| {
@@ -2816,7 +2816,7 @@ fn zonedDateTimeOptionFromValue(self: *Interpreter, value: JSValue, key: []const
 /// but obtains all three option properties before validating any of them.
 fn readZonedDateTimeFromOptions(self: *Interpreter, options: JSValue) anyerror!ZonedDateTimeFromOptions {
     try surfaceOptions(self, options);
-    if (options == .undefined) return .{ .overflow = .constrain, .disambiguation = .compatible, .offset = .reject };
+    if (options.tag() == .undefined) return .{ .overflow = .constrain, .disambiguation = .compatible, .offset = .reject };
     const disambiguation = try self.getProperty(options, "disambiguation");
     defer disambiguation.deinit();
     const parsed_disambiguation = try zonedDateTimeOptionFromValue(self, disambiguation, "disambiguation", ztemporal.Disambiguation, .compatible);
@@ -2850,7 +2850,7 @@ fn zonedDateTimeFromRawBag(self: *Interpreter, allocator: Allocator, raw: *const
     defer if (offset) |text| self.gc_allocator.free(text);
     if (offset) |text| try validateZonedDateTimeOffsetSyntax(self, text);
     const second = try zonedDateTimeIntegerFromValue(self, raw.second, "second");
-    if (raw.time_zone == .undefined) return self.throwError(.type_error, "timeZone is required", .{});
+    if (raw.time_zone.tag() == .undefined) return self.throwError(.type_error, "timeZone is required", .{});
     const time_zone = try surfaceZone(self, raw.time_zone);
     const year = try zonedDateTimeIntegerFromValue(self, raw.year, "year");
     return ztemporal.ZonedDateTime.from(allocator, ioHandle(), .{ .fields = .{
@@ -2875,9 +2875,9 @@ fn zonedDateTimeFromRawBag(self: *Interpreter, allocator: Allocator, raw: *const
 }
 
 fn coerceZonedDateTime(self: *Interpreter, allocator: Allocator, v: JSValue, overflow: Overflow, disambiguation: ztemporal.Disambiguation, offset_option: ztemporal.OffsetOption) anyerror!ztemporal.ZonedDateTime {
-    if (v == .temporal and v.temporal.value == .zoned_date_time) return v.temporal.value.zoned_date_time;
-    if (v == .string) return ztemporal.ZonedDateTime.from(allocator, ioHandle(), .{
-        .string = v.string.value.data,
+    if (v.tag() == .temporal and v.asTemporal().value == .zoned_date_time) return v.asTemporal().value.zoned_date_time;
+    if (v.tag() == .string) return ztemporal.ZonedDateTime.from(allocator, ioHandle(), .{
+        .string = v.asString().value.data,
     }, .{
         .overflow = overflow,
         .offset = offset_option,
@@ -2894,23 +2894,23 @@ fn zonedDateTimeFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     const self = interp(ctx);
     const item = arg(args, 0);
     const option_value = arg(args, 1);
-    const zdt = if (item == .temporal and item.temporal.value == .zoned_date_time) blk: {
+    const zdt = if (item.tag() == .temporal and item.asTemporal().value == .zoned_date_time) blk: {
         // ZonedDateTime.from(instance, options) returns an equivalent fresh
         // Temporal value, but still performs all three option conversions.
         _ = try readZonedDateTimeFromOptions(self, option_value);
-        break :blk item.temporal.value.zoned_date_time;
-    } else if (item == .string) blk: {
+        break :blk item.asTemporal().value.zoned_date_time;
+    } else if (item.tag() == .string) blk: {
         // ISO parsing precedes option access. Use `ignore` only for this
         // syntax preflight: user-supplied offset policy still governs the
         // actual conversion below.
-        _ = ztemporal.ZonedDateTime.from(allocator, ioHandle(), .{ .string = item.string.value.data }, .{
+        _ = ztemporal.ZonedDateTime.from(allocator, ioHandle(), .{ .string = item.asString().value.data }, .{
             .overflow = .constrain,
             .offset = .ignore,
             .disambiguation = .compatible,
         }) catch |e| return temporalErr(self, e);
         const options = try readZonedDateTimeFromOptions(self, option_value);
         break :blk try coerceZonedDateTime(self, allocator, item, options.overflow, options.disambiguation, options.offset);
-    } else if (!Interpreter.isPrimitiveTag(item) and !(item == .temporal and item.temporal.value == .zoned_date_time)) blk: {
+    } else if (!Interpreter.isPrimitiveTag(item) and !(item.tag() == .temporal and item.asTemporal().value == .zoned_date_time)) blk: {
         var raw = try readZonedDateTimeBagRaw(self, item);
         defer raw.deinit();
         const options = try readZonedDateTimeFromOptions(self, option_value);
@@ -3155,12 +3155,12 @@ fn zdtGetTimeZoneTransition(ctx: *anyopaque, allocator: Allocator, this_value: J
     const self = interp(ctx);
     const zdt = try zdtSelf(self, this_value);
     const dir_arg = arg(args, 0);
-    const direction_value = if (dir_arg == .string) dir_arg.retain() else blk: {
+    const direction_value = if (dir_arg.tag() == .string) dir_arg.retain() else blk: {
         try surfaceObject(self, dir_arg);
         break :blk try self.getProperty(dir_arg, "direction");
     };
     defer direction_value.deinit();
-    if (direction_value == .undefined)
+    if (direction_value.tag() == .undefined)
         return self.throwError(.range_error, "direction is required", .{});
     const direction_text = try self.toDisplayStringJS(self.gc_allocator, direction_value);
     defer self.gc_allocator.free(direction_text);
@@ -3256,9 +3256,9 @@ fn nowInstant(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 /// consulted; only `/etc/localtime` resolution (z-temporal's fallback)
 /// applies.
 fn resolveTimeZoneArg(self: *Interpreter, allocator: Allocator, tz_arg: JSValue) anyerror![]u8 {
-    if (tz_arg != .undefined) {
-        if (tz_arg != .string) return self.throwError(.type_error, "timeZone must be a string", .{});
-        return try allocator.dupe(u8, tz_arg.string.value.data);
+    if (tz_arg.tag() != .undefined) {
+        if (tz_arg.tag() != .string) return self.throwError(.type_error, "timeZone must be a string", .{});
+        return try allocator.dupe(u8, tz_arg.asString().value.data);
     }
     return ztemporal.Now.timeZoneId(allocator, ioHandle(), null) catch |e| return temporalErr(self, e);
 }
@@ -3336,26 +3336,26 @@ pub fn install(self: *Interpreter) !void {
 
 // JavaScript surface shared by the typed Temporal adapters.
 pub fn isIntrinsicConstructor(value: JSValue) bool {
-    if (value != .function) return false;
+    if (value.tag() != .function) return false;
     inline for (.{ plainDateConstructor, plainTimeConstructor, plainDateTimeConstructor, plainYearMonthConstructor, plainMonthDayConstructor, instantConstructor, durationConstructor, zonedDateTimeConstructor }) |callback| {
-        if (value.function.value.call == callback) return true;
+        if (value.asFunction().value.call == callback) return true;
     }
     return false;
 }
 
 pub fn installTags(self: *Interpreter, key: []const u8) !void {
     const attrs = zvalue.PropertyDescriptor{ .writable = false, .enumerable = false, .configurable = true };
-    try self.protos.temporal_plain_date.object.value.defineProperty(key, try self.gcNewString("Temporal.PlainDate"), attrs);
-    try self.protos.temporal_plain_time.object.value.defineProperty(key, try self.gcNewString("Temporal.PlainTime"), attrs);
-    try self.protos.temporal_plain_date_time.object.value.defineProperty(key, try self.gcNewString("Temporal.PlainDateTime"), attrs);
-    try self.protos.temporal_plain_year_month.object.value.defineProperty(key, try self.gcNewString("Temporal.PlainYearMonth"), attrs);
-    try self.protos.temporal_plain_month_day.object.value.defineProperty(key, try self.gcNewString("Temporal.PlainMonthDay"), attrs);
-    try self.protos.temporal_instant.object.value.defineProperty(key, try self.gcNewString("Temporal.Instant"), attrs);
-    try self.protos.temporal_duration.object.value.defineProperty(key, try self.gcNewString("Temporal.Duration"), attrs);
-    try self.protos.temporal_zoned_date_time.object.value.defineProperty(key, try self.gcNewString("Temporal.ZonedDateTime"), attrs);
+    try self.protos.temporal_plain_date.asObject().value.defineProperty(key, try self.gcNewString("Temporal.PlainDate"), attrs);
+    try self.protos.temporal_plain_time.asObject().value.defineProperty(key, try self.gcNewString("Temporal.PlainTime"), attrs);
+    try self.protos.temporal_plain_date_time.asObject().value.defineProperty(key, try self.gcNewString("Temporal.PlainDateTime"), attrs);
+    try self.protos.temporal_plain_year_month.asObject().value.defineProperty(key, try self.gcNewString("Temporal.PlainYearMonth"), attrs);
+    try self.protos.temporal_plain_month_day.asObject().value.defineProperty(key, try self.gcNewString("Temporal.PlainMonthDay"), attrs);
+    try self.protos.temporal_instant.asObject().value.defineProperty(key, try self.gcNewString("Temporal.Instant"), attrs);
+    try self.protos.temporal_duration.asObject().value.defineProperty(key, try self.gcNewString("Temporal.Duration"), attrs);
+    try self.protos.temporal_zoned_date_time.asObject().value.defineProperty(key, try self.gcNewString("Temporal.ZonedDateTime"), attrs);
     if (self.global_env.get("Temporal")) |ns| {
-        try ns.object.value.defineProperty(key, try self.gcNewString("Temporal"), attrs);
-        if (ns.object.value.get("Now")) |now| try now.object.value.defineProperty(key, try self.gcNewString("Temporal.Now"), attrs);
+        try ns.asObject().value.defineProperty(key, try self.gcNewString("Temporal"), attrs);
+        if (ns.asObject().value.get("Now")) |now| try now.asObject().value.defineProperty(key, try self.gcNewString("Temporal.Now"), attrs);
     }
 }
 
@@ -3364,15 +3364,15 @@ fn surfaceObject(self: *Interpreter, value: JSValue) anyerror!void {
 }
 
 fn surfaceOptions(self: *Interpreter, value: JSValue) anyerror!void {
-    if (value != .undefined) try surfaceObject(self, value);
+    if (!value.isUndefined()) try surfaceObject(self, value);
 }
 
 fn surfaceEnum(self: *Interpreter, options: JSValue, key: []const u8, comptime T: type, default: T) anyerror!T {
     try surfaceOptions(self, options);
-    if (options == .undefined) return default;
+    if (options.isUndefined()) return default;
     const value = try self.getProperty(options, key);
     defer value.deinit();
-    if (value == .undefined) return default;
+    if (value.tag() == .undefined) return default;
     const text = try self.toDisplayStringJS(self.gc_allocator, value);
     defer self.gc_allocator.free(text);
     inline for (@typeInfo(T).@"enum".field_names) |name| {
@@ -3385,16 +3385,16 @@ const StringOptionsKind = enum { plain_time, plain_date_time, duration, instant,
 
 fn surfaceStringOptions(self: *Interpreter, options: JSValue, comptime kind: StringOptionsKind) anyerror!ztemporal.StringOptions {
     try surfaceOptions(self, options);
-    if (options == .undefined) return .{};
+    if (options.tag() == .undefined) return .{};
     var out: ztemporal.StringOptions = .{};
     if (comptime kind == .plain_date_time or kind == .zoned_date_time) {
         out.calendarName = try surfaceEnum(self, options, "calendarName", ztemporal.CalendarName, .auto);
     }
     const digits = try self.getProperty(options, "fractionalSecondDigits");
     defer digits.deinit();
-    if (digits != .undefined) {
-        if (digits == .number) {
-            const n = @floor(digits.number);
+    if (digits.tag() != .undefined) {
+        if (digits.tag() == .number) {
+            const n = @floor(digits.asNumber());
             if (!std.math.isFinite(n) or n < 0 or n > 9) return self.throwError(.range_error, "Invalid fractionalSecondDigits", .{});
             out.fractionalSecondDigits = @intFromFloat(n);
         } else {
@@ -3409,7 +3409,7 @@ fn surfaceStringOptions(self: *Interpreter, options: JSValue, comptime kind: Str
     out.roundingMode = try surfaceEnum(self, options, "roundingMode", RoundingMode, .trunc);
     const smallest = try self.getProperty(options, "smallestUnit");
     defer smallest.deinit();
-    if (smallest != .undefined) {
+    if (smallest.tag() != .undefined) {
         const name = try self.toDisplayStringJS(self.gc_allocator, smallest);
         defer self.gc_allocator.free(name);
         out.smallestUnit = try unitFromString(self, name, "smallestUnit");
@@ -3420,7 +3420,7 @@ fn surfaceStringOptions(self: *Interpreter, options: JSValue, comptime kind: Str
     if (comptime kind == .instant) {
         const zone = try self.getProperty(options, "timeZone");
         defer zone.deinit();
-        if (zone != .undefined) {
+        if (zone.tag() != .undefined) {
             out.timeZone = try surfaceZoneArgument(self, zone);
             out.io = ioHandle();
         }
@@ -3431,7 +3431,7 @@ fn surfaceStringOptions(self: *Interpreter, options: JSValue, comptime kind: Str
 fn surfaceI32(self: *Interpreter, object: JSValue, key: []const u8) anyerror!?i32 {
     const value = try self.getProperty(object, key);
     defer value.deinit();
-    if (value == .undefined) return null;
+    if (value.tag() == .undefined) return null;
     const n = try self.toNumberJS(value);
     if (!std.math.isFinite(n) or @trunc(n) < std.math.minInt(i32) or @trunc(n) > std.math.maxInt(i32)) return self.throwError(.range_error, "Invalid Temporal field {s}", .{key});
     return @intFromFloat(@trunc(n));
@@ -3440,12 +3440,12 @@ fn surfaceI32(self: *Interpreter, object: JSValue, key: []const u8) anyerror!?i3
 fn surfaceString(self: *Interpreter, object: JSValue, key: []const u8) anyerror!?[]const u8 {
     const value = try self.getProperty(object, key);
     defer value.deinit();
-    if (value == .undefined) return null;
+    if (value.tag() == .undefined) return null;
     if (std.mem.eql(u8, key, "calendar")) {
         const identifier = try calendarFromValue(self, value) orelse return null;
         return try self.gc_allocator.dupe(u8, identifier);
     }
-    if (std.mem.eql(u8, key, "offset") and value != .string) return self.throwError(.type_error, "Temporal offset must be a string", .{});
+    if (std.mem.eql(u8, key, "offset") and value.tag() != .string) return self.throwError(.type_error, "Temporal offset must be a string", .{});
     if (std.mem.eql(u8, key, "timeZone")) return try surfaceZoneArgument(self, value);
     return try self.toDisplayStringJS(self.gc_allocator, value);
 }
@@ -3501,7 +3501,7 @@ fn surfaceValueOf(ctx: *anyopaque, allocator: Allocator, receiver: JSValue, args
 fn installSurface(self: *Interpreter, ns: JSValue) !void {
     {
         const proto = self.protos.temporal_plain_date;
-        proto.object.value.getOwnRecordMut("constructor").?.descriptor.enumerable = false;
+        proto.asObject().value.getOwnRecordMut("constructor").?.descriptor.enumerable = false;
         try dneMethod(proto, "toJSON", try native(self, "toJSON", 0, surfaceSerialize(.plain_date)));
         try dneMethod(proto, "valueOf", try native(self, "valueOf", 0, surfaceValueOf));
         try dneMethod(proto, "toLocaleString", try native(self, "toLocaleString", 0, surfaceSerialize(.plain_date)));
@@ -3517,14 +3517,14 @@ fn installSurface(self: *Interpreter, ns: JSValue) !void {
     }
     {
         const proto = self.protos.temporal_plain_time;
-        proto.object.value.getOwnRecordMut("constructor").?.descriptor.enumerable = false;
+        proto.asObject().value.getOwnRecordMut("constructor").?.descriptor.enumerable = false;
         try dneMethod(proto, "toJSON", try native(self, "toJSON", 0, surfaceSerialize(.plain_time)));
         try dneMethod(proto, "valueOf", try native(self, "valueOf", 0, surfaceValueOf));
         try dneMethod(proto, "toLocaleString", try native(self, "toLocaleString", 0, surfaceSerialize(.plain_time)));
     }
     {
         const proto = self.protos.temporal_plain_date_time;
-        proto.object.value.getOwnRecordMut("constructor").?.descriptor.enumerable = false;
+        proto.asObject().value.getOwnRecordMut("constructor").?.descriptor.enumerable = false;
         try dneMethod(proto, "toJSON", try native(self, "toJSON", 0, surfaceSerialize(.plain_date_time)));
         try dneMethod(proto, "valueOf", try native(self, "valueOf", 0, surfaceValueOf));
         try dneMethod(proto, "toLocaleString", try native(self, "toLocaleString", 0, surfaceSerialize(.plain_date_time)));
@@ -3542,7 +3542,7 @@ fn installSurface(self: *Interpreter, ns: JSValue) !void {
     }
     {
         const proto = self.protos.temporal_plain_year_month;
-        proto.object.value.getOwnRecordMut("constructor").?.descriptor.enumerable = false;
+        proto.asObject().value.getOwnRecordMut("constructor").?.descriptor.enumerable = false;
         try dneMethod(proto, "toJSON", try native(self, "toJSON", 0, surfaceSerialize(.plain_year_month)));
         try dneMethod(proto, "valueOf", try native(self, "valueOf", 0, surfaceValueOf));
         try dneMethod(proto, "toLocaleString", try native(self, "toLocaleString", 0, surfaceSerialize(.plain_year_month)));
@@ -3551,28 +3551,28 @@ fn installSurface(self: *Interpreter, ns: JSValue) !void {
     }
     {
         const proto = self.protos.temporal_plain_month_day;
-        proto.object.value.getOwnRecordMut("constructor").?.descriptor.enumerable = false;
+        proto.asObject().value.getOwnRecordMut("constructor").?.descriptor.enumerable = false;
         try dneMethod(proto, "toJSON", try native(self, "toJSON", 0, surfaceSerialize(.plain_month_day)));
         try dneMethod(proto, "valueOf", try native(self, "valueOf", 0, surfaceValueOf));
         try dneMethod(proto, "toLocaleString", try native(self, "toLocaleString", 0, surfaceSerialize(.plain_month_day)));
     }
     {
         const proto = self.protos.temporal_instant;
-        proto.object.value.getOwnRecordMut("constructor").?.descriptor.enumerable = false;
+        proto.asObject().value.getOwnRecordMut("constructor").?.descriptor.enumerable = false;
         try dneMethod(proto, "toJSON", try native(self, "toJSON", 0, surfaceSerialize(.instant)));
         try dneMethod(proto, "valueOf", try native(self, "valueOf", 0, surfaceValueOf));
         try dneMethod(proto, "toLocaleString", try native(self, "toLocaleString", 0, surfaceSerialize(.instant)));
     }
     {
         const proto = self.protos.temporal_duration;
-        proto.object.value.getOwnRecordMut("constructor").?.descriptor.enumerable = false;
+        proto.asObject().value.getOwnRecordMut("constructor").?.descriptor.enumerable = false;
         try dneMethod(proto, "toJSON", try native(self, "toJSON", 0, surfaceSerialize(.duration)));
         try dneMethod(proto, "valueOf", try native(self, "valueOf", 0, surfaceValueOf));
         try dneMethod(proto, "toLocaleString", try native(self, "toLocaleString", 0, surfaceSerialize(.duration)));
     }
     {
         const proto = self.protos.temporal_zoned_date_time;
-        proto.object.value.getOwnRecordMut("constructor").?.descriptor.enumerable = false;
+        proto.asObject().value.getOwnRecordMut("constructor").?.descriptor.enumerable = false;
         try dneMethod(proto, "toLocaleString", try native(self, "toLocaleString", 0, surfaceSerialize(.zoned_date_time)));
         try installGetter(self, proto, "daysInWeek", surfaceGetter(.zoned_date_time, "daysInWeek"));
         try installGetter(self, proto, "era", surfaceGetter(.zoned_date_time, "era"));
@@ -3608,24 +3608,24 @@ fn surfaceFieldsMode(self: *Interpreter, value: JSValue, comptime T: type, compt
 }
 
 fn surfaceTime(self: *Interpreter, value: JSValue) anyerror!ztemporal.PlainTime {
-    if (value == .temporal) switch (value.temporal.value) {
+    if (value.tag() == .temporal) switch (value.asTemporal().value) {
         .plain_time => |v| return v,
         .plain_date_time => |v| return v.time,
         .zoned_date_time => |v| return v.toPlainTime(self.gc_allocator, ioHandle()) catch |e| temporalErr(self, e),
         else => {},
     };
-    if (value == .string) return ztemporal.PlainTime.from(.{ .string = value.string.value.data }, .{}) catch |e| temporalErr(self, e);
+    if (value.tag() == .string) return ztemporal.PlainTime.from(.{ .string = value.asString().value.data }, .{}) catch |e| temporalErr(self, e);
     return ztemporal.PlainTime.from(.{ .fields = try surfaceFields(self, value, ztemporal.PlainTime.Fields) }, .{}) catch |e| temporalErr(self, e);
 }
 
 fn surfaceDuration(self: *Interpreter, value: JSValue) anyerror!ztemporal.Duration {
-    if (value == .string or (value == .temporal and value.temporal.value == .duration)) return coerceDuration(self, value);
+    if (value.tag() == .string or (value.tag() == .temporal and value.asTemporal().value == .duration)) return coerceDuration(self, value);
     try surfaceObject(self, value);
     var fields: ztemporal.Duration.Fields = .{};
     inline for (.{ "days", "hours", "microseconds", "milliseconds", "minutes", "months", "nanoseconds", "seconds", "weeks", "years" }) |key| {
         const v = try self.getProperty(value, key);
         defer v.deinit();
-        if (v != .undefined) {
+        if (v.tag() != .undefined) {
             const n = try self.toNumberJS(v);
             if (!std.math.isFinite(n) or @trunc(n) != n) return self.throwError(.range_error, "Invalid duration field {s}", .{key});
             @field(fields, key) = n;
@@ -3635,9 +3635,9 @@ fn surfaceDuration(self: *Interpreter, value: JSValue) anyerror!ztemporal.Durati
 }
 
 fn surfaceZone(self: *Interpreter, value: JSValue) anyerror![]const u8 {
-    if (value == .temporal and value.temporal.value == .zoned_date_time) return value.temporal.value.zoned_date_time.timeZoneId();
-    if (value != .string) return self.throwError(.type_error, "Time zone must be a string or ZonedDateTime", .{});
-    return surfaceZoneText(self, value.string.value.data);
+    if (value.tag() == .temporal and value.asTemporal().value == .zoned_date_time) return value.asTemporal().value.zoned_date_time.timeZoneId();
+    if (value.tag() != .string) return self.throwError(.type_error, "Time zone must be a string or ZonedDateTime", .{});
+    return surfaceZoneText(self, value.asString().value.data);
 }
 
 fn surfaceZoneText(self: *Interpreter, text: []const u8) anyerror![]const u8 {
@@ -3688,7 +3688,7 @@ fn surfaceWithPlainTime(comptime tag: std.meta.Tag(TemporalValue)) NativeFn {
         fn call(ctx: *anyopaque, allocator: Allocator, receiver: JSValue, args: []const JSValue) anyerror!JSValue {
             const self = interp(ctx);
             const value = try requireTemporal(self, receiver, tag, "Temporal.withPlainTime");
-            const time: ?ztemporal.PlainTime = if (arg(args, 0) == .undefined) null else try surfaceTime(self, arg(args, 0));
+            const time: ?ztemporal.PlainTime = if (arg(args, 0).tag() == .undefined) null else try surfaceTime(self, arg(args, 0));
             const result = if (tag == .zoned_date_time)
                 value.withPlainTime(allocator, ioHandle(), time) catch |e| return temporalErr(self, e)
             else
@@ -3702,7 +3702,7 @@ fn surfacePdToDateTime(ctx: *anyopaque, allocator: Allocator, receiver: JSValue,
     _ = allocator;
     const self = interp(ctx);
     const date = try pdSelf(self, receiver);
-    const time: ?ztemporal.PlainTime = if (arg(args, 0) == .undefined) null else try surfaceTime(self, arg(args, 0));
+    const time: ?ztemporal.PlainTime = if (arg(args, 0).tag() == .undefined) null else try surfaceTime(self, arg(args, 0));
     return self.gcNewTemporal(.{ .plain_date_time = date.toPlainDateTime(time) catch |e| return temporalErr(self, e) });
 }
 
@@ -3732,7 +3732,7 @@ fn surfacePdToZoned(ctx: *anyopaque, allocator: Allocator, receiver: JSValue, ar
     defer time_value.deinit();
     if (!Interpreter.isPrimitiveTag(item)) {
         const v = try self.getProperty(item, "timeZone");
-        if (v != .undefined) {
+        if (v.tag() != .undefined) {
             zone_value.deinit();
             zone_value = v;
             time_value = try self.getProperty(item, "plainTime");
@@ -3740,7 +3740,7 @@ fn surfacePdToZoned(ctx: *anyopaque, allocator: Allocator, receiver: JSValue, ar
     }
     const zone = try surfaceZoneArgument(self, zone_value);
     defer self.gc_allocator.free(zone);
-    const time: ?ztemporal.PlainTime = if (time_value == .undefined) null else try surfaceTime(self, time_value);
+    const time: ?ztemporal.PlainTime = if (time_value.tag() == .undefined) null else try surfaceTime(self, time_value);
     return self.gcNewTemporal(.{ .zoned_date_time = date.toZonedDateTime(allocator, ioHandle(), zone, time) catch |e| return temporalErr(self, e) });
 }
 
@@ -3766,13 +3766,13 @@ fn surfaceZdtWith(ctx: *anyopaque, allocator: Allocator, receiver: JSValue, args
     const dt = try zdtSelf(self, receiver);
     const item = arg(args, 0);
     try surfaceObject(self, item);
-    if (item == .temporal) return self.throwError(.type_error, "with requires a partial property bag", .{});
+    if (item.tag() == .temporal) return self.throwError(.type_error, "with requires a partial property bag", .{});
     const calendar = try self.getProperty(item, "calendar");
     defer calendar.deinit();
-    if (calendar != .undefined) return self.throwError(.type_error, "with forbids calendar", .{});
+    if (calendar.tag() != .undefined) return self.throwError(.type_error, "with forbids calendar", .{});
     const zone = try self.getProperty(item, "timeZone");
     defer zone.deinit();
-    if (zone != .undefined) return self.throwError(.type_error, "with forbids timeZone", .{});
+    if (zone.tag() != .undefined) return self.throwError(.type_error, "with forbids timeZone", .{});
     const fields = try surfaceFieldsMode(self, item, ztemporal.ZonedDateTime.Fields, true);
     defer freeSurfaceFields(self, fields);
     _ = dt.with(allocator, ioHandle(), fields, .{}) catch |e| return temporalErr(self, e);
@@ -3797,8 +3797,8 @@ fn surfaceZdtArithmetic(comptime subtract: bool) NativeFn {
 }
 
 fn surfaceZoned(self: *Interpreter, allocator: Allocator, item: JSValue) anyerror!ztemporal.ZonedDateTime {
-    if (item == .temporal and item.temporal.value == .zoned_date_time) return item.temporal.value.zoned_date_time;
-    if (item == .string) return ztemporal.ZonedDateTime.from(allocator, ioHandle(), .{ .string = item.string.value.data }, .{}) catch |e| temporalErr(self, e);
+    if (item.tag() == .temporal and item.asTemporal().value == .zoned_date_time) return item.asTemporal().value.zoned_date_time;
+    if (item.tag() == .string) return ztemporal.ZonedDateTime.from(allocator, ioHandle(), .{ .string = item.asString().value.data }, .{}) catch |e| temporalErr(self, e);
     try surfaceObject(self, item);
     var fields: ztemporal.ZonedDateTime.Fields = .{};
     defer freeSurfaceFields(self, fields);
@@ -3813,14 +3813,14 @@ fn surfaceZoned(self: *Interpreter, allocator: Allocator, item: JSValue) anyerro
     fields.nanosecond = try surfaceI32(self, item, "nanosecond");
     const offset_value = try self.getProperty(item, "offset");
     defer offset_value.deinit();
-    fields.offset = switch (offset_value) {
+    fields.offset = switch (offset_value.unpack()) {
         .undefined => null,
-        .string => try self.gc_allocator.dupe(u8, offset_value.string.value.data),
+        .string => try self.gc_allocator.dupe(u8, offset_value.asString().value.data),
         .object, .proxy => blk: {
             const primitive = try self.toPrimitive(offset_value, .string);
             defer primitive.deinit();
-            if (primitive != .string) return self.throwError(.type_error, "Temporal offset must be a string", .{});
-            break :blk try self.gc_allocator.dupe(u8, primitive.string.value.data);
+            if (primitive.tag() != .string) return self.throwError(.type_error, "Temporal offset must be a string", .{});
+            break :blk try self.gc_allocator.dupe(u8, primitive.asString().value.data);
         },
         else => return self.throwError(.type_error, "Temporal offset must be a string", .{}),
     };
@@ -3849,7 +3849,7 @@ fn surfaceZoned(self: *Interpreter, allocator: Allocator, item: JSValue) anyerro
 fn readZonedDateTimeDifferenceOptions(self: *Interpreter, options: JSValue) anyerror!RoundingOptions {
     var result: RoundingOptions = .{ .roundingMode = .trunc };
     try surfaceOptions(self, options);
-    if (options == .undefined) return result;
+    if (options.tag() == .undefined) return result;
 
     const largest = try surfaceString(self, options, "largestUnit");
     defer if (largest) |text| self.gc_allocator.free(text);
@@ -3860,8 +3860,8 @@ fn readZonedDateTimeDifferenceOptions(self: *Interpreter, options: JSValue) anye
 
     const increment = try self.getProperty(options, "roundingIncrement");
     defer increment.deinit();
-    if (increment != .undefined) {
-        if (increment == .bigint)
+    if (increment.tag() != .undefined) {
+        if (increment.tag() == .bigint)
             return self.throwError(.type_error, "roundingIncrement must be a number", .{});
         const number = try self.toNumberJS(increment);
         if (!std.math.isFinite(number) or @trunc(number) < 1 or @trunc(number) > 1_000_000_000)
@@ -3877,12 +3877,12 @@ fn readZonedDateTimeDifferenceOptions(self: *Interpreter, options: JSValue) anye
 
 fn surfaceRounding(self: *Interpreter, options: JSValue, comptime T: type, default_mode: RoundingMode, shorthand: bool) anyerror!T {
     var result: T = .{ .roundingMode = default_mode };
-    if (shorthand and options == .string) {
-        result.smallestUnit = try unitFromString(self, options.string.value.data, "smallestUnit");
+    if (shorthand and options.tag() == .string) {
+        result.smallestUnit = try unitFromString(self, options.asString().value.data, "smallestUnit");
         return result;
     }
     try surfaceOptions(self, options);
-    if (options == .undefined) return result;
+    if (options.tag() == .undefined) return result;
     if (comptime T == RoundingOptions) {
         const largest = try surfaceString(self, options, "largestUnit");
         defer if (largest) |text| self.gc_allocator.free(text);
@@ -3892,7 +3892,7 @@ fn surfaceRounding(self: *Interpreter, options: JSValue, comptime T: type, defau
     }
     const increment = try self.getProperty(options, "roundingIncrement");
     defer increment.deinit();
-    if (increment != .undefined) {
+    if (increment.tag() != .undefined) {
         const n = try self.toNumberJS(increment);
         if (!std.math.isFinite(n) or @trunc(n) < 1 or @trunc(n) > 1_000_000_000) return self.throwError(.range_error, "Invalid roundingIncrement", .{});
         result.roundingIncrement = @intFromFloat(@trunc(n));
@@ -3930,10 +3930,10 @@ fn surfaceZdtDifference(comptime since: bool) NativeFn {
 /// smallestUnit and observable read order differ from surfaceRounding's
 /// difference-method callers.
 fn readZonedDateTimeRoundOptions(self: *Interpreter, options: JSValue) anyerror!RoundOptions {
-    if (options == .undefined)
+    if (options.tag() == .undefined)
         return self.throwError(.type_error, "round requires options", .{});
-    if (options == .string) {
-        return .{ .smallestUnit = try unitFromString(self, options.string.value.data, "smallestUnit") };
+    if (options.tag() == .string) {
+        return .{ .smallestUnit = try unitFromString(self, options.asString().value.data, "smallestUnit") };
     }
     try surfaceOptions(self, options);
 

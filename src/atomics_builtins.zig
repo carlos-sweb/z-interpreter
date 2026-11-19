@@ -76,11 +76,11 @@ const TA = struct {
 };
 
 fn requireIntegerTypedArray(self: *Interpreter, v: JSValue, comptime waitable: bool) anyerror!TA {
-    if (v != .typed_array) return self.throwError(.type_error, "The typed array argument must be an integer or bigint typed array", .{});
-    const box = &v.typed_array.value;
+    if (v.tag() != .typed_array) return self.throwError(.type_error, "The typed array argument must be an integer or bigint typed array", .{});
+    const box = &v.asTypedArray().value;
     const ok = if (waitable) isWaitableKind(box.kind) else isAtomicsKind(box.kind);
     if (!ok) return self.throwError(.type_error, "The typed array argument must be an integer or bigint typed array", .{});
-    const buffer = &box.owner.array_buffer.value;
+    const buffer = &box.owner.asArrayBuffer().value;
     return .{ .buffer = buffer, .byte_offset = box.byte_offset, .len = box.len, .kind = box.kind, .is_shared = buffer.is_shared };
 }
 
@@ -157,7 +157,7 @@ fn atomicRMW(self: *Interpreter, comptime op: AtomicOp, ta: TA, index: usize, va
         .i64 => {
             const big = try toBigIntValue(self, self.gc_allocator, value_arg);
             defer big.deinit();
-            const operand = try toI64Wrapped(self, big.bigint.value);
+            const operand = try toI64Wrapped(self, big.asBigInt().value);
             const view = typedView(i64, ta.buffer, ta.byte_offset, ta.len);
             const old = view.get(index) catch unreachable;
             view.set(index, applyOp(op, i64, old, operand)) catch unreachable;
@@ -166,7 +166,7 @@ fn atomicRMW(self: *Interpreter, comptime op: AtomicOp, ta: TA, index: usize, va
         .u64 => {
             const big = try toBigIntValue(self, self.gc_allocator, value_arg);
             defer big.deinit();
-            const operand = try toU64Wrapped(self, big.bigint.value);
+            const operand = try toU64Wrapped(self, big.asBigInt().value);
             const view = typedView(u64, ta.buffer, ta.byte_offset, ta.len);
             const old = view.get(index) catch unreachable;
             view.set(index, applyOp(op, u64, old, operand)) catch unreachable;
@@ -229,10 +229,10 @@ fn atomicCompareExchange(self: *Interpreter, ta: TA, index: usize, expected_arg:
         .i64 => {
             const eb = try toBigIntValue(self, self.gc_allocator, expected_arg);
             defer eb.deinit();
-            const expected = try toI64Wrapped(self, eb.bigint.value);
+            const expected = try toI64Wrapped(self, eb.asBigInt().value);
             const rb = try toBigIntValue(self, self.gc_allocator, replacement_arg);
             defer rb.deinit();
-            const replacement = try toI64Wrapped(self, rb.bigint.value);
+            const replacement = try toI64Wrapped(self, rb.asBigInt().value);
             const view = typedView(i64, ta.buffer, ta.byte_offset, ta.len);
             const old = view.get(index) catch unreachable;
             if (old == expected) view.set(index, replacement) catch unreachable;
@@ -241,10 +241,10 @@ fn atomicCompareExchange(self: *Interpreter, ta: TA, index: usize, expected_arg:
         .u64 => {
             const eb = try toBigIntValue(self, self.gc_allocator, expected_arg);
             defer eb.deinit();
-            const expected = try toU64Wrapped(self, eb.bigint.value);
+            const expected = try toU64Wrapped(self, eb.asBigInt().value);
             const rb = try toBigIntValue(self, self.gc_allocator, replacement_arg);
             defer rb.deinit();
-            const replacement = try toU64Wrapped(self, rb.bigint.value);
+            const replacement = try toU64Wrapped(self, rb.asBigInt().value);
             const view = typedView(u64, ta.buffer, ta.byte_offset, ta.len);
             const old = view.get(index) catch unreachable;
             if (old == expected) view.set(index, replacement) catch unreachable;
@@ -397,7 +397,7 @@ fn atomicsWait(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     if (ta.kind == .i64) {
         const big = try toBigIntValue(self, self.gc_allocator, arg(args, 2));
         defer big.deinit();
-        const expected = try toI64Wrapped(self, big.bigint.value);
+        const expected = try toI64Wrapped(self, big.asBigInt().value);
         const view = typedView(i64, ta.buffer, ta.byte_offset, ta.len);
         matches = (view.get(index) catch unreachable) == expected;
     } else {
@@ -425,7 +425,7 @@ fn atomicsNotify(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     const ta = try requireIntegerTypedArray(self, arg(args, 0), true);
     _ = try requireIndex(self, ta, arg(args, 1));
     const count_arg = arg(args, 2);
-    if (count_arg != .undefined) _ = try self.toNumberJS(count_arg);
+    if (count_arg.tag() != .undefined) _ = try self.toNumberJS(count_arg);
     return JSValue.fromNumber(0);
 }
 

@@ -48,13 +48,13 @@ fn globalBigInt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     const owned = !Interpreter.isPrimitiveTag(a_in);
     const a = if (owned) try self.toPrimitive(a_in, .number) else a_in;
     defer if (owned) a.deinit();
-    if (a == .number) {
-        if (std.math.isNan(a.number) or std.math.isInf(a.number) or @floor(a.number) != a.number) {
+    if (a.tag() == .number) {
+        if (std.math.isNan(a.asNumber()) or std.math.isInf(a.asNumber()) or @floor(a.asNumber()) != a.asNumber()) {
             const shown = try coercion.toDisplayString(allocator, a);
             defer allocator.free(shown);
             return self.throwError(.range_error, "The number {s} cannot be converted to a BigInt because it is not an integer", .{shown});
         }
-        return self.gcNewBigIntValue(try zbigint.ZBigInt.fromFloat(self.gc_allocator, a.number));
+        return self.gcNewBigIntValue(try zbigint.ZBigInt.fromFloat(self.gc_allocator, a.asNumber()));
     }
     return toBigIntValue(self, allocator, a);
 }
@@ -70,12 +70,12 @@ fn requireBigInt(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyer
 fn bigintToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const v = try requireBigInt(ctx, this_value, "toString");
     var radix: u8 = 10;
-    if (arg(args, 0) != .undefined) {
+    if (arg(args, 0).tag() != .undefined) {
         const r = toIntSat(try interp(ctx).toNumberJS(arg(args, 0)));
         if (r < 2 or r > 36) return interp(ctx).throwError(.range_error, "toString() radix argument must be between 2 and 36", .{});
         radix = @intCast(r);
     }
-    const s = try v.bigint.value.toString(allocator, radix);
+    const s = try v.asBigInt().value.toString(allocator, radix);
     defer allocator.free(s);
     return interp(ctx).gcNewString(s);
 }
@@ -93,7 +93,7 @@ fn bigintValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
 fn bigintAsNArgs(ctx: *anyopaque, args: []const JSValue) anyerror!struct { bits: usize, x: JSValue, mask: zbigint.ZBigInt } {
     const self = interp(ctx);
     const bits_arg = arg(args, 0);
-    const bits: usize = if (bits_arg == .undefined) 0 else blk: {
+    const bits: usize = if (bits_arg.tag() == .undefined) 0 else blk: {
         const bits_n = try self.toNumberJS(bits_arg);
         const integer: f64 = if (std.math.isNan(bits_n)) 0 else @trunc(bits_n);
         const max_index: f64 = 9007199254740991.0;
@@ -105,7 +105,7 @@ fn bigintAsNArgs(ctx: *anyopaque, args: []const JSValue) anyerror!struct { bits:
     // Real spec: `bigint` also goes through ToBigInt (accepts boolean/
     // string/number, not just an already-bigint value) -- `x` is OWNED
     // (`toBigIntValue` always returns a fresh reference), so every
-    // caller must `.deinit()` it once done reading `.bigint.value`.
+    // caller must `.deinit()` it once done reading `.asBigInt().value`.
     const x = try toBigIntValue(self, self.gc_allocator, arg(args, 1));
     var one = try zbigint.ZBigInt.fromInt(self.gc_allocator, 1);
     defer one.deinit();
@@ -122,7 +122,7 @@ fn bigintAsUintN(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     var parsed = try bigintAsNArgs(ctx, args);
     defer parsed.mask.deinit();
     defer parsed.x.deinit();
-    const result = try zbigint.ZBigInt.bitAnd(self.gc_allocator, parsed.x.bigint.value, parsed.mask);
+    const result = try zbigint.ZBigInt.bitAnd(self.gc_allocator, parsed.x.asBigInt().value, parsed.mask);
     return self.gcNewBigIntValue(result);
 }
 
@@ -134,7 +134,7 @@ fn bigintAsIntN(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     defer parsed.mask.deinit();
     defer parsed.x.deinit();
     if (parsed.bits == 0) return self.gcNewBigIntValue(try zbigint.ZBigInt.fromInt(self.gc_allocator, 0));
-    var unsigned_val = try zbigint.ZBigInt.bitAnd(self.gc_allocator, parsed.x.bigint.value, parsed.mask);
+    var unsigned_val = try zbigint.ZBigInt.bitAnd(self.gc_allocator, parsed.x.asBigInt().value, parsed.mask);
     defer unsigned_val.deinit();
     var one = try zbigint.ZBigInt.fromInt(self.gc_allocator, 1);
     defer one.deinit();
@@ -154,7 +154,7 @@ pub fn install(self: *Interpreter) !void {
     // Unlike String/Number/Boolean, BigInt is NEVER constructable --
     // `new BigInt(5)` is a real TypeError in real JS (there's no
     // [[BigIntData]] wrapper object at all), which `constructValue`'s
-    // existing generic `!callee.function.value.constructable` guard
+    // existing generic `!callee.asFunction().value.constructable` guard
     // already produces for free by just leaving this false.
     _ = try installBuiltin(self, .{ .name = "BigInt", .ctor = .{ .arity = 1, .call = globalBigInt, .constructable = false }, .statics = &.{
         .{ .name = "asIntN", .value = .{ .method = .{ .call = bigintAsIntN, .arity = 2 } } },

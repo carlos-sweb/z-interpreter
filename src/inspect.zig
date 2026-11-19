@@ -25,7 +25,7 @@ fn appendIso(allocator: Allocator, buf: *std.ArrayList(u8), result: anyerror![]u
 /// something). Not spec-exact (real `util.inspect` is a large algorithm on
 /// its own) -- just legible and non-crashing for every JSValue shape.
 pub fn inspect(allocator: Allocator, buf: *std.ArrayList(u8), v: JSValue) !void {
-    switch (v) {
+    switch (v.unpack()) {
         .undefined => try buf.appendSlice(allocator, "undefined"),
         .null => try buf.appendSlice(allocator, "null"),
         .boolean => |b| try buf.appendSlice(allocator, if (b) "true" else "false"),

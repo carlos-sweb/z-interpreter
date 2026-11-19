@@ -15,7 +15,7 @@ test "for-of over a string iterates Unicode code points, not bytes" {
         struct {
             fn check(_: void, r: helpers.Result) !void {
                 // 3 code points; the last one is the 4-byte emoji
-                try testing.expectEqualStrings("\u{1F600}3", r.value.string.value.data);
+                try testing.expectEqualStrings("\u{1F600}3", r.value.asString().value.data);
             }
         }.check,
     );
@@ -43,7 +43,7 @@ test "for-of break/continue and labels" {
 test "for-of over a plain object is a catchable TypeError (matches Node)" {
     try helpers.runAndCheck("var r; try { for (const x of {a: 1}) {} } catch (e) { r = e.name; } r;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expectEqualStrings("TypeError", r.value.string.value.data);
+            try testing.expectEqualStrings("TypeError", r.value.asString().value.data);
         }
     }.check);
 }
@@ -51,7 +51,7 @@ test "for-of over a plain object is a catchable TypeError (matches Node)" {
 test "for-of over null is a catchable TypeError" {
     try helpers.runAndCheck("var r; try { for (const x of null) {} } catch (e) { r = e.name; } r;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expectEqualStrings("TypeError", r.value.string.value.data);
+            try testing.expectEqualStrings("TypeError", r.value.asString().value.data);
         }
     }.check);
 }
@@ -75,7 +75,7 @@ test "for-in over an object yields own keys in insertion order" {
         {},
         struct {
             fn check(_: void, r: helpers.Result) !void {
-                try testing.expectEqualStrings("bac", r.value.string.value.data);
+                try testing.expectEqualStrings("bac", r.value.asString().value.data);
             }
         }.check,
     );
@@ -96,8 +96,8 @@ test "for-in includes inherited enumerable keys via the prototype chain" {
                 // own first, then walk the chain -- constructor is
                 // enumerable in our narrowed model (documented divergence:
                 // real JS marks it non-enumerable)
-                try testing.expect(std.mem.indexOf(u8, r.value.string.value.data, "own,") != null);
-                try testing.expect(std.mem.indexOf(u8, r.value.string.value.data, "inherited,") != null);
+                try testing.expect(std.mem.indexOf(u8, r.value.asString().value.data, "own,") != null);
+                try testing.expect(std.mem.indexOf(u8, r.value.asString().value.data, "inherited,") != null);
             }
         }.check,
     );
@@ -122,7 +122,7 @@ test "for-in over an array yields STRING indices" {
         {},
         struct {
             fn check(_: void, r: helpers.Result) !void {
-                try testing.expectEqualStrings("012:string", r.value.string.value.data);
+                try testing.expectEqualStrings("012:string", r.value.asString().value.data);
             }
         }.check,
     );
@@ -131,7 +131,7 @@ test "for-in over an array yields STRING indices" {
 test "for-in over a string yields index strings" {
     try helpers.runAndCheck("var out = ''; for (const k in 'ab') { out += k; } out;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expectEqualStrings("01", r.value.string.value.data);
+            try testing.expectEqualStrings("01", r.value.asString().value.data);
         }
     }.check);
 }
@@ -143,7 +143,7 @@ test "for-in over null/undefined: zero iterations, NO error (spec)" {
 test "for-in with an existing binding leaves the last key behind" {
     try helpers.runAndCheck("var k; for (k in {x: 1, y: 2}) {} k;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expectEqualStrings("y", r.value.string.value.data);
+            try testing.expectEqualStrings("y", r.value.asString().value.data);
         }
     }.check);
 }

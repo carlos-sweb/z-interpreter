@@ -499,7 +499,7 @@ test "ClassCtx.traceChildren visits closure_env and both super refs, skips null 
     try testing.expectEqual(@as(usize, 1), mock.environments.items.len);
     try testing.expectEqual(&env, mock.environments.items[0]);
     try testing.expectEqual(@as(usize, 1), mock.values.items.len);
-    try testing.expectEqual(@as(f64, 1), mock.values.items[0].number);
+    try testing.expectEqual(@as(f64, 1), mock.values.items[0].asNumber());
 }
 
 test "ClosureCtx.traceChildren visits closure_env, super_proto, and its ClassCtx's own children" {
@@ -533,8 +533,8 @@ test "ClosureCtx.traceChildren visits closure_env, super_proto, and its ClassCtx
     try testing.expectEqual(&class_env, mock.environments.items[1]);
     // ClosureCtx's own super_proto (42) + ClassCtx's super_proto (9).
     try testing.expectEqual(@as(usize, 2), mock.values.items.len);
-    try testing.expectEqual(@as(f64, 42), mock.values.items[0].number);
-    try testing.expectEqual(@as(f64, 9), mock.values.items[1].number);
+    try testing.expectEqual(@as(f64, 42), mock.values.items[0].asNumber());
+    try testing.expectEqual(@as(f64, 9), mock.values.items[1].asNumber());
 }
 
 test "ClosureCtx.traceChildren with no private_ctx only visits closure_env" {
@@ -584,7 +584,7 @@ test "FiberState.traceChildren visits closure_env, this, args, and every in-flig
     // stayed null, 7 values total.
     try testing.expectEqual(@as(usize, 7), mock.values.items.len);
     var sum: f64 = 0;
-    for (mock.values.items) |v| sum += v.number;
+    for (mock.values.items) |v| sum += v.asNumber();
     try testing.expectEqual(@as(f64, 1 + 2 + 3 + 4 + 5 + 6 + 7), sum);
 }
 
@@ -978,17 +978,17 @@ pub const Interpreter = struct {
     /// Returns a Temporal instance's effective [[Prototype]]. The override
     /// table is intentionally read-only in this first subclassing commit.
     pub fn temporalPrototype(self: *const Interpreter, value: JSValue) JSValue {
-        std.debug.assert(value == .temporal);
-        return self.temporal_protos.get(@intFromPtr(value.temporal)) orelse
-            self.protos.temporalProtoFor(value.temporal.value);
+        std.debug.assert(value.tag() == .temporal);
+        return self.temporal_protos.get(@intFromPtr(value.asTemporal())) orelse
+            self.protos.temporalProtoFor(value.asTemporal().value);
     }
 
     /// Installs an explicit Temporal [[Prototype]] override. The map owns its
     /// value; absence remains reserved for the intrinsic-prototype fallback.
     pub fn setTemporalPrototype(self: *Interpreter, value: JSValue, proto: JSValue) !void {
-        std.debug.assert(value == .temporal);
-        std.debug.assert(proto == .object or proto == .null);
-        const gop = try self.temporal_protos.getOrPut(self.gc_allocator, @intFromPtr(value.temporal));
+        std.debug.assert(value.tag() == .temporal);
+        std.debug.assert(proto.isObject() or proto.isNull());
+        const gop = try self.temporal_protos.getOrPut(self.gc_allocator, @intFromPtr(value.asTemporal()));
         const old: ?JSValue = if (gop.found_existing) gop.value_ptr.* else null;
         gop.value_ptr.* = proto.retain();
         if (old) |previous| previous.deinit();
@@ -1266,9 +1266,9 @@ test "a gcNew* whose gcTrack fails releases what it built" {
             return i.gcNewTypedArray(S.o.retain(), 0, 2, .i32);
         }
     }.make);
-    try testing.expectEqual(@as(usize, 1), target.object.refCount());
-    try testing.expectEqual(@as(usize, 1), handler.object.refCount());
-    try testing.expectEqual(@as(usize, 1), owner.array_buffer.refCount());
+    try testing.expectEqual(@as(usize, 1), target.asObject().refCount());
+    try testing.expectEqual(@as(usize, 1), handler.asObject().refCount());
+    try testing.expectEqual(@as(usize, 1), owner.asArrayBuffer().refCount());
 }
 
 test "Map.prototype.set and Set.prototype.add release their arguments on OOM" {
@@ -1294,14 +1294,14 @@ test "Map.prototype.set and Set.prototype.add release their arguments on OOM" {
     const s = try JSValue.newSet(failing.allocator());
     defer s.deinit();
     failing.fail_index = failing.alloc_index;
-    const f = map_set.function.value;
+    const f = map_set.asFunction().value;
     try testing.expectError(error.OutOfMemory, f.call(f.ctx, interp.gc_allocator, m, &.{ key, value }));
-    const g = set_add.function.value;
+    const g = set_add.asFunction().value;
     try testing.expectError(error.OutOfMemory, g.call(g.ctx, interp.gc_allocator, s, &.{key}));
-    try testing.expect(!m.map.value.has(key));
-    try testing.expect(!s.set.value.has(key));
-    try testing.expectEqual(@as(usize, 1), key.object.refCount());
-    try testing.expectEqual(@as(usize, 1), value.object.refCount());
+    try testing.expect(!m.asMap().value.has(key));
+    try testing.expect(!s.asSet().value.has(key));
+    try testing.expectEqual(@as(usize, 1), key.asObject().refCount());
+    try testing.expectEqual(@as(usize, 1), value.asObject().refCount());
 }
 
 /// The invariant `setOwnedPrototype` keeps: an object whose raw
@@ -1309,14 +1309,14 @@ test "Map.prototype.set and Set.prototype.add release their arguments on OOM" {
 /// and `proto`'s count is its baseline plus that one reference.
 fn expectPrototypeRetained(interp: *Interpreter, obj: JSValue, proto: JSValue, base: usize) !void {
     const testing = std.testing;
-    const linked = obj.object.value.getPrototype() == &proto.object.value;
-    const entry = interp.proto_refs.get(@intFromPtr(obj.object));
+    const linked = obj.asObject().value.getPrototype() == &proto.asObject().value;
+    const entry = interp.proto_refs.get(@intFromPtr(obj.asObject()));
     if (linked) {
-        try testing.expect(entry != null and entry.? == .object and entry.?.object == proto.object);
-        try testing.expectEqual(base + 1, proto.object.refCount());
+        try testing.expect(entry != null and entry.?.isObject() and entry.?.asObject() == proto.asObject());
+        try testing.expectEqual(base + 1, proto.asObject().refCount());
     } else {
         try testing.expect(entry == null);
-        try testing.expectEqual(base, proto.object.refCount());
+        try testing.expectEqual(base, proto.asObject().refCount());
     }
 }
 
@@ -1334,7 +1334,7 @@ fn callFailingAtEveryIndex(interp: *Interpreter, failings: []std.testing.Failing
         if (index >= failings.len) return error.TooManyAllocations;
         failings[index] = std.testing.FailingAllocator.init(real, .{ .fail_index = index });
         interp.gc_allocator = failings[index].allocator();
-        const result = f.function.value.call(f.function.value.ctx, interp.gc_allocator, this, args);
+        const result = f.asFunction().value.call(f.asFunction().value.ctx, interp.gc_allocator, this, args);
         interp.gc_allocator = real;
         if (result) |v| {
             try check(ctx, v);
@@ -1373,7 +1373,7 @@ test "Object.create, Object.setPrototypeOf and __proto__ never leave an unretain
         defer proto.deinit();
         // An empty table: its first insert must allocate.
         try testing.expectEqual(@as(usize, 0), interp.proto_refs.capacity());
-        const base = proto.object.refCount();
+        const base = proto.asObject().refCount();
         const Ctx = struct { interp: *Interpreter, obj: JSValue, proto: JSValue, base: usize, case: Case };
         const ctx = Ctx{ .interp = &interp, .obj = obj, .proto = proto, .base = base, .case = case };
         const check = struct {
@@ -1381,7 +1381,7 @@ test "Object.create, Object.setPrototypeOf and __proto__ never leave an unretain
                 switch (c.case) {
                     // A failed create returns nothing: the prototype must
                     // be back at its baseline.
-                    .create => if (result) |r| try expectPrototypeRetained(c.interp, r, c.proto, c.base) else try std.testing.expectEqual(c.base, c.proto.object.refCount()),
+                    .create => if (result) |r| try expectPrototypeRetained(c.interp, r, c.proto, c.base) else try std.testing.expectEqual(c.base, c.proto.asObject().refCount()),
                     else => try expectPrototypeRetained(c.interp, c.obj, c.proto, c.base),
                 }
             }
@@ -1410,7 +1410,7 @@ test "collectGarbage keeps an instance's prototype once its constructor is unrea
     );
     interp.collectGarbage();
     const v = try interp.run("var junk = []; for (var i = 0; i < 2000; i++) junk.push({ x: i }); o.x + 1;");
-    try testing.expectEqual(@as(f64, 42), v.number);
+    try testing.expectEqual(@as(f64, 42), v.asNumber());
 }
 
 test "collectGarbage keeps a class's prototype and statics chain to its parent" {
@@ -1435,7 +1435,7 @@ test "collectGarbage keeps a class's prototype and statics chain to its parent" 
     );
     interp.collectGarbage();
     const v = try interp.run("var junk = []; for (var i = 0; i < 2000; i++) junk.push({ x: i }); c.m() + K.s();");
-    try testing.expectEqual(@as(f64, 42), v.number);
+    try testing.expectEqual(@as(f64, 42), v.asNumber());
 }
 
 test "a dying array drops its array_props entry and releases the bag" {
@@ -1445,7 +1445,7 @@ test "a dying array drops its array_props entry and releases the bag" {
     var interp = try gcTestInterp(&allocating);
     defer interp.deinit();
     const arr = try interp.run("var r = /a/.exec('a'); r;");
-    const key = @intFromPtr(arr.array);
+    const key = @intFromPtr(arr.asArray());
     const bag = interp.array_props.get(key).?.retain(); // index/input/groups
     defer bag.deinit();
     const before = interp.array_props.count();
@@ -1453,7 +1453,7 @@ test "a dying array drops its array_props entry and releases the bag" {
     arr.deinit(); // the array's last reference
     try testing.expect(!interp.array_props.contains(key));
     try testing.expectEqual(before - 1, interp.array_props.count());
-    try testing.expectEqual(@as(usize, 1), bag.object.refCount()); // only ours is left
+    try testing.expectEqual(@as(usize, 1), bag.asObject().refCount()); // only ours is left
 }
 
 test "a dying wrapper object drops its primitive_wrapper_data entry and releases the primitive" {
@@ -1463,16 +1463,16 @@ test "a dying wrapper object drops its primitive_wrapper_data entry and releases
     var interp = try gcTestInterp(&allocating);
     defer interp.deinit();
     const w = try interp.run("var w = new String('xyz'); w;");
-    const key = @intFromPtr(w.object);
+    const key = @intFromPtr(w.asObject());
     const prim = interp.primitive_wrapper_data.get(key).?.retain();
     defer prim.deinit();
-    try testing.expect(prim == .string);
+    try testing.expect(prim.isString());
     const before = interp.primitive_wrapper_data.count();
     _ = try interp.run("w = null;");
     w.deinit();
     try testing.expect(!interp.primitive_wrapper_data.contains(key));
     try testing.expectEqual(before - 1, interp.primitive_wrapper_data.count());
-    try testing.expectEqual(@as(usize, 1), prim.string.refCount()); // only ours is left
+    try testing.expectEqual(@as(usize, 1), prim.asString().refCount()); // only ours is left
 }
 
 test "a dying function drops its deleted_fn_props entry" {
@@ -1482,7 +1482,7 @@ test "a dying function drops its deleted_fn_props entry" {
     var interp = try gcTestInterp(&allocating);
     defer interp.deinit();
     const f = try interp.run("var f = function () {}; delete f.name; delete f.length; f;");
-    const key = @intFromPtr(f.function);
+    const key = @intFromPtr(f.asFunction());
     const gone = interp.deleted_fn_props.get(key).?;
     try testing.expect(gone.name and gone.length);
     _ = try interp.run("f = null;");
@@ -1491,7 +1491,7 @@ test "a dying function drops its deleted_fn_props entry" {
     // A function made afterwards has its own name/length.
     const v = try interp.run("var g = function (a, b) {}; g.name + g.length;");
     defer v.deinit();
-    try testing.expectEqualStrings("g2", v.string.value.data);
+    try testing.expectEqualStrings("g2", v.asString().value.data);
 }
 
 test "collectGarbage drops the per-address entries of the boxes it frees" {
@@ -1557,12 +1557,12 @@ test "Temporal own properties survive marking and cycles are collected" {
         \\Object.defineProperty(temporal_box, 'self', {value: temporal_box, configurable: true});
         \\temporal_box;
     );
-    const address = @intFromPtr(temporal.temporal);
+    const address = @intFromPtr(temporal.asTemporal());
     const count = interp.temporal_props.count();
     try testing.expect(interp.temporal_props.contains(address));
     interp.collectGarbage();
     const observed = try interp.run("temporal_box.self === temporal_box;");
-    try testing.expect(observed.boolean);
+    try testing.expect(observed.asBool());
     observed.deinit();
 
     const properties = try interp.run(
@@ -1589,12 +1589,12 @@ test "Temporal own properties survive marking and cycles are collected" {
     // A later box, even at the same address, cannot inherit old properties.
     for (0..64) |_| {
         const fresh = try interp.run("new Temporal.PlainDate(2024, 5, 2);");
-        try testing.expect(!interp.temporal_props.contains(@intFromPtr(fresh.temporal)));
+        try testing.expect(!interp.temporal_props.contains(@intFromPtr(fresh.asTemporal())));
         fresh.deinit();
     }
 
     const ordinary = try interp.run("var temporal_plain = new Temporal.PlainDate(2024, 5, 2); temporal_plain.note = 1; temporal_plain;");
-    const ordinary_address = @intFromPtr(ordinary.temporal);
+    const ordinary_address = @intFromPtr(ordinary.asTemporal());
     try testing.expect(interp.temporal_props.contains(ordinary_address));
     const dropped = try interp.run("temporal_plain = null;");
     dropped.deinit();
@@ -1604,8 +1604,8 @@ test "Temporal own properties survive marking and cycles are collected" {
 
 /// The FiberState behind a generator object (its own `next` native's ctx).
 fn fiberOf(gen: JSValue) *FiberState {
-    const next = gen.object.value.get("next").?;
-    return @ptrCast(@alignCast(next.function.value.ctx));
+    const next = gen.asObject().value.get("next").?;
+    return @ptrCast(@alignCast(next.asFunction().value.ctx));
 }
 
 test "yield takes the resume value: the slot ends empty and the value has one owner" {
@@ -1619,12 +1619,12 @@ test "yield takes the resume value: the slot ends empty and the value has one ow
     defer it.deinit();
     const fs = fiberOf(it);
     _ = try interp.run("it.next(probe);");
-    try testing.expect(fs.resume_value == .undefined);
+    try testing.expect(fs.resume_value.isUndefined());
     const probe = try interp.run("probe;");
     defer probe.deinit();
     // probe's binding, this reference, and the generator's `x` (its
     // environment lives until the collector runs) -- not the slot.
-    try testing.expectEqual(@as(usize, 3), probe.object.refCount());
+    try testing.expectEqual(@as(usize, 3), probe.asObject().refCount());
 }
 
 test "await takes the resume value: the slot ends empty" {
@@ -1642,8 +1642,8 @@ test "await takes the resume value: the slot ends empty" {
     const it = try interp.run("it;");
     defer it.deinit();
     const seen = try interp.run("seen;");
-    try testing.expect(seen == .boolean and seen.boolean); // the await did resume
-    try testing.expect(fiberOf(it).resume_value == .undefined);
+    try testing.expect(seen.isBool() and seen.asBool()); // the await did resume
+    try testing.expect(fiberOf(it).resume_value.isUndefined());
 }
 
 test "a throw delivered at yield or yield* takes the resume value" {
@@ -1666,16 +1666,16 @@ test "a throw delivered at yield or yield* takes the resume value" {
         defer it.deinit();
         const probe = try interp.run("probe;");
         defer probe.deinit();
-        const before = probe.object.refCount();
+        const before = probe.asObject().refCount();
         const fs = fiberOf(it);
         fs.setResumeValue(probe.retain());
         fs.resume_is_throw = true;
         try interp.resumeFiber(fs);
-        try testing.expect(fs.resume_value == .undefined);
+        try testing.expect(fs.resume_value.isUndefined());
         // The thrown value moved to the generator's completed_throw: still
         // exactly the one reference the slot had.
-        try testing.expect(fs.completed_throw != null and fs.completed_throw.? == .object and fs.completed_throw.?.object == probe.object);
-        try testing.expectEqual(before + 1, probe.object.refCount());
+        try testing.expect(fs.completed_throw != null and fs.completed_throw.?.isObject() and fs.completed_throw.?.asObject() == probe.asObject());
+        try testing.expectEqual(before + 1, probe.asObject().refCount());
     }
 }
 
@@ -1694,7 +1694,7 @@ test "the first next(v), which the body never sees, does not leak its value" {
     );
     const probe = try interp.run("probe;");
     defer probe.deinit();
-    try testing.expectEqual(@as(usize, 2), probe.object.refCount()); // binding + this
+    try testing.expectEqual(@as(usize, 2), probe.asObject().refCount()); // binding + this
 }
 
 test "the shutdown snapshot of the GC registry never grows while it fills" {
@@ -1863,7 +1863,7 @@ test "collectGarbage keeps a reachable bound function context" {
     interp.collectGarbage();
     const result = try interp.run("f();");
     defer result.deinit();
-    try testing.expectEqual(@as(f64, 42), result.number);
+    try testing.expectEqual(@as(f64, 42), result.asNumber());
 }
 
 test "collectGarbage keeps a reachable suspended generator context" {
@@ -1877,5 +1877,5 @@ test "collectGarbage keeps a reachable suspended generator context" {
     interp.collectGarbage();
     const result = try interp.run("g.next().value;");
     defer result.deinit();
-    try testing.expectEqual(@as(f64, 42), result.number);
+    try testing.expectEqual(@as(f64, 42), result.asNumber());
 }

@@ -136,13 +136,13 @@ pub fn loadModule(self: *Interpreter, specifier: []const u8, referrer: ?[]const 
             try module_env.markConst(gc, ns);
         }
         if (imp.default_local) |dl| {
-            const v = dep.exports.object.value.get("default") orelse
+            const v = dep.exports.asObject().value.get("default") orelse
                 return self.throwError(.syntax_error, "The requested module '{s}' does not provide an export named 'default'", .{imp.source});
             try module_env.define(gc, dl, v.retain());
             try module_env.markConst(gc, dl);
         }
         for (imp.named) |spec| {
-            const v = dep.exports.object.value.get(spec.imported) orelse
+            const v = dep.exports.asObject().value.get(spec.imported) orelse
                 return self.throwError(.syntax_error, "The requested module '{s}' does not provide an export named '{s}'", .{ imp.source, spec.imported });
             try module_env.define(gc, spec.local, v.retain());
             try module_env.markConst(gc, spec.local);
@@ -187,7 +187,7 @@ pub fn evalModuleBody(self: *Interpreter, env: *Environment, stmts: []const *zst
                     if (n.source) |src| {
                         const dep = try self.loadModule(src, rec.path);
                         for (n.specifiers) |spec| {
-                            const v = dep.exports.object.value.get(spec.local) orelse
+                            const v = dep.exports.asObject().value.get(spec.local) orelse
                                 return self.throwError(.syntax_error, "The requested module '{s}' does not provide an export named '{s}'", .{ src, spec.local });
                             try rec.exports.objectSet(spec.exported, v.retain());
                         }
@@ -199,11 +199,11 @@ pub fn evalModuleBody(self: *Interpreter, env: *Environment, stmts: []const *zst
                     // `export *` re-exports everything EXCEPT default
                     // (the real rule).
                     const dep = try self.loadModule(a.source, rec.path);
-                    const keys = try dep.exports.object.value.keys(arena);
+                    const keys = try dep.exports.asObject().value.keys(arena);
                     defer arena.free(keys);
                     for (keys) |k| {
                         if (std.mem.eql(u8, k, "default")) continue;
-                        try rec.exports.objectSet(k, dep.exports.object.value.get(k).?.retain());
+                        try rec.exports.objectSet(k, dep.exports.asObject().value.get(k).?.retain());
                     }
                 },
             },

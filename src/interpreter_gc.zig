@@ -147,7 +147,7 @@ pub const GcRegistry = std.AutoHashMapUnmanaged(usize, GcNode);
 /// than merging them, since gcTrack needs a typed `GcNode`, not just an
 /// address).
 pub fn heapBoxAddress(v: JSValue) ?usize {
-    return switch (v) {
+    return switch (v.unpack()) {
         .undefined, .null, .boolean, .number => null,
         .array => |box| @intFromPtr(box),
         .object => |box| @intFromPtr(box),
@@ -421,7 +421,7 @@ pub fn gcOnBoxDestroyed(ctx: *anyopaque, box: *anyopaque) void {
 /// `gcNew*`/other container-producing site should route through this
 /// exactly once, right after creation.
 pub fn gcTrack(self: *Interpreter, v: JSValue) !void {
-    const node: GcNode = switch (v) {
+    const node: GcNode = switch (v.unpack()) {
         .array => |box| .{ .array = box },
         .object => |box| .{ .object = box },
         .regex => |box| .{ .regex = box },
@@ -470,7 +470,7 @@ pub fn gcTrack(self: *Interpreter, v: JSValue) !void {
 /// string); a plain recursive walk with no cycle guard is safe because
 /// freshly parsed text can never encode a back-reference.
 pub fn gcAdoptTree(self: *Interpreter, v: JSValue) !void {
-    switch (v) {
+    switch (v.unpack()) {
         .object => |box| {
             try self.gcTrack(v);
             for (box.value.properties.values()) |prop| try self.gcAdoptTree(prop.value);
@@ -653,7 +653,7 @@ pub fn gcNewArrayBufferFromValue(self: *Interpreter, v: zbuffer.ArrayBuffer) !JS
         payload.deinit();
         return err;
     };
-    const jv: JSValue = .{ .array_buffer = box };
+    const jv: JSValue = JSValue.fromArrayBuffer(box);
     errdefer jv.deinit();
     try self.gcTrack(jv);
     return jv;
@@ -685,7 +685,7 @@ pub fn gcNewTypedArray(self: *Interpreter, owner: JSValue, byte_offset: usize, l
 /// registry lookup on its address -- natives whose ctx is `*Interpreter`
 /// (or anything else untracked) just miss the lookup and stop there.
 pub fn traceValueChildren(self: *Interpreter, v: JSValue, visitor: anytype) void {
-    switch (v) {
+    switch (v.unpack()) {
         // "No children" here is a DIFFERENT axis than heapBoxAddress's
         // leaf/boxed split (Step 1b/1c) -- don't expect the two lists to
         // match. heapBoxAddress asks "does this variant live in the GC
@@ -1156,12 +1156,12 @@ pub fn registrySnapshot(self: *Interpreter) !std.AutoHashMapUnmanaged(usize, voi
 /// never a raw pointer to a prototype nothing retains. On a refused
 /// change (a cycle) nothing is retained or released either.
 pub fn setOwnedPrototype(self: *Interpreter, obj: JSValue, proto: JSValue) !void {
-    if (obj == .object) {
-        const p: ?*@TypeOf(obj.object.value) = if (proto == .object) @constCast(&proto.object.value) else null;
-        if (proto != .null) try self.proto_refs.ensureUnusedCapacity(self.gc_allocator, 1);
-        try obj.object.value.setPrototype(p);
-        const key = @intFromPtr(obj.object);
-        if (proto != .null) {
+    if (obj.isObject()) {
+        const p: ?*@TypeOf(obj.asObject().value) = if (proto.isObject()) @constCast(&proto.asObject().value) else null;
+        if (!proto.isNull()) try self.proto_refs.ensureUnusedCapacity(self.gc_allocator, 1);
+        try obj.asObject().value.setPrototype(p);
+        const key = @intFromPtr(obj.asObject());
+        if (!proto.isNull()) {
             const gop = self.proto_refs.getOrPutAssumeCapacity(key);
             const old: ?JSValue = if (gop.found_existing) gop.value_ptr.* else null;
             gop.value_ptr.* = proto.retain();
@@ -1171,7 +1171,7 @@ pub fn setOwnedPrototype(self: *Interpreter, obj: JSValue, proto: JSValue) !void
         }
         return;
     }
-    if (obj == .temporal) {
+    if (obj.tag() == .temporal) {
         try self.setTemporalPrototype(obj, proto);
         return;
     }

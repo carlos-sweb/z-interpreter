@@ -5,8 +5,8 @@ const helpers = @import("helpers.zig");
 fn expectString(source: []const u8, expected: []const u8) !void {
     try helpers.runAndCheck(source, expected, struct {
         fn check(want: []const u8, r: helpers.Result) !void {
-            try testing.expect(r.value == .string);
-            try testing.expectEqualStrings(want, r.value.string.value.data);
+            try testing.expect(r.value.isString());
+            try testing.expectEqualStrings(want, r.value.asString().value.data);
         }
     }.check);
 }
@@ -14,8 +14,8 @@ fn expectString(source: []const u8, expected: []const u8) !void {
 fn expectBool(source: []const u8, expected: bool) !void {
     try helpers.runAndCheck(source, expected, struct {
         fn check(want: bool, r: helpers.Result) !void {
-            try testing.expect(r.value == .boolean);
-            try testing.expectEqual(want, r.value.boolean);
+            try testing.expect(r.value.isBool());
+            try testing.expectEqual(want, r.value.asBool());
         }
     }.check);
 }
@@ -66,7 +66,7 @@ test "reduce with and without an initial value" {
     try helpers.expectNumber("[1, 2, 3, 4].reduce((acc, x) => acc + x);", 10);
     try helpers.runAndCheck("var r; try { [].reduce((a, x) => a + x); } catch (e) { r = e.name; } r;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expectEqualStrings("TypeError", r.value.string.value.data);
+            try testing.expectEqualStrings("TypeError", r.value.asString().value.data);
         }
     }.check);
 }
@@ -85,7 +85,7 @@ test "method identity: a.push === b.push" {
 test "a detached method call is a TypeError" {
     try helpers.runAndCheck("var f = [1].push; var r; try { f(2); } catch (e) { r = e.name; } r;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expectEqualStrings("TypeError", r.value.string.value.data);
+            try testing.expectEqualStrings("TypeError", r.value.asString().value.data);
         }
     }.check);
 }
@@ -155,7 +155,7 @@ test "JSON.parse round-trip" {
 test "JSON.parse of invalid input is a catchable SyntaxError" {
     try helpers.runAndCheck("var r; try { JSON.parse('{oops'); } catch (e) { r = e.name; } r;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expectEqualStrings("SyntaxError", r.value.string.value.data);
+            try testing.expectEqualStrings("SyntaxError", r.value.asString().value.data);
         }
     }.check);
 }

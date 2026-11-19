@@ -85,8 +85,8 @@ test "a function's prototype descriptor holds its own reference to the prototype
         \\p;
     , @as(usize, 3), struct {
         fn check(want: usize, result: helpers.Result) !void {
-            try std.testing.expect(result.value == .object);
-            try std.testing.expectEqual(want, result.value.object.refCount());
+            try std.testing.expect(result.value.isObject());
+            try std.testing.expectEqual(want, result.value.asObject().refCount());
         }
     }.check);
 }

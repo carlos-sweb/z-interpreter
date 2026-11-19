@@ -5,8 +5,8 @@ const helpers = @import("helpers.zig");
 fn expectString(source: []const u8, expected: []const u8) !void {
     try helpers.runAndCheck(source, expected, struct {
         fn check(want: []const u8, r: helpers.Result) !void {
-            try testing.expect(r.value == .string);
-            try testing.expectEqualStrings(want, r.value.string.value.data);
+            try testing.expect(r.value.isString());
+            try testing.expectEqualStrings(want, r.value.asString().value.data);
         }
     }.check);
 }
@@ -47,7 +47,7 @@ test "JSON.stringify of a Date is its quoted ISO string" {
 test "new Date() with no args is 'now' (sanity: later than 2020)" {
     try helpers.runAndCheck("new Date().getTime() > 1577934245000;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expect(r.value.boolean == true);
+            try testing.expect(r.value.asBool() == true);
         }
     }.check);
 }
@@ -59,7 +59,7 @@ test "console.log renders a Date as ISO" {
 test "Date methods on a non-date receiver are a TypeError" {
     try helpers.runAndCheck("var f = new Date(0).getTime; var r; try { f(); } catch (e) { r = e.name; } r;", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expectEqualStrings("TypeError", r.value.string.value.data);
+            try testing.expectEqualStrings("TypeError", r.value.asString().value.data);
         }
     }.check);
 }
@@ -102,18 +102,18 @@ test "valueOf, and String()/template coercion use toString (not ISO)" {
 test "Invalid Date: getTime is NaN, toString is 'Invalid Date', toJSON is null" {
     try helpers.runAndCheck("Number.isNaN(new Date(NaN).getTime());", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expect(r.value.boolean == true);
+            try testing.expect(r.value.asBool() == true);
         }
     }.check);
     try helpers.runAndCheck("Number.isNaN(new Date('nope').getTime());", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expect(r.value.boolean == true);
+            try testing.expect(r.value.asBool() == true);
         }
     }.check);
     try expectString("String(new Date(NaN));", "Invalid Date");
     try helpers.runAndCheck("new Date(NaN).toJSON();", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expect(r.value == .@"null");
+            try testing.expect(r.value.isNull());
         }
     }.check);
 }
@@ -121,12 +121,12 @@ test "Invalid Date: getTime is NaN, toString is 'Invalid Date', toJSON is null" 
 test "out-of-range and NaN inputs don't crash (Invalid Date)" {
     try helpers.runAndCheck("Number.isNaN(new Date(1e300).getTime());", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expect(r.value.boolean == true);
+            try testing.expect(r.value.asBool() == true);
         }
     }.check);
     try helpers.runAndCheck("Number.isNaN(new Date(0).setHours(Infinity));", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expect(r.value.boolean == true);
+            try testing.expect(r.value.asBool() == true);
         }
     }.check);
 }

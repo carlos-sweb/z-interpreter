@@ -36,10 +36,8 @@ fn symbolConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     if (self.construct_target == ctx) {
         return self.throwError(.type_error, "Symbol is not a constructor", .{});
     }
-    const desc: ?[]const u8 = switch (arg(args, 0)) {
-        .undefined => null,
-        else => |v| try self.toDisplayStringJS(allocator, v),
-    };
+    const a0 = arg(args, 0);
+    const desc: ?[]const u8 = if (a0.isUndefined()) null else try self.toDisplayStringJS(allocator, a0);
     defer if (desc) |d| allocator.free(d);
     return self.gcNewSymbol(desc);
 }
@@ -51,7 +49,7 @@ fn symbolToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     // those outright, when real spec's SymbolDescriptiveString/
     // thisSymbolValue explicitly accept a boxed Symbol object.
     const sym = try requirePrimitive(ctx, this_value, .symbol, "Symbol.prototype.{s} requires a symbol", "toString");
-    const s = try sym.symbol.value.toString(allocator);
+    const s = try sym.asSymbol().value.toString(allocator);
     defer allocator.free(s);
     return interp(ctx).gcNewString(s);
 }
@@ -83,10 +81,10 @@ fn symbolKeyFor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     _ = this_value;
     const self = interp(ctx);
     const target = arg(args, 0);
-    if (target != .symbol) return self.throwError(.type_error, "Symbol.keyFor requires a symbol", .{});
+    if (!target.isSymbol()) return self.throwError(.type_error, "Symbol.keyFor requires a symbol", .{});
     var it = self.symbol_registry.iterator();
     while (it.next()) |entry| {
-        if (entry.value_ptr.* == .symbol and entry.value_ptr.symbol == target.symbol) {
+        if (entry.value_ptr.isSymbol() and entry.value_ptr.asSymbol() == target.asSymbol()) {
             return interp(ctx).gcNewString(entry.key_ptr.*);
         }
     }

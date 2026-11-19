@@ -20,7 +20,7 @@ test "non-finite numeric args don't panic (saturate / throw like real JS)" {
     try helpers.expectNumber("[10,20,30].at(NaN);", 10);
     try helpers.runAndCheck("[1,2,3].at(9);", {}, struct {
         fn check(_: void, r: helpers.Result) !void {
-            try testing.expect(r.value == .@"undefined");
+            try testing.expect(r.value.isUndefined());
         }
     }.check);
     // flat(Infinity) fully flattens without panicking.

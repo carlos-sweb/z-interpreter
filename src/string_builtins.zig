@@ -86,12 +86,12 @@ pub const string_methods = std.StaticStringMap(MethodSpec).initComptime(.{
 /// string fast path) so every call site has one uniform cleanup
 /// contract regardless of which path produced it.
 fn requireString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, method: []const u8) anyerror![]const u8 {
-    if (this_value == .undefined or this_value == .null) {
+    if (this_value.tag() == .undefined or this_value.tag() == .null) {
         return interp(ctx).throwError(.type_error, "String.prototype.{s} called on null or undefined", .{method});
     }
     const self = interp(ctx);
     const v = self.unboxPrimitiveWrapper(this_value) orelse this_value;
-    if (v == .string) return allocator.dupe(u8, v.string.value.data);
+    if (v.tag() == .string) return allocator.dupe(u8, v.asString().value.data);
     // toDisplayStringJS (not the pure coercion.toDisplayString): a
     // plain object with a real .toString()/.valueOf()/@@toPrimitive
     // needs the interpreter to actually call it (real ToPrimitive),
@@ -134,7 +134,7 @@ const stringToLocaleLowerCase = stringToLowerCase;
 fn stringCharAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const data = try requireString(ctx, allocator, this_value, "charAt");
     defer allocator.free(data);
-    const idx: isize = toIntSat(if (arg(args, 0) == .undefined) 0 else try interp(ctx).toNumberJS(arg(args, 0)));
+    const idx: isize = toIntSat(if (arg(args, 0).tag() == .undefined) 0 else try interp(ctx).toNumberJS(arg(args, 0)));
     const out = try zstring.access.charAt(allocator, data, idx);
     defer allocator.free(out);
     return interp(ctx).gcNewString(out);
@@ -142,13 +142,13 @@ fn stringCharAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 
 fn toNumberStrict(self: *Interpreter, v: JSValue) anyerror!f64 {
     const unwrapped = self.unboxPrimitiveWrapper(v) orelse v;
-    if (unwrapped == .bigint) return self.throwError(.type_error, "Cannot convert a BigInt value to a number", .{});
-    if (unwrapped == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a number", .{});
+    if (unwrapped.tag() == .bigint) return self.throwError(.type_error, "Cannot convert a BigInt value to a number", .{});
+    if (unwrapped.tag() == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a number", .{});
     if (isObjectLike(unwrapped)) {
         const prim = try self.toPrimitive(unwrapped, .number);
         defer prim.deinit();
-        if (prim == .bigint) return self.throwError(.type_error, "Cannot convert a BigInt value to a number", .{});
-        if (prim == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a number", .{});
+        if (prim.tag() == .bigint) return self.throwError(.type_error, "Cannot convert a BigInt value to a number", .{});
+        if (prim.tag() == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a number", .{});
         return try self.toNumberJS(prim);
     }
     return try self.toNumberJS(unwrapped);
@@ -161,7 +161,7 @@ fn stringIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     const search = try argString(self, allocator, args, 0);
     defer allocator.free(search);
     const pos_arg = arg(args, 1);
-    const pos: ?isize = if (pos_arg == .undefined) null else toIntSat(try toNumberStrict(self, pos_arg));
+    const pos: ?isize = if (pos_arg.tag() == .undefined) null else toIntSat(try toNumberStrict(self, pos_arg));
     return JSValue.fromNumber(@floatFromInt(zstring.search.indexOf(data, search, pos)));
 }
 
@@ -171,8 +171,8 @@ fn isRegExp(self: *Interpreter, v: JSValue) anyerror!bool {
     defer self.gc_allocator.free(key);
     const m = try self.getProperty(v, key);
     defer m.deinit();
-    if (m != .undefined) return coercion.isTruthy(m);
-    return v == .regex;
+    if (m.tag() != .undefined) return coercion.isTruthy(m);
+    return v.tag() == .regex;
 }
 
 fn throwIfRegExp(self: *Interpreter, v: JSValue, comptime method: []const u8) anyerror!void {
@@ -190,7 +190,7 @@ fn stringIncludes(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     const search = try argString(self, allocator, args, 0);
     defer allocator.free(search);
     const pos_arg = arg(args, 1);
-    const pos: ?isize = if (pos_arg == .undefined) null else toIntSat(try toNumberStrict(self, pos_arg));
+    const pos: ?isize = if (pos_arg.tag() == .undefined) null else toIntSat(try toNumberStrict(self, pos_arg));
     return JSValue.fromBool(zstring.search.includes(data, search, pos));
 }
 
@@ -203,7 +203,7 @@ fn stringStartsWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     const search = try argString(self, allocator, args, 0);
     defer allocator.free(search);
     const pos_arg = arg(args, 1);
-    const pos: ?isize = if (pos_arg == .undefined) null else toIntSat(try toNumberStrict(self, pos_arg));
+    const pos: ?isize = if (pos_arg.tag() == .undefined) null else toIntSat(try toNumberStrict(self, pos_arg));
     return JSValue.fromBool(zstring.search.startsWith(data, search, pos));
 }
 
@@ -216,15 +216,15 @@ fn stringEndsWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     const search = try argString(self, allocator, args, 0);
     defer allocator.free(search);
     const pos_arg = arg(args, 1);
-    const pos: ?isize = if (pos_arg == .undefined) null else toIntSat(try toNumberStrict(self, pos_arg));
+    const pos: ?isize = if (pos_arg.tag() == .undefined) null else toIntSat(try toNumberStrict(self, pos_arg));
     return JSValue.fromBool(zstring.search.endsWith(data, search, pos));
 }
 
 fn stringSlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const data = try requireString(ctx, allocator, this_value, "slice");
     defer allocator.free(data);
-    const start: isize = toIntSat(if (arg(args, 0) == .undefined) 0 else try interp(ctx).toNumberJS(arg(args, 0)));
-    const end: ?isize = if (arg(args, 1) == .undefined) null else toIntSat(try interp(ctx).toNumberJS(arg(args, 1)));
+    const start: isize = toIntSat(if (arg(args, 0).tag() == .undefined) 0 else try interp(ctx).toNumberJS(arg(args, 0)));
+    const end: ?isize = if (arg(args, 1).tag() == .undefined) null else toIntSat(try interp(ctx).toNumberJS(arg(args, 1)));
     const out = try zstring.transform.slice(allocator, data, start, end);
     defer allocator.free(out);
     return interp(ctx).gcNewString(out);
@@ -233,7 +233,7 @@ fn stringSlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
 fn stringRepeat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const data = try requireString(ctx, allocator, this_value, "repeat");
     defer allocator.free(data);
-    const nf = if (arg(args, 0) == .undefined) 0 else try interp(ctx).toNumberJS(arg(args, 0));
+    const nf = if (arg(args, 0).tag() == .undefined) 0 else try interp(ctx).toNumberJS(arg(args, 0));
     // A negative or infinite count is a RangeError (before any saturation).
     if (nf < 0 or std.math.isInf(nf)) return interp(ctx).throwError(.range_error, "Invalid count value: {d}", .{nf});
     const count: isize = toIntSat(nf);
@@ -274,21 +274,21 @@ fn stringTrimEnd(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
 fn stringCharCodeAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const data = try requireString(ctx, allocator, this_value, "charCodeAt");
     defer allocator.free(data);
-    const idx: isize = toIntSat(if (arg(args, 0) == .undefined) 0 else try interp(ctx).toNumberJS(arg(args, 0)));
+    const idx: isize = toIntSat(if (arg(args, 0).tag() == .undefined) 0 else try interp(ctx).toNumberJS(arg(args, 0)));
     return if (zstring.access.charCodeAt(data, idx)) |c| JSValue.fromNumber(@floatFromInt(c)) else JSValue.fromNumber(std.math.nan(f64));
 }
 
 fn stringCodePointAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const data = try requireString(ctx, allocator, this_value, "codePointAt");
     defer allocator.free(data);
-    const idx: isize = toIntSat(if (arg(args, 0) == .undefined) 0 else try interp(ctx).toNumberJS(arg(args, 0)));
+    const idx: isize = toIntSat(if (arg(args, 0).tag() == .undefined) 0 else try interp(ctx).toNumberJS(arg(args, 0)));
     return if (zstring.access.codePointAt(data, idx)) |c| JSValue.fromNumber(@floatFromInt(c)) else JSValue.UNDEFINED;
 }
 
 fn stringAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const data = try requireString(ctx, allocator, this_value, "at");
     defer allocator.free(data);
-    const idx: isize = toIntSat(if (arg(args, 0) == .undefined) 0 else try interp(ctx).toNumberJS(arg(args, 0)));
+    const idx: isize = toIntSat(if (arg(args, 0).tag() == .undefined) 0 else try interp(ctx).toNumberJS(arg(args, 0)));
     const out = (try zstring.access.at(allocator, data, idx)) orelse return JSValue.UNDEFINED;
     defer allocator.free(out);
     return interp(ctx).gcNewString(out);
@@ -323,15 +323,15 @@ fn stringPadEnd(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 /// against real Node: `"abc".padEnd(10, false)` pads with "false", not
 /// spaces).
 fn padFillArg(self: *Interpreter, allocator: Allocator, args: []const JSValue) anyerror!?[]const u8 {
-    if (arg(args, 1) == .undefined) return null;
+    if (arg(args, 1).tag() == .undefined) return null;
     return try self.toDisplayStringJS(allocator, arg(args, 1));
 }
 
 fn stringSubstring(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const data = try requireString(ctx, allocator, this_value, "substring");
     defer allocator.free(data);
-    const start: isize = toIntSat(if (arg(args, 0) == .undefined) 0 else try interp(ctx).toNumberJS(arg(args, 0)));
-    const end: ?isize = if (arg(args, 1) == .undefined) null else toIntSat(try interp(ctx).toNumberJS(arg(args, 1)));
+    const start: isize = toIntSat(if (arg(args, 0).tag() == .undefined) 0 else try interp(ctx).toNumberJS(arg(args, 0)));
+    const end: ?isize = if (arg(args, 1).tag() == .undefined) null else toIntSat(try interp(ctx).toNumberJS(arg(args, 1)));
     const out = try zstring.transform.substring(allocator, data, start, end);
     defer allocator.free(out);
     return interp(ctx).gcNewString(out);
@@ -342,9 +342,9 @@ fn stringSubstr(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     const data = try requireString(ctx, allocator, this_value, "substr");
     defer allocator.free(data);
     const total: isize = @intCast(zstring.utf16.lengthUtf16(data));
-    var start: isize = toIntSat(if (arg(args, 0) == .undefined) 0 else try interp(ctx).toNumberJS(arg(args, 0)));
+    var start: isize = toIntSat(if (arg(args, 0).tag() == .undefined) 0 else try interp(ctx).toNumberJS(arg(args, 0)));
     if (start < 0) start = @max(total + start, 0);
-    const length: isize = if (arg(args, 1) == .undefined) total else toIntSat(try interp(ctx).toNumberJS(arg(args, 1)));
+    const length: isize = if (arg(args, 1).tag() == .undefined) total else toIntSat(try interp(ctx).toNumberJS(arg(args, 1)));
     const end = @min(start + @max(length, 0), total);
     const out = try zstring.transform.substring(allocator, data, start, end);
     defer allocator.free(out);
@@ -358,7 +358,7 @@ fn stringLastIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     const search = try argString(self, allocator, args, 0);
     defer allocator.free(search);
     const pos_arg = arg(args, 1);
-    const pos: ?isize = if (pos_arg == .undefined) null else blk: {
+    const pos: ?isize = if (pos_arg.tag() == .undefined) null else blk: {
         const num = try toNumberStrict(self, pos_arg);
         if (std.math.isNan(num)) break :blk null;
         break :blk toIntSat(num);
@@ -378,8 +378,8 @@ fn stringConcat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
         owned.deinit(allocator);
     }
     for (args) |a| {
-        if (a == .string) {
-            try pieces.append(allocator, a.string.value.data);
+        if (a.tag() == .string) {
+            try pieces.append(allocator, a.asString().value.data);
         } else {
             const s = try self.toDisplayStringJS(allocator, a);
             try owned.append(allocator, s);
@@ -394,7 +394,7 @@ fn stringConcat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 fn stringLocaleCompare(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const data = try requireString(ctx, allocator, this_value, "localeCompare");
     defer allocator.free(data);
-    const other: []const u8 = if (arg(args, 0) == .string) arg(args, 0).string.value.data else "";
+    const other: []const u8 = if (arg(args, 0).tag() == .string) arg(args, 0).asString().value.data else "";
     return JSValue.fromNumber(switch (std.mem.order(u8, data, other)) {
         .lt => -1,
         .eq => 0,
@@ -425,7 +425,7 @@ fn stringNormalize(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     const data = try requireString(ctx, allocator, this_value, "normalize");
     defer allocator.free(data);
     const form_val = arg(args, 0);
-    const form_str = if (form_val == .undefined) null else blk: {
+    const form_str = if (form_val.tag() == .undefined) null else blk: {
         const s = try argString(self, allocator, args, 0);
         break :blk s;
     };
@@ -555,11 +555,11 @@ fn stringRaw(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     _ = this_value;
     const self = interp(ctx);
     const template = arg(args, 0);
-    if (template == .undefined or template == .null) {
+    if (template.tag() == .undefined or template.tag() == .null) {
         return self.throwError(.type_error, "Cannot convert undefined or null to object", .{});
     }
     const raw = try self.getProperty(template, "raw");
-    if (raw == .undefined or raw == .null) {
+    if (raw.tag() == .undefined or raw.tag() == .null) {
         return self.throwError(.type_error, "Cannot convert undefined or null to object", .{});
     }
     const len_val = try self.getProperty(raw, "length");
@@ -605,13 +605,13 @@ fn globalString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     if (args.len == 0) return self.boxPrimitiveIfConstructed(ctx, this_value, try self.gcNewString(""));
     // String(symbol) is the one explicit coercion the spec allows --
     // "Symbol(desc)" -- unlike implicit `sym + ''` which throws.
-    if (arg(args, 0) == .symbol) {
-        const s = try arg(args, 0).symbol.value.toString(allocator);
+    if (arg(args, 0).tag() == .symbol) {
+        const s = try arg(args, 0).asSymbol().value.toString(allocator);
         defer allocator.free(s);
         return self.boxPrimitiveIfConstructed(ctx, this_value, try self.gcNewString(s));
     }
     // String(regex) is regex.toString() -- /source/flags (with flags).
-    if (arg(args, 0) == .regex) {
+    if (arg(args, 0).tag() == .regex) {
         const st = self.regexState(arg(args, 0));
         var flags_buf: [8]u8 = undefined;
         const s = try std.fmt.allocPrint(allocator, "/{s}/{s}", .{ st.source, Interpreter.canonicalFlags(st, &flags_buf) });

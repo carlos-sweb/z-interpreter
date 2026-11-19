@@ -252,8 +252,8 @@ fn observedOptions(entries: []const u8) ![]const u8 {
 
     const result = try interpreter.run(entries);
     defer result.deinit();
-    try testing.expect(result == .string);
-    return try testing.allocator.dupe(u8, result.string.value.data);
+    try testing.expect(result.isString());
+    return try testing.allocator.dupe(u8, result.asString().value.data);
 }
 
 test "PlainDate since reads all difference settings before validation" {

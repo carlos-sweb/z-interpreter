@@ -45,7 +45,7 @@ const Record = struct {
 };
 
 fn isCallable(v: JSValue) bool {
-    return switch (v) {
+    return switch (v.unpack()) {
         .function => true,
         .proxy => |box| isCallable(box.value.target),
         else => false,
@@ -82,7 +82,7 @@ fn closeOnThrow(self: *Interpreter, iterator: JSValue, err: anyerror) anyerror {
     }
     const ret = self.getProperty(iterator, "return") catch return err;
     defer ret.deinit();
-    if (ret == .undefined or ret == .null) return err;
+    if (ret.tag() == .undefined or ret.tag() == .null) return err;
     const r = self.callValue(ret, iterator, &.{}, "return") catch return err;
     r.deinit();
     return err;
@@ -93,7 +93,7 @@ fn closeOnThrow(self: *Interpreter, iterator: JSValue, err: anyerror) anyerror {
 fn closeNormal(self: *Interpreter, iterator: JSValue) anyerror!void {
     const ret = try self.getProperty(iterator, "return");
     defer ret.deinit();
-    if (ret == .undefined or ret == .null) return;
+    if (ret.tag() == .undefined or ret.tag() == .null) return;
     const r = try self.callValue(ret, iterator, &.{}, "return");
     defer r.deinit();
     if (!isObjectLike(r)) return self.throwError(.type_error, "Iterator result {s} is not an object", .{r.typeOf()});
@@ -102,23 +102,23 @@ fn closeNormal(self: *Interpreter, iterator: JSValue) anyerror!void {
 /// GetIteratorFlattenable(obj, primitiveHandling).
 fn getIteratorFlattenable(self: *Interpreter, obj: JSValue, comptime allow_strings: bool) anyerror!Record {
     if (!isObjectLike(obj)) {
-        if (!(allow_strings and obj == .string)) return self.throwError(.type_error, "{s} is not an object", .{obj.typeOf()});
+        if (!(allow_strings and obj.tag() == .string)) return self.throwError(.type_error, "{s} is not an object", .{obj.typeOf()});
     }
     const key = try self.encodeKey(self.symbol_iterator.?);
     defer self.gc_allocator.free(key);
     const method = try self.getProperty(obj, key);
     defer method.deinit();
-    const iterator = if (method == .undefined or method == .null) blk: {
+    const iterator = if (method.tag() == .undefined or method.tag() == .null) blk: {
         // Strings (and String objects) iterate structurally here (no
         // String.prototype[@@iterator] yet): an array iterator over the
         // code points.
-        const str: ?JSValue = if (obj == .string) obj else if (self.unboxPrimitiveWrapper(obj)) |u| (if (u == .string) u else null) else null;
+        const str: ?JSValue = if (obj.tag() == .string) obj else if (self.unboxPrimitiveWrapper(obj)) |u| (if (u.tag() == .string) u else null) else null;
         if (str) |sv| {
             const cps = try self.iterableItems(sv);
             defer self.gc_allocator.free(cps);
             var arr = try self.gcNewArray();
             defer arr.deinit();
-            for (cps) |cp| _ = try arr.array.value.push(cp);
+            for (cps) |cp| _ = try arr.asArray().value.push(cp);
             break :blk try builtin_helpers.makeArrayIterator(self, self.gc_allocator, arr, .values);
         }
         break :blk obj.retain();
@@ -132,8 +132,8 @@ fn getIteratorFlattenable(self: *Interpreter, obj: JSValue, comptime allow_strin
 /// CreateIterResultObject(value, done); takes ownership of `value`.
 fn iterResult(self: *Interpreter, value: JSValue, done: bool) anyerror!JSValue {
     var o = try self.ordinaryObject();
-    try o.object.value.set("value", value);
-    try o.object.value.set("done", JSValue.fromBool(done));
+    try o.asObject().value.set("value", value);
+    try o.asObject().value.set("done", JSValue.fromBool(done));
     return o;
 }
 
@@ -150,19 +150,19 @@ fn iteratorConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
     _ = allocator;
     _ = args;
     const self = interp(ctx);
-    if (self.construct_target != ctx or this_value != .object)
+    if (self.construct_target != ctx or this_value.tag() != .object)
         return self.throwError(.type_error, "Constructor Iterator requires 'new'", .{});
-    const proto = this_value.object.value.getPrototype();
-    if (proto == null or proto.? == &self.iterator_prototype.?.object.value)
+    const proto = this_value.asObject().value.getPrototype();
+    if (proto == null or proto.? == &self.iterator_prototype.?.asObject().value)
         return self.throwError(.type_error, "Abstract class Iterator not directly constructable", .{});
     return this_value.retain();
 }
 
 /// OrdinaryHasInstance(%Iterator%, v): %IteratorPrototype% on v's chain.
 fn inheritsFromIterator(self: *Interpreter, v: JSValue) bool {
-    if (v != .object) return false;
-    const target = &self.iterator_prototype.?.object.value;
-    var p = v.object.value.getPrototype();
+    if (v.tag() != .object) return false;
+    const target = &self.iterator_prototype.?.asObject().value;
+    var p = v.asObject().value.getPrototype();
     while (p) |cur| : (p = cur.getPrototype()) {
         if (cur == target) return true;
     }
@@ -180,14 +180,14 @@ fn iteratorFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     }
     var wrapper = try self.gcNewObject();
     errdefer wrapper.deinit();
-    try wrapper.object.value.setPrototype(&self.wrap_for_valid_iterator_proto.?.object.value);
-    try self.object_slots.put(self.gc_allocator, @intFromPtr(wrapper.object), .{ .wrapped_iterator = .{ .iterator = rec.iterator, .next = rec.next } });
+    try wrapper.asObject().value.setPrototype(&self.wrap_for_valid_iterator_proto.?.asObject().value);
+    try self.object_slots.put(self.gc_allocator, @intFromPtr(wrapper.asObject()), .{ .wrapped_iterator = .{ .iterator = rec.iterator, .next = rec.next } });
     return wrapper;
 }
 
 fn wrappedOf(self: *Interpreter, this_value: JSValue, comptime what: []const u8) anyerror!Record {
-    if (this_value == .object) {
-        if (self.object_slots.get(@intFromPtr(this_value.object))) |slots| {
+    if (this_value.tag() == .object) {
+        if (self.object_slots.get(@intFromPtr(this_value.asObject()))) |slots| {
             if (slots == .wrapped_iterator) return .{ .iterator = slots.wrapped_iterator.iterator, .next = slots.wrapped_iterator.next };
         }
     }
@@ -209,7 +209,7 @@ fn wrapReturn(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     const rec = try wrappedOf(self, this_value, "%WrapForValidIteratorPrototype%.return");
     const ret = try self.getProperty(rec.iterator, "return");
     defer ret.deinit();
-    if (ret == .undefined or ret == .null) return iterResult(self, JSValue.UNDEFINED, true);
+    if (ret.tag() == .undefined or ret.tag() == .null) return iterResult(self, JSValue.UNDEFINED, true);
     return self.callValue(ret, rec.iterator, &.{}, "return");
 }
 
@@ -236,13 +236,13 @@ fn ignoringSetter(comptime which: enum { constructor, tag }) NativeFn {
             _ = allocator;
             const self = interp(ctx);
             if (!isObjectLike(this_value)) return self.throwError(.type_error, "Iterator.prototype setter called on non-object", .{});
-            if (this_value == .object and this_value.object == self.iterator_prototype.?.object)
+            if (this_value.isObject() and this_value.asObject() == self.iterator_prototype.?.asObject())
                 return self.throwError(.type_error, "Cannot assign to read only property of Iterator.prototype", .{});
             const key = if (which == .constructor) try self.gc_allocator.dupe(u8, "constructor") else try regex_builtins.wellKnownKey(self, "toStringTag");
             defer self.gc_allocator.free(key);
             const v = arg(args, 0);
-            if (this_value == .object and this_value.object.value.getOwnRecordMut(key) == null) {
-                this_value.object.value.defineProperty(key, v.retain(), .{ .writable = true, .enumerable = true, .configurable = true }) catch |err| switch (err) {
+            if (this_value.tag() == .object and this_value.asObject().value.getOwnRecordMut(key) == null) {
+                this_value.asObject().value.defineProperty(key, v.retain(), .{ .writable = true, .enumerable = true, .configurable = true }) catch |err| switch (err) {
                     error.ObjectNotExtensible => {
                         v.deinit();
                         return self.throwError(.type_error, "Cannot add property to a non-extensible object", .{});
@@ -260,8 +260,8 @@ fn ignoringSetter(comptime which: enum { constructor, tag }) NativeFn {
 // ===== Iterator helpers (lazy) =====
 
 fn helperOf(self: *Interpreter, this_value: JSValue, comptime what: []const u8) anyerror!*IteratorHelper {
-    if (this_value == .object) {
-        if (self.object_slots.get(@intFromPtr(this_value.object))) |slots| {
+    if (this_value.tag() == .object) {
+        if (self.object_slots.get(@intFromPtr(this_value.asObject()))) |slots| {
             if (slots == .iterator_helper) return slots.iterator_helper;
         }
     }
@@ -273,8 +273,8 @@ fn newHelper(self: *Interpreter, kind: @FieldType(IteratorHelper, "kind"), rec: 
     const h = try self.gc_allocator.create(IteratorHelper);
     h.* = .{ .kind = kind, .iterator = rec.iterator, .next = rec.next, .func = func.retain(), .remaining = remaining };
     var o = try self.gcNewObject();
-    try o.object.value.setPrototype(&self.iterator_helper_proto.?.object.value);
-    self.object_slots.put(self.gc_allocator, @intFromPtr(o.object), .{ .iterator_helper = h }) catch |err| {
+    try o.asObject().value.setPrototype(&self.iterator_helper_proto.?.asObject().value);
+    self.object_slots.put(self.gc_allocator, @intFromPtr(o.asObject()), .{ .iterator_helper = h }) catch |err| {
         o.deinit();
         return err;
     };
@@ -475,7 +475,7 @@ fn iteratorToArray(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     defer rec.deinit();
     var arr = try self.gcNewArray();
     errdefer arr.deinit();
-    while (try stepValue(self, rec.iterator, rec.next)) |v| _ = try arr.array.value.push(v);
+    while (try stepValue(self, rec.iterator, rec.next)) |v| _ = try arr.asArray().value.push(v);
     return arr;
 }
 
@@ -527,14 +527,14 @@ fn predicateConsumer(comptime mode: enum { for_each, some, every, find }, compti
 // ===== install =====
 
 fn defineMethod(self: *Interpreter, target: JSValue, comptime name: []const u8, arity: usize, f: NativeFn) !void {
-    try target.object.value.defineProperty(name, try native(self, name, arity, f), method_attrs);
+    try target.asObject().value.defineProperty(name, try native(self, name, arity, f), method_attrs);
 }
 
 /// A new prototype object chained to %IteratorPrototype% with `next` and
 /// `return`.
 fn subProto(self: *Interpreter, next: NativeFn, ret: NativeFn) !JSValue {
     const proto = try self.gcNewObject();
-    try proto.object.value.setPrototype(&self.iterator_prototype.?.object.value);
+    try proto.asObject().value.setPrototype(&self.iterator_prototype.?.asObject().value);
     try defineMethod(self, proto, "next", 0, next);
     try defineMethod(self, proto, "return", 0, ret);
     return proto;
@@ -549,7 +549,7 @@ pub fn install(self: *Interpreter) !void {
     const ctor = try builtin_helpers.installBuiltin(self, .{ .name = "Iterator", .ctor = .{ .arity = 0, .call = iteratorConstructor, .constructable = true }, .statics = &.{
         .{ .name = "from", .value = .{ .method = .{ .call = iteratorFrom, .arity = 1 } } },
     } });
-    ctor.function.value.prototype = proto.retain();
+    ctor.asFunction().value.prototype = proto.retain();
     self.iterator_ctor = ctor.retain();
 
     // `constructor` and @@toStringTag are accessors (ES2025), so that
@@ -560,8 +560,8 @@ pub fn install(self: *Interpreter) !void {
         const g = try native(self, "get " ++ e[0], 0, e[1]);
         const s = try native(self, "set " ++ e[0], 1, e[2]);
         const key: []const u8 = if (comptime std.mem.eql(u8, e[0], "constructor")) "constructor" else tag_key;
-        try proto.object.value.defineAccessor(key, g, s, JSValue.UNDEFINED);
-        const rec = proto.object.value.getOwnRecordMut(key).?;
+        try proto.asObject().value.defineAccessor(key, g, s, JSValue.UNDEFINED);
+        const rec = proto.asObject().value.getOwnRecordMut(key).?;
         rec.descriptor.enumerable = false;
         rec.descriptor.configurable = true;
     }
@@ -570,8 +570,8 @@ pub fn install(self: *Interpreter) !void {
     // Symbol.iterator exists, so it is added here).
     const iter_key = try self.encodeKey(self.symbol_iterator.?);
     defer self.gc_allocator.free(iter_key);
-    if (proto.object.value.getOwnRecordMut(iter_key) == null)
-        try proto.object.value.defineProperty(iter_key, try native(self, "[Symbol.iterator]", 0, builtin_helpers.iteratorSelfBuiltin), method_attrs);
+    if (proto.asObject().value.getOwnRecordMut(iter_key) == null)
+        try proto.asObject().value.defineProperty(iter_key, try native(self, "[Symbol.iterator]", 0, builtin_helpers.iteratorSelfBuiltin), method_attrs);
 
     try defineMethod(self, proto, "map", 1, callbackHelper(.map, "Iterator.prototype.map"));
     try defineMethod(self, proto, "filter", 1, callbackHelper(.filter, "Iterator.prototype.filter"));
@@ -586,7 +586,7 @@ pub fn install(self: *Interpreter) !void {
     try defineMethod(self, proto, "find", 1, predicateConsumer(.find, "Iterator.prototype.find"));
 
     const helper_proto = try subProto(self, helperNext, helperReturn);
-    try helper_proto.object.value.defineProperty(tag_key, try self.gcNewString("Iterator Helper"), .{ .writable = false, .enumerable = false, .configurable = true });
+    try helper_proto.asObject().value.defineProperty(tag_key, try self.gcNewString("Iterator Helper"), .{ .writable = false, .enumerable = false, .configurable = true });
     self.iterator_helper_proto = helper_proto;
     self.wrap_for_valid_iterator_proto = try subProto(self, wrapNext, wrapReturn);
 }

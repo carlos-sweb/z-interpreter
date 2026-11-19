@@ -139,8 +139,8 @@ fn mathRandom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 fn closeIterator(self: *Interpreter, allocator: Allocator, iter: JSValue) void {
     const return_fn = self.getProperty(iter, "return") catch return;
     defer return_fn.deinit();
-    if (return_fn != .function) return;
-    const result = return_fn.function.value.call(return_fn.function.value.ctx, allocator, iter, &.{}) catch return;
+    if (!return_fn.isFunction()) return;
+    const result = return_fn.asFunction().value.call(return_fn.asFunction().value.ctx, allocator, iter, &.{}) catch return;
     result.deinit();
 }
 
@@ -160,12 +160,12 @@ fn mathSumPrecise(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     _ = this_value;
     const self = interp(ctx);
     const iterable = arg(args, 0);
-    if (iterable == .undefined or iterable == .null) {
+    if (iterable.isUndefined() or iterable.isNull()) {
         return self.throwError(.type_error, "Cannot convert undefined or null to object", .{});
     }
     const iter = try self.resolveIterator(iterable);
     const next_fn = try self.getProperty(iter, "next");
-    if (next_fn != .function) return self.throwError(.type_error, "iterator.next is not a function", .{});
+    if (!next_fn.isFunction()) return self.throwError(.type_error, "iterator.next is not a function", .{});
 
     var has_nan = false;
     var has_pos_inf = false;
@@ -176,8 +176,8 @@ fn mathSumPrecise(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     var count: f64 = 0;
 
     while (true) {
-        const step = try next_fn.function.value.call(next_fn.function.value.ctx, allocator, iter, &.{});
-        if (step != .object) return self.throwError(.type_error, "Iterator result {s} is not an object", .{step.typeOf()});
+        const step = try next_fn.asFunction().value.call(next_fn.asFunction().value.ctx, allocator, iter, &.{});
+        if (!step.isObject()) return self.throwError(.type_error, "Iterator result {s} is not an object", .{step.typeOf()});
         if (coercion.isTruthy(try self.getProperty(step, "done"))) break;
         const value = try self.getProperty(step, "value");
 
@@ -186,11 +186,11 @@ fn mathSumPrecise(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
             closeIterator(self, allocator, iter);
             return self.throwError(.range_error, "Too many values to sum", .{});
         }
-        if (value != .number) {
+        if (!value.isNumber()) {
             closeIterator(self, allocator, iter);
             return self.throwError(.type_error, "Cannot convert {s} to a number", .{value.typeOf()});
         }
-        const n = value.number;
+        const n = value.asNumber();
 
         if (std.math.isNan(n)) {
             has_nan = true;

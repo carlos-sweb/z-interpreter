@@ -9,23 +9,14 @@ const JSValue = zvalue.JSValue;
 /// ECMA-262 ToBoolean. Arrays/objects/functions are truthy even when
 /// empty -- the real JS quirk, not a bug.
 pub fn isTruthy(v: JSValue) bool {
-    return switch (v) {
-        .undefined, .null => false,
-        .boolean => |b| b,
-        .number => |n| n != 0 and !std.math.isNan(n),
-        .string => |box| box.value.data.len != 0,
-        // Falsy only for 0n -- the one variant here that isn't
-        // unconditionally true, matching real JS ToBoolean(BigInt).
-        .bigint => |box| !box.value.isZero(),
-        .array, .object, .regex, .symbol, .map, .set, .@"error", .function, .date, .promise, .proxy, .array_buffer, .data_view, .typed_array, .temporal => true,
-    };
+    return v.isTruthy();
 }
 
 /// ECMA-262 ToNumber, narrowed to the primitives this phase's operators
 /// need. Real ToPrimitive (valueOf/Symbol.toPrimitive) doesn't exist in
 /// this ecosystem yet, so object-shaped values are `error.NotImplemented`.
 pub fn toNumber(v: JSValue) !f64 {
-    return switch (v) {
+    return switch (v.unpack()) {
         .number => |n| n,
         .boolean => |b| if (b) @as(f64, 1) else @as(f64, 0),
         .undefined => std.math.nan(f64),
@@ -89,7 +80,7 @@ pub fn toUint32(v: JSValue) !u32 {
 /// loop independently (see ~/.plans/builtins-consolidation-analysis.md).
 /// z-array's joinWith() takes this as its comptime stringify callback.
 pub fn joinElementToString(_: void, item: JSValue, allocator: Allocator) anyerror![]u8 {
-    return switch (item) {
+    return switch (item.tag()) {
         .undefined, .null => try allocator.dupe(u8, ""),
         else => toDisplayString(allocator, item),
     };
@@ -98,7 +89,7 @@ pub fn joinElementToString(_: void, item: JSValue, allocator: Allocator) anyerro
 /// ECMA-262 ToString, narrowed to what template literals and `+`'s
 /// string-concat branch need. Caller owns the returned slice.
 pub fn toDisplayString(allocator: Allocator, v: JSValue) ![]u8 {
-    return switch (v) {
+    return switch (v.unpack()) {
         .number => |n| try znumber.FormattingMethods.toString(n, allocator, null),
         .string => |box| try allocator.dupe(u8, box.value.data),
         .boolean => |b| try allocator.dupe(u8, if (b) "true" else "false"),
@@ -131,15 +122,15 @@ pub fn toDisplayString(allocator: Allocator, v: JSValue) ![]u8 {
 /// that wrapper can call back into the primitive-only cases here once
 /// both sides have been reduced to primitives.
 pub fn looseEquals(allocator: Allocator, a: JSValue, b: JSValue) !bool {
-    if (@as(std.meta.Tag(JSValue), a) == @as(std.meta.Tag(JSValue), b)) {
+    if (a.tag() == b.tag()) {
         return zvalue.equality.strictEquals(a, b);
     }
-    if ((a == .undefined or a == .null) and (b == .undefined or b == .null)) return true;
-    if (a == .undefined or a == .null or b == .undefined or b == .null) return false;
-    if (a == .boolean) return looseEquals(allocator, JSValue.fromNumber(try toNumber(a)), b);
-    if (b == .boolean) return looseEquals(allocator, a, JSValue.fromNumber(try toNumber(b)));
-    if (a == .number and b == .string) return a.number == try toNumber(b);
-    if (a == .string and b == .number) return (try toNumber(a)) == b.number;
+    if ((a.isUndefined() or a.isNull()) and (b.isUndefined() or b.isNull())) return true;
+    if (a.isUndefined() or a.isNull() or b.isUndefined() or b.isNull()) return false;
+    if (a.isBool()) return looseEquals(allocator, JSValue.fromNumber(try toNumber(a)), b);
+    if (b.isBool()) return looseEquals(allocator, a, JSValue.fromNumber(try toNumber(b)));
+    if (a.isNumber() and b.isString()) return a.asNumber() == try toNumber(b);
+    if (a.isString() and b.isNumber()) return (try toNumber(a)) == b.asNumber();
     // Real JS explicitly allows `==`/`!=` to mix BigInt with Number/
     // String (unlike the arithmetic operators, which throw) --
     // number mixing is narrowed to float comparison (documented
@@ -147,10 +138,10 @@ pub fn looseEquals(allocator: Allocator, a: JSValue, b: JSValue) !bool {
     // this file); string mixing parses exact digit text (StringToBigInt
     // is integer-only, unlike the general numeric-string grammar), a
     // parse failure meaning "not equal", not an error.
-    if (a == .bigint and b == .number) return bigintEqualsNumber(a.bigint.value, b.number);
-    if (a == .number and b == .bigint) return bigintEqualsNumber(b.bigint.value, a.number);
-    if (a == .bigint and b == .string) return try bigintEqualsString(allocator, a.bigint.value, b.string.value.data);
-    if (a == .string and b == .bigint) return try bigintEqualsString(allocator, b.bigint.value, a.string.value.data);
+    if (a.isBigInt() and b.isNumber()) return bigintEqualsNumber(a.asBigInt().value, b.asNumber());
+    if (a.isNumber() and b.isBigInt()) return bigintEqualsNumber(b.asBigInt().value, a.asNumber());
+    if (a.isBigInt() and b.isString()) return try bigintEqualsString(allocator, a.asBigInt().value, b.asString().value.data);
+    if (a.isString() and b.isBigInt()) return try bigintEqualsString(allocator, b.asBigInt().value, a.asString().value.data);
     return error.NotImplemented;
 }
 
@@ -207,28 +198,28 @@ pub fn binaryOp(allocator: Allocator, op: zparser.BinaryOp, left: JSValue, right
         // surrogate pair (BMP-only, the overwhelming common case) --
         // documented narrowing, same spirit as the bigint precision-loss
         // notes elsewhere in this file.
-        .lt => if (left == .bigint and right == .bigint)
-            JSValue.fromBool(left.bigint.value.cmp(right.bigint.value) == .lt)
-        else if (left == .string and right == .string)
-            JSValue.fromBool(std.mem.order(u8, left.string.value.data, right.string.value.data) == .lt)
+        .lt => if (left.isBigInt() and right.isBigInt())
+            JSValue.fromBool(left.asBigInt().value.cmp(right.asBigInt().value) == .lt)
+        else if (left.isString() and right.isString())
+            JSValue.fromBool(std.mem.order(u8, left.asString().value.data, right.asString().value.data) == .lt)
         else
             JSValue.fromBool((try toNumber(left)) < (try toNumber(right))),
-        .gt => if (left == .bigint and right == .bigint)
-            JSValue.fromBool(left.bigint.value.cmp(right.bigint.value) == .gt)
-        else if (left == .string and right == .string)
-            JSValue.fromBool(std.mem.order(u8, left.string.value.data, right.string.value.data) == .gt)
+        .gt => if (left.isBigInt() and right.isBigInt())
+            JSValue.fromBool(left.asBigInt().value.cmp(right.asBigInt().value) == .gt)
+        else if (left.isString() and right.isString())
+            JSValue.fromBool(std.mem.order(u8, left.asString().value.data, right.asString().value.data) == .gt)
         else
             JSValue.fromBool((try toNumber(left)) > (try toNumber(right))),
-        .le => if (left == .bigint and right == .bigint)
-            JSValue.fromBool(left.bigint.value.cmp(right.bigint.value) != .gt)
-        else if (left == .string and right == .string)
-            JSValue.fromBool(std.mem.order(u8, left.string.value.data, right.string.value.data) != .gt)
+        .le => if (left.isBigInt() and right.isBigInt())
+            JSValue.fromBool(left.asBigInt().value.cmp(right.asBigInt().value) != .gt)
+        else if (left.isString() and right.isString())
+            JSValue.fromBool(std.mem.order(u8, left.asString().value.data, right.asString().value.data) != .gt)
         else
             JSValue.fromBool((try toNumber(left)) <= (try toNumber(right))),
-        .ge => if (left == .bigint and right == .bigint)
-            JSValue.fromBool(left.bigint.value.cmp(right.bigint.value) != .lt)
-        else if (left == .string and right == .string)
-            JSValue.fromBool(std.mem.order(u8, left.string.value.data, right.string.value.data) != .lt)
+        .ge => if (left.isBigInt() and right.isBigInt())
+            JSValue.fromBool(left.asBigInt().value.cmp(right.asBigInt().value) != .lt)
+        else if (left.isString() and right.isString())
+            JSValue.fromBool(std.mem.order(u8, left.asString().value.data, right.asString().value.data) != .lt)
         else
             JSValue.fromBool((try toNumber(left)) >= (try toNumber(right))),
         .eqeqeq => JSValue.fromBool(zvalue.equality.strictEquals(left, right)),

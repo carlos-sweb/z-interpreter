@@ -91,13 +91,13 @@ fn reflectDeleteProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
 /// properties returns both from Reflect.ownKeys, in that order.
 fn reflectOwnKeys(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const target = try reflectRequireObject(ctx, "ownKeys", arg(args, 0));
-    if (target == .proxy) {
+    if (target.isProxy()) {
         return object_builtins.proxyOwnPropertyKeys(interp(ctx), allocator, target);
     }
     const names = try objectGetOwnPropertyNames(ctx, allocator, this_value, args);
     const symbols = try objectGetOwnPropertySymbols(ctx, allocator, this_value, args);
     defer symbols.deinit();
-    for (symbols.array.value.toSlice()) |s| _ = try names.array.value.push(s.retain());
+    for (symbols.asArray().value.toSlice()) |s| _ = try names.asArray().value.push(s.retain());
     return names;
 }
 
@@ -131,7 +131,7 @@ fn reflectApply(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     const target = arg(args, 0);
     const this_arg = arg(args, 1);
     const arg_list = arg(args, 2);
-    const call_args: []const JSValue = switch (arg_list) {
+    const call_args: []const JSValue = switch (arg_list.unpack()) {
         .undefined, .null => &.{},
         .array => |box| box.value.toSlice(),
         else => return self.throwError(.type_error, "CreateListFromArrayLike called on non-object", .{}),
@@ -145,7 +145,7 @@ fn reflectConstruct(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     const self = interp(ctx);
     const target = arg(args, 0);
     const arg_list = arg(args, 1);
-    const call_args: []const JSValue = switch (arg_list) {
+    const call_args: []const JSValue = switch (arg_list.unpack()) {
         .undefined, .null => &.{},
         .array => |box| box.value.toSlice(),
         else => return self.throwError(.type_error, "CreateListFromArrayLike called on non-object", .{}),
@@ -154,7 +154,7 @@ fn reflectConstruct(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
         return self.throwError(.type_error, "target is not a constructor", .{});
     }
     const new_target_arg = arg(args, 2);
-    const new_target: JSValue = if (new_target_arg == .undefined) target else new_target_arg;
+    const new_target: JSValue = if (new_target_arg.isUndefined()) target else new_target_arg;
     if (!self.isConstructor(new_target)) {
         return self.throwError(.type_error, "newTarget is not a constructor", .{});
     }
@@ -167,7 +167,7 @@ fn reflectSetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
     const self = interp(ctx);
     const target = try reflectRequireObject(ctx, "setPrototypeOf", arg(args, 0));
     const proto = arg(args, 1);
-    if (proto != .object and proto != .null) {
+    if (!proto.isObject() and !proto.isNull()) {
         return self.throwError(.type_error, "Object prototype may only be an Object or null", .{});
     }
     const ok = object_builtins.setPrototypeOfInternal(self, target, proto) catch |err| switch (err) {
@@ -211,7 +211,7 @@ pub fn install(self: *Interpreter) !void {
     if (self.symbol_to_string_tag) |tag_sym| {
         const tag_key = try self.encodeKey(tag_sym);
         defer self.gc_allocator.free(tag_key);
-        try reflect_obj.object.value.defineProperty(tag_key, try self.gcNewString("Reflect"), .{
+        try reflect_obj.asObject().value.defineProperty(tag_key, try self.gcNewString("Reflect"), .{
             .writable = false,
             .enumerable = false,
             .configurable = true,

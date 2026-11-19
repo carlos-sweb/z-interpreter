@@ -112,7 +112,7 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
             var arr = try self.gcNewArray();
             for (elements) |maybe_el| {
                 const el = maybe_el orelse {
-                    _ = try arr.array.value.push(JSValue.UNDEFINED);
+                    _ = try arr.asArray().value.push(JSValue.UNDEFINED);
                     continue;
                 };
                 if (el.data == .spread) {
@@ -120,12 +120,12 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                     defer spread_val.deinit();
                     const items = try self.iterableItems(spread_val);
                     defer arena.free(items);
-                    for (items) |item| _ = try arr.array.value.push(item.retain());
+                    for (items) |item| _ = try arr.asArray().value.push(item.retain());
                     continue;
                 }
                 // The element's value is owned here and moves into the array.
                 const v = try self.evalExpression(env, el);
-                _ = arr.array.value.push(v) catch |err| {
+                _ = arr.asArray().value.push(v) catch |err| {
                     v.deinit();
                     return err;
                 };
@@ -164,7 +164,7 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                             // no Rc-aware accessor wrapper.
                             .get, .set => {
                                 const f = try self.makeObjectMethodClosure(env, zfunctions.asFunctionNode(prop.value.data.function_like), obj);
-                                try obj.object.value.defineAccessor(
+                                try obj.asObject().value.defineAccessor(
                                     key_str,
                                     if (prop.kind == .get) f else null,
                                     if (prop.kind == .set) f else null,
@@ -176,7 +176,7 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                     .spread => |spread_node| {
                         const spread_val = try self.evalExpression(env, spread_node.data.spread);
                         defer spread_val.deinit();
-                        if (spread_val == .proxy) {
+                        if (spread_val.isProxy()) {
                             // ownKeys trap (or delegate) for the key
                             // list, `get` trap (or delegate) per key
                             // for the value -- same narrowing as
@@ -190,11 +190,11 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                                 try obj.objectSet(k, try self.getProperty(spread_val, k));
                             }
                         } else {
-                            if (spread_val != .object) return self.throwError(.type_error, "Spreading a {s} into an object literal is not supported yet", .{@tagName(spread_val)});
-                            const keys = try spread_val.object.value.keys(arena);
+                            if (!spread_val.isObject()) return self.throwError(.type_error, "Spreading a {s} into an object literal is not supported yet", .{@tagName(spread_val.tag())});
+                            const keys = try spread_val.asObject().value.keys(arena);
                             defer arena.free(keys);
                             for (keys) |k| {
-                                try obj.objectSet(k, spread_val.object.value.get(k).?.retain());
+                                try obj.objectSet(k, spread_val.asObject().value.get(k).?.retain());
                             }
                         }
                     },
@@ -231,7 +231,7 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
             const take_right = switch (l.op) {
                 .and_op => coercion.isTruthy(left),
                 .or_op => !coercion.isTruthy(left),
-                .nullish => left == .undefined or left == .null,
+                .nullish => left.isUndefined() or left.isNull(),
             };
             if (!take_right) return left;
             left.deinit();
@@ -262,11 +262,11 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                 // are mutually exclusive.
                 if (env.resolveSuperHome()) |home| {
                     defer home.deinit();
-                    const p = home.object.value.getPrototype();
+                    const p = home.asObject().value.getPrototype();
                     const sproto: JSValue = if (p) |pp| blk: {
-                        const Box = @TypeOf(home.object.*);
+                        const Box = @TypeOf(home.asObject().*);
                         const box: *Box = @fieldParentPtr("value", pp);
-                        break :blk (JSValue{ .object = box }).retain();
+                        break :blk (JSValue.fromObject(box)).retain();
                     } else JSValue.NULL;
                     defer sproto.deinit();
                     return try self.getProperty(sproto, pk.key);
@@ -280,7 +280,7 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
             // Owned (evalExpression's); getProperty/privateGet only borrow
             // it and hand back an owned result.
             defer obj.deinit();
-            if (m.optional and (obj == .undefined or obj == .null)) return JSValue.UNDEFINED;
+            if (m.optional and (obj.isUndefined() or obj.isNull())) return JSValue.UNDEFINED;
             if (privateMemberName(m)) |pn| return self.privateGet(env, obj, pn);
             const pk = try self.memberKeyString(env, m);
             defer pk.free(self.gc_allocator);
@@ -341,17 +341,17 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
 /// keeps its own independent copy as the map key, so the two owners
 /// never alias the same buffer.
 pub fn encodeKey(self: *Interpreter, value: JSValue) anyerror![]const u8 {
-    if (value == .symbol) return encodeSymbolKey(self, value);
+    if (value.isSymbol()) return encodeSymbolKey(self, value);
     if (Interpreter.isPrimitiveTag(value)) return coercion.toDisplayString(self.gc_allocator, value);
     const prim = try self.toPrimitive(value, .string);
     defer prim.deinit();
-    if (prim == .symbol) return encodeSymbolKey(self, prim);
+    if (prim.isSymbol()) return encodeSymbolKey(self, prim);
     return coercion.toDisplayString(self.gc_allocator, prim);
 }
 
 fn encodeSymbolKey(self: *Interpreter, sym: JSValue) anyerror![]const u8 {
     const arena = self.gc_allocator;
-    const key = try std.fmt.allocPrint(arena, "\x00S{x}", .{@intFromPtr(sym.symbol)});
+    const key = try std.fmt.allocPrint(arena, "\x00S{x}", .{@intFromPtr(sym.asSymbol())});
     if (!self.symbol_keys.contains(key)) {
         const stored_key = try arena.dupe(u8, key);
         try self.symbol_keys.put(arena, stored_key, sym.retain());
@@ -420,8 +420,8 @@ pub fn evalInstanceof(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSVal
     // Best-effort unwrap, not a real Symbol.hasInstance trap dispatch
     // (that protocol doesn't exist in this engine at all yet, for
     // plain functions either -- pre-existing narrowing, not new).
-    if (r == .proxy) return self.evalInstanceof(l, r.proxy.value.target);
-    if (r != .function) {
+    if (r.isProxy()) return self.evalInstanceof(l, r.asProxy().value.target);
+    if (!r.isFunction()) {
         return self.throwError(.type_error, "Right-hand side of 'instanceof' is not callable", .{});
     }
 
@@ -435,16 +435,16 @@ pub fn evalInstanceof(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSVal
     // identity against the value's own kind's global constructor (the
     // same trick getProperty's `.constructor` resolution already uses).
     // Falls through to the walk below for the generic Error case.
-    if (l == .@"error") {
-        if (self.global_env.get(l.@"error".value.kind.name())) |own_ctor| {
+    if (l.isError()) {
+        if (self.global_env.get(l.asError().value.kind.name())) |own_ctor| {
             if (zvalue.equality.strictEquals(own_ctor, r)) return JSValue.fromBool(true);
         }
     }
 
     // A never-touched prototype slot means this function never
     // constructed anything -- nothing can be an instance of it.
-    const proto = r.function.value.prototype orelse return JSValue.fromBool(false);
-    if (proto != .object) return JSValue.fromBool(false);
+    const proto = r.asFunction().value.prototype orelse return JSValue.fromBool(false);
+    if (!proto.isObject()) return JSValue.fromBool(false);
     // These boxed kinds have exactly one shared method-table prototype
     // each (no user-settable [[Prototype]] chain of their own, no
     // subclassing) -- the chain walk starts directly at the kind's
@@ -452,36 +452,38 @@ pub fn evalInstanceof(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSVal
     // these to be the SAME object as the matching global constructor's
     // `.prototype`) instead of "the instance's own prototype" like the
     // `.object` case below.
-    var current: ?*const zobject.ZObject(JSValue) = switch (l) {
-        .object => l.object.value.getPrototype(),
+    var current: ?*const zobject.ZObject(JSValue) = switch (l.tag()) {
+        .object => l.asObject().value.getPrototype(),
         .typed_array => blk: {
             const tp = @import("interpreter_props.zig").typedArrayInstanceProto(self, l);
-            break :blk if (tp == .object) &tp.object.value else null;
+            break :blk if (tp.isObject()) &tp.asObject().value else null;
         },
-        .array => &self.protos.array.object.value,
-        .date => &self.protos.date.object.value,
-        .regex => &self.protos.regex.object.value,
-        .function => &self.protos.function.object.value,
-        .map => &self.protos.map.object.value,
-        .set => &self.protos.set.object.value,
-        .promise => &self.protos.promise.object.value,
-        .array_buffer => |box| blk: {
+        .array => &self.protos.array.asObject().value,
+        .date => &self.protos.date.asObject().value,
+        .regex => &self.protos.regex.asObject().value,
+        .function => &self.protos.function.asObject().value,
+        .map => &self.protos.map.asObject().value,
+        .set => &self.protos.set.asObject().value,
+        .promise => &self.protos.promise.asObject().value,
+        .array_buffer => blk: {
+            const box = l.asArrayBuffer();
             const p = self.proto_refs.get(@intFromPtr(box)) orelse self.arrayBufferProto(box.value.is_shared);
-            break :blk if (p == .object) &p.object.value else null;
+            break :blk if (p.isObject()) &p.asObject().value else null;
         },
-        .data_view => |box| blk: {
+        .data_view => blk: {
+            const box = l.asDataView();
             const p = self.proto_refs.get(@intFromPtr(box)) orelse self.protos.data_view;
-            break :blk if (p == .object) &p.object.value else null;
+            break :blk if (p.isObject()) &p.asObject().value else null;
         },
-        .@"error" => &self.protos.@"error".object.value,
+        .@"error" => &self.protos.@"error".asObject().value,
         .temporal => blk: {
             const temporal_proto = self.temporalPrototype(l);
-            break :blk if (temporal_proto == .object) &temporal_proto.object.value else null;
+            break :blk if (temporal_proto.isObject()) &temporal_proto.asObject().value else null;
         },
         else => return JSValue.fromBool(false), // primitives are never instances
     };
     while (current) |p| : (current = p.getPrototype()) {
-        if (p == &proto.object.value) return JSValue.fromBool(true);
+        if (p == &proto.asObject().value) return JSValue.fromBool(true);
     }
     return JSValue.fromBool(false);
 }
@@ -498,15 +500,15 @@ pub fn evalIn(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
     // in real spec.
     const key = try self.encodeKey(l);
     defer arena.free(key);
-    return switch (r) {
+    return switch (r.unpack()) {
         .object => |box| blk: {
             if (box.value.has(key)) break :blk JSValue.fromBool(true);
             var last_obj: *const @TypeOf(box.value) = &box.value;
             while (last_obj.getPrototype()) |p| last_obj = p;
-            const Box = @TypeOf(r.object.*);
+            const Box = @TypeOf(r.asObject().*);
             const last_box: *const Box = @fieldParentPtr("value", last_obj);
             if (self.proto_refs.get(@intFromPtr(last_box))) |ext_proto| {
-                if (ext_proto != .object and ext_proto != .null) {
+                if (!ext_proto.isObject() and !ext_proto.isNull()) {
                     break :blk try self.evalIn(l, ext_proto);
                 }
             }
@@ -515,22 +517,22 @@ pub fn evalIn(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
         .array => |box| blk: {
             if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromBool(true);
             if (self.array_props.get(@intFromPtr(box))) |bag| {
-                if (bag.object.value.hasOwnProperty(key)) break :blk JSValue.fromBool(true);
+                if (bag.asObject().value.hasOwnProperty(key)) break :blk JSValue.fromBool(true);
             }
             if (zarray.CanonicalNumericIndexString(key)) |idx| {
                 if (idx < box.value.length() and !box.value.isHole(idx)) break :blk JSValue.fromBool(true);
             }
             if (self.proto_refs.get(@intFromPtr(box))) |ext_proto| {
-                if (ext_proto != .null) break :blk try self.evalIn(l, ext_proto);
+                if (!ext_proto.isNull()) break :blk try self.evalIn(l, ext_proto);
                 break :blk JSValue.fromBool(false);
             }
-            break :blk JSValue.fromBool(self.protos.array.object.value.has(key));
+            break :blk JSValue.fromBool(self.protos.array.asObject().value.has(key));
         },
         // `key` is the raw `\x00S<ptr>` encoding when `l` is a symbol --
         // display the real "Symbol(desc)" form in the message instead
         // of leaking that internal encoding to user-visible text.
-        .undefined, .null, .boolean, .number, .string => if (l == .symbol)
-            self.throwError(.type_error, "Cannot use 'in' operator to search for 'Symbol({s})'", .{l.symbol.value.description orelse ""})
+        .undefined, .null, .boolean, .number, .string => if (l.isSymbol())
+            self.throwError(.type_error, "Cannot use 'in' operator to search for 'Symbol({s})'", .{l.asSymbol().value.description orelse ""})
         else
             self.throwError(.type_error, "Cannot use 'in' operator to search for '{s}'", .{key}),
         // has(target, property) -- ToBoolean-coerced.
@@ -539,7 +541,7 @@ pub fn evalIn(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
                 defer trap_fn.deinit();
                 const key_val = try self.gcNewString(key);
                 defer key_val.deinit();
-                const result = try trap_fn.function.value.call(trap_fn.function.value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, key_val });
+                const result = try trap_fn.asFunction().value.call(trap_fn.asFunction().value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, key_val });
                 defer result.deinit();
                 break :blk JSValue.fromBool(coercion.isTruthy(result));
             }
@@ -548,21 +550,21 @@ pub fn evalIn(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
         // A RegExp's own `lastIndex`, or anything on RegExp.prototype's
         // chain (source, flags, global, ... are accessors there).
         .regex => JSValue.fromBool(std.mem.eql(u8, key, "lastIndex") or
-            (if (self.regexProps(r)) |bag| bag.object.value.hasOwnProperty(key) else false) or
-            self.protos.regex.object.value.has(key)),
-        .temporal => |box| JSValue.fromBool((if (self.temporal_props.get(@intFromPtr(box))) |bag| bag.object.value.hasOwnProperty(key) else false) or
-            self.protos.temporalProtoFor(box.value).object.value.has(key)),
+            (if (self.regexProps(r)) |bag| bag.asObject().value.hasOwnProperty(key) else false) or
+            self.protos.regex.asObject().value.has(key)),
+        .temporal => |box| JSValue.fromBool((if (self.temporal_props.get(@intFromPtr(box))) |bag| bag.asObject().value.hasOwnProperty(key) else false) or
+            self.protos.temporalProtoFor(box.value).asObject().value.has(key)),
         .typed_array => |box| blk: {
             switch (@import("interpreter_props.zig").canonicalNumericIndex(self.gc_allocator, key, box.value.len)) {
                 .valid_index => break :blk JSValue.fromBool(!@import("builtin_helpers.zig").isTypedArrayDetached(&box.value)),
                 .invalid_index => break :blk JSValue.fromBool(false),
                 .not_numeric => {
                     if (self.extraProps(r)) |bag| {
-                        if (bag.object.value.hasOwnProperty(key)) break :blk JSValue.fromBool(true);
+                        if (bag.asObject().value.hasOwnProperty(key)) break :blk JSValue.fromBool(true);
                     }
                     const proto = @import("interpreter_props.zig").typedArrayInstanceProto(self, r);
-                    if (proto == .object) break :blk JSValue.fromBool(proto.object.value.has(key));
-                    if (proto != .null) break :blk try self.evalIn(l, proto);
+                    if (proto.isObject()) break :blk JSValue.fromBool(proto.asObject().value.has(key));
+                    if (!proto.isNull()) break :blk try self.evalIn(l, proto);
                     break :blk JSValue.fromBool(false);
                 },
             }
@@ -570,26 +572,26 @@ pub fn evalIn(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
         .function => |box| blk: {
             const deleted = self.deletedFnProps(r);
             if (box.value.statics) |bag| {
-                if (bag.object.value.has(key)) break :blk JSValue.fromBool(true);
+                if (bag.asObject().value.has(key)) break :blk JSValue.fromBool(true);
             }
             if (std.mem.eql(u8, key, "length") and !deleted.length) break :blk JSValue.fromBool(true);
             if (std.mem.eql(u8, key, "name") and !deleted.name) break :blk JSValue.fromBool(true);
             if (std.mem.eql(u8, key, "prototype") and !property_desc.isProxyConstructor(self, r) and function_builtins.boundContext(r) == null and (box.value.prototype != null or box.value.constructable)) break :blk JSValue.fromBool(true);
-            break :blk JSValue.fromBool(self.protos.function.object.value.has(key));
+            break :blk JSValue.fromBool(self.protos.function.asObject().value.has(key));
         },
-        .array_buffer => |box| JSValue.fromBool((if (self.extraProps(r)) |bag| bag.object.value.hasOwnProperty(key) else false) or
-            self.arrayBufferProto(box.value.is_shared).object.value.has(key)),
-        .data_view => JSValue.fromBool((if (self.extraProps(r)) |bag| bag.object.value.hasOwnProperty(key) else false) or
-            self.protos.data_view.object.value.has(key)),
+        .array_buffer => |box| JSValue.fromBool((if (self.extraProps(r)) |bag| bag.asObject().value.hasOwnProperty(key) else false) or
+            self.arrayBufferProto(box.value.is_shared).asObject().value.has(key)),
+        .data_view => JSValue.fromBool((if (self.extraProps(r)) |bag| bag.asObject().value.hasOwnProperty(key) else false) or
+            self.protos.data_view.asObject().value.has(key)),
         .@"error" => JSValue.fromBool(std.mem.eql(u8, key, "name") or
             std.mem.eql(u8, key, "message") or
             std.mem.eql(u8, key, "constructor") or
-            (if (self.extraProps(r)) |bag| bag.object.value.hasOwnProperty(key) else false) or
-            self.protos.@"error".object.value.has(key)),
-        .date => JSValue.fromBool((if (self.extraProps(r)) |bag| bag.object.value.hasOwnProperty(key) else false) or self.protos.date.object.value.has(key)),
-        .promise => JSValue.fromBool((if (self.extraProps(r)) |bag| bag.object.value.hasOwnProperty(key) else false) or self.protos.promise.object.value.has(key)),
-        .map => JSValue.fromBool((if (self.extraProps(r)) |bag| bag.object.value.hasOwnProperty(key) else false) or self.protos.map.object.value.has(key)),
-        .set => JSValue.fromBool((if (self.extraProps(r)) |bag| bag.object.value.hasOwnProperty(key) else false) or self.protos.set.object.value.has(key)),
+            (if (self.extraProps(r)) |bag| bag.asObject().value.hasOwnProperty(key) else false) or
+            self.protos.@"error".asObject().value.has(key)),
+        .date => JSValue.fromBool((if (self.extraProps(r)) |bag| bag.asObject().value.hasOwnProperty(key) else false) or self.protos.date.asObject().value.has(key)),
+        .promise => JSValue.fromBool((if (self.extraProps(r)) |bag| bag.asObject().value.hasOwnProperty(key) else false) or self.protos.promise.asObject().value.has(key)),
+        .map => JSValue.fromBool((if (self.extraProps(r)) |bag| bag.asObject().value.hasOwnProperty(key) else false) or self.protos.map.asObject().value.has(key)),
+        .set => JSValue.fromBool((if (self.extraProps(r)) |bag| bag.asObject().value.hasOwnProperty(key) else false) or self.protos.set.asObject().value.has(key)),
         // Symbol / BigInt are primitives: real TypeError.
         .symbol => self.throwError(.type_error, "Cannot use 'in' operator to search for '{s}' in a Symbol", .{key}),
         .bigint => self.throwError(.type_error, "Cannot use 'in' operator to search for '{s}' in a BigInt", .{key}),
@@ -607,11 +609,11 @@ pub fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSV
             const v = try self.evalExpression(env, u.operand);
             defer v.deinit();
             const n = try self.toNumericJS(v);
-            if (n == .bigint) {
+            if (n.isBigInt()) {
                 defer n.deinit();
-                return try self.gcNewBigIntValue(try n.bigint.value.negate());
+                return try self.gcNewBigIntValue(try n.asBigInt().value.negate());
             }
-            return JSValue.fromNumber(-n.number);
+            return JSValue.fromNumber(-n.asNumber());
         },
         .plus => {
             // Real spec: unary `+` is ALWAYS a ToNumber, and
@@ -622,7 +624,7 @@ pub fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSV
             // explicit-conversion case).
             const v = try self.evalExpression(env, u.operand);
             defer v.deinit();
-            if (v == .bigint) return self.throwError(.type_error, "Cannot convert a BigInt value to a number", .{});
+            if (v.isBigInt()) return self.throwError(.type_error, "Cannot convert a BigInt value to a number", .{});
             return JSValue.fromNumber(try self.toNumberJS(v));
         },
         .typeof => {
@@ -677,9 +679,9 @@ pub fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSV
             // already `.number` (harmless alias -- numbers aren't
             // refcounted, so `old`'s own `defer .deinit()` above is a
             // no-op either way).
-            if (old_num == .bigint) {
+            if (old_num.isBigInt()) {
                 defer old_num.deinit();
-                return try self.gcNewBigIntValue(try old_num.bigint.value.clone());
+                return try self.gcNewBigIntValue(try old_num.asBigInt().value.clone());
             }
             return old_num;
         },
@@ -687,9 +689,9 @@ pub fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSV
             const v = try self.evalExpression(env, u.operand);
             defer v.deinit();
             const n = try self.toNumericJS(v);
-            if (n == .bigint) {
+            if (n.isBigInt()) {
                 defer n.deinit();
-                return try self.gcNewBigIntValue(try zbigint.ZBigInt.not(self.gc_allocator, n.bigint.value));
+                return try self.gcNewBigIntValue(try zbigint.ZBigInt.not(self.gc_allocator, n.asBigInt().value));
             }
             return JSValue.fromNumber(@floatFromInt(~(try coercion.toInt32(n))));
         },
@@ -748,7 +750,7 @@ pub fn evalAssignment(self: *Interpreter, env: *Environment, a: anytype) anyerro
             const should_assign = switch (a.op) {
                 .logical_and => coercion.isTruthy(current),
                 .logical_or => !coercion.isTruthy(current),
-                .nullish => current == .undefined or current == .null,
+                .nullish => current.isUndefined() or current.isNull(),
                 else => unreachable,
             };
             if (!should_assign) return current;
@@ -773,9 +775,9 @@ pub fn evalAssignment(self: *Interpreter, env: *Environment, a: anytype) anyerro
 /// Number/Number arithmetic and relational cases. The operands were still
 /// evaluated left-to-right above; this only skips work after both are values.
 fn numericBinaryFastPath(op: zparser.BinaryOp, left: JSValue, right: JSValue) ?JSValue {
-    if (left != .number or right != .number) return null;
-    const l = left.number;
-    const r = right.number;
+    if (!left.isNumber() or !right.isNumber()) return null;
+    const l = left.asNumber();
+    const r = right.asNumber();
     return switch (op) {
         .add => JSValue.fromNumber(l + r),
         .sub => JSValue.fromNumber(l - r),
@@ -838,7 +840,7 @@ fn applyBinaryOp(self: *Interpreter, op: zparser.BinaryOp, l: JSValue, r: JSValu
 }
 
 fn rejectSymbolOperands(self: *Interpreter, a: JSValue, b: JSValue) anyerror!void {
-    if (a == .symbol or b == .symbol) {
+    if (a.isSymbol() or b.isSymbol()) {
         return self.throwError(.type_error, "Cannot convert a Symbol value to a number", .{});
     }
 }
@@ -878,16 +880,16 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
         const args = try self.evalArgs(env, c.args);
         defer freeArgs(self, args);
         const prev_target = self.construct_target;
-        self.construct_target = sctor.function.value.ctx;
+        self.construct_target = sctor.asFunction().value.ctx;
         defer self.construct_target = prev_target;
         const this_v = env.resolveThis();
         defer this_v.deinit();
-        const result = try sctor.function.value.call(sctor.function.value.ctx, arena, this_v, args);
+        const result = try sctor.asFunction().value.call(sctor.asFunction().value.ctx, arena, this_v, args);
         // A Temporal base constructor returns the branded exotic it created.
         // Adopt it as the derived constructor's this only when commit 2 gave
         // it an explicit newTarget prototype; ordinary super() returns keep
         // the provisional ordinary instance.
-        if ((result == .temporal and self.temporal_protos.contains(@intFromPtr(result.temporal))) or result == .typed_array or result == .array_buffer or result == .data_view) {
+        if ((result.isTemporal() and self.temporal_protos.contains(@intFromPtr(result.asTemporal()))) or result.isTypedArray() or result.isArrayBuffer() or result.isDataView()) {
             if (env.this_value) |previous| previous.deinit();
             env.this_value = result.retain();
             if (self.adopted_super_this) |previous| previous.deinit();
@@ -919,11 +921,11 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
         const sproto: JSValue = blk: {
             if (env.resolveSuperHome()) |home| {
                 defer home.deinit();
-                const p = home.object.value.getPrototype();
+                const p = home.asObject().value.getPrototype();
                 break :blk if (p) |pp| inner: {
-                    const Box = @TypeOf(home.object.*);
+                    const Box = @TypeOf(home.asObject().*);
                     const box: *Box = @fieldParentPtr("value", pp);
-                    break :inner (JSValue{ .object = box }).retain();
+                    break :inner (JSValue.fromObject(box)).retain();
                 } else JSValue.NULL;
             }
             // resolveSuperProto already returns an owned reference
@@ -934,14 +936,14 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
         defer sproto.deinit();
         const method = try self.getProperty(sproto, pk.key);
         defer method.deinit();
-        if (method != .function) {
+        if (!method.isFunction()) {
             return self.throwError(.type_error, "(intermediate value).{s} is not a function", .{pk.key});
         }
         const args = try self.evalArgs(env, c.args);
         defer freeArgs(self, args);
         const this_v = env.resolveThis();
         defer this_v.deinit();
-        return try method.function.value.call(method.function.value.ctx, arena, this_v, args);
+        return try method.asFunction().value.call(method.asFunction().value.ctx, arena, this_v, args);
     }
     var this_value: JSValue = JSValue.UNDEFINED;
     defer this_value.deinit();
@@ -949,7 +951,7 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
     if (c.callee.data == .member) {
         const m = c.callee.data.member;
         const obj = try self.evalExpression(env, m.object);
-        if (m.optional and (obj == .undefined or obj == .null)) {
+        if (m.optional and (obj.isUndefined() or obj.isNull())) {
             obj.deinit();
             return JSValue.UNDEFINED;
         }
@@ -967,7 +969,7 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
         callee_val = try self.evalExpression(env, c.callee);
     }
     defer callee_val.deinit();
-    if (c.optional and (callee_val == .undefined or callee_val == .null)) return JSValue.UNDEFINED;
+    if (c.optional and (callee_val.isUndefined() or callee_val.isNull())) return JSValue.UNDEFINED;
     // Best-effort callee name for the "is not a function" message --
     // no expression printer, just the two cheap cases. Needed both
     // for the immediate check below AND (a no-trap proxy chain whose
@@ -977,7 +979,7 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
         .member => |m| if (!m.computed and m.property.data == .identifier) m.property.data.identifier else "expression",
         else => "expression",
     };
-    if (callee_val != .function and callee_val != .proxy) {
+    if (!callee_val.isFunction() and !callee_val.isProxy()) {
         return self.throwError(.type_error, "{s} is not a function", .{callee_name});
     }
 
@@ -991,12 +993,12 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
     // native below. Guarded on .function first -- callee_val.function
     // is a union field access, unsafe to touch when callee_val is
     // actually .proxy (a proxy is never literally the eval intrinsic).
-    if (callee_val == .function) {
+    if (callee_val.isFunction()) {
         if (self.eval_fn) |ev| {
-            if (c.callee.data == .identifier and std.mem.eql(u8, c.callee.data.identifier, "eval") and callee_val.function == ev.function) {
+            if (c.callee.data == .identifier and std.mem.eql(u8, c.callee.data.identifier, "eval") and callee_val.asFunction() == ev.asFunction()) {
                 if (args.len == 0) return JSValue.UNDEFINED;
-                if (args[0] != .string) return args[0].retain();
-                return self.evalSource(env, args[0].string.value.data);
+                if (!args[0].isString()) return args[0].retain();
+                return self.evalSource(env, args[0].asString().value.data);
             }
         }
     }
@@ -1012,18 +1014,18 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
 /// no-trap proxy chain can still hit if its target (transitively)
 /// isn't callable -- e.g. `(new Proxy({}, {}))()`.
 pub fn callValue(self: *Interpreter, callee: JSValue, this_value: JSValue, args: []const JSValue, callee_name: []const u8) anyerror!JSValue {
-    if (callee == .proxy) {
-        const box = callee.proxy;
+    if (callee.isProxy()) {
+        const box = callee.asProxy();
         if (try self.proxyTrap(box, "apply")) |trap_fn| {
             defer trap_fn.deinit();
             const args_array = try self.argsToArray(args);
             defer args_array.deinit();
-            return try trap_fn.function.value.call(trap_fn.function.value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, this_value, args_array });
+            return try trap_fn.asFunction().value.call(trap_fn.asFunction().value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, this_value, args_array });
         }
         return self.callValue(box.value.target, this_value, args, callee_name);
     }
-    if (callee != .function) return self.throwError(.type_error, "{s} is not a function", .{callee_name});
-    return try callee.function.value.call(callee.function.value.ctx, self.gc_allocator, this_value, args);
+    if (!callee.isFunction()) return self.throwError(.type_error, "{s} is not a function", .{callee_name});
+    return try callee.asFunction().value.call(callee.asFunction().value.ctx, self.gc_allocator, this_value, args);
 }
 
 pub const CallArgs = struct {
@@ -1129,7 +1131,7 @@ pub fn evalNew(self: *Interpreter, env: *Environment, n: anytype) anyerror!JSVal
 /// proxies to their target (a Proxy is a constructor iff its target
 /// is, regardless of whether a `construct` trap is present).
 pub fn isConstructor(self: *Interpreter, v: JSValue) bool {
-    return switch (v) {
+    return switch (v.unpack()) {
         .function => |f| f.value.constructable,
         .proxy => |p| self.isConstructor(p.value.target),
         else => false,
@@ -1145,17 +1147,17 @@ pub fn constructValue(self: *Interpreter, callee: JSValue, args: []const JSValue
 /// construction context so native constructors can create branded exotics with
 /// the caller-selected prototype.
 pub fn constructValueWithNewTarget(self: *Interpreter, target: JSValue, args: []const JSValue, new_target: JSValue, callee_name: []const u8) anyerror!JSValue {
-    if (target == .proxy) {
-        const box = target.proxy;
+    if (target.isProxy()) {
+        const box = target.asProxy();
         if (try self.proxyTrap(box, "construct")) |trap_fn| {
             defer trap_fn.deinit();
             const args_array = try self.argsToArray(args);
             defer args_array.deinit();
-            return try trap_fn.function.value.call(trap_fn.function.value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, args_array, new_target });
+            return try trap_fn.asFunction().value.call(trap_fn.asFunction().value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, args_array, new_target });
         }
         return self.constructValueWithNewTarget(box.value.target, args, new_target, callee_name);
     }
-    if (target != .function or !target.function.value.constructable) {
+    if (!target.isFunction() or !target.asFunction().value.constructable) {
         return self.throwError(.type_error, "{s} is not a constructor", .{callee_name});
     }
 
@@ -1174,14 +1176,14 @@ pub fn constructValueWithNewTarget(self: *Interpreter, target: JSValue, args: []
     // Pre-prototype validation for builtins that validate arguments before OrdinaryCreateFromConstructor:
     if (promise_builtins.isPromiseConstructor(target)) {
         const executor = if (args.len > 0) args[0] else JSValue.UNDEFINED;
-        if (executor != .function) {
+        if (!executor.isFunction()) {
             return self.throwError(.type_error, "Promise resolver {s} is not a function", .{executor.typeOf()});
         }
     } else if (arraybuffer_builtins.isTypedArrayConstructor(target)) {
         if (args.len > 0) {
             const first = args[0];
-            if (first == .symbol or first == .bigint) {
-                return self.throwError(.type_error, "Cannot convert a {s} value to a number", .{@tagName(first)});
+            if (first.isSymbol() or first.isBigInt()) {
+                return self.throwError(.type_error, "Cannot convert a {s} value to a number", .{@tagName(first.tag())});
             }
         }
     }
@@ -1194,14 +1196,14 @@ pub fn constructValueWithNewTarget(self: *Interpreter, target: JSValue, args: []
 
     const instance = try self.gcNewObject();
     errdefer instance.deinit();
-    if (proto == .object or !arraybuffer_builtins.isTypedArrayConstructor(target)) {
+    if (proto.isObject() or !arraybuffer_builtins.isTypedArrayConstructor(target)) {
         try self.setOwnedPrototype(instance, proto);
     }
 
     const prev_target = self.construct_target;
     const prev_new_target = self.construct_new_target;
     const prev_proto = self.construct_proto;
-    self.construct_target = target.function.value.ctx;
+    self.construct_target = target.asFunction().value.ctx;
     self.construct_new_target = new_target.retain();
     self.construct_proto = if (has_custom_proto) observed_proto.retain() else null;
     defer {
@@ -1212,8 +1214,8 @@ pub fn constructValueWithNewTarget(self: *Interpreter, target: JSValue, args: []
         self.construct_proto = prev_proto;
     }
 
-    const result = try target.function.value.call(target.function.value.ctx, self.gc_allocator, instance, args);
-    return switch (result) {
+    const result = try target.asFunction().value.call(target.asFunction().value.ctx, self.gc_allocator, instance, args);
+    return switch (result.tag()) {
         .object, .array, .function, .regex, .map, .set, .@"error", .date, .promise, .proxy, .array_buffer, .data_view, .typed_array, .temporal => result,
         else => instance,
     };

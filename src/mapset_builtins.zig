@@ -60,11 +60,11 @@ fn mapConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor Map requires 'new'", .{});
     var m = try interp(ctx).gcNewMap();
     const init = arg(args, 0);
-    if (init != .undefined and init != .null) {
+    if (init.tag() != .undefined and init.tag() != .null) {
         const items = try self.iterableItems(init);
         defer self.gc_allocator.free(items);
         for (items) |entry| {
-            if (entry != .array and entry != .object) return self.throwError(.type_error, "Iterator value {s} is not an entry object", .{entry.typeOf()});
+            if (entry.tag() != .array and entry.tag() != .object) return self.throwError(.type_error, "Iterator value {s} is not an entry object", .{entry.typeOf()});
             // getProperty hands back owned references: they move into
             // the map (mapSet consumes both, also on error).
             const k = try self.getProperty(entry, "0");
@@ -85,7 +85,7 @@ fn setConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor Set requires 'new'", .{});
     var s = try interp(ctx).gcNewSet();
     const init = arg(args, 0);
-    if (init != .undefined and init != .null) {
+    if (init.tag() != .undefined and init.tag() != .null) {
         const items = try self.iterableItems(init);
         defer self.gc_allocator.free(items);
         // iterableItems' ownership is mixed (borrowed for array/set
@@ -99,7 +99,7 @@ fn setConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
 fn mapGet(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const m = try requireMap(ctx, this_value, "get");
-    return if (m.map.value.get(arg(args, 0))) |v| v.retain() else JSValue.UNDEFINED;
+    return if (m.asMap().value.get(arg(args, 0))) |v| v.retain() else JSValue.UNDEFINED;
 }
 
 fn mapSet(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -114,7 +114,7 @@ fn mapSet(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
 fn mapHas(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const m = try requireMap(ctx, this_value, "has");
-    return JSValue.fromBool(m.map.value.has(arg(args, 0)));
+    return JSValue.fromBool(m.asMap().value.has(arg(args, 0)));
 }
 
 fn mapDelete(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -136,8 +136,8 @@ fn mapClear(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
 fn mapForEach(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const m = try requireMap(ctx, this_value, "forEach");
     const cb = try requireCallback(ctx, args);
-    const ks = m.map.value.keys();
-    const vs = m.map.value.values();
+    const ks = m.asMap().value.keys();
+    const vs = m.asMap().value.values();
     // Snapshot + retain before calling into JS: `ks`/`vs` are live slices
     // into the map's storage, and the callback may mutate `m` (delete/
     // set), which can resize/compact that storage and invalidate them
@@ -158,7 +158,7 @@ fn mapForEach(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
         v.deinit();
     };
     for (snap_keys, snap_values) |k, v| {
-        _ = try cb.function.value.call(cb.function.value.ctx, allocator, JSValue.UNDEFINED, &.{ v, k, m });
+        _ = try cb.asFunction().value.call(cb.asFunction().value.ctx, allocator, JSValue.UNDEFINED, &.{ v, k, m });
     }
     return JSValue.UNDEFINED;
 }
@@ -166,33 +166,33 @@ fn mapForEach(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 /// Snapshot slice -> array iterator (reuses the array-iterator machinery).
 fn iteratorFromValues(self: *Interpreter, allocator: Allocator, items: []const JSValue) anyerror!JSValue {
     var arr = try self.gcNewArray();
-    for (items) |it| _ = try arr.array.value.push(it.retain());
+    for (items) |it| _ = try arr.asArray().value.push(it.retain());
     return makeArrayIterator(self, allocator, arr, .values);
 }
 
 fn mapKeys(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
     const m = try requireMap(ctx, this_value, "keys");
-    return iteratorFromValues(interp(ctx), allocator, m.map.value.keys());
+    return iteratorFromValues(interp(ctx), allocator, m.asMap().value.keys());
 }
 
 fn mapValues(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
     const m = try requireMap(ctx, this_value, "values");
-    return iteratorFromValues(interp(ctx), allocator, m.map.value.values());
+    return iteratorFromValues(interp(ctx), allocator, m.asMap().value.values());
 }
 
 fn mapEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
     const m = try requireMap(ctx, this_value, "entries");
-    const ks = m.map.value.keys();
-    const vs = m.map.value.values();
+    const ks = m.asMap().value.keys();
+    const vs = m.asMap().value.values();
     var pairs: std.ArrayList(JSValue) = .empty;
     defer pairs.deinit(allocator);
     for (ks, vs) |k, v| {
         var pair = try interp(ctx).gcNewArray();
-        _ = try pair.array.value.push(k.retain());
-        _ = try pair.array.value.push(v.retain());
+        _ = try pair.asArray().value.push(k.retain());
+        _ = try pair.asArray().value.push(v.retain());
         try pairs.append(allocator, pair);
     }
     return iteratorFromValues(interp(ctx), allocator, pairs.items);
@@ -209,7 +209,7 @@ fn setAdd(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
 fn setHas(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const s = try requireSet(ctx, this_value, "has");
-    return JSValue.fromBool(s.set.value.has(arg(args, 0)));
+    return JSValue.fromBool(s.asSet().value.has(arg(args, 0)));
 }
 
 fn setDelete(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -220,7 +220,7 @@ fn setDelete(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     // devuelva referencias propias: hoy liberar aquí deja colgando la
     // lista de un llamador que ejecuta JS mientras la recorre
     // (Array.from(set, fn), yield* set).
-    return JSValue.fromBool(s.set.value.delete(arg(args, 0)));
+    return JSValue.fromBool(s.asSet().value.delete(arg(args, 0)));
 }
 
 fn setClear(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -232,21 +232,21 @@ fn setClear(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
     // devuelva referencias propias: hoy liberar aquí deja colgando la
     // lista de un llamador que ejecuta JS mientras la recorre
     // (Array.from(set, fn), yield* set).
-    s.set.value.clear();
+    s.asSet().value.clear();
     return JSValue.UNDEFINED;
 }
 
 fn setForEach(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const s = try requireSet(ctx, this_value, "forEach");
     const cb = try requireCallback(ctx, args);
-    const vs = s.set.value.values();
+    const vs = s.asSet().value.values();
     // Same snapshot-and-retain rationale as mapForEach above.
     const snap_values = try allocator.alloc(JSValue, vs.len);
     defer allocator.free(snap_values);
     for (vs, 0..) |v, i| snap_values[i] = v.retain();
     defer for (snap_values) |v| v.deinit();
     for (snap_values) |v| {
-        _ = try cb.function.value.call(cb.function.value.ctx, allocator, JSValue.UNDEFINED, &.{ v, v, s });
+        _ = try cb.asFunction().value.call(cb.asFunction().value.ctx, allocator, JSValue.UNDEFINED, &.{ v, v, s });
     }
     return JSValue.UNDEFINED;
 }
@@ -254,7 +254,7 @@ fn setForEach(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 fn setValues(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
     const s = try requireSet(ctx, this_value, "values");
-    return iteratorFromValues(interp(ctx), allocator, s.set.value.values());
+    return iteratorFromValues(interp(ctx), allocator, s.asSet().value.values());
 }
 
 fn setEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -262,10 +262,10 @@ fn setEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     const s = try requireSet(ctx, this_value, "entries");
     var pairs: std.ArrayList(JSValue) = .empty;
     defer pairs.deinit(allocator);
-    for (s.set.value.values()) |v| {
+    for (s.asSet().value.values()) |v| {
         var pair = try interp(ctx).gcNewArray();
-        _ = try pair.array.value.push(v.retain());
-        _ = try pair.array.value.push(v.retain());
+        _ = try pair.asArray().value.push(v.retain());
+        _ = try pair.asArray().value.push(v.retain());
         try pairs.append(allocator, pair);
     }
     return iteratorFromValues(interp(ctx), allocator, pairs.items);

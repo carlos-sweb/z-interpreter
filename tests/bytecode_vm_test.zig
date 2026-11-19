@@ -15,8 +15,8 @@ fn runAdd(use_bytecode_vm: bool) !void {
 
     const result = try interpreter.run("function add(a, b) { return a + b; } add(2, 3);");
     defer result.deinit();
-    try testing.expect(result == .number);
-    try testing.expectEqual(@as(f64, 5), result.number);
+    try testing.expect(result.isNumber());
+    try testing.expectEqual(@as(f64, 5), result.asNumber());
 }
 
 fn runNumber(source: []const u8, use_bytecode_vm: bool) !f64 {
@@ -27,8 +27,8 @@ fn runNumber(source: []const u8, use_bytecode_vm: bool) !f64 {
     interpreter.compile_options.use_bytecode_vm = use_bytecode_vm;
     const result = try interpreter.run(source);
     defer result.deinit();
-    try testing.expect(result == .number);
-    return result.number;
+    try testing.expect(result.isNumber());
+    return result.asNumber();
 }
 
 test "basic bytecode function is opt-in and preserves AST fallback" {
@@ -45,8 +45,8 @@ test "bytecode opt-in falls back for an unsupported call expression" {
 
     const result = try interpreter.run("function identity(x) { return x; } function throughCall(x) { return identity(x); } throughCall(5);");
     defer result.deinit();
-    try testing.expect(result == .number);
-    try testing.expectEqual(@as(f64, 5), result.number);
+    try testing.expect(result.isNumber());
+    try testing.expectEqual(@as(f64, 5), result.asNumber());
 }
 
 test "bytecode VM matches AST recursion, branches, and calls" {
@@ -80,8 +80,8 @@ test "bytecode VM top-level arithmetic, unaries, comparisons, and strings" {
         interpreter.compile_options.use_bytecode_vm = true;
         const res = try interpreter.run("1 + 2");
         defer res.deinit();
-        try testing.expect(res == .number);
-        try testing.expectEqual(@as(f64, 3), res.number);
+        try testing.expect(res.isNumber());
+        try testing.expectEqual(@as(f64, 3), res.asNumber());
     }
     // 10 * 5 - 3 -> 47
     {
@@ -92,8 +92,8 @@ test "bytecode VM top-level arithmetic, unaries, comparisons, and strings" {
         interpreter.compile_options.use_bytecode_vm = true;
         const res = try interpreter.run("10 * 5 - 3");
         defer res.deinit();
-        try testing.expect(res == .number);
-        try testing.expectEqual(@as(f64, 47), res.number);
+        try testing.expect(res.isNumber());
+        try testing.expectEqual(@as(f64, 47), res.asNumber());
     }
     // "hello" + " " + "world" -> "hello world"
     {
@@ -104,8 +104,8 @@ test "bytecode VM top-level arithmetic, unaries, comparisons, and strings" {
         interpreter.compile_options.use_bytecode_vm = true;
         const res = try interpreter.run("\"hello\" + \" \" + \"world\"");
         defer res.deinit();
-        try testing.expect(res == .string);
-        try testing.expectEqualStrings("hello world", res.string.value.data);
+        try testing.expect(res.isString());
+        try testing.expectEqualStrings("hello world", res.asString().value.data);
     }
     // 1 < 2 -> true
     {
@@ -116,8 +116,8 @@ test "bytecode VM top-level arithmetic, unaries, comparisons, and strings" {
         interpreter.compile_options.use_bytecode_vm = true;
         const res = try interpreter.run("1 < 2");
         defer res.deinit();
-        try testing.expect(res == .boolean);
-        try testing.expectEqual(true, res.boolean);
+        try testing.expect(res.isBool());
+        try testing.expectEqual(true, res.asBool());
     }
     // -5 + 3 -> -2
     {
@@ -128,8 +128,8 @@ test "bytecode VM top-level arithmetic, unaries, comparisons, and strings" {
         interpreter.compile_options.use_bytecode_vm = true;
         const res = try interpreter.run("-5 + 3");
         defer res.deinit();
-        try testing.expect(res == .number);
-        try testing.expectEqual(@as(f64, -2), res.number);
+        try testing.expect(res.isNumber());
+        try testing.expectEqual(@as(f64, -2), res.asNumber());
     }
     // !true -> false
     {
@@ -140,8 +140,8 @@ test "bytecode VM top-level arithmetic, unaries, comparisons, and strings" {
         interpreter.compile_options.use_bytecode_vm = true;
         const res = try interpreter.run("!true");
         defer res.deinit();
-        try testing.expect(res == .boolean);
-        try testing.expectEqual(false, res.boolean);
+        try testing.expect(res.isBool());
+        try testing.expectEqual(false, res.asBool());
     }
     // !false -> true
     {
@@ -152,8 +152,8 @@ test "bytecode VM top-level arithmetic, unaries, comparisons, and strings" {
         interpreter.compile_options.use_bytecode_vm = true;
         const res = try interpreter.run("!false");
         defer res.deinit();
-        try testing.expect(res == .boolean);
-        try testing.expectEqual(true, res.boolean);
+        try testing.expect(res.isBool());
+        try testing.expectEqual(true, res.asBool());
     }
 }
 
@@ -198,8 +198,8 @@ test "bytecode VM try catch throw" {
     interpreter.compile_options.use_bytecode_vm = true;
     const res = try interpreter.run("let r; try { throw 'err'; } catch(e) { r = e; } r;");
     defer res.deinit();
-    try testing.expect(res == .string);
-    try testing.expectEqualStrings("err", res.string.value.data);
+    try testing.expect(res.isString());
+    try testing.expectEqualStrings("err", res.asString().value.data);
 }
 
 test "bytecode opt-in falls back for generator functions" {
@@ -212,8 +212,8 @@ test "bytecode opt-in falls back for generator functions" {
     const source = "function* g() { yield 1; yield 2; } let it = g(); let r = [it.next().value, it.next().value]; r[0] + r[1];";
     const result = try interpreter.run(source);
     defer result.deinit();
-    try testing.expect(result == .number);
-    try testing.expectEqual(@as(f64, 3), result.number);
+    try testing.expect(result.isNumber());
+    try testing.expectEqual(@as(f64, 3), result.asNumber());
 }
 
 test "bytecode opt-in falls back for async functions" {
@@ -225,7 +225,7 @@ test "bytecode opt-in falls back for async functions" {
 
     const result = try interpreter.run("async function f() { return await 1; } f();");
     defer result.deinit();
-    try testing.expect(result == .promise);
+    try testing.expect(result.isPromise());
 }
 
 test "bytecode VM superinstructions" {
@@ -265,7 +265,7 @@ test "bytecode VM register recycling in fib" {
 
     const result = try interpreter.run("function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); } fib(10);");
     defer result.deinit();
-    try testing.expectEqual(@as(f64, 55), result.number);
+    try testing.expectEqual(@as(f64, 55), result.asNumber());
     const disasm = output.written();
     try testing.expect(std.mem.indexOf(u8, disasm, "r1") != null);
     try testing.expect(std.mem.indexOf(u8, disasm, "r2") != null);
@@ -304,8 +304,8 @@ test "bytecode VM call site cache invalidation when callee changes" {
     ;
     const result = try interpreter.run(source);
     defer result.deinit();
-    try testing.expect(result == .number);
-    try testing.expectEqual(@as(f64, 12), result.number);
+    try testing.expect(result.isNumber());
+    try testing.expectEqual(@as(f64, 12), result.asNumber());
 }
 
 test "bytecode VM get_elem_const and array pre-size" {
@@ -324,7 +324,7 @@ test "bytecode VM get_elem_const and array pre-size" {
         interpreter.compile_options.use_bytecode_vm = true;
         const result = try interpreter.run("let a = [1,2]; a[5];");
         defer result.deinit();
-        try testing.expect(result == .undefined);
+        try testing.expect(result.isUndefined());
     }
 
     // 14. Funcional: let a = [1]; let i = 0; a[i] -> 1 (key no es const, fallback)
@@ -358,8 +358,8 @@ test "NaNBoxedValue roundtrip and helpers" {
         try testing.expect(nb.isNumber());
         try testing.expectEqual(@as(f64, 42.5), nb.asNumber());
         const back = nb.toJSValue();
-        try testing.expect(back == .number);
-        try testing.expectEqual(@as(f64, 42.5), back.number);
+        try testing.expect(back.isNumber());
+        try testing.expectEqual(@as(f64, 42.5), back.asNumber());
     }
 
     // .number = nan (positive)
@@ -370,8 +370,8 @@ test "NaNBoxedValue roundtrip and helpers" {
         try testing.expect(std.math.isNan(nb.asNumber()));
         try testing.expectEqual(NaNBoxedValue.CANONICAL_NAN, nb.bits);
         const back = nb.toJSValue();
-        try testing.expect(back == .number);
-        try testing.expect(std.math.isNan(back.number));
+        try testing.expect(back.isNumber());
+        try testing.expect(std.math.isNan(back.asNumber()));
     }
 
     // .number = -nan (canonicalized to positive)
@@ -383,8 +383,8 @@ test "NaNBoxedValue roundtrip and helpers" {
         try testing.expect(std.math.isNan(nb.asNumber()));
         try testing.expectEqual(NaNBoxedValue.CANONICAL_NAN, nb.bits);
         const back = nb.toJSValue();
-        try testing.expect(back == .number);
-        try testing.expect(std.math.isNan(back.number));
+        try testing.expect(back.isNumber());
+        try testing.expect(std.math.isNan(back.asNumber()));
     }
 
     // .boolean = true / false
@@ -393,13 +393,13 @@ test "NaNBoxedValue roundtrip and helpers" {
         const nb_true = try NaNBoxedValue.fromJSValue(v_true, null);
         try testing.expect(!nb_true.isNumber());
         const back_true = nb_true.toJSValue();
-        try testing.expect(back_true == .boolean and back_true.boolean == true);
+        try testing.expect(back_true.isBool() and back_true.asBool() == true);
 
         const v_false = JSValue.fromBool(false);
         const nb_false = try NaNBoxedValue.fromJSValue(v_false, null);
         try testing.expect(!nb_false.isNumber());
         const back_false = nb_false.toJSValue();
-        try testing.expect(back_false == .boolean and back_false.boolean == false);
+        try testing.expect(back_false.isBool() and back_false.asBool() == false);
     }
 
     // .null, .undefined
@@ -408,13 +408,13 @@ test "NaNBoxedValue roundtrip and helpers" {
         const nb_null = try NaNBoxedValue.fromJSValue(v_null, null);
         try testing.expect(!nb_null.isNumber());
         const back_null = nb_null.toJSValue();
-        try testing.expect(back_null == .null);
+        try testing.expect(back_null.isNull());
 
         const v_undef = JSValue.UNDEFINED;
         const nb_undef = try NaNBoxedValue.fromJSValue(v_undef, null);
         try testing.expect(!nb_undef.isNumber());
         const back_undef = nb_undef.toJSValue();
-        try testing.expect(back_undef == .undefined);
+        try testing.expect(back_undef.isUndefined());
     }
 
     // .string = "hello" (pointer equality)
@@ -424,8 +424,8 @@ test "NaNBoxedValue roundtrip and helpers" {
         const nb = try NaNBoxedValue.fromJSValue(str, null);
         try testing.expect(!nb.isNumber());
         const back = nb.toJSValueNoRetain();
-        try testing.expect(back == .string);
-        try testing.expectEqual(str.string, back.string);
+        try testing.expect(back.isString());
+        try testing.expectEqual(str.asString(), back.asString());
     }
 
     // .array = [...] (pointer equality)
@@ -435,8 +435,8 @@ test "NaNBoxedValue roundtrip and helpers" {
         const nb = try NaNBoxedValue.fromJSValue(arr, null);
         try testing.expect(!nb.isNumber());
         const back = nb.toJSValueNoRetain();
-        try testing.expect(back == .array);
-        try testing.expectEqual(arr.array, back.array);
+        try testing.expect(back.isArray());
+        try testing.expectEqual(arr.asArray(), back.asArray());
     }
 
     // .object = {...} (pointer equality)
@@ -446,8 +446,8 @@ test "NaNBoxedValue roundtrip and helpers" {
         const nb = try NaNBoxedValue.fromJSValue(obj, null);
         try testing.expect(!nb.isNumber());
         const back = nb.toJSValueNoRetain();
-        try testing.expect(back == .object);
-        try testing.expectEqual(obj.object, back.object);
+        try testing.expect(back.isObject());
+        try testing.expectEqual(obj.asObject(), back.asObject());
     }
 
     // TAG_OTHER variants roundtrip
@@ -459,14 +459,14 @@ test "NaNBoxedValue roundtrip and helpers" {
         defer nb.deinit();
         try testing.expect(!nb.isNumber());
         const back = nb.toJSValueNoRetain();
-        try testing.expect(back == .set);
-        try testing.expectEqual(val.set, back.set);
+        try testing.expect(back.isSet());
+        try testing.expectEqual(val.asSet(), back.asSet());
 
         // toJSValue() creates an owned JSValue reference
         const owned_back = nb.toJSValue();
         defer owned_back.deinit();
-        try testing.expect(owned_back == .set);
-        try testing.expectEqual(val.set, owned_back.set);
+        try testing.expect(owned_back.isSet());
+        try testing.expectEqual(val.asSet(), owned_back.asSet());
     }
 
     // 2. @"error"
@@ -477,8 +477,8 @@ test "NaNBoxedValue roundtrip and helpers" {
         defer nb.deinit();
         try testing.expect(!nb.isNumber());
         const back = nb.toJSValueNoRetain();
-        try testing.expect(back == .@"error");
-        try testing.expectEqual(val.@"error", back.@"error");
+        try testing.expect(back.isError());
+        try testing.expectEqual(val.asError(), back.asError());
     }
 
     // 3. date
@@ -489,8 +489,8 @@ test "NaNBoxedValue roundtrip and helpers" {
         defer nb.deinit();
         try testing.expect(!nb.isNumber());
         const back = nb.toJSValueNoRetain();
-        try testing.expect(back == .date);
-        try testing.expectEqual(val.date, back.date);
+        try testing.expect(back.isDate());
+        try testing.expectEqual(val.asDate(), back.asDate());
     }
 
     // 4. promise
@@ -501,8 +501,8 @@ test "NaNBoxedValue roundtrip and helpers" {
         defer nb.deinit();
         try testing.expect(!nb.isNumber());
         const back = nb.toJSValueNoRetain();
-        try testing.expect(back == .promise);
-        try testing.expectEqual(val.promise, back.promise);
+        try testing.expect(back.isPromise());
+        try testing.expectEqual(val.asPromise(), back.asPromise());
     }
 
     // 5. proxy
@@ -515,8 +515,8 @@ test "NaNBoxedValue roundtrip and helpers" {
         defer nb.deinit();
         try testing.expect(!nb.isNumber());
         const back = nb.toJSValueNoRetain();
-        try testing.expect(back == .proxy);
-        try testing.expectEqual(val.proxy, back.proxy);
+        try testing.expect(back.isProxy());
+        try testing.expectEqual(val.asProxy(), back.asProxy());
     }
 
     // 6. array_buffer
@@ -527,8 +527,8 @@ test "NaNBoxedValue roundtrip and helpers" {
         defer nb.deinit();
         try testing.expect(!nb.isNumber());
         const back = nb.toJSValueNoRetain();
-        try testing.expect(back == .array_buffer);
-        try testing.expectEqual(val.array_buffer, back.array_buffer);
+        try testing.expect(back.isArrayBuffer());
+        try testing.expectEqual(val.asArrayBuffer(), back.asArrayBuffer());
     }
 
     // 7. data_view
@@ -540,8 +540,8 @@ test "NaNBoxedValue roundtrip and helpers" {
         defer nb.deinit();
         try testing.expect(!nb.isNumber());
         const back = nb.toJSValueNoRetain();
-        try testing.expect(back == .data_view);
-        try testing.expectEqual(val.data_view, back.data_view);
+        try testing.expect(back.isDataView());
+        try testing.expectEqual(val.asDataView(), back.asDataView());
     }
 
     // 8. typed_array
@@ -553,8 +553,8 @@ test "NaNBoxedValue roundtrip and helpers" {
         defer nb.deinit();
         try testing.expect(!nb.isNumber());
         const back = nb.toJSValueNoRetain();
-        try testing.expect(back == .typed_array);
-        try testing.expectEqual(val.typed_array, back.typed_array);
+        try testing.expect(back.isTypedArray());
+        try testing.expectEqual(val.asTypedArray(), back.asTypedArray());
     }
 
     // TAG_OTHER requires allocator: error.UnsupportedValue when null
