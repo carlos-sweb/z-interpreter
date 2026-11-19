@@ -44,12 +44,13 @@ pub const CallFrame = struct {
 
 const PropIC = struct {
     block: ?*const codeblock.CodeBlock = null,
+    key_ptr: [*]const u8 = undefined,
+    interned_key_ptr: ?[*]const u8 = null,
     pc: u32 = 0,
     shape_id: u32 = 0,
     next_shape: u32 = 0,
+    cached_shape_id: u32 = 0,
     slot_idx: u32 = 0,
-    key_ptr: [*]const u8 = undefined,
-    interned_key: []const u8 = &.{},
 };
 
 inline fn needsDeinit(v: JSValue) bool {
@@ -129,7 +130,7 @@ noinline fn deinitSlotSlow(v: *JSValue) void {
         const box = v.asObject();
         if (box._count == 1 and obj_pool_len < 32 and !box.value.is_frozen and box.value.is_extensible and box.value.properties.capacity() <= 16) {
             const props = box.value.properties.entries.items(.value);
-            var can_preserve = props.len > 0 and props.len <= 8;
+            var can_preserve = box.value.cached_len == 0 and props.len > 0 and props.len <= 8;
             var has_accessor = false;
             for (props) |*prop| {
                 if (prop.isAccessor()) {
@@ -384,26 +385,40 @@ noinline fn getPropSlow(allocator: Allocator, frame: *CallFrame, frame_regs: []J
 
 noinline fn setPropSlow(allocator: Allocator, frame: *CallFrame, op: codeblock.Op, op_pc: u32, obj: JSValue, key: []const u8, val: JSValue, ic: *PropIC) !void {
     @branchHint(.cold);
-    _ = op;
     if (obj.isObject()) {
         const box = obj.asObject();
         if (ic.block == frame.block and ic.pc == op_pc and ic.shape_id == box.value.shape_id and ic.key_ptr == key.ptr) {
-            if (ic.next_shape != 0 and ic.interned_key.len > 0) {
-                const val_to_store = if (needsDeinit(val)) val.retain() else val;
-                if (box.value.putBorrowedTransition(ic.interned_key, val_to_store, ic.slot_idx, ic.next_shape) catch false) {
-                    return;
-                } else if (needsDeinit(val)) {
-                    val_to_store.deinit();
+            if (ic.next_shape != 0) {
+                if (ic.interned_key_ptr) |ik_ptr| {
+                    const prev_cached_shape = box.value.cached_shape_id;
+                    const was_recycled_hit = prev_cached_shape != 0 and ic.slot_idx == box.value.active_len and ic.slot_idx < box.value.cached_len;
+                    const interned = ik_ptr[0..key.len];
+                    const val_to_store = if (needsDeinit(val)) val.retain() else val;
+                    if (box.value.putBorrowedTransition(interned, val_to_store, ic.slot_idx, ic.next_shape) catch false) {
+                        if (was_recycled_hit) {
+                            ic.cached_shape_id = prev_cached_shape;
+                            @constCast(frame.block.ops)[op_pc].opcode = .set_prop_transition;
+                        } else if (op.opcode == .set_prop_transition) {
+                            @constCast(frame.block.ops)[op_pc].opcode = .set_prop;
+                        }
+                        return;
+                    } else if (needsDeinit(val)) {
+                        val_to_store.deinit();
+                    }
                 }
             }
         }
+        if (op.opcode == .set_prop_transition) {
+            @constCast(frame.block.ops)[op_pc].opcode = .set_prop;
+        }
+        if (box.value.cached_len > 0) box.value.syncPartialRecycle();
         if (frame.interp) |itp| {
             const proto_is_obj_proto = if (box.value.prototype) |p| (itp.protos.object.isObject() and p == &itp.protos.object.asObject().value) else true;
             if (box.value.properties.getIndex(key) == null and proto_is_obj_proto) {
                 const prev_shape = box.value.shape_id;
                 const prev_count = box.value.properties.count();
-                const interned = if (ic.block == frame.block and ic.pc == op_pc and ic.key_ptr == key.ptr and ic.interned_key.len > 0)
-                    ic.interned_key
+                const interned = if (ic.block == frame.block and ic.pc == op_pc and ic.key_ptr == key.ptr and ic.interned_key_ptr != null)
+                    ic.interned_key_ptr.?[0..key.len]
                 else
                     try itp.internPropKey(key);
                 const val_to_store = if (needsDeinit(val)) val.retain() else val;
@@ -422,9 +437,10 @@ noinline fn setPropSlow(allocator: Allocator, frame: *CallFrame, op: codeblock.O
                     .pc = op_pc,
                     .shape_id = prev_shape,
                     .next_shape = box.value.shape_id,
+                    .cached_shape_id = 0,
                     .slot_idx = @intCast(prev_count),
                     .key_ptr = key.ptr,
-                    .interned_key = interned,
+                    .interned_key_ptr = interned.ptr,
                 };
                 return;
             }
@@ -438,12 +454,16 @@ noinline fn setPropSlow(allocator: Allocator, frame: *CallFrame, op: codeblock.O
                     .pc = op_pc,
                     .shape_id = box.value.shape_id,
                     .next_shape = 0,
+                    .cached_shape_id = 0,
                     .slot_idx = @intCast(slot_idx),
                     .key_ptr = key.ptr,
                 };
             }
         }
     } else {
+        if (op.opcode == .set_prop_transition) {
+            @constCast(frame.block.ops)[op_pc].opcode = .set_prop;
+        }
         try setProp(allocator, obj, key, val);
     }
 }
@@ -873,6 +893,47 @@ noinline fn vmCallDispatch(
                     }
                 }
             }
+            try setPropSlow(allocator, frame, op, op_pc, obj, key, val, ic);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .set_prop_transition => {
+            const op_pc: u32 = @intCast(ip);
+            const op = code[ip];
+            const obj = try getRegister(frame_regs, op.a);
+            const val = try getRegister(frame_regs, op.c);
+            const ic_idx = ((@intFromPtr(frame.block) >> 4) +% op_pc) & 255;
+            const ic = &prop_ic[ic_idx];
+            if (obj.isObject()) {
+                const box = obj.asObject();
+                const slot = ic.slot_idx;
+                if (ic.block == frame.block and
+                    ic.pc == op_pc and
+                    box.value.shape_id == ic.shape_id and
+                    box.value.cached_shape_id == ic.cached_shape_id and
+                    box.value.active_len == slot and
+                    slot < box.value.cached_len and
+                    !box.value.is_frozen and
+                    box.value.is_extensible and
+                    box.value.properties.entries.items(.key)[slot].ptr == ic.interned_key_ptr)
+                {
+                    box.value.properties.entries.items(.value)[slot].value = if (needsDeinit(val)) val.retain() else val;
+                    const next_active = box.value.active_len + 1;
+                    box.value.shape_id = ic.next_shape;
+                    if (next_active == box.value.cached_len) {
+                        box.value.cached_len = 0;
+                        box.value.cached_shape_id = 0;
+                        box.value.active_len = 0;
+                    } else {
+                        box.value.active_len = next_active;
+                    }
+                    ip += 1;
+                    if (ip >= code.len) return error.MissingReturn;
+                    continue :dispatch code[ip].opcode;
+                }
+            }
+            const key = try constantKey(frame.block, op.b);
             try setPropSlow(allocator, frame, op, op_pc, obj, key, val, ic);
             ip += 1;
             if (ip >= code.len) return error.MissingReturn;

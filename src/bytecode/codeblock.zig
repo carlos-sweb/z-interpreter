@@ -46,6 +46,7 @@ pub const Opcode = enum(u8) {
     new_value,
     get_prop,
     set_prop,
+    set_prop_transition,
     make_closure,
     return_value,
     return_undefined,

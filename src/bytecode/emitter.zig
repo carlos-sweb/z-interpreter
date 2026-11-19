@@ -1108,7 +1108,7 @@ pub fn disassemble(allocator: Allocator, block: *const codeblock.CodeBlock) ![]u
             .new_object => try output.print(allocator, " r{d}", .{op.a}),
             .new_array => try output.print(allocator, " r{d}, {d}", .{ op.a, op.b }),
             .get_prop => try output.print(allocator, " r{d}, r{d}, #{d}", .{ op.a, op.b, op.c }),
-            .set_prop => try output.print(allocator, " r{d}, #{d}, r{d}", .{ op.a, op.b, op.c }),
+            .set_prop, .set_prop_transition => try output.print(allocator, " r{d}, #{d}, r{d}", .{ op.a, op.b, op.c }),
             .get_elem => try output.print(allocator, " r{d}, r{d}, r{d}", .{ op.a, op.b, op.c }),
             .get_elem_const => try output.print(allocator, " r{d}, r{d}, #{d}", .{ op.a, op.b, op.c }),
             .set_elem => try output.print(allocator, " r{d}, r{d}, r{d}", .{ op.a, op.b, op.c }),
