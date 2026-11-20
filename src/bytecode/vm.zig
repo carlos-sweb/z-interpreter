@@ -7,6 +7,7 @@ const zmath = @import("zmath");
 const JSValue = zvalue.JSValue;
 const Environment = @import("../environment.zig").Environment;
 const codeblock = @import("codeblock.zig");
+const baseline_jit = @import("../jit/baseline.zig");
 const interpreter_class = @import("../interpreter_class.zig");
 const interpreter_mod = @import("../interpreter.zig");
 const ClosureCtx = interpreter_mod.ClosureCtx;
@@ -708,14 +709,102 @@ noinline fn vmCallCleanup(registers: []JSValue, reg_top: usize, prev_obj_pool_le
     }
 }
 
+fn checkSelfRecursionGuard(callee_block: *const codeblock.CodeBlock, env_opt: ?*Environment) bool {
+    for (callee_block.call_target_cache) |*cs| {
+        if (cs.global_name) |gname| {
+            const env = env_opt orelse return false;
+            const val = env.get(gname) orelse return false;
+            const target = getBytecodeTarget(val) orelse return false;
+            if (target.block != callee_block) return false;
+        }
+    }
+    return true;
+}
+
+noinline fn tryInvokeJitTopLevel(
+    allocator: Allocator,
+    mut_cb: *codeblock.CodeBlock,
+    cenv: ?*Environment,
+    args: []const JSValue,
+    registers: []JSValue,
+) ?JSValue {
+    @branchHint(.cold);
+    if (mut_cb.jit_fn == null) {
+        if (!baseline_jit.compile(allocator, mut_cb)) return null;
+    }
+    const jfn = mut_cb.jit_fn orelse return null;
+    if (args.len != mut_cb.param_count) return null;
+    for (args) |a| {
+        if (needsDeinit(a)) return null;
+    }
+    if (!checkSelfRecursionGuard(mut_cb, cenv)) return null;
+    for (0..mut_cb.param_count) |i| {
+        registers[i] = args[i];
+    }
+    const limit_idx = @min(MAX_REGISTERS, MAX_FRAMES * @as(usize, mut_cb.register_count));
+    var jit_out: JSValue = JSValue.UNDEFINED;
+    if (jfn(registers.ptr, &jit_out, registers.ptr + limit_idx) == 0) {
+        return jit_out;
+    }
+    return null;
+}
+
+noinline fn tryInvokeJit(
+    allocator: Allocator,
+    mut_cb: *codeblock.CodeBlock,
+    cenv: ?*Environment,
+    registers: []JSValue,
+    callee_reg_base: usize,
+    frame_count: usize,
+    frame_regs: []JSValue,
+    arg_start: usize,
+    arg_count: usize,
+    param_count: usize,
+    dst_reg: u8,
+) !bool {
+    @branchHint(.cold);
+    if (mut_cb.jit_fn == null) {
+        if (!baseline_jit.compile(allocator, mut_cb)) return false;
+    }
+    const jfn = mut_cb.jit_fn orelse return false;
+    if (arg_count != mut_cb.param_count or param_count != mut_cb.param_count) return false;
+    if (!checkSelfRecursionGuard(mut_cb, cenv)) return false;
+    const remaining_frames = MAX_FRAMES - frame_count;
+    const limit_idx = @min(MAX_REGISTERS, callee_reg_base + remaining_frames * @as(usize, mut_cb.register_count));
+    var jit_out: JSValue = JSValue.UNDEFINED;
+    if (jfn(registers.ptr + callee_reg_base, &jit_out, registers.ptr + limit_idx) == 0) {
+        try setRegPrimitive(frame_regs, dst_reg, jit_out);
+        return true;
+    }
+    for (0..param_count) |i| {
+        registers[callee_reg_base + i] = frame_regs[arg_start + i];
+    }
+    if (frame_count > 64) {
+        mut_cb.jit_fn = null;
+        mut_cb.jit_failed = true;
+    }
+    return false;
+}
+
 pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_env: ?*Environment, args: []const JSValue, interp: ?*interpreter_mod.Interpreter) !JSValue {
+    const registers = try allocator.alloc(JSValue, MAX_REGISTERS);
+    defer allocator.free(registers);
+
+    if (!block.jit_failed) {
+        const mut_cb = @constCast(block);
+        mut_cb.call_count +%= 1;
+        if (mut_cb.jit_fn != null or mut_cb.call_count >= baseline_jit.HOT_THRESHOLD) {
+            if (tryInvokeJitTopLevel(allocator, mut_cb, closure_env, args, registers)) |res| {
+                return res;
+            }
+        }
+    }
+
     clearGlobalCache();
     defer clearGlobalCache();
 
     const frames = try allocator.alloc(CallFrame, MAX_FRAMES);
     defer allocator.free(frames);
-    const registers = try allocator.alloc(JSValue, MAX_REGISTERS);
-    defer allocator.free(registers);
 
     var reg_top: usize = 0;
     const prev_obj_pool_len = obj_pool_len;
@@ -1447,6 +1536,18 @@ noinline fn vmCallDispatch(
                         if (needsDeinit(v)) callee_has_rc = true;
                     }
                 }
+                if (!callee_has_rc and !callee_block.jit_failed) {
+                    const mut_cb = @constCast(callee_block);
+                    mut_cb.call_count +%= 1;
+                    if (mut_cb.jit_fn != null or mut_cb.call_count >= baseline_jit.HOT_THRESHOLD) {
+                        const cenv: ?*Environment = if (cache.closure_env) |ce| @ptrCast(@alignCast(ce)) else null;
+                        if (try tryInvokeJit(allocator, mut_cb, cenv, registers, callee_reg_base, frame_count, frame_regs, start, arg_count, param_count, op.a)) {
+                            ip += 1;
+                            if (ip >= code.len) return error.MissingReturn;
+                            continue :dispatch code[ip].opcode;
+                        }
+                    }
+                }
 
                 frame.pc = @intCast(ip + 1);
                 frames[frame_count] = CallFrame{
@@ -1516,6 +1617,18 @@ noinline fn vmCallDispatch(
                         const v = frame_regs[start + i].retain();
                         registers[callee_reg_base + i] = v;
                         if (needsDeinit(v)) callee_has_rc = true;
+                    }
+                }
+                if (!callee_has_rc and !callee_block.jit_failed) {
+                    const mut_cb = @constCast(callee_block);
+                    mut_cb.call_count +%= 1;
+                    if (mut_cb.jit_fn != null or mut_cb.call_count >= baseline_jit.HOT_THRESHOLD) {
+                        const cenv: ?*Environment = if (cache.closure_env) |ce| @ptrCast(@alignCast(ce)) else null;
+                        if (try tryInvokeJit(allocator, mut_cb, cenv, registers, callee_reg_base, frame_count, frame_regs, start, arg_count, param_count, op.a)) {
+                            ip += 1;
+                            if (ip >= code.len) return error.MissingReturn;
+                            continue :dispatch code[ip].opcode;
+                        }
                     }
                 }
 
@@ -1964,4 +2077,9 @@ test "vm executes arithmetic and retains its result" {
     defer value.deinit();
     try std.testing.expect(value.isNumber());
     try std.testing.expectEqual(@as(f64, 5), value.asNumber());
+}
+
+test {
+    _ = @import("../jit/x64_asm.zig");
+    _ = @import("../jit/baseline.zig");
 }

@@ -131,6 +131,8 @@ pub const CallSiteCache = struct {
     global_version: u64 = 0,
 };
 
+pub const JitFn = *const fn (regs: [*]JSValue, out: *JSValue, regs_limit: [*]JSValue) callconv(.c) u8;
+
 /// Immutable representation emitted by a later compiler pass.
 pub const CodeBlock = struct {
     ops: []const Op = &.{},
@@ -143,6 +145,18 @@ pub const CodeBlock = struct {
     capture_count: u16 = 0,
     flags: Flags = .{},
     name: ?[]const u8 = null,
+    call_count: u32 = 0,
+    jit_failed: bool = false,
+    jit_code: ?[]align(std.heap.page_size_min) u8 = null,
+    jit_fn: ?JitFn = null,
+
+    pub fn deinitJit(self: *CodeBlock) void {
+        if (self.jit_code) |jc| {
+            @import("../jit/x64_asm.zig").freeExecutable(jc);
+            self.jit_code = null;
+            self.jit_fn = null;
+        }
+    }
 };
 
 pub const LocalKind = enum { parameter, @"var", let, @"const", function, class, catch_binding };

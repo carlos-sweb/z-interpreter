@@ -1,0 +1,387 @@
+const std = @import("std");
+const builtin = @import("builtin");
+const Allocator = std.mem.Allocator;
+
+pub const is_supported_host = (builtin.cpu.arch == .x86_64 and builtin.os.tag == .linux);
+
+pub const Reg = enum(u4) {
+    rax = 0,
+    rcx = 1,
+    rdx = 2,
+    rbx = 3,
+    rsp = 4,
+    rbp = 5,
+    rsi = 6,
+    rdi = 7,
+    r8 = 8,
+    r9 = 9,
+    r10 = 10,
+    r11 = 11,
+    r12 = 12,
+    r13 = 13,
+    r14 = 14,
+    r15 = 15,
+
+    pub inline fn low3(self: Reg) u3 {
+        return @truncate(@intFromEnum(self));
+    }
+
+    pub inline fn isExt(self: Reg) bool {
+        return (@intFromEnum(self) & 8) != 0;
+    }
+};
+
+pub const Xmm = enum(u3) {
+    xmm0 = 0,
+    xmm1 = 1,
+    xmm2 = 2,
+    xmm3 = 3,
+};
+
+pub const Cond = enum(u4) {
+    o = 0x0,
+    no = 0x1,
+    b = 0x2, // unsigned <  (CF=1)
+    ae = 0x3, // unsigned >= (CF=0)
+    e = 0x4, // ==          (ZF=1)
+    ne = 0x5, // !=          (ZF=0)
+    be = 0x6, // unsigned <= (CF=1 or ZF=1)
+    a = 0x7, // unsigned >  (CF=0 and ZF=0)
+    p = 0xA, // parity / unordered NaN (PF=1)
+    np = 0xB, // not parity / ordered (PF=0)
+};
+
+pub const Label = u32;
+
+const Fixup = struct {
+    patch_offset: usize,
+    target_label: Label,
+};
+
+pub const Assembler = struct {
+    allocator: Allocator,
+    code: std.ArrayListUnmanaged(u8) = .empty,
+    labels: std.ArrayListUnmanaged(?usize) = .empty,
+    fixups: std.ArrayListUnmanaged(Fixup) = .empty,
+
+    pub fn init(allocator: Allocator) Assembler {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *Assembler) void {
+        self.code.deinit(self.allocator);
+        self.labels.deinit(self.allocator);
+        self.fixups.deinit(self.allocator);
+    }
+
+    inline fn rexW(r_ext: bool, b_ext: bool) u8 {
+        return 0x48 | (if (r_ext) @as(u8, 4) else 0) | (if (b_ext) @as(u8, 1) else 0);
+    }
+
+    inline fn modRM(mod: u2, reg: u3, rm: u3) u8 {
+        return (@as(u8, mod) << 6) | (@as(u8, reg) << 3) | @as(u8, rm);
+    }
+
+    inline fn emitByte(self: *Assembler, b: u8) !void {
+        try self.code.append(self.allocator, b);
+    }
+
+    inline fn emitBytes(self: *Assembler, bytes: []const u8) !void {
+        try self.code.appendSlice(self.allocator, bytes);
+    }
+
+    inline fn emitU32(self: *Assembler, v: u32) !void {
+        var buf: [4]u8 = undefined;
+        std.mem.writeInt(u32, &buf, v, .little);
+        try self.emitBytes(&buf);
+    }
+
+    inline fn emitI32(self: *Assembler, v: i32) !void {
+        try self.emitU32(@bitCast(v));
+    }
+
+    inline fn emitU64(self: *Assembler, v: u64) !void {
+        var buf: [8]u8 = undefined;
+        std.mem.writeInt(u64, &buf, v, .little);
+        try self.emitBytes(&buf);
+    }
+
+    fn emitMemOperand(self: *Assembler, reg_field: u3, base: Reg, disp: i32) !void {
+        const rm = base.low3();
+        if (disp == 0 and rm != 5) {
+            try self.emitByte(modRM(0b00, reg_field, rm));
+            if (rm == 4) try self.emitByte(0x24);
+        } else if (disp >= -128 and disp <= 127) {
+            try self.emitByte(modRM(0b01, reg_field, rm));
+            if (rm == 4) try self.emitByte(0x24);
+            try self.emitByte(@bitCast(@as(i8, @intCast(disp))));
+        } else {
+            try self.emitByte(modRM(0b10, reg_field, rm));
+            if (rm == 4) try self.emitByte(0x24);
+            try self.emitI32(disp);
+        }
+    }
+
+    pub fn createLabel(self: *Assembler) !Label {
+        const id: Label = @intCast(self.labels.items.len);
+        try self.labels.append(self.allocator, null);
+        return id;
+    }
+
+    pub fn bindLabel(self: *Assembler, label: Label) void {
+        self.labels.items[label] = self.code.items.len;
+    }
+
+    pub fn pushReg(self: *Assembler, reg: Reg) !void {
+        if (reg.isExt()) try self.emitByte(0x41);
+        try self.emitByte(0x50 + @as(u8, reg.low3()));
+    }
+
+    pub fn popReg(self: *Assembler, reg: Reg) !void {
+        if (reg.isExt()) try self.emitByte(0x41);
+        try self.emitByte(0x58 + @as(u8, reg.low3()));
+    }
+
+    pub fn ret(self: *Assembler) !void {
+        try self.emitByte(0xC3);
+    }
+
+    pub fn movRegReg(self: *Assembler, dst: Reg, src: Reg) !void {
+        try self.emitByte(rexW(src.isExt(), dst.isExt()));
+        try self.emitByte(0x89);
+        try self.emitByte(modRM(0b11, src.low3(), dst.low3()));
+    }
+
+    pub fn movRegImm64(self: *Assembler, dst: Reg, imm: u64) !void {
+        try self.emitByte(rexW(false, dst.isExt()));
+        try self.emitByte(0xB8 + @as(u8, dst.low3()));
+        try self.emitU64(imm);
+    }
+
+    pub fn movRegImm32(self: *Assembler, dst: Reg, imm: u32) !void {
+        if (dst.isExt()) try self.emitByte(0x41);
+        try self.emitByte(0xB8 + @as(u8, dst.low3()));
+        try self.emitU32(imm);
+    }
+
+    pub fn xorRegReg(self: *Assembler, dst: Reg, src: Reg) !void {
+        try self.emitByte(rexW(src.isExt(), dst.isExt()));
+        try self.emitByte(0x31);
+        try self.emitByte(modRM(0b11, src.low3(), dst.low3()));
+    }
+
+    pub fn movRegMem(self: *Assembler, dst: Reg, base: Reg, disp: i32) !void {
+        try self.emitByte(rexW(dst.isExt(), base.isExt()));
+        try self.emitByte(0x8B);
+        try self.emitMemOperand(dst.low3(), base, disp);
+    }
+
+    pub fn movMemReg(self: *Assembler, base: Reg, disp: i32, src: Reg) !void {
+        try self.emitByte(rexW(src.isExt(), base.isExt()));
+        try self.emitByte(0x89);
+        try self.emitMemOperand(src.low3(), base, disp);
+    }
+
+    pub fn lea(self: *Assembler, dst: Reg, base: Reg, disp: i32) !void {
+        try self.emitByte(rexW(dst.isExt(), base.isExt()));
+        try self.emitByte(0x8D);
+        try self.emitMemOperand(dst.low3(), base, disp);
+    }
+
+    pub fn addRegImm32(self: *Assembler, dst: Reg, imm: i32) !void {
+        try self.emitByte(rexW(false, dst.isExt()));
+        if (imm >= -128 and imm <= 127) {
+            try self.emitByte(0x83);
+            try self.emitByte(modRM(0b11, 0, dst.low3()));
+            try self.emitByte(@bitCast(@as(i8, @intCast(imm))));
+        } else {
+            try self.emitByte(0x81);
+            try self.emitByte(modRM(0b11, 0, dst.low3()));
+            try self.emitI32(imm);
+        }
+    }
+
+    pub fn subRegImm32(self: *Assembler, dst: Reg, imm: i32) !void {
+        try self.emitByte(rexW(false, dst.isExt()));
+        if (imm >= -128 and imm <= 127) {
+            try self.emitByte(0x83);
+            try self.emitByte(modRM(0b11, 5, dst.low3()));
+            try self.emitByte(@bitCast(@as(i8, @intCast(imm))));
+        } else {
+            try self.emitByte(0x81);
+            try self.emitByte(modRM(0b11, 5, dst.low3()));
+            try self.emitI32(imm);
+        }
+    }
+
+    pub fn cmpRegReg(self: *Assembler, lhs: Reg, rhs: Reg) !void {
+        try self.emitByte(rexW(rhs.isExt(), lhs.isExt()));
+        try self.emitByte(0x39);
+        try self.emitByte(modRM(0b11, rhs.low3(), lhs.low3()));
+    }
+
+    pub fn cmpRegImm32(self: *Assembler, lhs: Reg, imm: i32) !void {
+        try self.emitByte(rexW(false, lhs.isExt()));
+        if (imm >= -128 and imm <= 127) {
+            try self.emitByte(0x83);
+            try self.emitByte(modRM(0b11, 7, lhs.low3()));
+            try self.emitByte(@bitCast(@as(i8, @intCast(imm))));
+        } else {
+            try self.emitByte(0x81);
+            try self.emitByte(modRM(0b11, 7, lhs.low3()));
+            try self.emitI32(imm);
+        }
+    }
+
+    pub fn shrRegImm8(self: *Assembler, dst: Reg, count: u8) !void {
+        try self.emitByte(rexW(false, dst.isExt()));
+        try self.emitByte(0xC1);
+        try self.emitByte(modRM(0b11, 5, dst.low3()));
+        try self.emitByte(count);
+    }
+
+    pub fn testRegReg(self: *Assembler, a: Reg, b: Reg) !void {
+        try self.emitByte(rexW(b.isExt(), a.isExt()));
+        try self.emitByte(0x85);
+        try self.emitByte(modRM(0b11, b.low3(), a.low3()));
+    }
+
+    pub fn cmovpRegReg(self: *Assembler, dst: Reg, src: Reg) !void {
+        try self.emitByte(rexW(dst.isExt(), src.isExt()));
+        try self.emitByte(0x0F);
+        try self.emitByte(0x4A);
+        try self.emitByte(modRM(0b11, dst.low3(), src.low3()));
+    }
+
+    pub fn movqXmmReg(self: *Assembler, dst: Xmm, src: Reg) !void {
+        try self.emitByte(0x66);
+        try self.emitByte(rexW(false, src.isExt()));
+        try self.emitByte(0x0F);
+        try self.emitByte(0x6E);
+        try self.emitByte(modRM(0b11, @intFromEnum(dst), src.low3()));
+    }
+
+    pub fn movqRegXmm(self: *Assembler, dst: Reg, src: Xmm) !void {
+        try self.emitByte(0x66);
+        try self.emitByte(rexW(false, dst.isExt()));
+        try self.emitByte(0x0F);
+        try self.emitByte(0x7E);
+        try self.emitByte(modRM(0b11, @intFromEnum(src), dst.low3()));
+    }
+
+    pub fn movsdXmmMem(self: *Assembler, dst: Xmm, base: Reg, disp: i32) !void {
+        try self.emitByte(0xF2);
+        if (base.isExt()) try self.emitByte(0x41);
+        try self.emitByte(0x0F);
+        try self.emitByte(0x10);
+        try self.emitMemOperand(@intFromEnum(dst), base, disp);
+    }
+
+    pub fn movsdMemXmm(self: *Assembler, base: Reg, disp: i32, src: Xmm) !void {
+        try self.emitByte(0xF2);
+        if (base.isExt()) try self.emitByte(0x41);
+        try self.emitByte(0x0F);
+        try self.emitByte(0x11);
+        try self.emitMemOperand(@intFromEnum(src), base, disp);
+    }
+
+    pub fn addsd(self: *Assembler, dst: Xmm, src: Xmm) !void {
+        try self.emitBytes(&.{ 0xF2, 0x0F, 0x58, modRM(0b11, @intFromEnum(dst), @intFromEnum(src)) });
+    }
+
+    pub fn subsd(self: *Assembler, dst: Xmm, src: Xmm) !void {
+        try self.emitBytes(&.{ 0xF2, 0x0F, 0x5C, modRM(0b11, @intFromEnum(dst), @intFromEnum(src)) });
+    }
+
+    pub fn mulsd(self: *Assembler, dst: Xmm, src: Xmm) !void {
+        try self.emitBytes(&.{ 0xF2, 0x0F, 0x59, modRM(0b11, @intFromEnum(dst), @intFromEnum(src)) });
+    }
+
+    pub fn ucomisd(self: *Assembler, lhs: Xmm, rhs: Xmm) !void {
+        try self.emitBytes(&.{ 0x66, 0x0F, 0x2E, modRM(0b11, @intFromEnum(lhs), @intFromEnum(rhs)) });
+    }
+
+    pub fn jmp(self: *Assembler, target: Label) !void {
+        try self.emitByte(0xE9);
+        const patch_offset = self.code.items.len;
+        try self.emitU32(0);
+        try self.fixups.append(self.allocator, .{ .patch_offset = patch_offset, .target_label = target });
+    }
+
+    pub fn jcc(self: *Assembler, cond: Cond, target: Label) !void {
+        try self.emitByte(0x0F);
+        try self.emitByte(0x80 + @as(u8, @intFromEnum(cond)));
+        const patch_offset = self.code.items.len;
+        try self.emitU32(0);
+        try self.fixups.append(self.allocator, .{ .patch_offset = patch_offset, .target_label = target });
+    }
+
+    pub fn callLabel(self: *Assembler, target: Label) !void {
+        try self.emitByte(0xE8);
+        const patch_offset = self.code.items.len;
+        try self.emitU32(0);
+        try self.fixups.append(self.allocator, .{ .patch_offset = patch_offset, .target_label = target });
+    }
+
+    pub fn finalizeFixups(self: *Assembler) !void {
+        for (self.fixups.items) |fixup| {
+            const target = self.labels.items[fixup.target_label] orelse return error.UnboundLabel;
+            const next_ip = fixup.patch_offset + 4;
+            const delta = @as(isize, @intCast(target)) - @as(isize, @intCast(next_ip));
+            const rel32: i32 = std.math.cast(i32, delta) orelse return error.JumpOutOfRange;
+            std.mem.writeInt(u32, self.code.items[fixup.patch_offset..][0..4], @bitCast(rel32), .little);
+        }
+    }
+
+    pub fn finalizeExecutable(self: *Assembler) ![]align(std.heap.page_size_min) u8 {
+        if (!comptime is_supported_host) return error.UnsupportedPlatform;
+        try self.finalizeFixups();
+        if (self.code.items.len == 0) return error.EmptyCode;
+        const page_size = std.heap.page_size_min;
+        const alloc_len = std.mem.alignForward(usize, self.code.items.len, page_size);
+        const mem = try std.posix.mmap(
+            null,
+            alloc_len,
+            .{ .READ = true, .WRITE = true },
+            .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
+            -1,
+            0,
+        );
+        errdefer std.posix.munmap(mem);
+        @memcpy(mem[0..self.code.items.len], self.code.items);
+        if (std.os.linux.mprotect(mem.ptr, mem.len, .{ .READ = true, .EXEC = true }) != 0) {
+            return error.MProtectFailed;
+        }
+        return mem;
+    }
+};
+
+pub fn freeExecutable(mem: []align(std.heap.page_size_min) u8) void {
+    if (comptime is_supported_host) {
+        std.posix.munmap(mem);
+    }
+}
+
+test "x64_asm emits and executes double addition with W^X mmap" {
+    if (!comptime is_supported_host) return;
+    var a = Assembler.init(std.testing.allocator);
+    defer a.deinit();
+
+    // fn(ptr: [*]u64) callconv(.c) u8: ptr[0] = as_f64(ptr[0]) + as_f64(ptr[1]); return 0;
+    try a.movsdXmmMem(.xmm0, .rdi, 0);
+    try a.movsdXmmMem(.xmm1, .rdi, 8);
+    try a.addsd(.xmm0, .xmm1);
+    try a.movsdMemXmm(.rdi, 0, .xmm0);
+    try a.xorRegReg(.rax, .rax);
+    try a.ret();
+
+    const exec = try a.finalizeExecutable();
+    defer freeExecutable(exec);
+
+    const Fn = *const fn ([*]u64) callconv(.c) u8;
+    const f: Fn = @ptrCast(exec.ptr);
+    var vals = [2]u64{ @bitCast(@as(f64, 12.5)), @bitCast(@as(f64, 29.5)) };
+    const rc = f(&vals);
+    try std.testing.expectEqual(@as(u8, 0), rc);
+    try std.testing.expectEqual(@as(f64, 42.0), @as(f64, @bitCast(vals[0])));
+}
