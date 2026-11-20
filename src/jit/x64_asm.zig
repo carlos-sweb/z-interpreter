@@ -253,6 +253,25 @@ pub const Assembler = struct {
         try self.emitByte(modRM(0b11, dst.low3(), src.low3()));
     }
 
+    pub fn andRegImm8(self: *Assembler, dst: Reg, imm: i8) !void {
+        try self.emitByte(rexW(false, dst.isExt()));
+        try self.emitByte(0x83);
+        try self.emitByte(modRM(0b11, 4, dst.low3()));
+        try self.emitByte(@bitCast(imm));
+    }
+
+    pub fn callReg(self: *Assembler, target: Reg) !void {
+        if (target.isExt()) try self.emitByte(0x41);
+        try self.emitByte(0xFF);
+        try self.emitByte(modRM(0b11, 2, target.low3()));
+    }
+
+    pub fn incMem64(self: *Assembler, base: Reg, disp: i32) !void {
+        try self.emitByte(rexW(false, base.isExt()));
+        try self.emitByte(0xFF);
+        try self.emitMemOperand(0, base, disp);
+    }
+
     pub fn movqXmmReg(self: *Assembler, dst: Xmm, src: Reg) !void {
         try self.emitByte(0x66);
         try self.emitByte(rexW(false, src.isExt()));

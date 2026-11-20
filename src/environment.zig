@@ -6,6 +6,8 @@ const JSValue = zvalue.JSValue;
 pub const EnvError = error{ReferenceError};
 pub const AssignError = error{ ReferenceError, BeforeInitialization, ImmutableBinding };
 
+pub var env_struct_version: u64 = 1;
+
 /// Result of a chain lookup: a live value, a binding that exists but is
 /// still in its temporal dead zone (`x; let x = 1;`), or nothing at all.
 pub const Lookup = union(enum) { value: JSValue, tdz, not_found };
@@ -71,6 +73,7 @@ pub const Environment = struct {
     escaping: bool = false,
 
     pub fn destroy(self: *Environment, allocator: Allocator) void {
+        env_struct_version +%= 1;
         for (self.bindings.items) |binding| binding.value.deinit();
         self.bindings.deinit(allocator);
         if (self.lazy_arguments) |args| {
@@ -118,10 +121,12 @@ pub const Environment = struct {
 
     pub fn removeBinding(self: *Environment, name: []const u8) ?Binding {
         const index = self.bindingIndex(name) orelse return null;
+        env_struct_version +%= 1;
         return self.bindings.orderedRemove(index);
     }
 
     pub fn define(self: *Environment, arena: Allocator, name: []const u8, value: JSValue) !void {
+        env_struct_version +%= 1;
         _ = self.tdz.remove(name);
         if (self.bindingIndex(name)) |index| {
             self.bindings.items[index].value = value;
@@ -141,6 +146,7 @@ pub const Environment = struct {
     /// Marks a lexically-declared name as existing-but-uninitialized in
     /// this scope. Set by the hoisting pre-pass at scope entry.
     pub fn markTDZ(self: *Environment, arena: Allocator, name: []const u8) !void {
+        env_struct_version +%= 1;
         try self.tdz.put(arena, name, {});
     }
 
@@ -148,6 +154,7 @@ pub const Environment = struct {
     /// `assign()` to it is a real TypeError (ECMA-262's
     /// SetMutableBinding step 5b, always-strict in this engine).
     pub fn markConst(self: *Environment, arena: Allocator, name: []const u8) !void {
+        env_struct_version +%= 1;
         try self.consts.put(arena, name, {});
     }
 

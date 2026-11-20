@@ -131,7 +131,14 @@ pub const CallSiteCache = struct {
     global_version: u64 = 0,
 };
 
-pub const JitFn = *const fn (regs: [*]JSValue, out: *JSValue, regs_limit: [*]JSValue) callconv(.c) u8;
+pub const JitGlobalSlot = extern struct {
+    env: ?*anyopaque = null,
+    value_ptr: ?*JSValue = null,
+    struct_version: u64 = 0,
+    is_mutable: u64 = 0,
+};
+
+pub const JitFn = *const fn (regs: [*]JSValue, out: *JSValue, regs_limit: [*]JSValue, env: ?*anyopaque) callconv(.c) u8;
 
 /// Immutable representation emitted by a later compiler pass.
 pub const CodeBlock = struct {
@@ -149,12 +156,17 @@ pub const CodeBlock = struct {
     jit_failed: bool = false,
     jit_code: ?[]align(std.heap.page_size_min) u8 = null,
     jit_fn: ?JitFn = null,
+    jit_global_slots: ?[]JitGlobalSlot = null,
 
-    pub fn deinitJit(self: *CodeBlock) void {
+    pub fn deinitJit(self: *CodeBlock, allocator: Allocator) void {
         if (self.jit_code) |jc| {
             @import("../jit/x64_asm.zig").freeExecutable(jc);
             self.jit_code = null;
             self.jit_fn = null;
+        }
+        if (self.jit_global_slots) |slots| {
+            allocator.free(slots);
+            self.jit_global_slots = null;
         }
     }
 };

@@ -5,7 +5,8 @@ const Allocator = std.mem.Allocator;
 const zvalue = @import("zvalue");
 const zmath = @import("zmath");
 const JSValue = zvalue.JSValue;
-const Environment = @import("../environment.zig").Environment;
+const environment_mod = @import("../environment.zig");
+const Environment = environment_mod.Environment;
 const codeblock = @import("codeblock.zig");
 const baseline_jit = @import("../jit/baseline.zig");
 const interpreter_class = @import("../interpreter_class.zig");
@@ -709,6 +710,13 @@ noinline fn vmCallCleanup(registers: []JSValue, reg_top: usize, prev_obj_pool_le
     }
 }
 
+noinline fn allocCapturedEnv(interp_opt: ?*interpreter_mod.Interpreter, parent_opt: ?*Environment) !?*Environment {
+    @branchHint(.cold);
+    const itp = interp_opt orelse return parent_opt;
+    const parent = parent_opt orelse return parent_opt;
+    return try itp.gcChildEnv(parent);
+}
+
 fn checkSelfRecursionGuard(callee_block: *const codeblock.CodeBlock, env_opt: ?*Environment) bool {
     for (callee_block.call_target_cache) |*cs| {
         if (cs.global_name) |gname| {
@@ -743,7 +751,7 @@ noinline fn tryInvokeJitTopLevel(
     }
     const limit_idx = @min(MAX_REGISTERS, MAX_FRAMES * @as(usize, mut_cb.register_count));
     var jit_out: JSValue = JSValue.UNDEFINED;
-    if (jfn(registers.ptr, &jit_out, registers.ptr + limit_idx) == 0) {
+    if (jfn(registers.ptr, &jit_out, registers.ptr + limit_idx, cenv) == 0) {
         return jit_out;
     }
     return null;
@@ -761,8 +769,9 @@ noinline fn tryInvokeJit(
     arg_count: usize,
     param_count: usize,
     dst_reg: u8,
-) !bool {
+) bool {
     @branchHint(.cold);
+    if (dst_reg >= frame_regs.len) return false;
     if (mut_cb.jit_fn == null) {
         if (!baseline_jit.compile(allocator, mut_cb)) return false;
     }
@@ -772,8 +781,10 @@ noinline fn tryInvokeJit(
     const remaining_frames = MAX_FRAMES - frame_count;
     const limit_idx = @min(MAX_REGISTERS, callee_reg_base + remaining_frames * @as(usize, mut_cb.register_count));
     var jit_out: JSValue = JSValue.UNDEFINED;
-    if (jfn(registers.ptr + callee_reg_base, &jit_out, registers.ptr + limit_idx) == 0) {
-        try setRegPrimitive(frame_regs, dst_reg, jit_out);
+    if (jfn(registers.ptr + callee_reg_base, &jit_out, registers.ptr + limit_idx, cenv) == 0) {
+        const slot = &frame_regs[dst_reg];
+        if (needsDeinit(slot.*)) deinitSlot(slot);
+        slot.* = jit_out;
         return true;
     }
     for (0..param_count) |i| {
@@ -852,7 +863,7 @@ noinline fn vmCallDispatch(
         .pc = 0,
         .reg_base = 0,
         .this_value = JSValue.UNDEFINED,
-        .closure_env = closure_env,
+        .closure_env = if (block.capture_count > 0) try allocCapturedEnv(interp, closure_env) else closure_env,
         .has_rc = init_has_rc,
         .return_reg = 0,
         .interp = interp,
@@ -1540,8 +1551,8 @@ noinline fn vmCallDispatch(
                     const mut_cb = @constCast(callee_block);
                     mut_cb.call_count +%= 1;
                     if (mut_cb.jit_fn != null or mut_cb.call_count >= baseline_jit.HOT_THRESHOLD) {
-                        const cenv: ?*Environment = if (cache.closure_env) |ce| @ptrCast(@alignCast(ce)) else null;
-                        if (try tryInvokeJit(allocator, mut_cb, cenv, registers, callee_reg_base, frame_count, frame_regs, start, arg_count, param_count, op.a)) {
+                        const cenv: ?*Environment = if (cache.closure_env) |ce| @ptrCast(@alignCast(ce)) else frame.closure_env;
+                        if (tryInvokeJit(allocator, mut_cb, cenv, registers, callee_reg_base, frame_count, frame_regs, start, arg_count, param_count, op.a)) {
                             ip += 1;
                             if (ip >= code.len) return error.MissingReturn;
                             continue :dispatch code[ip].opcode;
@@ -1549,13 +1560,14 @@ noinline fn vmCallDispatch(
                     }
                 }
 
+                const base_cenv: ?*Environment = if (cache.closure_env) |env| @ptrCast(@alignCast(env)) else null;
                 frame.pc = @intCast(ip + 1);
                 frames[frame_count] = CallFrame{
                     .block = callee_block,
                     .pc = 0,
                     .reg_base = @intCast(callee_reg_base),
                     .this_value = this_value,
-                    .closure_env = if (cache.closure_env) |env| @ptrCast(@alignCast(env)) else null,
+                    .closure_env = if (callee_block.capture_count > 0) try allocCapturedEnv(frame.interp, base_cenv) else base_cenv,
                     .has_rc = callee_has_rc,
                     .return_reg = op.a,
                     .interp = if (cache.interp) |itp| @ptrCast(@alignCast(itp)) else null,
@@ -1623,8 +1635,8 @@ noinline fn vmCallDispatch(
                     const mut_cb = @constCast(callee_block);
                     mut_cb.call_count +%= 1;
                     if (mut_cb.jit_fn != null or mut_cb.call_count >= baseline_jit.HOT_THRESHOLD) {
-                        const cenv: ?*Environment = if (cache.closure_env) |ce| @ptrCast(@alignCast(ce)) else null;
-                        if (try tryInvokeJit(allocator, mut_cb, cenv, registers, callee_reg_base, frame_count, frame_regs, start, arg_count, param_count, op.a)) {
+                        const cenv: ?*Environment = if (cache.closure_env) |ce| @ptrCast(@alignCast(ce)) else frame.closure_env;
+                        if (tryInvokeJit(allocator, mut_cb, cenv, registers, callee_reg_base, frame_count, frame_regs, start, arg_count, param_count, op.a)) {
                             ip += 1;
                             if (ip >= code.len) return error.MissingReturn;
                             continue :dispatch code[ip].opcode;
@@ -1632,13 +1644,14 @@ noinline fn vmCallDispatch(
                     }
                 }
 
+                const base_cenv: ?*Environment = if (cache.closure_env) |cenv| @ptrCast(@alignCast(cenv)) else null;
                 frame.pc = @intCast(ip + 1);
                 frames[frame_count] = CallFrame{
                     .block = callee_block,
                     .pc = 0,
                     .reg_base = @intCast(callee_reg_base),
                     .this_value = JSValue.UNDEFINED,
-                    .closure_env = if (cache.closure_env) |cenv| @ptrCast(@alignCast(cenv)) else null,
+                    .closure_env = if (callee_block.capture_count > 0) try allocCapturedEnv(frame.interp, base_cenv) else base_cenv,
                     .has_rc = callee_has_rc,
                     .return_reg = op.a,
                     .interp = if (cache.interp) |itp| @ptrCast(@alignCast(itp)) else null,
@@ -1955,11 +1968,12 @@ const GlobalCacheEntry = struct {
 };
 
 var global_cache: [32]GlobalCacheEntry = @splat(.{});
-var global_version: u64 = 1;
+pub var global_version: u64 = 1;
 
 pub fn clearGlobalCache() void {
     @memset(&global_cache, .{});
     global_version +%= 1;
+    environment_mod.env_struct_version +%= 1;
 }
 
 noinline fn loadGlobalSlow(

@@ -11,7 +11,7 @@ pub const CompiledCodeBlock = struct {
     block: codeblock.CodeBlock,
 
     pub fn deinit(self: *CompiledCodeBlock, allocator: Allocator) void {
-        self.block.deinitJit();
+        self.block.deinitJit(allocator);
         allocator.free(self.block.ops);
         allocator.free(self.block.constants);
         allocator.free(self.block.exception_table);
