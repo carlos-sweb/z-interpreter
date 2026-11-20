@@ -11,8 +11,10 @@ const Assembler = x64_asm.Assembler;
 const Label = x64_asm.Label;
 
 pub const JitFn = codeblock.JitFn;
+pub const OsrFn = codeblock.OsrFn;
 pub const JitGlobalSlot = codeblock.JitGlobalSlot;
 pub const HOT_THRESHOLD: u32 = 32;
+pub const OSR_THRESHOLD: u32 = 64;
 
 fn constantName(block: *const codeblock.CodeBlock, idx: u8) ?[]const u8 {
     if (idx >= block.constants.len) return null;
@@ -474,6 +476,324 @@ fn compileImpl(
     return a.finalizeExecutable();
 }
 
+pub fn canCompileOsr(block: *const codeblock.CodeBlock, start_ip: usize, end_ip: usize) bool {
+    if (!comptime x64_asm.is_supported_host) return false;
+    if (block.exception_table.len > 0 or block.flags.has_try) return false;
+    if (block.register_count == 0 or block.register_count > 32) return false;
+    if (start_ip >= end_ip or end_ip >= block.ops.len) return false;
+    const back_op = block.ops[end_ip];
+    if (back_op.opcode != .jump or (((@as(usize, back_op.b) << 8) | back_op.c) != start_ip)) return false;
+
+    var ip: usize = start_ip;
+    while (ip <= end_ip) : (ip += 1) {
+        const op = block.ops[ip];
+        switch (op.opcode) {
+            .nop => {},
+            .load_undefined => {
+                if (op.a >= block.register_count) return false;
+            },
+            .load_const => {
+                if (op.a >= block.register_count or op.b >= block.constants.len) return false;
+                if (block.constants[op.b] != .number) return false;
+            },
+            .move, .load_local, .store_local => {
+                if (op.a >= block.register_count or op.b >= block.register_count) return false;
+            },
+            .add, .add_num, .sub_num, .mul_num => {
+                if (op.a >= block.register_count or op.b >= block.register_count or op.c >= block.register_count) return false;
+            },
+            .add_local_const, .sub_local_const => {
+                if (op.a >= block.register_count or op.b >= block.register_count or op.c >= block.constants.len) return false;
+                if (block.constants[op.c] != .number) return false;
+            },
+            .jeq_local_const_false,
+            .jlt_local_const_false,
+            .jle_local_const_false,
+            .jgt_local_const_false,
+            .jge_local_const_false,
+            => {
+                if (op.a >= block.register_count or op.b >= block.constants.len) return false;
+                if (block.constants[op.b] != .number) return false;
+                if (ip + @as(usize, op.c) >= block.ops.len) return false;
+            },
+            .jump => {
+                const target = (@as(usize, op.b) << 8) | op.c;
+                if (target >= block.ops.len) return false;
+            },
+            .new_array => {
+                if (op.a >= block.register_count) return false;
+            },
+            .set_elem_const => {
+                if (op.a >= block.register_count or op.c >= block.register_count) return false;
+            },
+            .get_elem_const => {
+                if (op.a >= block.register_count or op.b >= block.register_count or op.c >= block.constants.len) return false;
+                if (block.constants[op.c] != .number) return false;
+                const n = block.constants[op.c].number;
+                if (n < 0 or n > 255 or @as(f64, @floatFromInt(@as(usize, @intFromFloat(n)))) != n) return false;
+            },
+            else => return false,
+        }
+    }
+    return true;
+}
+
+pub fn compileOsr(allocator: Allocator, block: *codeblock.CodeBlock, start_ip: usize, end_ip: usize) bool {
+    if (block.osr_fn != null) return true;
+    if (block.osr_failed) return false;
+    if (!canCompileOsr(block, start_ip, end_ip)) {
+        block.osr_failed = true;
+        return false;
+    }
+
+    const exec = compileOsrImpl(allocator, block, start_ip, end_ip) catch {
+        block.osr_failed = true;
+        return false;
+    };
+    block.osr_header_ip = @intCast(start_ip);
+    block.osr_end_ip = @intCast(end_ip);
+    block.osr_code = exec;
+    block.osr_fn = @ptrCast(exec.ptr);
+    return true;
+}
+
+fn compileOsrImpl(
+    allocator: Allocator,
+    block: *const codeblock.CodeBlock,
+    start_ip: usize,
+    end_ip: usize,
+) ![]align(std.heap.page_size_min) u8 {
+    var a = Assembler.init(allocator);
+    defer a.deinit();
+
+    const loop_len = end_ip - start_ip + 1;
+    var op_labels = try allocator.alloc(Label, loop_len);
+    defer allocator.free(op_labels);
+    var bailout_labels = try allocator.alloc(Label, loop_len);
+    defer allocator.free(bailout_labels);
+    for (0..loop_len) |i| {
+        op_labels[i] = try a.createLabel();
+        bailout_labels[i] = try a.createLabel();
+    }
+    const osr_epilogue = try a.createLabel();
+
+    const ExitStub = struct {
+        label: Label,
+        target_ip: u32,
+    };
+    var exit_stubs: std.ArrayListUnmanaged(ExitStub) = .empty;
+    defer exit_stubs.deinit(allocator);
+
+    // Entry: fn(regs: [*]JSValue, ctx: *OsrContext) callconv(.c) u32
+    // %rdi = regs, %rsi = ctx
+    // 5 pushes => %rsp is 16-byte aligned throughout OsrFn
+    try a.pushReg(.rbx);
+    try a.pushReg(.r12);
+    try a.pushReg(.r13);
+    try a.pushReg(.r14);
+    try a.pushReg(.r15);
+
+    try a.movRegReg(.r12, .rdi); // %r12 = regs
+    try a.movRegReg(.r13, .rsi); // %r13 = ctx
+    try a.movRegImm64(.r14, JSValue.HEAP_BASE); // %r14 = HEAP_BASE
+    try a.movRegImm64(.r15, JSValue.BASE_TAG); // %r15 = BASE_TAG
+
+    for (0..loop_len) |idx| {
+        const ip = start_ip + idx;
+        const op = block.ops[ip];
+        const bail_lbl = bailout_labels[idx];
+        a.bindLabel(op_labels[idx]);
+
+        switch (op.opcode) {
+            .nop => {},
+            .load_undefined => {
+                try a.movRegMem(.rdx, .r12, @intCast(@as(usize, op.a) * 8));
+                try a.cmpRegReg(.rdx, .r14);
+                try a.jcc(.ae, bail_lbl);
+                try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .r15);
+            },
+            .load_const => {
+                try a.movRegMem(.rdx, .r12, @intCast(@as(usize, op.a) * 8));
+                try a.cmpRegReg(.rdx, .r14);
+                try a.jcc(.ae, bail_lbl);
+                const bits = JSValue.fromNumber(block.constants[op.b].number).bits;
+                try a.movRegImm64(.rax, bits);
+                try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+            },
+            .move, .load_local, .store_local => {
+                try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
+                try a.cmpRegReg(.rax, .r15);
+                try a.jcc(.ae, bail_lbl);
+                if (op.a != op.b) {
+                    try a.movRegMem(.rdx, .r12, @intCast(@as(usize, op.a) * 8));
+                    try a.cmpRegReg(.rdx, .r14);
+                    try a.jcc(.ae, bail_lbl);
+                }
+                try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+            },
+            .add, .add_num, .sub_num, .mul_num => {
+                try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
+                try a.cmpRegReg(.rax, .r15);
+                try a.jcc(.ae, bail_lbl);
+                try a.movRegMem(.rcx, .r12, @intCast(@as(usize, op.c) * 8));
+                try a.cmpRegReg(.rcx, .r15);
+                try a.jcc(.ae, bail_lbl);
+                if (op.a != op.b and op.a != op.c) {
+                    try a.movRegMem(.rdx, .r12, @intCast(@as(usize, op.a) * 8));
+                    try a.cmpRegReg(.rdx, .r14);
+                    try a.jcc(.ae, bail_lbl);
+                }
+                try a.movqXmmReg(.xmm0, .rax);
+                try a.movqXmmReg(.xmm1, .rcx);
+                switch (op.opcode) {
+                    .add, .add_num => try a.addsd(.xmm0, .xmm1),
+                    .sub_num => try a.subsd(.xmm0, .xmm1),
+                    .mul_num => try a.mulsd(.xmm0, .xmm1),
+                    else => unreachable,
+                }
+                try a.movqRegXmm(.rax, .xmm0);
+                try a.ucomisd(.xmm0, .xmm0);
+                try a.movRegImm64(.rcx, JSValue.CANONICAL_NAN);
+                try a.cmovpRegReg(.rax, .rcx);
+                try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+            },
+            .add_local_const, .sub_local_const => {
+                const c_bits = JSValue.fromNumber(block.constants[op.c].number).bits;
+                try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
+                try a.cmpRegReg(.rax, .r15);
+                try a.jcc(.ae, bail_lbl);
+                if (op.a != op.b) {
+                    try a.movRegMem(.rdx, .r12, @intCast(@as(usize, op.a) * 8));
+                    try a.cmpRegReg(.rdx, .r14);
+                    try a.jcc(.ae, bail_lbl);
+                }
+                try a.movqXmmReg(.xmm0, .rax);
+                try a.movRegImm64(.rcx, c_bits);
+                try a.movqXmmReg(.xmm1, .rcx);
+                if (op.opcode == .add_local_const) {
+                    try a.addsd(.xmm0, .xmm1);
+                } else {
+                    try a.subsd(.xmm0, .xmm1);
+                }
+                try a.movqRegXmm(.rax, .xmm0);
+                try a.ucomisd(.xmm0, .xmm0);
+                try a.movRegImm64(.rcx, JSValue.CANONICAL_NAN);
+                try a.cmovpRegReg(.rax, .rcx);
+                try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+            },
+            .jeq_local_const_false,
+            .jlt_local_const_false,
+            .jle_local_const_false,
+            .jgt_local_const_false,
+            .jge_local_const_false,
+            => {
+                const c_bits = JSValue.fromNumber(block.constants[op.b].number).bits;
+                const target_pc = ip + @as(usize, op.c);
+                const target_lbl = if (target_pc >= start_ip and target_pc <= end_ip)
+                    op_labels[target_pc - start_ip]
+                else blk: {
+                    const el = try a.createLabel();
+                    try exit_stubs.append(allocator, .{ .label = el, .target_ip = @intCast(target_pc) });
+                    break :blk el;
+                };
+                try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.a) * 8));
+                try a.cmpRegReg(.rax, .r15);
+                try a.jcc(.ae, bail_lbl);
+                try a.movqXmmReg(.xmm0, .rax);
+                try a.movRegImm64(.rcx, c_bits);
+                try a.movqXmmReg(.xmm1, .rcx);
+                switch (op.opcode) {
+                    .jeq_local_const_false => {
+                        try a.ucomisd(.xmm0, .xmm1);
+                        try a.jcc(.p, target_lbl);
+                        try a.jcc(.ne, target_lbl);
+                    },
+                    .jlt_local_const_false => {
+                        try a.ucomisd(.xmm1, .xmm0);
+                        try a.jcc(.be, target_lbl);
+                    },
+                    .jle_local_const_false => {
+                        try a.ucomisd(.xmm1, .xmm0);
+                        try a.jcc(.b, target_lbl);
+                    },
+                    .jgt_local_const_false => {
+                        try a.ucomisd(.xmm0, .xmm1);
+                        try a.jcc(.be, target_lbl);
+                    },
+                    .jge_local_const_false => {
+                        try a.ucomisd(.xmm0, .xmm1);
+                        try a.jcc(.b, target_lbl);
+                    },
+                    else => unreachable,
+                }
+            },
+            .jump => {
+                const target_pc = (@as(usize, op.b) << 8) | op.c;
+                if (target_pc >= start_ip and target_pc <= end_ip) {
+                    try a.jmp(op_labels[target_pc - start_ip]);
+                } else {
+                    try a.movRegImm32(.rax, @intCast(target_pc));
+                    try a.jmp(osr_epilogue);
+                }
+            },
+            .new_array => {
+                try a.movRegReg(.rdi, .r13);
+                try a.movRegReg(.rsi, .r12);
+                try a.movRegImm32(.rdx, op.a);
+                try a.movRegImm32(.rcx, op.b);
+                try a.movRegImm64(.rax, @intFromPtr(&vm.jitNewArray));
+                try a.callReg(.rax);
+                try a.testRegReg(.rax, .rax);
+                try a.jcc(.ne, bail_lbl);
+            },
+            .set_elem_const => {
+                try a.movRegReg(.rdi, .r12);
+                try a.movRegImm32(.rsi, op.a);
+                try a.movRegImm32(.rdx, op.b);
+                try a.movRegImm32(.rcx, op.c);
+                try a.movRegImm64(.rax, @intFromPtr(&vm.jitSetElemConst));
+                try a.callReg(.rax);
+                try a.testRegReg(.rax, .rax);
+                try a.jcc(.ne, bail_lbl);
+            },
+            .get_elem_const => {
+                const elem_idx: u32 = @intFromFloat(block.constants[op.c].number);
+                try a.movRegReg(.rdi, .r12);
+                try a.movRegImm32(.rsi, op.a);
+                try a.movRegImm32(.rdx, op.b);
+                try a.movRegImm32(.rcx, elem_idx);
+                try a.movRegImm64(.rax, @intFromPtr(&vm.jitGetElemConst));
+                try a.callReg(.rax);
+                try a.testRegReg(.rax, .rax);
+                try a.jcc(.ne, bail_lbl);
+            },
+            else => unreachable,
+        }
+    }
+
+    for (exit_stubs.items) |stub| {
+        a.bindLabel(stub.label);
+        try a.movRegImm32(.rax, stub.target_ip);
+        try a.jmp(osr_epilogue);
+    }
+
+    for (0..loop_len) |idx| {
+        a.bindLabel(bailout_labels[idx]);
+        try a.movRegImm32(.rax, @intCast(start_ip + idx));
+        try a.jmp(osr_epilogue);
+    }
+
+    a.bindLabel(osr_epilogue);
+    try a.popReg(.r15);
+    try a.popReg(.r14);
+    try a.popReg(.r13);
+    try a.popReg(.r12);
+    try a.popReg(.rbx);
+    try a.ret();
+
+    return a.finalizeExecutable();
+}
+
 test "baseline JIT compiles and executes fib(20), NaN arithmetic, string bailout, global reassignment, and stack overflow" {
     if (!comptime x64_asm.is_supported_host) return;
     const Interpreter = @import("../interpreter.zig").Interpreter;
@@ -615,5 +935,93 @@ test "baseline JIT compiles closures with load_global/store_global, multiple clo
         defer res.deinit();
         try std.testing.expect(res.isNumber());
         try std.testing.expectEqual(@as(f64, 1), res.asNumber());
+    }
+}
+
+test "baseline JIT OSR compiles hot array loops, handles mid-loop type bailout without duplicating iterations, and isolates multiple loops" {
+    if (!comptime x64_asm.is_supported_host) return;
+    const Interpreter = @import("../interpreter.zig").Interpreter;
+
+    // 1. Hot loop with new_array + set_elem_const + get_elem_const (> 100 iterations, 0 leaks)
+    {
+        var allocating = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer allocating.deinit();
+        var interp = try Interpreter.init(std.testing.allocator, &allocating.writer);
+        defer interp.deinit();
+        interp.compile_options.use_bytecode_vm = true;
+
+        const res = try interp.run(
+            \\function arrayLoop(n) {
+            \\    let total = 0;
+            \\    for (let i = 0; i < n; i++) {
+            \\        const arr = [i, i + 1, i + 2];
+            \\        total += arr[0] + arr[1] + arr[2];
+            \\    }
+            \\    return total;
+            \\}
+            \\arrayLoop(200);
+        );
+        defer res.deinit();
+        try std.testing.expect(res.isNumber());
+        // sum_{i=0}^{199} (3i + 3) = 3 * (199*200/2) + 600 = 59700 + 600 = 60300
+        try std.testing.expectEqual(@as(f64, 60300), res.asNumber());
+    }
+
+    // 2. Mid-loop bailout when an array element changes to string at iteration 80 (after OSR activation at 64)
+    {
+        var allocating = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer allocating.deinit();
+        var interp = try Interpreter.init(std.testing.allocator, &allocating.writer);
+        defer interp.deinit();
+        interp.compile_options.use_bytecode_vm = true;
+
+        const res = try interp.run(
+            \\function mixedArrayLoop() {
+            \\    const box = [1];
+            \\    const s = "x";
+            \\    let total = 0;
+            \\    for (let i = 0; i < 82; i++) {
+            \\        if (i == 80) {
+            \\            box[0] = s;
+            \\        }
+            \\        total = total + box[0];
+            \\    }
+            \\    return total === "80xx" ? 1 : 0;
+            \\}
+            \\mixedArrayLoop();
+        );
+        defer res.deinit();
+        try std.testing.expect(res.isNumber());
+        try std.testing.expectEqual(@as(f64, 1), res.asNumber());
+    }
+
+    // 3. Function with 2 sequential loops in the same CodeBlock (target_ip == osr_header_ip guard)
+    {
+        var allocating = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer allocating.deinit();
+        var interp = try Interpreter.init(std.testing.allocator, &allocating.writer);
+        defer interp.deinit();
+        interp.compile_options.use_bytecode_vm = true;
+
+        const res = try interp.run(
+            \\function twoLoops() {
+            \\    let s1 = 0;
+            \\    for (let i = 0; i < 100; i++) {
+            \\        const a = [i, 1];
+            \\        s1 += a[0] + a[1];
+            \\    }
+            \\    let s2 = 0;
+            \\    for (let j = 0; j < 100; j++) {
+            \\        const b = [j, 10];
+            \\        s2 += b[0] + b[1];
+            \\    }
+            \\    return s1 * 10000 + s2;
+            \\}
+            \\twoLoops();
+        );
+        defer res.deinit();
+        try std.testing.expect(res.isNumber());
+        // s1 = 4950 + 100 = 5050; s2 = 4950 + 1000 = 5950 => 50505950
+        try std.testing.expectEqual(@as(f64, 50505950), res.asNumber());
     }
 }

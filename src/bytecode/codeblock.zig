@@ -138,7 +138,14 @@ pub const JitGlobalSlot = extern struct {
     is_mutable: u64 = 0,
 };
 
+pub const OsrContext = extern struct {
+    allocator_ptr: *const anyopaque,
+    frame_ptr: *anyopaque,
+    prop_ic_ptr: *anyopaque,
+};
+
 pub const JitFn = *const fn (regs: [*]JSValue, out: *JSValue, regs_limit: [*]JSValue, env: ?*anyopaque) callconv(.c) u8;
+pub const OsrFn = *const fn (regs: [*]JSValue, ctx: *OsrContext) callconv(.c) u32;
 
 /// Immutable representation emitted by a later compiler pass.
 pub const CodeBlock = struct {
@@ -157,12 +164,23 @@ pub const CodeBlock = struct {
     jit_code: ?[]align(std.heap.page_size_min) u8 = null,
     jit_fn: ?JitFn = null,
     jit_global_slots: ?[]JitGlobalSlot = null,
+    osr_count: u32 = 0,
+    osr_header_ip: u32 = 0,
+    osr_end_ip: u32 = 0,
+    osr_failed: bool = false,
+    osr_code: ?[]align(std.heap.page_size_min) u8 = null,
+    osr_fn: ?OsrFn = null,
 
     pub fn deinitJit(self: *CodeBlock, allocator: Allocator) void {
         if (self.jit_code) |jc| {
             @import("../jit/x64_asm.zig").freeExecutable(jc);
             self.jit_code = null;
             self.jit_fn = null;
+        }
+        if (self.osr_code) |oc| {
+            @import("../jit/x64_asm.zig").freeExecutable(oc);
+            self.osr_code = null;
+            self.osr_fn = null;
         }
         if (self.jit_global_slots) |slots| {
             allocator.free(slots);

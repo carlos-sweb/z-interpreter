@@ -797,6 +797,120 @@ noinline fn tryInvokeJit(
     return false;
 }
 
+pub fn jitNewArray(ctx: *codeblock.OsrContext, regs: [*]JSValue, dst: u32, len_hint: u32) callconv(.c) u8 {
+    const frame: *CallFrame = @ptrCast(@alignCast(ctx.frame_ptr));
+    const allocator: *const Allocator = @ptrCast(@alignCast(ctx.allocator_ptr));
+    const slot = &regs[dst];
+    const cap = @max(@as(usize, len_hint), 4);
+    if (slot.isArray()) {
+        const box = slot.asArray();
+        if (box._count == 1 and box.value.holey == null and box.value.items.capacity >= cap and box.value.items.capacity <= 16) {
+            for (box.value.items.items) |*el| {
+                if (el.needsDeinit()) el.deinit();
+            }
+            box.value.items.items.len = 0;
+            frame.has_rc = true;
+            return 0;
+        }
+    }
+    if (needsDeinit(slot.*)) deinitSlot(slot);
+    if (arr_pool_len > 0) {
+        arr_pool_len -= 1;
+        const box = arr_pool[arr_pool_len];
+        box._count = 1;
+        if (box.value.items.capacity < cap) {
+            box.value.reserve(cap) catch {
+                box.value.deinit();
+                box.destroy();
+                return 1;
+            };
+        }
+        slot.* = JSValue.fromArray(box);
+        frame.has_rc = true;
+        return 0;
+    }
+    const arr = JSValue.newArray(allocator.*) catch return 1;
+    arr.asArray().value.reserve(cap) catch {
+        arr.deinit();
+        return 1;
+    };
+    slot.* = arr;
+    frame.has_rc = true;
+    return 0;
+}
+
+pub fn jitSetElemConst(regs: [*]JSValue, arr_reg: u32, idx: u32, val_reg: u32) callconv(.c) u8 {
+    const obj = regs[arr_reg];
+    if (!obj.isArray()) return 1;
+    const arr = &obj.asArray().value;
+    if (arr.holey != null) return 1;
+    const val = regs[val_reg];
+    const len = arr.items.items.len;
+    if (idx == len) {
+        const val_to_store = if (needsDeinit(val)) val.retain() else val;
+        if (len < arr.items.capacity) {
+            arr.items.items.len = len + 1;
+            arr.items.items.ptr[len] = val_to_store;
+            return 0;
+        }
+        arr.items.append(arr.allocator, val_to_store) catch {
+            if (needsDeinit(val_to_store)) val_to_store.deinit();
+            return 1;
+        };
+        return 0;
+    } else if (idx < len) {
+        const val_to_store = if (needsDeinit(val)) val.retain() else val;
+        const old = arr.items.items[idx];
+        arr.items.items[idx] = val_to_store;
+        if (needsDeinit(old)) old.deinit();
+        return 0;
+    }
+    return 1;
+}
+
+pub fn jitGetElemConst(regs: [*]JSValue, dst: u32, arr_reg: u32, idx: u32) callconv(.c) u8 {
+    const obj = regs[arr_reg];
+    if (!obj.isArray()) return 1;
+    const arr = &obj.asArray().value;
+    if (arr.holey != null or idx >= arr.items.items.len) return 1;
+    const elem = arr.items.items[idx];
+    if (!elem.isNumber()) return 1;
+    const slot = &regs[dst];
+    if (needsDeinit(slot.*)) deinitSlot(slot);
+    slot.* = elem;
+    return 0;
+}
+
+noinline fn tryEnterOsr(
+    allocator: *const Allocator,
+    frame: *CallFrame,
+    frame_regs: []JSValue,
+    prop_ic: *[256]PropIC,
+    start_ip: usize,
+    end_ip: usize,
+) usize {
+    @branchHint(.cold);
+    const mut_cb = @constCast(frame.block);
+    if (mut_cb.osr_fn == null) {
+        mut_cb.osr_count +%= 1;
+        if (mut_cb.osr_count < baseline_jit.OSR_THRESHOLD) return start_ip;
+        if (!baseline_jit.compileOsr(allocator.*, mut_cb, start_ip, end_ip)) return start_ip;
+    }
+    const ofn = mut_cb.osr_fn orelse return start_ip;
+    if (mut_cb.osr_header_ip != start_ip or mut_cb.osr_end_ip != end_ip) return start_ip;
+    var ctx = codeblock.OsrContext{
+        .allocator_ptr = allocator,
+        .frame_ptr = frame,
+        .prop_ic_ptr = prop_ic,
+    };
+    const next_ip: usize = ofn(frame_regs.ptr, &ctx);
+    if (next_ip >= start_ip and next_ip <= end_ip) {
+        mut_cb.osr_fn = null;
+        mut_cb.osr_failed = true;
+    }
+    return next_ip;
+}
+
 pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_env: ?*Environment, args: []const JSValue, interp: ?*interpreter_mod.Interpreter) !JSValue {
     const registers = try allocator.alloc(JSValue, MAX_REGISTERS);
     defer allocator.free(registers);
@@ -1478,7 +1592,12 @@ noinline fn vmCallDispatch(
             continue :dispatch code[ip].opcode;
         },
         .jump => {
-            ip = @intCast(try jumpTarget(frame.block, code[ip]));
+            const target_ip: usize = @intCast(try jumpTarget(frame.block, code[ip]));
+            if (target_ip < ip and !frame.block.osr_failed) {
+                ip = tryEnterOsr(&allocator, frame, frame_regs, &prop_ic, target_ip, ip);
+            } else {
+                ip = target_ip;
+            }
             if (ip >= code.len) return error.MissingReturn;
             continue :dispatch code[ip].opcode;
         },
