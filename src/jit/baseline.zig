@@ -758,6 +758,56 @@ fn compileOsrImpl(
                 try a.jcc(.ne, bail_lbl);
             },
             .set_elem_const => {
+                const ArrayBox = zvalue.Rc(zvalue.ZArray(JSValue));
+                const ZArr = zvalue.ZArray(JSValue);
+                const ArrList = @FieldType(ZArr, "items");
+                const arr_val_off: i32 = @intCast(@offsetOf(ArrayBox, "value"));
+                const arr_holey_off: i32 = arr_val_off + @as(i32, @intCast(@offsetOf(ZArr, "holey")));
+                const arr_list_off: i32 = arr_val_off + @as(i32, @intCast(@offsetOf(ZArr, "items")));
+                const arr_items_ptr_off: i32 = arr_list_off + @as(i32, @intCast(@offsetOf(ArrList, "items")));
+                const arr_items_len_off: i32 = arr_items_ptr_off + 8;
+                const arr_items_cap_off: i32 = arr_list_off + @as(i32, @intCast(@offsetOf(ArrList, "capacity")));
+
+                const slow_lbl = try a.createLabel();
+                const done_lbl = try a.createLabel();
+
+                // val = regs[op.c]; guard val < BASE_TAG (%r15)
+                try a.movRegMem(.rdx, .r12, @intCast(@as(usize, op.c) * 8));
+                try a.cmpRegReg(.rdx, .r15);
+                try a.jcc(.ae, slow_lbl);
+
+                // arr = regs[op.a]; guard (arr >> 47) == 0x1FFF4 (HEADER_ARRAY)
+                try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.a) * 8));
+                try a.movRegReg(.rcx, .rax);
+                try a.shrRegImm8(.rcx, 47);
+                try a.cmpRegImm32(.rcx, 0x1FFF4);
+                try a.jcc(.ne, slow_lbl);
+
+                // box = arr & PTR_MASK
+                try a.movRegImm64(.rcx, JSValue.PTR_MASK);
+                try a.andRegReg(.rax, .rcx);
+
+                // guard box.holey == null
+                try a.movRegMem(.rcx, .rax, arr_holey_off);
+                try a.testRegReg(.rcx, .rcx);
+                try a.jcc(.ne, slow_lbl);
+
+                // guard box.items.len == op.b and op.b < box.items.capacity
+                try a.movRegMem(.rcx, .rax, arr_items_len_off);
+                try a.cmpRegImm32(.rcx, op.b);
+                try a.jcc(.ne, slow_lbl);
+                try a.movRegMem(.rcx, .rax, arr_items_cap_off);
+                try a.cmpRegImm32(.rcx, op.b);
+                try a.jcc(.be, slow_lbl);
+
+                // box.items.ptr[op.b] = val; box.items.len = op.b + 1
+                try a.movRegMem(.rcx, .rax, arr_items_ptr_off);
+                try a.movMemReg(.rcx, @intCast(@as(usize, op.b) * 8), .rdx);
+                try a.movRegImm32(.rcx, @as(u32, op.b) + 1);
+                try a.movMemReg(.rax, arr_items_len_off, .rcx);
+                try a.jmp(done_lbl);
+
+                a.bindLabel(slow_lbl);
                 try a.movRegReg(.rdi, .r12);
                 try a.movRegImm32(.rsi, op.a);
                 try a.movRegImm32(.rdx, op.b);
@@ -766,9 +816,55 @@ fn compileOsrImpl(
                 try a.callReg(.rax);
                 try a.testRegReg(.rax, .rax);
                 try a.jcc(.ne, bail_lbl);
+
+                a.bindLabel(done_lbl);
             },
             .get_elem_const => {
+                const ArrayBox = zvalue.Rc(zvalue.ZArray(JSValue));
+                const ZArr = zvalue.ZArray(JSValue);
+                const ArrList = @FieldType(ZArr, "items");
+                const arr_val_off: i32 = @intCast(@offsetOf(ArrayBox, "value"));
+                const arr_holey_off: i32 = arr_val_off + @as(i32, @intCast(@offsetOf(ZArr, "holey")));
+                const arr_list_off: i32 = arr_val_off + @as(i32, @intCast(@offsetOf(ZArr, "items")));
+                const arr_items_ptr_off: i32 = arr_list_off + @as(i32, @intCast(@offsetOf(ArrList, "items")));
+                const arr_items_len_off: i32 = arr_items_ptr_off + 8;
+
                 const elem_idx: u32 = @intFromFloat(block.constants[op.c].number);
+                const slow_lbl = try a.createLabel();
+                const done_lbl = try a.createLabel();
+
+                // arr = regs[op.b]; guard (arr >> 47) == 0x1FFF4 (HEADER_ARRAY)
+                try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
+                try a.movRegReg(.rcx, .rax);
+                try a.shrRegImm8(.rcx, 47);
+                try a.cmpRegImm32(.rcx, 0x1FFF4);
+                try a.jcc(.ne, slow_lbl);
+
+                // box = arr & PTR_MASK
+                try a.movRegImm64(.rcx, JSValue.PTR_MASK);
+                try a.andRegReg(.rax, .rcx);
+
+                // guard box.holey == null and elem_idx < box.items.len
+                try a.movRegMem(.rcx, .rax, arr_holey_off);
+                try a.testRegReg(.rcx, .rcx);
+                try a.jcc(.ne, slow_lbl);
+                try a.movRegMem(.rcx, .rax, arr_items_len_off);
+                try a.cmpRegImm32(.rcx, @intCast(elem_idx));
+                try a.jcc(.be, slow_lbl);
+
+                // elem = box.items.ptr[elem_idx]; guard elem < BASE_TAG (%r15) and regs[op.a] < HEAP_BASE (%r14)
+                try a.movRegMem(.rcx, .rax, arr_items_ptr_off);
+                try a.movRegMem(.rax, .rcx, @intCast(@as(usize, elem_idx) * 8));
+                try a.cmpRegReg(.rax, .r15);
+                try a.jcc(.ae, slow_lbl);
+                try a.movRegMem(.rdx, .r12, @intCast(@as(usize, op.a) * 8));
+                try a.cmpRegReg(.rdx, .r14);
+                try a.jcc(.ae, slow_lbl);
+
+                try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+                try a.jmp(done_lbl);
+
+                a.bindLabel(slow_lbl);
                 try a.movRegReg(.rdi, .r12);
                 try a.movRegImm32(.rsi, op.a);
                 try a.movRegImm32(.rdx, op.b);
@@ -777,6 +873,8 @@ fn compileOsrImpl(
                 try a.callReg(.rax);
                 try a.testRegReg(.rax, .rax);
                 try a.jcc(.ne, bail_lbl);
+
+                a.bindLabel(done_lbl);
             },
             .new_object => {
                 try a.movRegReg(.rdi, .r13);
@@ -788,22 +886,26 @@ fn compileOsrImpl(
                 try a.jcc(.ne, bail_lbl);
             },
             .set_prop, .set_prop_transition => {
-                const op_bits: u32 = @bitCast(op);
+                const ic_idx: u8 = @intCast(((@intFromPtr(block) >> 4) +% ip) & 255);
+                const key = constantName(block, op.b).?;
+                const packed_info: u64 = (@as(u64, @intCast(ip)) << 32) | (@as(u64, ic_idx) << 16) | (@as(u64, op.c) << 8) | @as(u64, op.a);
                 try a.movRegReg(.rdi, .r13);
                 try a.movRegReg(.rsi, .r12);
-                try a.movRegImm32(.rdx, @intCast(ip));
-                try a.movRegImm32(.rcx, op_bits);
+                try a.movRegImm64(.rdx, packed_info);
+                try a.movRegImm64(.rcx, @intFromPtr(key.ptr));
                 try a.movRegImm64(.rax, @intFromPtr(&vm.jitSetProp));
                 try a.callReg(.rax);
                 try a.testRegReg(.rax, .rax);
                 try a.jcc(.ne, bail_lbl);
             },
             .get_prop => {
-                const op_bits: u32 = @bitCast(op);
+                const ic_idx: u8 = @intCast(((@intFromPtr(block) >> 4) +% ip) & 255);
+                const key = constantName(block, op.c).?;
+                const packed_info: u64 = (@as(u64, @intCast(ip)) << 32) | (@as(u64, ic_idx) << 16) | (@as(u64, op.b) << 8) | @as(u64, op.a);
                 try a.movRegReg(.rdi, .r13);
                 try a.movRegReg(.rsi, .r12);
-                try a.movRegImm32(.rdx, @intCast(ip));
-                try a.movRegImm32(.rcx, op_bits);
+                try a.movRegImm64(.rdx, packed_info);
+                try a.movRegImm64(.rcx, @intFromPtr(key.ptr));
                 try a.movRegImm64(.rax, @intFromPtr(&vm.jitGetProp));
                 try a.callReg(.rax);
                 try a.testRegReg(.rax, .rax);
@@ -1103,5 +1205,33 @@ test "baseline JIT OSR compiles hot array loops, handles mid-loop type bailout w
         try std.testing.expect(res.isNumber());
         // objLoop(200) = 60300; objShapeBailout: 89 * 3 + 15 = 267 + 15 = 282 => 60300282
         try std.testing.expectEqual(@as(f64, 60300282), res.asNumber());
+    }
+
+    // 5. Phase 3A inline set_elem_const + get_elem_const fast-path + slow-path overwrite/heap fallback (0 leaks)
+    {
+        var allocating = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer allocating.deinit();
+        var interp = try Interpreter.init(std.testing.allocator, &allocating.writer);
+        defer interp.deinit();
+        interp.compile_options.use_bytecode_vm = true;
+
+        const res = try interp.run(
+            \\function overwriteAndHeapElemLoop() {
+            \\    let sum = 0;
+            \\    for (let i = 0; i < 120; i++) {
+            \\        const o = { v: i };
+            \\        const arr = [o, i, i + 1];
+            \\        let x = { tmp: 1 };
+            \\        x = arr[1];
+            \\        sum += x + arr[2];
+            \\    }
+            \\    return sum;
+            \\}
+            \\overwriteAndHeapElemLoop();
+        );
+        defer res.deinit();
+        try std.testing.expect(res.isNumber());
+        // sum_{i=0}^{119} (2i + 1) = 120^2 = 14400
+        try std.testing.expectEqual(@as(f64, 14400), res.asNumber());
     }
 }

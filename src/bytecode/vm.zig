@@ -948,15 +948,17 @@ pub fn jitNewObject(ctx: *codeblock.OsrContext, regs: [*]JSValue, dst: u32) call
     return 0;
 }
 
-pub fn jitSetProp(ctx: *codeblock.OsrContext, regs: [*]JSValue, op_pc: u32, op_bits: u32) callconv(.c) u8 {
-    const op: codeblock.Op = @bitCast(op_bits);
+pub fn jitSetProp(ctx: *codeblock.OsrContext, regs: [*]JSValue, packed_info: u64, key_ptr: [*]const u8) callconv(.c) u8 {
+    const obj_reg: u8 = @truncate(packed_info);
+    const val_reg: u8 = @truncate(packed_info >> 8);
+    const ic_idx: u8 = @truncate(packed_info >> 16);
+    const op_pc: u32 = @truncate(packed_info >> 32);
     const frame: *CallFrame = @ptrCast(@alignCast(ctx.frame_ptr));
     const prop_ic: *[256]PropIC = @ptrCast(@alignCast(ctx.prop_ic_ptr));
-    const obj = regs[op.a];
+    const obj = regs[obj_reg];
     if (!obj.isObject()) return 1;
     const box = obj.asObject();
-    const val = regs[op.c];
-    const ic_idx = ((@intFromPtr(frame.block) >> 4) +% op_pc) & 255;
+    const val = regs[val_reg];
     const ic = &prop_ic[ic_idx];
     const slot = ic.slot_idx;
 
@@ -982,8 +984,7 @@ pub fn jitSetProp(ctx: *codeblock.OsrContext, regs: [*]JSValue, op_pc: u32, op_b
                 return 0;
             }
         } else {
-            const key = constantKey(frame.block, op.b) catch return 1;
-            if (ic.key_ptr == key.ptr and slot < box.value.properties.count()) {
+            if (ic.key_ptr == key_ptr and slot < box.value.properties.count()) {
                 const rec = &box.value.properties.entries.items(.value)[slot];
                 if (!rec.isAccessor() and rec.descriptor.writable and !box.value.is_frozen) {
                     if (!needsDeinit(rec.value) and !needsDeinit(val)) {
@@ -1001,22 +1002,23 @@ pub fn jitSetProp(ctx: *codeblock.OsrContext, regs: [*]JSValue, op_pc: u32, op_b
     return 1;
 }
 
-pub fn jitGetProp(ctx: *codeblock.OsrContext, regs: [*]JSValue, op_pc: u32, op_bits: u32) callconv(.c) u8 {
-    const op: codeblock.Op = @bitCast(op_bits);
+pub fn jitGetProp(ctx: *codeblock.OsrContext, regs: [*]JSValue, packed_info: u64, key_ptr: [*]const u8) callconv(.c) u8 {
+    const dst_reg: u8 = @truncate(packed_info);
+    const obj_reg: u8 = @truncate(packed_info >> 8);
+    const ic_idx: u8 = @truncate(packed_info >> 16);
+    const op_pc: u32 = @truncate(packed_info >> 32);
     const frame: *CallFrame = @ptrCast(@alignCast(ctx.frame_ptr));
     const prop_ic: *[256]PropIC = @ptrCast(@alignCast(ctx.prop_ic_ptr));
-    const obj = regs[op.b];
+    const obj = regs[obj_reg];
     if (!obj.isObject()) return 1;
     const box = obj.asObject();
-    const key = constantKey(frame.block, op.c) catch return 1;
-    const ic_idx = ((@intFromPtr(frame.block) >> 4) +% op_pc) & 255;
     const ic = &prop_ic[ic_idx];
-    if (ic.block == frame.block and ic.pc == op_pc and ic.shape_id == box.value.shape_id and ic.key_ptr == key.ptr and ic.slot_idx < box.value.properties.count()) {
+    if (ic.block == frame.block and ic.pc == op_pc and ic.shape_id == box.value.shape_id and ic.key_ptr == key_ptr and ic.slot_idx < box.value.properties.count()) {
         const rec = &box.value.properties.entries.items(.value)[ic.slot_idx];
         if (!rec.isAccessor()) {
             const v = rec.value;
             if (!v.isNumber()) return 1;
-            const slot = &regs[op.a];
+            const slot = &regs[dst_reg];
             if (needsDeinit(slot.*)) deinitSlot(slot);
             slot.* = v;
             return 0;

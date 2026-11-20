@@ -260,6 +260,12 @@ pub const Assembler = struct {
         try self.emitByte(@bitCast(imm));
     }
 
+    pub fn andRegReg(self: *Assembler, dst: Reg, src: Reg) !void {
+        try self.emitByte(rexW(src.isExt(), dst.isExt()));
+        try self.emitByte(0x21);
+        try self.emitByte(modRM(0b11, src.low3(), dst.low3()));
+    }
+
     pub fn callReg(self: *Assembler, target: Reg) !void {
         if (target.isExt()) try self.emitByte(0x41);
         try self.emitByte(0xFF);
