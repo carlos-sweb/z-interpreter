@@ -897,8 +897,8 @@ pub fn jitMoveSlot(ctx: *codeblock.OsrContext, regs: [*]JSValue, dst: u32, src: 
     return 0;
 }
 
-pub fn jitDeinitSlot(regs: [*]JSValue, dst: u32) callconv(.c) void {
-    deinitSlot(&regs[dst]);
+pub fn jitDeinitSlot(slot: *JSValue) callconv(.c) void {
+    if (needsDeinit(slot.*)) deinitSlot(slot);
 }
 
 pub fn jitBitwise(regs: [*]JSValue, dst: u32, lhs_reg: u32, rhs_reg: u32, kind_u32: u32) callconv(.c) u8 {

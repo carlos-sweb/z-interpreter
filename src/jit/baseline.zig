@@ -15,6 +15,10 @@ pub const OsrFn = codeblock.OsrFn;
 pub const JitGlobalSlot = codeblock.JitGlobalSlot;
 pub const HOT_THRESHOLD: u32 = 32;
 pub const OSR_THRESHOLD: u32 = 64;
+const HEADER_FUNCTION: u32 = blk: {
+    const dummy: JSValue = JSValue.fromHeap(.function, @as(*zvalue.Rc(zvalue.Callable), @ptrFromInt(8)));
+    break :blk @intCast(dummy.bits >> 47);
+};
 
 fn constantName(block: *const codeblock.CodeBlock, idx: u8) ?[]const u8 {
     if (idx >= block.constants.len) return null;
@@ -282,8 +286,7 @@ fn emitGuardNonHeapInOsr(a: *Assembler, reg_idx: u8, _: Label) !void {
     try a.jcc(.b, clean_lbl);
     try a.pushReg(.rax);
     try a.pushReg(.rcx);
-    try a.movRegReg(.rdi, .r12);
-    try a.movRegImm32(.rsi, reg_idx);
+    try a.lea(.rdi, .r12, @intCast(@as(usize, reg_idx) * 8));
     try a.movRegImm64(.rax, @intFromPtr(&vm.jitDeinitSlot));
     try a.callReg(.rax);
     try a.popReg(.rcx);
@@ -1134,23 +1137,37 @@ fn compileOsrImpl(
             },
             .move, .load_local, .store_local => {
                 if (op.a != op.b) {
-                    const slow_move_lbl = try a.createLabel();
+                    const fn_move_lbl = try a.createLabel();
                     const done_move_lbl = try a.createLabel();
-                    try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
-                    try a.cmpRegReg(.rax, .r14);
-                    try a.jcc(.ae, slow_move_lbl);
+
+                    // Guard: regs[dst] < HEAP_BASE (%r14)
                     try a.movRegMem(.rdx, .r12, @intCast(@as(usize, op.a) * 8));
                     try a.cmpRegReg(.rdx, .r14);
-                    try a.jcc(.ae, slow_move_lbl);
+                    try a.jcc(.ae, bail_lbl);
+
+                    // Load val = regs[src]
+                    try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
+                    try a.cmpRegReg(.rax, .r14);
+                    try a.jcc(.ae, fn_move_lbl);
+
+                    // val < HEAP_BASE: write regs[dst] = val
                     try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
                     try a.jmp(done_move_lbl);
-                    a.bindLabel(slow_move_lbl);
-                    try a.movRegReg(.rdi, .r13);
-                    try a.movRegReg(.rsi, .r12);
-                    try a.movRegImm32(.rdx, op.a);
-                    try a.movRegImm32(.rcx, op.b);
-                    try a.movRegImm64(.rax, @intFromPtr(&vm.jitMoveSlot));
-                    try a.callReg(.rax);
+
+                    // val >= HEAP_BASE: check if (val >> 47) == HEADER_FUNCTION
+                    a.bindLabel(fn_move_lbl);
+                    try a.movRegReg(.rcx, .rax);
+                    try a.shrRegImm8(.rcx, 47);
+                    try a.cmpRegImm32(.rcx, HEADER_FUNCTION);
+                    try a.jcc(.ne, bail_lbl);
+
+                    // Function: ptr = val & PTR_MASK
+                    try a.movRegImm64(.rcx, JSValue.PTR_MASK);
+                    try a.andRegReg(.rcx, .rax);
+                    const rc_off: i32 = @intCast(@offsetOf(zvalue.Rc(zvalue.Callable), "_count"));
+                    try a.incMem64(.rcx, rc_off);
+                    try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+
                     a.bindLabel(done_move_lbl);
                 }
             },
@@ -1573,11 +1590,6 @@ fn compileOsrImpl(
                 const jit_fn_off: i32 = @intCast(@offsetOf(codeblock.CodeBlock, "jit_fn"));
                 const closure_env_off: i32 = @intCast(@offsetOf(codeblock.CallSiteCache, "closure_env"));
 
-                // Guard 1: regs[op.a] < HEAP_BASE (%r14)
-                try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.a) * 8));
-                try a.cmpRegReg(.rax, .r14);
-                try a.jcc(.ae, bail_lbl);
-
                 // Guard 2:
                 if (op.opcode == .call) {
                     const expected_callee = cs.callee orelse return error.CannotCompile;
@@ -1648,9 +1660,50 @@ fn compileOsrImpl(
 
                 // Success path:
                 a.bindLabel(call_ok_lbl);
-                try a.movRegMem(.rax, .rsp, 0);
+                try a.movRegMem(.rbx, .rsp, 0); // %rbx = out_val (callee-saved)
                 try a.addRegImm32(.rsp, 16);
-                try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+
+                const write_out_lbl = try a.createLabel();
+                const heap_old_lbl = try a.createLabel();
+                const deinit_call_lbl = try a.createLabel();
+
+                // Check old regs[op.a] < HEAP_BASE (%r14)
+                try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.a) * 8));
+                try a.cmpRegReg(.rax, .r14);
+                try a.jcc(.ae, heap_old_lbl);
+                try a.jmp(write_out_lbl);
+
+                // old regs[op.a] >= HEAP_BASE
+                a.bindLabel(heap_old_lbl);
+                try a.movRegReg(.rcx, .rax);
+                try a.shrRegImm8(.rcx, 47);
+                try a.cmpRegImm32(.rcx, HEADER_FUNCTION);
+                try a.jcc(.ne, deinit_call_lbl);
+
+                // It is a function! Extract ptr = old_val & PTR_MASK
+                try a.movRegImm64(.rcx, JSValue.PTR_MASK);
+                try a.andRegReg(.rcx, .rax);
+
+                // Check ptr._count > 1
+                const rc_off: i32 = @intCast(@offsetOf(zvalue.Rc(zvalue.Callable), "_count"));
+                try a.movRegMem(.rdx, .rcx, rc_off);
+                try a.cmpRegImm32(.rdx, 1);
+                try a.jcc(.be, deinit_call_lbl);
+
+                // ptr._count > 1: decrement ptr._count -= 1
+                try a.subRegImm32(.rdx, 1);
+                try a.movMemReg(.rcx, rc_off, .rdx);
+                try a.jmp(write_out_lbl);
+
+                // Slow path: jitDeinitSlot(&regs[op.a])
+                a.bindLabel(deinit_call_lbl);
+                try a.lea(.rdi, .r12, @intCast(@as(usize, op.a) * 8));
+                try a.movRegImm64(.rax, @intFromPtr(&vm.jitDeinitSlot));
+                try a.callReg(.rax);
+
+                // Write out_val into regs[op.a]
+                a.bindLabel(write_out_lbl);
+                try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rbx);
             },
             else => {
                 if (!(try emitSharedOp(&a, block, op, true, bail_lbl))) unreachable;
