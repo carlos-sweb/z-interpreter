@@ -20,6 +20,10 @@ const HEADER_FUNCTION: u32 = blk: {
     const dummy: JSValue = JSValue.fromHeap(.function, @as(*zvalue.Rc(zvalue.Callable), @ptrFromInt(8)));
     break :blk @intCast(dummy.bits >> 47);
 };
+const HEADER_ARRAY: u32 = blk: {
+    const dummy: JSValue = JSValue.fromHeap(.array, @as(*zvalue.Rc(zvalue.ZArray(JSValue)), @ptrFromInt(8)));
+    break :blk @intCast(dummy.bits >> 47);
+};
 
 fn constantName(block: *const codeblock.CodeBlock, idx: u8) ?[]const u8 {
     if (idx >= block.constants.len) return null;
@@ -1700,6 +1704,7 @@ const OsrCachedAnalysis = struct {
     cached_regs: [12]u8 = @splat(0),
     cached_count: usize = 0,
     reg_to_xmm: [64]?Xmm = @splat(null),
+    read_before_written: [64]bool = @splat(false),
 };
 
 fn analyzeOsrLoop(block: *const codeblock.CodeBlock, start_ip: usize, end_ip: usize) OsrCachedAnalysis {
@@ -1868,6 +1873,7 @@ fn analyzeOsrLoop(block: *const codeblock.CodeBlock, start_ip: usize, end_ip: us
             if (op.opcode == .move or op.opcode == .load_local or op.opcode == .store_local) {
                 if (op.b < 64 and op.a < 64) {
                     if (invalid[op.b]) invalid[op.a] = true;
+                    if (invalid[op.a]) invalid[op.b] = true;
                 }
             }
         }
@@ -1880,7 +1886,7 @@ fn analyzeOsrLoop(block: *const codeblock.CodeBlock, start_ip: usize, end_ip: us
     const limit = @min(block.register_count, 64);
     for (0..limit) |r_usize| {
         const r: u8 = @intCast(r_usize);
-        if (!invalid[r] and read_before_written[r] and use_count[r] > 0) {
+        if (!invalid[r] and use_count[r] > 0) {
             candidates[num_candidates] = .{ .reg = r, .count = use_count[r] };
             num_candidates += 1;
         }
@@ -1906,6 +1912,7 @@ fn analyzeOsrLoop(block: *const codeblock.CodeBlock, start_ip: usize, end_ip: us
         result.reg_to_xmm[reg] = @enumFromInt(4 + k);
     }
     result.cached_count = max_cached;
+    result.read_before_written = read_before_written;
 
     return result;
 }
@@ -1930,30 +1937,40 @@ fn emitReloadCached(a: *Assembler, cached_regs: [12]u8, cached_count: usize) !vo
     }
 }
 
-fn emitGuardNonHeapInOsrCached(
+fn emitReleaseHeapIfRefGt1(
     a: *Assembler,
     reg_idx: u8,
-    cached_regs: [12]u8,
-    cached_count: usize,
+    bail_lbl: Label,
 ) !void {
-    const clean_lbl = try a.createLabel();
-    try a.movRegMem(.rdx, .r12, @intCast(@as(usize, reg_idx) * 8));
-    try a.cmpRegReg(.rdx, .r14);
-    try a.jcc(.b, clean_lbl);
-    try a.pushReg(.rax);
-    try a.pushReg(.rcx);
-    if (cached_count > 0) {
-        try emitFlushCached(a, cached_regs, cached_count);
-    }
-    try a.lea(.rdi, .r12, @intCast(@as(usize, reg_idx) * 8));
-    try a.movRegImm64(.rax, @intFromPtr(&vm.jitDeinitSlot));
-    try a.callReg(.rax);
-    if (cached_count > 0) {
-        try emitReloadCached(a, cached_regs, cached_count);
-    }
-    try a.popReg(.rcx);
-    try a.popReg(.rax);
-    a.bindLabel(clean_lbl);
+    const ok_lbl = try a.createLabel();
+    try a.movRegMem(.rax, .r12, @intCast(@as(usize, reg_idx) * 8));
+    try a.cmpRegReg(.rax, .r14); // %r14 = HEAP_BASE
+    try a.jcc(.b, ok_lbl);
+
+    // Old value is >= HEAP_BASE
+    try a.movRegReg(.rcx, .rax);
+    try a.shrRegImm8(.rcx, 47);
+    const is_ref_lbl = try a.createLabel();
+    try a.cmpRegImm32(.rcx, HEADER_ARRAY);
+    try a.jcc(.e, is_ref_lbl);
+    try a.cmpRegImm32(.rcx, HEADER_FUNCTION);
+    try a.jcc(.ne, bail_lbl); // Other heap type -> bail out
+
+    // Array or Function: ptr = rax & PTR_MASK
+    a.bindLabel(is_ref_lbl);
+    try a.movRegImm64(.rcx, JSValue.PTR_MASK);
+    try a.andRegReg(.rax, .rcx);
+
+    // Read _count at offset 0
+    try a.movRegMem(.rcx, .rax, 0);
+    try a.cmpRegImm32(.rcx, 1);
+    try a.jcc(.be, bail_lbl); // If rc <= 1 -> bail out
+
+    // rc > 1: decrement rc inline
+    try a.decReg64(.rcx);
+    try a.movMemReg(.rax, 0, .rcx);
+
+    a.bindLabel(ok_lbl);
 }
 
 fn emitLoadNumToXmm(
@@ -1985,18 +2002,19 @@ fn emitStoreXmmToNum(
     src_xmm: Xmm,
     bail_lbl: Label,
 ) !void {
-    _ = bail_lbl;
+    _ = cached_regs;
+    _ = cached_count;
     if (r < 64 and reg_to_xmm[r] != null) {
         const xmm_k = reg_to_xmm[r].?;
         if (xmm_k != src_xmm) {
             try a.movsdXmmXmm(xmm_k, src_xmm);
         }
     } else {
+        try emitReleaseHeapIfRefGt1(a, r, bail_lbl);
         try a.movqRegXmm(.rax, src_xmm);
         try a.ucomisd(src_xmm, src_xmm);
         try a.movRegImm64(.rcx, JSValue.CANONICAL_NAN);
         try a.cmovpRegReg(.rax, .rcx);
-        try emitGuardNonHeapInOsrCached(a, r, cached_regs, cached_count);
         try a.movMemReg(.r12, @intCast(@as(usize, r) * 8), .rax);
     }
 }
@@ -2054,10 +2072,23 @@ fn compileOsrImpl(
         for (0..cached_count) |k| {
             const r = cached_regs[k];
             const xmm_k = @as(Xmm, @enumFromInt(4 + k));
-            try a.movRegMem(.rax, .r12, @intCast(@as(usize, r) * 8));
-            try a.cmpRegReg(.rax, .r15);
-            try a.jcc(.ae, preheader_bailout);
-            try a.movqXmmReg(xmm_k, .rax);
+            if (analysis.read_before_written[r]) {
+                try a.movRegMem(.rax, .r12, @intCast(@as(usize, r) * 8));
+                try a.cmpRegReg(.rax, .r15);
+                try a.jcc(.ae, preheader_bailout);
+                try a.movqXmmReg(xmm_k, .rax);
+            } else {
+                const skip_lbl = try a.createLabel();
+                const done_lbl = try a.createLabel();
+                try a.movRegMem(.rax, .r12, @intCast(@as(usize, r) * 8));
+                try a.cmpRegReg(.rax, .r15);
+                try a.jcc(.ae, skip_lbl);
+                try a.movqXmmReg(xmm_k, .rax);
+                try a.jmp(done_lbl);
+                a.bindLabel(skip_lbl);
+                try a.xorpd(xmm_k, xmm_k);
+                a.bindLabel(done_lbl);
+            }
         }
     }
 
@@ -2070,7 +2101,7 @@ fn compileOsrImpl(
         switch (op.opcode) {
             .nop => {},
             .load_undefined => {
-                try emitGuardNonHeapInOsrCached(&a, op.a, cached_regs, cached_count);
+                try emitReleaseHeapIfRefGt1(&a, op.a, bail_lbl);
                 try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .r15);
             },
             .load_const => {
@@ -2085,7 +2116,7 @@ fn compileOsrImpl(
                     try a.movRegImm64(.rax, bits);
                     try a.movqXmmReg(xmm_k, .rax);
                 } else {
-                    try emitGuardNonHeapInOsrCached(&a, op.a, cached_regs, cached_count);
+                    try emitReleaseHeapIfRefGt1(&a, op.a, bail_lbl);
                     try a.movRegImm64(.rax, bits);
                     try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
                 }
@@ -2099,39 +2130,40 @@ fn compileOsrImpl(
                     } else if (a_cached and !b_cached) {
                         try emitLoadNumToXmm(&a, reg_to_xmm, op.b, reg_to_xmm[op.a].?, bail_lbl);
                     } else if (!a_cached and b_cached) {
+                        try emitReleaseHeapIfRefGt1(&a, op.a, bail_lbl);
                         try a.movqRegXmm(.rax, reg_to_xmm[op.b].?);
-                        try emitGuardNonHeapInOsrCached(&a, op.a, cached_regs, cached_count);
                         try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
                     } else {
-                        const fn_move_lbl = try a.createLabel();
+                        const heap_move_lbl = try a.createLabel();
                         const done_move_lbl = try a.createLabel();
 
-                        // Guard: regs[dst] < HEAP_BASE (%r14)
-                        try a.movRegMem(.rdx, .r12, @intCast(@as(usize, op.a) * 8));
-                        try a.cmpRegReg(.rdx, .r14);
-                        try a.jcc(.ae, bail_lbl);
+                        // Release old regs[dst] if it's a heap ref with rc > 1
+                        try emitReleaseHeapIfRefGt1(&a, op.a, bail_lbl);
 
                         // Load val = regs[src]
                         try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
                         try a.cmpRegReg(.rax, .r14);
-                        try a.jcc(.ae, fn_move_lbl);
+                        try a.jcc(.ae, heap_move_lbl);
 
                         // val < HEAP_BASE: write regs[dst] = val
                         try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
                         try a.jmp(done_move_lbl);
 
-                        // val >= HEAP_BASE: check if (val >> 47) == HEADER_FUNCTION
-                        a.bindLabel(fn_move_lbl);
+                        // val >= HEAP_BASE: check if (val >> 47) == HEADER_ARRAY or HEADER_FUNCTION
+                        a.bindLabel(heap_move_lbl);
                         try a.movRegReg(.rcx, .rax);
                         try a.shrRegImm8(.rcx, 47);
+                        const inc_rc_lbl = try a.createLabel();
+                        try a.cmpRegImm32(.rcx, HEADER_ARRAY);
+                        try a.jcc(.e, inc_rc_lbl);
                         try a.cmpRegImm32(.rcx, HEADER_FUNCTION);
                         try a.jcc(.ne, bail_lbl);
 
-                        // Function: ptr = val & PTR_MASK
+                        // Retain: ptr = val & PTR_MASK; ptr._count += 1
+                        a.bindLabel(inc_rc_lbl);
                         try a.movRegImm64(.rcx, JSValue.PTR_MASK);
                         try a.andRegReg(.rcx, .rax);
-                        const rc_off: i32 = @intCast(@offsetOf(zvalue.Rc(zvalue.Callable), "_count"));
-                        try a.incMem64(.rcx, rc_off);
+                        try a.incMem64(.rcx, 0);
                         try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
 
                         a.bindLabel(done_move_lbl);
@@ -2163,7 +2195,7 @@ fn compileOsrImpl(
                 try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
                 try a.movRegReg(.rcx, .rax);
                 try a.shrRegImm8(.rcx, 47);
-                try a.cmpRegImm32(.rcx, 0x1FFF4);
+                try a.cmpRegImm32(.rcx, HEADER_ARRAY);
                 try a.jcc(.ne, bail_lbl);
                 try a.movRegImm64(.rcx, JSValue.PTR_MASK);
                 try a.andRegReg(.rax, .rcx);
@@ -2201,8 +2233,9 @@ fn compileOsrImpl(
                     const xmm_k = reg_to_xmm[op.a].?;
                     try a.movqXmmReg(xmm_k, .rax);
                 } else {
-                    try emitGuardNonHeapInOsrCached(&a, op.a, cached_regs, cached_count);
-                    try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+                    try a.movRegReg(.rdx, .rax);
+                    try emitReleaseHeapIfRefGt1(&a, op.a, bail_lbl);
+                    try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rdx);
                 }
             },
             .set_elem => {
@@ -2232,11 +2265,11 @@ fn compileOsrImpl(
                     try a.jcc(.ae, bail_lbl);
                 }
 
-                // arr = regs[op.a]; guard (arr >> 47) == 0x1FFF4 (HEADER_ARRAY)
+                // arr = regs[op.a]; guard (arr >> 47) == HEADER_ARRAY
                 try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.a) * 8));
                 try a.movRegReg(.rcx, .rax);
                 try a.shrRegImm8(.rcx, 47);
-                try a.cmpRegImm32(.rcx, 0x1FFF4);
+                try a.cmpRegImm32(.rcx, HEADER_ARRAY);
                 try a.jcc(.ne, bail_lbl);
                 try a.movRegImm64(.rcx, JSValue.PTR_MASK);
                 try a.andRegReg(.rax, .rcx);
@@ -2531,7 +2564,7 @@ fn compileOsrImpl(
             .lt_num, .gt_num, .le_num, .ge_num, .eq, .ne => {
                 try emitLoadNumToXmm(&a, reg_to_xmm, op.b, .xmm0, bail_lbl);
                 try emitLoadNumToXmm(&a, reg_to_xmm, op.c, .xmm1, bail_lbl);
-                try emitGuardNonHeapInOsrCached(&a, op.a, cached_regs, cached_count);
+                try emitReleaseHeapIfRefGt1(&a, op.a, bail_lbl);
                 try emitCmpToBool(&a, op.opcode);
                 try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
             },
@@ -2540,7 +2573,7 @@ fn compileOsrImpl(
                 try emitLoadNumToXmm(&a, reg_to_xmm, op.b, .xmm0, bail_lbl);
                 try a.movRegImm64(.rcx, c_bits);
                 try a.movqXmmReg(.xmm1, .rcx);
-                try emitGuardNonHeapInOsrCached(&a, op.a, cached_regs, cached_count);
+                try emitReleaseHeapIfRefGt1(&a, op.a, bail_lbl);
                 try emitCmpToBool(&a, op.opcode);
                 try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
             },
@@ -2594,11 +2627,11 @@ fn compileOsrImpl(
                     try a.jcc(.ae, slow_lbl);
                 }
 
-                // arr = regs[op.a]; guard (arr >> 47) == 0x1FFF4 (HEADER_ARRAY)
+                // arr = regs[op.a]; guard (arr >> 47) == HEADER_ARRAY
                 try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.a) * 8));
                 try a.movRegReg(.rcx, .rax);
                 try a.shrRegImm8(.rcx, 47);
-                try a.cmpRegImm32(.rcx, 0x1FFF4);
+                try a.cmpRegImm32(.rcx, HEADER_ARRAY);
                 try a.jcc(.ne, slow_lbl);
 
                 // box = arr & PTR_MASK
@@ -2657,11 +2690,11 @@ fn compileOsrImpl(
                 const slow_lbl = try a.createLabel();
                 const done_lbl = try a.createLabel();
 
-                // arr = regs[op.b]; guard (arr >> 47) == 0x1FFF4 (HEADER_ARRAY)
+                // arr = regs[op.b]; guard (arr >> 47) == HEADER_ARRAY
                 try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
                 try a.movRegReg(.rcx, .rax);
                 try a.shrRegImm8(.rcx, 47);
-                try a.cmpRegImm32(.rcx, 0x1FFF4);
+                try a.cmpRegImm32(.rcx, HEADER_ARRAY);
                 try a.jcc(.ne, slow_lbl);
 
                 // box = arr & PTR_MASK
@@ -2686,8 +2719,9 @@ fn compileOsrImpl(
                     const xmm_k = reg_to_xmm[op.a].?;
                     try a.movqXmmReg(xmm_k, .rax);
                 } else {
-                    try emitGuardNonHeapInOsrCached(&a, op.a, cached_regs, cached_count);
-                    try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+                    try a.movRegReg(.rdx, .rax);
+                    try emitReleaseHeapIfRefGt1(&a, op.a, bail_lbl);
+                    try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rdx);
                 }
                 try a.jmp(done_lbl);
 
@@ -3605,4 +3639,39 @@ test "baseline JIT Phase 4C caches hot numeric locals in xmm4..xmm15, handles Na
         );
         try std.testing.expectEqual(@as(f64, 6048), res.asNumber());
     }
+}
+
+test "baseline JIT Phase 4D eliminates bailouts in bitwise sieve with array, mod_num, inline RC" {
+    if (!comptime x64_asm.is_supported_host) return;
+    const Interpreter = @import("../interpreter.zig").Interpreter;
+
+    var allocating = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(std.testing.allocator, &allocating.writer);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+
+    const res = try interp.run(
+        \\function runSieveBitwise(n) {
+        \\    const arr = [0, 0, 0, 0, 0, 0, 0, 0];
+        \\    let acc = 0;
+        \\    for (let i = 1; i <= n; i++) {
+        \\        const idx = i & 7;
+        \\        const r = i % 7;
+        \\        const q = (i / 4) | 0;
+        \\        const b = ((q ^ idx) << 2) ^ (i >>> 1);
+        \\        if (r === 0) {
+        \\            arr[idx] = arr[idx] + b;
+        \\        } else {
+        \\            arr[idx] = arr[idx] + r;
+        \\        }
+        \\        acc = (acc + arr[idx]) | 0;
+        \\    }
+        \\    return acc;
+        \\}
+        \\runSieveBitwise(5000);
+    );
+    defer res.deinit();
+    try std.testing.expect(res.isNumber());
+    try std.testing.expectEqual(@as(f64, 418157123), res.asNumber());
 }
