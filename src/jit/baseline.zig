@@ -66,27 +66,58 @@ pub fn canCompile(block: *const codeblock.CodeBlock) bool {
         const reg_bit = if (op.a < 32) (@as(u32, 1) << @intCast(op.a)) else 0;
         switch (op.opcode) {
             .nop, .return_undefined => {},
-            .load_undefined => {
+            .load_undefined, .load_null, .load_true, .load_false => {
                 if (op.a >= block.register_count or seen_store_global) return false;
                 num_validated_regs &= ~reg_bit;
             },
             .load_const => {
                 if (op.a >= block.register_count or op.b >= block.constants.len) return false;
-                if (block.constants[op.b] != .number) return false;
-                num_validated_regs |= reg_bit;
+                switch (block.constants[op.b]) {
+                    .number => num_validated_regs |= reg_bit,
+                    .boolean => {
+                        if (seen_store_global) return false;
+                        num_validated_regs &= ~reg_bit;
+                    },
+                    else => return false,
+                }
             },
             .move, .load_local, .store_local => {
                 if (op.a >= block.register_count or op.b >= block.register_count) return false;
                 const src_bit = @as(u32, 1) << @intCast(op.b);
                 if (seen_store_global and (num_validated_regs & src_bit) == 0) return false;
+                if ((num_validated_regs & src_bit) != 0) {
+                    num_validated_regs |= reg_bit;
+                } else {
+                    num_validated_regs &= ~reg_bit;
+                }
+            },
+            .neg, .not_bits => {
+                if (op.a >= block.register_count or op.b >= block.register_count) return false;
+                const b_bit = @as(u32, 1) << @intCast(op.b);
+                if (seen_store_global and (num_validated_regs & b_bit) == 0) return false;
+                if (op.opcode == .not_bits and seen_store_global) return false;
                 num_validated_regs |= reg_bit;
             },
-            .add, .add_num, .sub_num, .mul_num => {
+            .not => {
+                if (op.a >= block.register_count or op.b >= block.register_count or seen_store_global) return false;
+                num_validated_regs &= ~reg_bit;
+            },
+            .add, .add_num, .sub_num, .mul_num, .div_num => {
                 if (op.a >= block.register_count or op.b >= block.register_count or op.c >= block.register_count) return false;
                 const b_bit = @as(u32, 1) << @intCast(op.b);
                 const c_bit = @as(u32, 1) << @intCast(op.c);
                 if (seen_store_global and ((num_validated_regs & b_bit) == 0 or (num_validated_regs & c_bit) == 0)) return false;
                 num_validated_regs |= reg_bit;
+            },
+            .mod_num, .and_bits, .or_bits, .xor_bits, .shl, .shr, .ushr => {
+                if (seen_store_global) return false;
+                if (op.a >= block.register_count or op.b >= block.register_count or op.c >= block.register_count) return false;
+                num_validated_regs |= reg_bit;
+            },
+            .lt_num, .gt_num, .le_num, .ge_num, .eq, .ne => {
+                if (seen_store_global) return false;
+                if (op.a >= block.register_count or op.b >= block.register_count or op.c >= block.register_count) return false;
+                num_validated_regs &= ~reg_bit;
             },
             .add_local_const, .sub_local_const => {
                 if (op.a >= block.register_count or op.b >= block.register_count or op.c >= block.constants.len) return false;
@@ -94,6 +125,12 @@ pub fn canCompile(block: *const codeblock.CodeBlock) bool {
                 const b_bit = @as(u32, 1) << @intCast(op.b);
                 if (seen_store_global and (num_validated_regs & b_bit) == 0) return false;
                 num_validated_regs |= reg_bit;
+            },
+            .lt_local_const, .gt_local_const, .le_local_const, .ge_local_const, .eq_local_const => {
+                if (seen_store_global) return false;
+                if (op.a >= block.register_count or op.b >= block.register_count or op.c >= block.constants.len) return false;
+                if (block.constants[op.c] != .number) return false;
+                num_validated_regs &= ~reg_bit;
             },
             .jeq_local_const_false,
             .jlt_local_const_false,
@@ -105,6 +142,13 @@ pub fn canCompile(block: *const codeblock.CodeBlock) bool {
                 if (op.a >= block.register_count or op.b >= block.constants.len) return false;
                 if (block.constants[op.b] != .number) return false;
                 const target = ip + @as(usize, op.c);
+                if (target >= block.ops.len) return false;
+                max_jump_target = @max(max_jump_target, target);
+            },
+            .jump_if_false, .jump_if_true => {
+                if (seen_store_global) return false;
+                if (op.a >= block.register_count) return false;
+                const target = (@as(usize, op.b) << 8) | op.c;
                 if (target >= block.ops.len) return false;
                 max_jump_target = @max(max_jump_target, target);
             },
@@ -231,6 +275,381 @@ fn emitGlobalSlotLookup(
     a.bindLabel(hit_label);
 }
 
+fn emitGuardNonHeapInOsr(a: *Assembler, reg_idx: u8, _: Label) !void {
+    const clean_lbl = try a.createLabel();
+    try a.movRegMem(.rdx, .r12, @intCast(@as(usize, reg_idx) * 8));
+    try a.cmpRegReg(.rdx, .r14);
+    try a.jcc(.b, clean_lbl);
+    try a.pushReg(.rax);
+    try a.pushReg(.rcx);
+    try a.movRegReg(.rdi, .r12);
+    try a.movRegImm32(.rsi, reg_idx);
+    try a.movRegImm64(.rax, @intFromPtr(&vm.jitDeinitSlot));
+    try a.callReg(.rax);
+    try a.popReg(.rcx);
+    try a.popReg(.rax);
+    a.bindLabel(clean_lbl);
+}
+
+fn emitCmpToBool(a: *Assembler, opcode: codeblock.Opcode) !void {
+    // Assumes %xmm0 = lhs, %xmm1 = rhs; produces JSValue.fromBool(result) in %rax.
+    const done_lbl = try a.createLabel();
+    const true_lbl = try a.createLabel();
+
+    switch (opcode) {
+        .lt_num, .lt_local_const => {
+            try a.ucomisd(.xmm1, .xmm0);
+            try a.jcc(.a, true_lbl);
+        },
+        .le_num, .le_local_const => {
+            try a.ucomisd(.xmm1, .xmm0);
+            try a.jcc(.ae, true_lbl);
+        },
+        .gt_num, .gt_local_const => {
+            try a.ucomisd(.xmm0, .xmm1);
+            try a.jcc(.a, true_lbl);
+        },
+        .ge_num, .ge_local_const => {
+            try a.ucomisd(.xmm0, .xmm1);
+            try a.jcc(.ae, true_lbl);
+        },
+        .eq, .eq_local_const => {
+            const false_lbl = try a.createLabel();
+            try a.ucomisd(.xmm0, .xmm1);
+            try a.jcc(.p, false_lbl);
+            try a.jcc(.e, true_lbl);
+            a.bindLabel(false_lbl);
+        },
+        .ne => {
+            try a.ucomisd(.xmm0, .xmm1);
+            try a.jcc(.p, true_lbl);
+            try a.jcc(.ne, true_lbl);
+        },
+        else => unreachable,
+    }
+    try a.movRegImm64(.rax, JSValue.fromBool(false).bits);
+    try a.jmp(done_lbl);
+    a.bindLabel(true_lbl);
+    try a.movRegImm64(.rax, JSValue.fromBool(true).bits);
+    a.bindLabel(done_lbl);
+}
+
+fn emitCondJump(a: *Assembler, is_true_jump: bool, src_reg: u8, target_lbl: Label, bail_lbl: Label) !void {
+    const num_lbl = try a.createLabel();
+    const fallthrough_lbl = try a.createLabel();
+
+    try a.movRegMem(.rax, .r12, @intCast(@as(usize, src_reg) * 8));
+    try a.cmpRegReg(.rax, .r15);
+    try a.jcc(.b, num_lbl);
+
+    try a.cmpRegReg(.rax, .r15);
+    if (is_true_jump) {
+        try a.jcc(.e, fallthrough_lbl);
+    } else {
+        try a.jcc(.e, target_lbl);
+    }
+    const null_bits = JSValue.NULL.bits;
+    try a.movRegImm64(.rcx, null_bits);
+    try a.cmpRegReg(.rax, .rcx);
+    if (is_true_jump) {
+        try a.jcc(.e, fallthrough_lbl);
+    } else {
+        try a.jcc(.e, target_lbl);
+    }
+    const false_bits = JSValue.fromBool(false).bits;
+    const true_bits = JSValue.fromBool(true).bits;
+    try a.movRegImm64(.rcx, false_bits);
+    try a.cmpRegReg(.rax, .rcx);
+    if (is_true_jump) {
+        try a.jcc(.e, fallthrough_lbl);
+    } else {
+        try a.jcc(.e, target_lbl);
+    }
+    try a.movRegImm64(.rcx, true_bits);
+    try a.cmpRegReg(.rax, .rcx);
+    try a.jcc(.ne, bail_lbl);
+    if (is_true_jump) {
+        try a.jmp(target_lbl);
+    } else {
+        try a.jmp(fallthrough_lbl);
+    }
+
+    a.bindLabel(num_lbl);
+    try a.movqXmmReg(.xmm0, .rax);
+    try a.xorpd(.xmm1, .xmm1);
+    try a.ucomisd(.xmm0, .xmm1);
+    if (is_true_jump) {
+        try a.jcc(.p, fallthrough_lbl);
+        try a.jcc(.ne, target_lbl);
+    } else {
+        try a.jcc(.p, target_lbl);
+        try a.jcc(.e, target_lbl);
+    }
+    a.bindLabel(fallthrough_lbl);
+}
+
+fn emitSharedOp(a: *Assembler, block: *const codeblock.CodeBlock, op: codeblock.Op, is_osr: bool, bail_lbl: Label) !bool {
+    switch (op.opcode) {
+        .load_null => {
+            if (is_osr) try emitGuardNonHeapInOsr(a, op.a, bail_lbl);
+            try a.movRegImm64(.rax, JSValue.NULL.bits);
+            try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+            return true;
+        },
+        .load_true => {
+            if (is_osr) try emitGuardNonHeapInOsr(a, op.a, bail_lbl);
+            try a.movRegImm64(.rax, JSValue.fromBool(true).bits);
+            try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+            return true;
+        },
+        .load_false => {
+            if (is_osr) try emitGuardNonHeapInOsr(a, op.a, bail_lbl);
+            try a.movRegImm64(.rax, JSValue.fromBool(false).bits);
+            try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+            return true;
+        },
+        .not => {
+            try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
+            const false_bits = JSValue.fromBool(false).bits;
+            const true_bits = JSValue.fromBool(true).bits;
+            const is_false_lbl = try a.createLabel();
+            const store_lbl = try a.createLabel();
+            try a.movRegImm64(.rcx, false_bits);
+            try a.cmpRegReg(.rax, .rcx);
+            try a.jcc(.e, is_false_lbl);
+            try a.movRegImm64(.rdx, true_bits);
+            try a.cmpRegReg(.rax, .rdx);
+            try a.jcc(.ne, bail_lbl);
+            try a.movRegReg(.rax, .rcx);
+            try a.jmp(store_lbl);
+            a.bindLabel(is_false_lbl);
+            try a.movRegImm64(.rax, true_bits);
+            a.bindLabel(store_lbl);
+            if (is_osr and op.a != op.b) try emitGuardNonHeapInOsr(a, op.a, bail_lbl);
+            try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+            return true;
+        },
+        .neg => {
+            try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
+            try a.cmpRegReg(.rax, .r15);
+            try a.jcc(.ae, bail_lbl);
+            if (is_osr and op.a != op.b) try emitGuardNonHeapInOsr(a, op.a, bail_lbl);
+            try a.movqXmmReg(.xmm0, .rax);
+            try a.movRegImm64(.rcx, 0x8000_0000_0000_0000);
+            try a.xorRegReg64(.rax, .rcx);
+            try a.ucomisd(.xmm0, .xmm0);
+            try a.movRegImm64(.rcx, JSValue.CANONICAL_NAN);
+            try a.cmovpRegReg(.rax, .rcx);
+            try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+            return true;
+        },
+        .div_num => {
+            try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
+            try a.cmpRegReg(.rax, .r15);
+            try a.jcc(.ae, bail_lbl);
+            try a.movRegMem(.rcx, .r12, @intCast(@as(usize, op.c) * 8));
+            try a.cmpRegReg(.rcx, .r15);
+            try a.jcc(.ae, bail_lbl);
+            if (is_osr and op.a != op.b and op.a != op.c) try emitGuardNonHeapInOsr(a, op.a, bail_lbl);
+            try a.movqXmmReg(.xmm0, .rax);
+            try a.movqXmmReg(.xmm1, .rcx);
+            try a.divsd(.xmm0, .xmm1);
+            try a.movqRegXmm(.rax, .xmm0);
+            try a.ucomisd(.xmm0, .xmm0);
+            try a.movRegImm64(.rcx, JSValue.CANONICAL_NAN);
+            try a.cmovpRegReg(.rax, .rcx);
+            try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+            return true;
+        },
+        .mod_num => {
+            try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
+            try a.cmpRegReg(.rax, .r15);
+            try a.jcc(.ae, bail_lbl);
+            try a.movRegMem(.rcx, .r12, @intCast(@as(usize, op.c) * 8));
+            try a.cmpRegReg(.rcx, .r15);
+            try a.jcc(.ae, bail_lbl);
+            // lhs: positive exact int32 (also rejects -0.0 via sign bit check)
+            try a.movRegReg(.rdx, .rax);
+            try a.shrRegImm8(.rdx, 63);
+            try a.testRegReg(.rdx, .rdx);
+            try a.jcc(.ne, bail_lbl);
+            try a.movqXmmReg(.xmm0, .rax);
+            try a.cvttsd2siReg32Xmm(.rax, .xmm0);
+            try a.cmpReg32Imm32(.rax, -0x80000000);
+            try a.jcc(.e, bail_lbl);
+            try a.cvtsi2sdXmmReg32(.xmm2, .rax);
+            try a.ucomisd(.xmm0, .xmm2);
+            try a.jcc(.p, bail_lbl);
+            try a.jcc(.ne, bail_lbl);
+            // rhs: strictly positive exact int32 (> 0)
+            try a.movRegReg(.rdx, .rcx);
+            try a.shrRegImm8(.rdx, 63);
+            try a.testRegReg(.rdx, .rdx);
+            try a.jcc(.ne, bail_lbl);
+            try a.movqXmmReg(.xmm1, .rcx);
+            try a.cvttsd2siReg32Xmm(.rcx, .xmm1);
+            try a.cmpReg32Imm32(.rcx, -0x80000000);
+            try a.jcc(.e, bail_lbl);
+            try a.testReg32Reg32(.rcx, .rcx);
+            try a.jcc(.e, bail_lbl);
+            try a.cvtsi2sdXmmReg32(.xmm2, .rcx);
+            try a.ucomisd(.xmm1, .xmm2);
+            try a.jcc(.p, bail_lbl);
+            try a.jcc(.ne, bail_lbl);
+            if (is_osr and op.a != op.b and op.a != op.c) try emitGuardNonHeapInOsr(a, op.a, bail_lbl);
+            try a.xorReg32Reg32(.rdx, .rdx);
+            try a.divReg32(.rcx);
+            try a.cvtsi2sdXmmReg32(.xmm0, .rdx);
+            try a.movqRegXmm(.rax, .xmm0);
+            try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+            return true;
+        },
+        .not_bits => {
+            const slow_lbl = try a.createLabel();
+            const done_lbl = try a.createLabel();
+            try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
+            try a.cmpRegReg(.rax, .r15);
+            try a.jcc(.ae, bail_lbl);
+            try a.movqXmmReg(.xmm0, .rax);
+            try a.cvttsd2siReg32Xmm(.rax, .xmm0);
+            try a.cmpReg32Imm32(.rax, -0x80000000);
+            try a.jcc(.e, slow_lbl);
+            if (is_osr and op.a != op.b) try emitGuardNonHeapInOsr(a, op.a, bail_lbl);
+            try a.notReg32(.rax);
+            try a.cvtsi2sdXmmReg32(.xmm0, .rax);
+            try a.movqRegXmm(.rax, .xmm0);
+            try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+            try a.jmp(done_lbl);
+
+            a.bindLabel(slow_lbl);
+            try a.movRegReg(.rdi, .r12);
+            try a.movRegImm32(.rsi, op.a);
+            try a.movRegImm32(.rdx, op.b);
+            try a.movRegImm32(.rcx, op.b);
+            try a.movRegImm32(.r8, 6);
+            try a.movRegImm64(.rax, @intFromPtr(&vm.jitBitwise));
+            if (!is_osr) {
+                try a.movRegReg(.rbx, .rsp);
+                try a.andRegImm8(.rsp, -16);
+            }
+            try a.callReg(.rax);
+            if (!is_osr) {
+                try a.movRegReg(.rsp, .rbx);
+            }
+            try a.testRegReg(.rax, .rax);
+            try a.jcc(.ne, bail_lbl);
+            a.bindLabel(done_lbl);
+            return true;
+        },
+        .and_bits, .or_bits, .xor_bits, .shl, .shr, .ushr => {
+            const slow_lbl = try a.createLabel();
+            const done_lbl = try a.createLabel();
+            try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
+            try a.cmpRegReg(.rax, .r15);
+            try a.jcc(.ae, bail_lbl);
+            try a.movRegMem(.rcx, .r12, @intCast(@as(usize, op.c) * 8));
+            try a.cmpRegReg(.rcx, .r15);
+            try a.jcc(.ae, bail_lbl);
+            try a.movqXmmReg(.xmm0, .rax);
+            try a.movqXmmReg(.xmm1, .rcx);
+            try a.cvttsd2siReg32Xmm(.rax, .xmm0);
+            try a.cmpReg32Imm32(.rax, -0x80000000);
+            try a.jcc(.e, slow_lbl);
+            try a.cvttsd2siReg32Xmm(.rcx, .xmm1);
+            try a.cmpReg32Imm32(.rcx, -0x80000000);
+            try a.jcc(.e, slow_lbl);
+            if (is_osr and op.a != op.b and op.a != op.c) try emitGuardNonHeapInOsr(a, op.a, bail_lbl);
+            switch (op.opcode) {
+                .and_bits => {
+                    try a.andReg32Reg32(.rax, .rcx);
+                    try a.cvtsi2sdXmmReg32(.xmm0, .rax);
+                },
+                .or_bits => {
+                    try a.orReg32Reg32(.rax, .rcx);
+                    try a.cvtsi2sdXmmReg32(.xmm0, .rax);
+                },
+                .xor_bits => {
+                    try a.xorReg32Reg32(.rax, .rcx);
+                    try a.cvtsi2sdXmmReg32(.xmm0, .rax);
+                },
+                .shl => {
+                    try a.shlReg32Cl(.rax);
+                    try a.cvtsi2sdXmmReg32(.xmm0, .rax);
+                },
+                .shr => {
+                    try a.sarReg32Cl(.rax);
+                    try a.cvtsi2sdXmmReg32(.xmm0, .rax);
+                },
+                .ushr => {
+                    try a.shrReg32Cl(.rax);
+                    try a.cvtsi2sdqXmmReg64(.xmm0, .rax);
+                },
+                else => unreachable,
+            }
+            try a.movqRegXmm(.rax, .xmm0);
+            try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+            try a.jmp(done_lbl);
+
+            a.bindLabel(slow_lbl);
+            const kind_u32: u32 = switch (op.opcode) {
+                .and_bits => 0,
+                .or_bits => 1,
+                .xor_bits => 2,
+                .shl => 3,
+                .shr => 4,
+                .ushr => 5,
+                else => unreachable,
+            };
+            try a.movRegReg(.rdi, .r12);
+            try a.movRegImm32(.rsi, op.a);
+            try a.movRegImm32(.rdx, op.b);
+            try a.movRegImm32(.rcx, op.c);
+            try a.movRegImm32(.r8, kind_u32);
+            try a.movRegImm64(.rax, @intFromPtr(&vm.jitBitwise));
+            if (!is_osr) {
+                try a.movRegReg(.rbx, .rsp);
+                try a.andRegImm8(.rsp, -16);
+            }
+            try a.callReg(.rax);
+            if (!is_osr) {
+                try a.movRegReg(.rsp, .rbx);
+            }
+            try a.testRegReg(.rax, .rax);
+            try a.jcc(.ne, bail_lbl);
+            a.bindLabel(done_lbl);
+            return true;
+        },
+        .lt_num, .gt_num, .le_num, .ge_num, .eq, .ne => {
+            try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
+            try a.cmpRegReg(.rax, .r15);
+            try a.jcc(.ae, bail_lbl);
+            try a.movRegMem(.rcx, .r12, @intCast(@as(usize, op.c) * 8));
+            try a.cmpRegReg(.rcx, .r15);
+            try a.jcc(.ae, bail_lbl);
+            if (is_osr and op.a != op.b and op.a != op.c) try emitGuardNonHeapInOsr(a, op.a, bail_lbl);
+            try a.movqXmmReg(.xmm0, .rax);
+            try a.movqXmmReg(.xmm1, .rcx);
+            try emitCmpToBool(a, op.opcode);
+            try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+            return true;
+        },
+        .lt_local_const, .gt_local_const, .le_local_const, .ge_local_const, .eq_local_const => {
+            const c_bits = JSValue.fromNumber(block.constants[op.c].number).bits;
+            try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
+            try a.cmpRegReg(.rax, .r15);
+            try a.jcc(.ae, bail_lbl);
+            if (is_osr and op.a != op.b) try emitGuardNonHeapInOsr(a, op.a, bail_lbl);
+            try a.movqXmmReg(.xmm0, .rax);
+            try a.movRegImm64(.rcx, c_bits);
+            try a.movqXmmReg(.xmm1, .rcx);
+            try emitCmpToBool(a, op.opcode);
+            try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+            return true;
+        },
+        else => return false,
+    }
+}
+
 fn compileImpl(
     allocator: Allocator,
     block: *const codeblock.CodeBlock,
@@ -305,15 +724,25 @@ fn compileImpl(
                 try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .r15);
             },
             .load_const => {
-                const bits = JSValue.fromNumber(block.constants[op.b].number).bits;
+                const c = block.constants[op.b];
+                const bits = switch (c) {
+                    .number => |n| JSValue.fromNumber(n).bits,
+                    .boolean => |b| JSValue.fromBool(b).bits,
+                    else => unreachable,
+                };
                 try a.movRegImm64(.rax, bits);
                 try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
             },
             .move, .load_local, .store_local => {
                 try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
-                try a.cmpRegReg(.rax, .r15);
+                try a.movRegImm64(.rcx, JSValue.HEAP_BASE);
+                try a.cmpRegReg(.rax, .rcx);
                 try a.jcc(.ae, bailout_label);
                 try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+            },
+            .jump_if_false, .jump_if_true => {
+                const target_pc = (@as(usize, op.b) << 8) | op.c;
+                try emitCondJump(&a, op.opcode == .jump_if_true, op.a, op_labels[target_pc], bailout_label);
             },
             .add, .add_num, .sub_num, .mul_num => {
                 try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
@@ -455,7 +884,8 @@ fn compileImpl(
             },
             .return_value => {
                 try a.movRegMem(.rcx, .r12, @intCast(@as(usize, op.a) * 8));
-                try a.cmpRegReg(.rcx, .r15);
+                try a.movRegImm64(.rdx, JSValue.HEAP_BASE);
+                try a.cmpRegReg(.rcx, .rdx);
                 try a.jcc(.ae, bailout_label);
                 try a.xorRegReg(.rax, .rax);
                 try a.ret();
@@ -465,7 +895,9 @@ fn compileImpl(
                 try a.xorRegReg(.rax, .rax);
                 try a.ret();
             },
-            else => unreachable,
+            else => {
+                if (!(try emitSharedOp(&a, block, op, false, bailout_label))) unreachable;
+            },
         }
     }
 
@@ -489,20 +921,50 @@ pub fn canCompileOsr(block: *const codeblock.CodeBlock, start_ip: usize, end_ip:
         const op = block.ops[ip];
         switch (op.opcode) {
             .nop => {},
-            .load_undefined => {
+            .load_undefined, .load_null, .load_true, .load_false => {
                 if (op.a >= block.register_count) return false;
             },
             .load_const => {
                 if (op.a >= block.register_count or op.b >= block.constants.len) return false;
-                if (block.constants[op.b] != .number) return false;
+                switch (block.constants[op.b]) {
+                    .number, .boolean => {},
+                    else => return false,
+                }
             },
-            .move, .load_local, .store_local => {
+            .move, .load_local, .store_local, .neg, .not, .not_bits => {
                 if (op.a >= block.register_count or op.b >= block.register_count) return false;
             },
-            .add, .add_num, .sub_num, .mul_num => {
+            .add,
+            .add_num,
+            .sub_num,
+            .mul_num,
+            .div_num,
+            .mod_num,
+            .and_bits,
+            .or_bits,
+            .xor_bits,
+            .shl,
+            .shr,
+            .ushr,
+            .lt_num,
+            .gt_num,
+            .le_num,
+            .ge_num,
+            .eq,
+            .ne,
+            .get_elem,
+            .set_elem,
+            => {
                 if (op.a >= block.register_count or op.b >= block.register_count or op.c >= block.register_count) return false;
             },
-            .add_local_const, .sub_local_const => {
+            .add_local_const,
+            .sub_local_const,
+            .lt_local_const,
+            .gt_local_const,
+            .le_local_const,
+            .ge_local_const,
+            .eq_local_const,
+            => {
                 if (op.a >= block.register_count or op.b >= block.register_count or op.c >= block.constants.len) return false;
                 if (block.constants[op.c] != .number) return false;
             },
@@ -515,6 +977,11 @@ pub fn canCompileOsr(block: *const codeblock.CodeBlock, start_ip: usize, end_ip:
                 if (op.a >= block.register_count or op.b >= block.constants.len) return false;
                 if (block.constants[op.b] != .number) return false;
                 if (ip + @as(usize, op.c) >= block.ops.len) return false;
+            },
+            .jump_if_false, .jump_if_true => {
+                if (op.a >= block.register_count) return false;
+                const target = (@as(usize, op.b) << 8) | op.c;
+                if (target >= block.ops.len) return false;
             },
             .jump => {
                 const target = (@as(usize, op.b) << 8) | op.c;
@@ -618,29 +1085,179 @@ fn compileOsrImpl(
         switch (op.opcode) {
             .nop => {},
             .load_undefined => {
-                try a.movRegMem(.rdx, .r12, @intCast(@as(usize, op.a) * 8));
-                try a.cmpRegReg(.rdx, .r14);
-                try a.jcc(.ae, bail_lbl);
+                try emitGuardNonHeapInOsr(&a, op.a, bail_lbl);
                 try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .r15);
             },
             .load_const => {
-                try a.movRegMem(.rdx, .r12, @intCast(@as(usize, op.a) * 8));
-                try a.cmpRegReg(.rdx, .r14);
-                try a.jcc(.ae, bail_lbl);
-                const bits = JSValue.fromNumber(block.constants[op.b].number).bits;
+                try emitGuardNonHeapInOsr(&a, op.a, bail_lbl);
+                const c = block.constants[op.b];
+                const bits = switch (c) {
+                    .number => |n| JSValue.fromNumber(n).bits,
+                    .boolean => |b| JSValue.fromBool(b).bits,
+                    else => unreachable,
+                };
                 try a.movRegImm64(.rax, bits);
                 try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
             },
             .move, .load_local, .store_local => {
-                try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
-                try a.cmpRegReg(.rax, .r15);
-                try a.jcc(.ae, bail_lbl);
                 if (op.a != op.b) {
+                    const slow_move_lbl = try a.createLabel();
+                    const done_move_lbl = try a.createLabel();
+                    try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
+                    try a.cmpRegReg(.rax, .r14);
+                    try a.jcc(.ae, slow_move_lbl);
                     try a.movRegMem(.rdx, .r12, @intCast(@as(usize, op.a) * 8));
                     try a.cmpRegReg(.rdx, .r14);
-                    try a.jcc(.ae, bail_lbl);
+                    try a.jcc(.ae, slow_move_lbl);
+                    try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+                    try a.jmp(done_move_lbl);
+                    a.bindLabel(slow_move_lbl);
+                    try a.movRegReg(.rdi, .r13);
+                    try a.movRegReg(.rsi, .r12);
+                    try a.movRegImm32(.rdx, op.a);
+                    try a.movRegImm32(.rcx, op.b);
+                    try a.movRegImm64(.rax, @intFromPtr(&vm.jitMoveSlot));
+                    try a.callReg(.rax);
+                    a.bindLabel(done_move_lbl);
                 }
+            },
+            .jump_if_false, .jump_if_true => {
+                const target_pc = (@as(usize, op.b) << 8) | op.c;
+                const target_lbl = if (target_pc >= start_ip and target_pc <= end_ip)
+                    op_labels[target_pc - start_ip]
+                else blk: {
+                    const el = try a.createLabel();
+                    try exit_stubs.append(allocator, .{ .label = el, .target_ip = @intCast(target_pc) });
+                    break :blk el;
+                };
+                try emitCondJump(&a, op.opcode == .jump_if_true, op.a, target_lbl, bail_lbl);
+            },
+            .get_elem => {
+                const ArrayBox = zvalue.Rc(zvalue.ZArray(JSValue));
+                const ZArr = zvalue.ZArray(JSValue);
+                const ArrList = @FieldType(ZArr, "items");
+                const arr_val_off: i32 = @intCast(@offsetOf(ArrayBox, "value"));
+                const arr_holey_off: i32 = arr_val_off + @as(i32, @intCast(@offsetOf(ZArr, "holey")));
+                const arr_list_off: i32 = arr_val_off + @as(i32, @intCast(@offsetOf(ZArr, "items")));
+                const arr_items_ptr_off: i32 = arr_list_off + @as(i32, @intCast(@offsetOf(ArrList, "items")));
+                const arr_items_len_off: i32 = arr_items_ptr_off + 8;
+
+                // arr = regs[op.b]; guard (arr >> 47) == 0x1FFF4 (HEADER_ARRAY)
+                try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
+                try a.movRegReg(.rcx, .rax);
+                try a.shrRegImm8(.rcx, 47);
+                try a.cmpRegImm32(.rcx, 0x1FFF4);
+                try a.jcc(.ne, bail_lbl);
+                try a.movRegImm64(.rcx, JSValue.PTR_MASK);
+                try a.andRegReg(.rax, .rcx);
+
+                // guard box.holey == null
+                try a.movRegMem(.rcx, .rax, arr_holey_off);
+                try a.testRegReg(.rcx, .rcx);
+                try a.jcc(.ne, bail_lbl);
+
+                // key = regs[op.c]; guard key < BASE_TAG and exact int32 >= 0
+                try a.movRegMem(.rcx, .r12, @intCast(@as(usize, op.c) * 8));
+                try a.cmpRegReg(.rcx, .r15);
+                try a.jcc(.ae, bail_lbl);
+                try a.movqXmmReg(.xmm0, .rcx);
+                try a.cvttsd2siReg32Xmm(.rcx, .xmm0);
+                try a.cvtsi2sdXmmReg32(.xmm1, .rcx);
+                try a.ucomisd(.xmm0, .xmm1);
+                try a.jcc(.p, bail_lbl);
+                try a.jcc(.ne, bail_lbl);
+                // sign check on 32-bit int: (rcx >> 31) == 0
+                try a.movRegReg(.rdx, .rcx);
+                try a.shrRegImm8(.rdx, 31);
+                try a.testRegReg(.rdx, .rdx);
+                try a.jcc(.ne, bail_lbl);
+
+                // guard idx < box.items.len
+                try a.movRegMem(.rdx, .rax, arr_items_len_off);
+                try a.cmpRegReg(.rcx, .rdx);
+                try a.jcc(.ae, bail_lbl);
+
+                // elem = box.items.ptr[idx]; guard elem < BASE_TAG and clean destination if needed
+                try a.movRegMem(.rax, .rax, arr_items_ptr_off);
+                try a.movRegMemIndexed8(.rax, .rax, .rcx, 0);
+                try a.cmpRegReg(.rax, .r15);
+                try a.jcc(.ae, bail_lbl);
+                try emitGuardNonHeapInOsr(&a, op.a, bail_lbl);
                 try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+            },
+            .set_elem => {
+                const ArrayBox = zvalue.Rc(zvalue.ZArray(JSValue));
+                const ZArr = zvalue.ZArray(JSValue);
+                const ArrList = @FieldType(ZArr, "items");
+                const arr_val_off: i32 = @intCast(@offsetOf(ArrayBox, "value"));
+                const arr_holey_off: i32 = arr_val_off + @as(i32, @intCast(@offsetOf(ZArr, "holey")));
+                const arr_list_off: i32 = arr_val_off + @as(i32, @intCast(@offsetOf(ZArr, "items")));
+                const arr_items_ptr_off: i32 = arr_list_off + @as(i32, @intCast(@offsetOf(ArrList, "items")));
+                const arr_items_len_off: i32 = arr_items_ptr_off + 8;
+                const arr_items_cap_off: i32 = arr_list_off + @as(i32, @intCast(@offsetOf(ArrList, "capacity")));
+
+                const append_lbl = try a.createLabel();
+                const done_lbl = try a.createLabel();
+
+                // val = regs[op.c]; guard val < BASE_TAG
+                try a.movRegMem(.r10, .r12, @intCast(@as(usize, op.c) * 8));
+                try a.cmpRegReg(.r10, .r15);
+                try a.jcc(.ae, bail_lbl);
+
+                // arr = regs[op.a]; guard (arr >> 47) == 0x1FFF4 (HEADER_ARRAY)
+                try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.a) * 8));
+                try a.movRegReg(.rcx, .rax);
+                try a.shrRegImm8(.rcx, 47);
+                try a.cmpRegImm32(.rcx, 0x1FFF4);
+                try a.jcc(.ne, bail_lbl);
+                try a.movRegImm64(.rcx, JSValue.PTR_MASK);
+                try a.andRegReg(.rax, .rcx);
+
+                // guard box.holey == null
+                try a.movRegMem(.rcx, .rax, arr_holey_off);
+                try a.testRegReg(.rcx, .rcx);
+                try a.jcc(.ne, bail_lbl);
+
+                // key = regs[op.b]; guard key < BASE_TAG and exact int32 >= 0
+                try a.movRegMem(.rcx, .r12, @intCast(@as(usize, op.b) * 8));
+                try a.cmpRegReg(.rcx, .r15);
+                try a.jcc(.ae, bail_lbl);
+                try a.movqXmmReg(.xmm0, .rcx);
+                try a.cvttsd2siReg32Xmm(.rcx, .xmm0);
+                try a.cvtsi2sdXmmReg32(.xmm1, .rcx);
+                try a.ucomisd(.xmm0, .xmm1);
+                try a.jcc(.p, bail_lbl);
+                try a.jcc(.ne, bail_lbl);
+                try a.movRegReg(.rdx, .rcx);
+                try a.shrRegImm8(.rdx, 31);
+                try a.testRegReg(.rdx, .rdx);
+                try a.jcc(.ne, bail_lbl);
+
+                // len = box.items.len
+                try a.movRegMem(.rdx, .rax, arr_items_len_off);
+                try a.cmpRegReg(.rcx, .rdx);
+                try a.jcc(.e, append_lbl);
+                try a.jcc(.a, bail_lbl);
+
+                // Overwrite: idx < len; guard old elem < HEAP_BASE (%r14)
+                try a.movRegMem(.r11, .rax, arr_items_ptr_off);
+                try a.movRegMemIndexed8(.rdx, .r11, .rcx, 0);
+                try a.cmpRegReg(.rdx, .r14);
+                try a.jcc(.ae, bail_lbl);
+                try a.movMemIndexed8Reg(.r11, .rcx, 0, .r10);
+                try a.jmp(done_lbl);
+
+                // Append: idx == len; guard idx < box.items.capacity
+                a.bindLabel(append_lbl);
+                try a.movRegMem(.r11, .rax, arr_items_cap_off);
+                try a.cmpRegReg(.rcx, .r11);
+                try a.jcc(.ae, bail_lbl);
+                try a.movRegMem(.r11, .rax, arr_items_ptr_off);
+                try a.movMemIndexed8Reg(.r11, .rcx, 0, .r10);
+                try a.addRegImm32(.rdx, 1);
+                try a.movMemReg(.rax, arr_items_len_off, .rdx);
+
+                a.bindLabel(done_lbl);
             },
             .add, .add_num, .sub_num, .mul_num => {
                 try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
@@ -650,9 +1267,7 @@ fn compileOsrImpl(
                 try a.cmpRegReg(.rcx, .r15);
                 try a.jcc(.ae, bail_lbl);
                 if (op.a != op.b and op.a != op.c) {
-                    try a.movRegMem(.rdx, .r12, @intCast(@as(usize, op.a) * 8));
-                    try a.cmpRegReg(.rdx, .r14);
-                    try a.jcc(.ae, bail_lbl);
+                    try emitGuardNonHeapInOsr(&a, op.a, bail_lbl);
                 }
                 try a.movqXmmReg(.xmm0, .rax);
                 try a.movqXmmReg(.xmm1, .rcx);
@@ -674,9 +1289,7 @@ fn compileOsrImpl(
                 try a.cmpRegReg(.rax, .r15);
                 try a.jcc(.ae, bail_lbl);
                 if (op.a != op.b) {
-                    try a.movRegMem(.rdx, .r12, @intCast(@as(usize, op.a) * 8));
-                    try a.cmpRegReg(.rdx, .r14);
-                    try a.jcc(.ae, bail_lbl);
+                    try emitGuardNonHeapInOsr(&a, op.a, bail_lbl);
                 }
                 try a.movqXmmReg(.xmm0, .rax);
                 try a.movRegImm64(.rcx, c_bits);
@@ -911,7 +1524,9 @@ fn compileOsrImpl(
                 try a.testRegReg(.rax, .rax);
                 try a.jcc(.ne, bail_lbl);
             },
-            else => unreachable,
+            else => {
+                if (!(try emitSharedOp(&a, block, op, true, bail_lbl))) unreachable;
+            },
         }
     }
 
@@ -1233,5 +1848,135 @@ test "baseline JIT OSR compiles hot array loops, handles mid-loop type bailout w
         try std.testing.expect(res.isNumber());
         // sum_{i=0}^{119} (2i + 1) = 120^2 = 14400
         try std.testing.expectEqual(@as(f64, 14400), res.asNumber());
+    }
+}
+
+test "baseline JIT Phase 3B executes div_num, mod_num, neg, bitwise, comparisons, jump_if_false/true, dynamic get_elem/set_elem, and IEEE 754 edge cases" {
+    if (!comptime x64_asm.is_supported_host) return;
+    const Interpreter = @import("../interpreter.zig").Interpreter;
+
+    // 1. Prime check / compute with div_num, mod_num, neg, comparisons, and jump_if_false/jump_if_true
+    {
+        var allocating = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer allocating.deinit();
+        var interp = try Interpreter.init(std.testing.allocator, &allocating.writer);
+        defer interp.deinit();
+        interp.compile_options.use_bytecode_vm = true;
+
+        const res = try interp.run(
+            \\function isPrime(n) {
+            \\    if (n <= 1) return false;
+            \\    for (let d = 2; d * d <= n; d++) {
+            \\        if (n % d === 0) return false;
+            \\    }
+            \\    return true;
+            \\}
+            \\function arithCmp(x, y) {
+            \\    const q = x / y;
+            \\    const r = x % y;
+            \\    const neg_r = -r;
+            \\    const ok = (q > 0 && r >= 0 && !(r < 0) && (x !== y || r === 0));
+            \\    return ok ? (q + neg_r) : -1;
+            \\}
+            \\let primes = 0;
+            \\let acc = 0;
+            \\for (let i = 1; i <= 100; i++) {
+            \\    if (isPrime(i)) primes++;
+            \\    acc += arithCmp(i * 3, 2);
+            \\}
+            \\// Neg & float modulo bailout verification
+            \\function modFn(a, b) { return a % b; }
+            \\for (let k = 1; k <= 50; k++) modFn(k + 10, 3);
+            \\const neg_mod = modFn(-7, 3);
+            \\(primes === 25 && neg_mod === -1 && acc > 0) ? 1 : 0;
+        );
+        defer res.deinit();
+        try std.testing.expect(res.isNumber());
+        try std.testing.expectEqual(@as(f64, 1), res.asNumber());
+    }
+
+    // 2. Bitwise operations (&, |, ^, ~, <<, >>, >>>) + safe bailout on NaN/Infinity/>2^31
+    {
+        var allocating = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer allocating.deinit();
+        var interp = try Interpreter.init(std.testing.allocator, &allocating.writer);
+        defer interp.deinit();
+        interp.compile_options.use_bytecode_vm = true;
+
+        const res = try interp.run(
+            \\function bitOps(a, b) {
+            \\    const x = (a & 255) | (b ^ 15);
+            \\    const y = (~x) << 2;
+            \\    const z = (y >> 1) ^ (a >>> 1);
+            \\    return z;
+            \\}
+            \\let sum = 0;
+            \\for (let i = 0; i < 80; i++) {
+            \\    sum += bitOps(i, i + 3);
+            \\}
+            \\const u_neg = (-1) >>> 1;
+            \\const bail_nan = bitOps(NaN, 5);
+            \\const bail_inf = bitOps(Infinity, 5);
+            \\const bail_big = (4294967297 | 0);
+            \\(u_neg === 2147483647 && bail_nan === bitOps(0, 5) && bail_inf === bitOps(0, 5) && bail_big === 1) ? 1 : 0;
+        );
+        defer res.deinit();
+        try std.testing.expect(res.isNumber());
+        try std.testing.expectEqual(@as(f64, 1), res.asNumber());
+    }
+
+    // 3. OSR loop with dynamic get_elem and set_elem (sieve / swap / sum + 0 leaks)
+    {
+        var allocating = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer allocating.deinit();
+        var interp = try Interpreter.init(std.testing.allocator, &allocating.writer);
+        defer interp.deinit();
+        interp.compile_options.use_bytecode_vm = true;
+
+        const res = try interp.run(
+            \\function dynamicElemLoop(n) {
+            \\    const a = [0, 0, 0, 0];
+            \\    for (let i = 0; i < n; i++) {
+            \\        const idx = i & 3;
+            \\        a[idx] = a[idx] + i;
+            \\    }
+            \\    return a[0] + a[1] + a[2] + a[3];
+            \\}
+            \\dynamicElemLoop(200);
+        );
+        defer res.deinit();
+        try std.testing.expect(res.isNumber());
+        // sum_{i=0}^{199} i = 199 * 200 / 2 = 19900
+        try std.testing.expectEqual(@as(f64, 19900), res.asNumber());
+    }
+
+    // 4. IEEE 754 edge cases (NaN === NaN false, NaN !== NaN true, 0/0 canonical NaN, 1/0 Infinity)
+    {
+        var allocating = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer allocating.deinit();
+        var interp = try Interpreter.init(std.testing.allocator, &allocating.writer);
+        defer interp.deinit();
+        interp.compile_options.use_bytecode_vm = true;
+
+        const res = try interp.run(
+            \\function ieeeCheck(a, b) {
+            \\    const d = a / b;
+            \\    const eq_self = (d === d);
+            \\    const ne_self = (d !== d);
+            \\    const lt_zero = (d < 0);
+            \\    const gt_zero = (d > 0);
+            \\    return (eq_self ? 100 : 0) + (ne_self ? 10 : 0) + ((lt_zero || gt_zero) ? 1 : 0);
+            \\}
+            \\let r_num = 0;
+            \\for (let i = 1; i <= 50; i++) {
+            \\    r_num = ieeeCheck(i, 2);
+            \\}
+            \\const r_nan = ieeeCheck(0, 0);
+            \\const r_inf = ieeeCheck(1, 0);
+            \\(r_num === 101 && r_nan === 10 && r_inf === 101) ? 1 : 0;
+        );
+        defer res.deinit();
+        try std.testing.expect(res.isNumber());
+        try std.testing.expectEqual(@as(f64, 1), res.asNumber());
     }
 }

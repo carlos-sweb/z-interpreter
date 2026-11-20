@@ -881,6 +881,48 @@ pub fn jitGetElemConst(regs: [*]JSValue, dst: u32, arr_reg: u32, idx: u32) callc
     return 0;
 }
 
+pub fn jitMoveSlot(ctx: *codeblock.OsrContext, regs: [*]JSValue, dst: u32, src: u32) callconv(.c) u8 {
+    const frame: *CallFrame = @ptrCast(@alignCast(ctx.frame_ptr));
+    const v = regs[src];
+    const slot = &regs[dst];
+    if (!needsDeinit(v)) {
+        if (needsDeinit(slot.*)) deinitSlot(slot);
+        slot.* = v;
+    } else {
+        const retained = v.retain();
+        if (needsDeinit(slot.*)) deinitSlot(slot);
+        slot.* = retained;
+        frame.has_rc = true;
+    }
+    return 0;
+}
+
+pub fn jitDeinitSlot(regs: [*]JSValue, dst: u32) callconv(.c) void {
+    deinitSlot(&regs[dst]);
+}
+
+pub fn jitBitwise(regs: [*]JSValue, dst: u32, lhs_reg: u32, rhs_reg: u32, kind_u32: u32) callconv(.c) u8 {
+    const left = regs[lhs_reg];
+    const right = regs[rhs_reg];
+    if (!left.isNumber() or !right.isNumber()) return 1;
+    const lnum = left.asNumber();
+    const rnum = right.asNumber();
+    const result: f64 = switch (kind_u32) {
+        0 => @floatFromInt(numberToInt32(lnum) & numberToInt32(rnum)),
+        1 => @floatFromInt(numberToInt32(lnum) | numberToInt32(rnum)),
+        2 => @floatFromInt(numberToInt32(lnum) ^ numberToInt32(rnum)),
+        3 => @floatFromInt(numberToInt32(lnum) << @as(u5, @intCast(numberToUint32(rnum) & 31))),
+        4 => @floatFromInt(numberToInt32(lnum) >> @as(u5, @intCast(numberToUint32(rnum) & 31))),
+        5 => @floatFromInt(numberToUint32(lnum) >> @as(u5, @intCast(numberToUint32(rnum) & 31))),
+        6 => @floatFromInt(~numberToInt32(lnum)),
+        else => return 1,
+    };
+    const slot = &regs[dst];
+    if (needsDeinit(slot.*)) deinitSlot(slot);
+    slot.* = JSValue.fromNumberFast(result);
+    return 0;
+}
+
 pub fn jitNewObject(ctx: *codeblock.OsrContext, regs: [*]JSValue, dst: u32) callconv(.c) u8 {
     const frame: *CallFrame = @ptrCast(@alignCast(ctx.frame_ptr));
     const allocator: *const Allocator = @ptrCast(@alignCast(ctx.allocator_ptr));
@@ -2071,7 +2113,7 @@ fn arithmetic(registers: []JSValue, op: codeblock.Op, kind: Arithmetic) !void {
         .sub => lnum - rnum,
         .mul => lnum * rnum,
         .div => lnum / rnum,
-        .mod => @mod(lnum, rnum),
+        .mod => @rem(lnum, rnum),
         .pow => zmath.pow(lnum, rnum),
     };
     try setRegister(registers, op.a, JSValue.fromNumberFast(result));
@@ -2136,7 +2178,7 @@ fn arithmeticLocalConst(registers: []JSValue, block: *const codeblock.CodeBlock,
             .sub => lnum - c.number,
             .mul => lnum * c.number,
             .div => lnum / c.number,
-            .mod => @mod(lnum, c.number),
+            .mod => @rem(lnum, c.number),
             .pow => zmath.pow(lnum, c.number),
         };
         try setRegister(registers, op.a, JSValue.fromNumberFast(result));
