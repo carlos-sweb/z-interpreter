@@ -532,6 +532,17 @@ pub fn canCompileOsr(block: *const codeblock.CodeBlock, start_ip: usize, end_ip:
                 const n = block.constants[op.c].number;
                 if (n < 0 or n > 255 or @as(f64, @floatFromInt(@as(usize, @intFromFloat(n)))) != n) return false;
             },
+            .new_object => {
+                if (op.a >= block.register_count) return false;
+            },
+            .set_prop, .set_prop_transition => {
+                if (op.a >= block.register_count or op.c >= block.register_count) return false;
+                if (constantName(block, op.b) == null) return false;
+            },
+            .get_prop => {
+                if (op.a >= block.register_count or op.b >= block.register_count) return false;
+                if (constantName(block, op.c) == null) return false;
+            },
             else => return false,
         }
     }
@@ -763,6 +774,37 @@ fn compileOsrImpl(
                 try a.movRegImm32(.rdx, op.b);
                 try a.movRegImm32(.rcx, elem_idx);
                 try a.movRegImm64(.rax, @intFromPtr(&vm.jitGetElemConst));
+                try a.callReg(.rax);
+                try a.testRegReg(.rax, .rax);
+                try a.jcc(.ne, bail_lbl);
+            },
+            .new_object => {
+                try a.movRegReg(.rdi, .r13);
+                try a.movRegReg(.rsi, .r12);
+                try a.movRegImm32(.rdx, op.a);
+                try a.movRegImm64(.rax, @intFromPtr(&vm.jitNewObject));
+                try a.callReg(.rax);
+                try a.testRegReg(.rax, .rax);
+                try a.jcc(.ne, bail_lbl);
+            },
+            .set_prop, .set_prop_transition => {
+                const op_bits: u32 = @bitCast(op);
+                try a.movRegReg(.rdi, .r13);
+                try a.movRegReg(.rsi, .r12);
+                try a.movRegImm32(.rdx, @intCast(ip));
+                try a.movRegImm32(.rcx, op_bits);
+                try a.movRegImm64(.rax, @intFromPtr(&vm.jitSetProp));
+                try a.callReg(.rax);
+                try a.testRegReg(.rax, .rax);
+                try a.jcc(.ne, bail_lbl);
+            },
+            .get_prop => {
+                const op_bits: u32 = @bitCast(op);
+                try a.movRegReg(.rdi, .r13);
+                try a.movRegReg(.rsi, .r12);
+                try a.movRegImm32(.rdx, @intCast(ip));
+                try a.movRegImm32(.rcx, op_bits);
+                try a.movRegImm64(.rax, @intFromPtr(&vm.jitGetProp));
                 try a.callReg(.rax);
                 try a.testRegReg(.rax, .rax);
                 try a.jcc(.ne, bail_lbl);
@@ -1023,5 +1065,43 @@ test "baseline JIT OSR compiles hot array loops, handles mid-loop type bailout w
         try std.testing.expect(res.isNumber());
         // s1 = 4950 + 100 = 5050; s2 = 4950 + 1000 = 5950 => 50505950
         try std.testing.expectEqual(@as(f64, 50505950), res.asNumber());
+    }
+
+    // 4. Hot loop with new_object + set_prop/set_prop_transition + get_prop (> 100 iterations, 0 leaks) + mid-loop shape/type bailout
+    {
+        var allocating = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer allocating.deinit();
+        var interp = try Interpreter.init(std.testing.allocator, &allocating.writer);
+        defer interp.deinit();
+        interp.compile_options.use_bytecode_vm = true;
+
+        const res = try interp.run(
+            \\function objLoop(n) {
+            \\    let total = 0;
+            \\    for (let i = 0; i < n; i++) {
+            \\        const o = { x: i, y: i + 1, z: i + 2 };
+            \\        const arr = [o.x, o.y, o.z];
+            \\        total += arr[0] + arr[1] + arr[2];
+            \\    }
+            \\    return total;
+            \\}
+            \\function objShapeBailout() {
+            \\    const alt = { y: 10, x: 5 };
+            \\    let sum = 0;
+            \\    for (let i = 0; i < 90; i++) {
+            \\        let o = { x: 1, y: 2 };
+            \\        if (i == 80) {
+            \\            o = alt;
+            \\        }
+            \\        sum += o.x + o.y;
+            \\    }
+            \\    return sum;
+            \\}
+            \\objLoop(200) * 1000 + objShapeBailout();
+        );
+        defer res.deinit();
+        try std.testing.expect(res.isNumber());
+        // objLoop(200) = 60300; objShapeBailout: 89 * 3 + 15 = 267 + 15 = 282 => 60300282
+        try std.testing.expectEqual(@as(f64, 60300282), res.asNumber());
     }
 }

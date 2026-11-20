@@ -881,6 +881,150 @@ pub fn jitGetElemConst(regs: [*]JSValue, dst: u32, arr_reg: u32, idx: u32) callc
     return 0;
 }
 
+pub fn jitNewObject(ctx: *codeblock.OsrContext, regs: [*]JSValue, dst: u32) callconv(.c) u8 {
+    const frame: *CallFrame = @ptrCast(@alignCast(ctx.frame_ptr));
+    const allocator: *const Allocator = @ptrCast(@alignCast(ctx.allocator_ptr));
+    const slot = &regs[dst];
+    if (slot.isObject()) {
+        const box = slot.asObject();
+        if (box._count == 1 and box.value.cached_len == 0 and !box.value.is_frozen and box.value.is_extensible and box.value.properties.capacity() <= 16) {
+            const props = box.value.properties.entries.items(.value);
+            var can_preserve = props.len > 0 and props.len <= 8;
+            var has_accessor = false;
+            for (props) |*prop| {
+                if (prop.isAccessor()) {
+                    has_accessor = true;
+                    can_preserve = false;
+                    break;
+                }
+                const d = prop.descriptor;
+                if (!d.borrowed_key or !d.writable or !d.enumerable or !d.configurable) {
+                    can_preserve = false;
+                }
+                if (prop.value.needsDeinit()) prop.value.deinit();
+                prop.value = JSValue.UNDEFINED;
+            }
+            if (!has_accessor) {
+                if (can_preserve) {
+                    box.value.recyclePreserveShape();
+                } else {
+                    box.value.clearRetainingCapacity();
+                }
+                if (frame.interp) |itp| {
+                    if (itp.protos.object.isObject()) {
+                        box.value.prototype = &itp.protos.object.asObject().value;
+                    } else {
+                        box.value.prototype = null;
+                    }
+                } else {
+                    box.value.prototype = null;
+                }
+                frame.has_rc = true;
+                return 0;
+            }
+        }
+    }
+    if (needsDeinit(slot.*)) deinitSlot(slot);
+    if (obj_pool_len > 0) {
+        obj_pool_len -= 1;
+        const box = obj_pool[obj_pool_len];
+        box._count = 1;
+        if (frame.interp) |itp| {
+            if (itp.protos.object.isObject()) {
+                box.value.prototype = &itp.protos.object.asObject().value;
+            } else {
+                box.value.prototype = null;
+            }
+        } else {
+            box.value.prototype = null;
+        }
+        slot.* = JSValue.fromObject(box);
+        frame.has_rc = true;
+        return 0;
+    }
+    const obj = (if (frame.interp) |itp| itp.ordinaryObject() else JSValue.newObject(allocator.*)) catch return 1;
+    slot.* = obj;
+    frame.has_rc = true;
+    return 0;
+}
+
+pub fn jitSetProp(ctx: *codeblock.OsrContext, regs: [*]JSValue, op_pc: u32, op_bits: u32) callconv(.c) u8 {
+    const op: codeblock.Op = @bitCast(op_bits);
+    const frame: *CallFrame = @ptrCast(@alignCast(ctx.frame_ptr));
+    const prop_ic: *[256]PropIC = @ptrCast(@alignCast(ctx.prop_ic_ptr));
+    const obj = regs[op.a];
+    if (!obj.isObject()) return 1;
+    const box = obj.asObject();
+    const val = regs[op.c];
+    const ic_idx = ((@intFromPtr(frame.block) >> 4) +% op_pc) & 255;
+    const ic = &prop_ic[ic_idx];
+    const slot = ic.slot_idx;
+
+    if (ic.block == frame.block and ic.pc == op_pc and box.value.shape_id == ic.shape_id) {
+        if (ic.next_shape != 0) {
+            if (box.value.cached_shape_id == ic.cached_shape_id and
+                box.value.active_len == slot and
+                slot < box.value.cached_len and
+                !box.value.is_frozen and
+                box.value.is_extensible and
+                box.value.properties.entries.items(.key)[slot].ptr == ic.interned_key_ptr)
+            {
+                box.value.properties.entries.items(.value)[slot].value = if (needsDeinit(val)) val.retain() else val;
+                const next_active = box.value.active_len + 1;
+                box.value.shape_id = ic.next_shape;
+                if (next_active == box.value.cached_len) {
+                    box.value.cached_len = 0;
+                    box.value.cached_shape_id = 0;
+                    box.value.active_len = 0;
+                } else {
+                    box.value.active_len = next_active;
+                }
+                return 0;
+            }
+        } else {
+            const key = constantKey(frame.block, op.b) catch return 1;
+            if (ic.key_ptr == key.ptr and slot < box.value.properties.count()) {
+                const rec = &box.value.properties.entries.items(.value)[slot];
+                if (!rec.isAccessor() and rec.descriptor.writable and !box.value.is_frozen) {
+                    if (!needsDeinit(rec.value) and !needsDeinit(val)) {
+                        rec.value = val;
+                    } else {
+                        const old = rec.value;
+                        rec.value = val.retain();
+                        old.deinit();
+                    }
+                    return 0;
+                }
+            }
+        }
+    }
+    return 1;
+}
+
+pub fn jitGetProp(ctx: *codeblock.OsrContext, regs: [*]JSValue, op_pc: u32, op_bits: u32) callconv(.c) u8 {
+    const op: codeblock.Op = @bitCast(op_bits);
+    const frame: *CallFrame = @ptrCast(@alignCast(ctx.frame_ptr));
+    const prop_ic: *[256]PropIC = @ptrCast(@alignCast(ctx.prop_ic_ptr));
+    const obj = regs[op.b];
+    if (!obj.isObject()) return 1;
+    const box = obj.asObject();
+    const key = constantKey(frame.block, op.c) catch return 1;
+    const ic_idx = ((@intFromPtr(frame.block) >> 4) +% op_pc) & 255;
+    const ic = &prop_ic[ic_idx];
+    if (ic.block == frame.block and ic.pc == op_pc and ic.shape_id == box.value.shape_id and ic.key_ptr == key.ptr and ic.slot_idx < box.value.properties.count()) {
+        const rec = &box.value.properties.entries.items(.value)[ic.slot_idx];
+        if (!rec.isAccessor()) {
+            const v = rec.value;
+            if (!v.isNumber()) return 1;
+            const slot = &regs[op.a];
+            if (needsDeinit(slot.*)) deinitSlot(slot);
+            slot.* = v;
+            return 0;
+        }
+    }
+    return 1;
+}
+
 noinline fn tryEnterOsr(
     allocator: *const Allocator,
     frame: *CallFrame,
