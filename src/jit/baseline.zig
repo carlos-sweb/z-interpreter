@@ -653,6 +653,32 @@ fn emitSharedOp(a: *Assembler, block: *const codeblock.CodeBlock, op: codeblock.
     }
 }
 
+fn isKnownNum(known_num: u64, reg: u8) bool {
+    if (reg >= 64) return false;
+    return (known_num & (@as(u64, 1) << @intCast(reg))) != 0;
+}
+
+fn isKnownNonHeap(known_non_heap: u64, reg: u8) bool {
+    if (reg >= 64) return false;
+    return (known_non_heap & (@as(u64, 1) << @intCast(reg))) != 0;
+}
+
+fn markNum(reg: u8, known_num: *u64, known_non_heap: *u64) void {
+    if (reg < 64) {
+        const mask = @as(u64, 1) << @intCast(reg);
+        known_num.* |= mask;
+        known_non_heap.* |= mask;
+    }
+}
+
+fn clearReg(reg: u8, known_num: *u64, known_non_heap: *u64) void {
+    if (reg < 64) {
+        const mask = ~(@as(u64, 1) << @intCast(reg));
+        known_num.* &= mask;
+        known_non_heap.* &= mask;
+    }
+}
+
 fn compileImpl(
     allocator: Allocator,
     block: *const codeblock.CodeBlock,
@@ -719,12 +745,89 @@ fn compileImpl(
     const global_ver_addr: u64 = @intFromPtr(&vm.global_version);
     var next_slot_idx: usize = 0;
 
-    for (block.ops, 0..) |op, ip| {
+    const is_jump_target = try allocator.alloc(bool, block.ops.len);
+    defer allocator.free(is_jump_target);
+    @memset(is_jump_target, false);
+
+    for (block.ops, 0..) |op, op_idx| {
+        switch (op.opcode) {
+            .jump, .jump_if_false, .jump_if_true => {
+                const target = (@as(usize, op.b) << 8) | op.c;
+                if (target < block.ops.len) is_jump_target[target] = true;
+            },
+            .jeq_local_const_false,
+            .jlt_local_const_false,
+            .jle_local_const_false,
+            .jgt_local_const_false,
+            .jge_local_const_false => {
+                const target = op_idx + @as(usize, op.c);
+                if (target < block.ops.len) is_jump_target[target] = true;
+            },
+            else => {},
+        }
+    }
+
+    var can_mutate_globals = false;
+    for (block.ops) |op| {
+        if (op.opcode == .store_global) {
+            can_mutate_globals = true;
+            break;
+        }
+    }
+
+    var pure_numeric_returns = true;
+    var param_guarded: u64 = 0;
+    for (block.ops) |op| {
+        switch (op.opcode) {
+            .nop => {},
+            .load_const => {
+                if (op.b >= block.constants.len or block.constants[op.b] != .number) {
+                    pure_numeric_returns = false;
+                }
+            },
+            .add, .add_num, .sub_num, .mul_num, .div_num, .add_local_const, .sub_local_const, .neg => {},
+            .jump, .jump_if_false, .jump_if_true => {},
+            .jeq_local_const_false,
+            .jlt_local_const_false,
+            .jle_local_const_false,
+            .jgt_local_const_false,
+            .jge_local_const_false => {
+                if (op.a < 64) param_guarded |= (@as(u64, 1) << @intCast(op.a));
+            },
+            .call_global => {},
+            .move, .load_local, .store_local => {},
+            .return_value => {
+                if (op.a < block.param_count) {
+                    if ((param_guarded & (@as(u64, 1) << @intCast(op.a))) == 0) {
+                        pure_numeric_returns = false;
+                    }
+                }
+            },
+            else => {
+                pure_numeric_returns = false;
+            },
+        }
+    }
+
+    var known_num: u64 = 0;
+    var known_non_heap: u64 = 0;
+    var global_ver_checked = false;
+
+    var ip: usize = 0;
+    while (ip < block.ops.len) : (ip += 1) {
+        if (is_jump_target[ip]) {
+            known_num = 0;
+            known_non_heap = 0;
+            global_ver_checked = false;
+        }
         a.bindLabel(op_labels[ip]);
+        const op = block.ops[ip];
         switch (op.opcode) {
             .nop => {},
             .load_undefined => {
                 try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .r15);
+                clearReg(op.a, &known_num, &known_non_heap);
+                if (op.a < 64) known_non_heap |= (@as(u64, 1) << @intCast(op.a));
             },
             .load_const => {
                 const c = block.constants[op.b];
@@ -735,13 +838,30 @@ fn compileImpl(
                 };
                 try a.movRegImm64(.rax, bits);
                 try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+                if (c == .number) {
+                    markNum(op.a, &known_num, &known_non_heap);
+                } else {
+                    clearReg(op.a, &known_num, &known_non_heap);
+                    if (op.a < 64) known_non_heap |= (@as(u64, 1) << @intCast(op.a));
+                }
             },
             .move, .load_local, .store_local => {
                 try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
-                try a.movRegImm64(.rcx, JSValue.HEAP_BASE);
-                try a.cmpRegReg(.rax, .rcx);
-                try a.jcc(.ae, bailout_label);
+                if (!isKnownNonHeap(known_non_heap, op.b)) {
+                    try a.movRegImm64(.rcx, JSValue.HEAP_BASE);
+                    try a.cmpRegReg(.rax, .rcx);
+                    try a.jcc(.ae, bailout_label);
+                    if (op.b < 64) known_non_heap |= (@as(u64, 1) << @intCast(op.b));
+                }
                 try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+                if (isKnownNum(known_num, op.b)) {
+                    markNum(op.a, &known_num, &known_non_heap);
+                } else if (isKnownNonHeap(known_non_heap, op.b)) {
+                    clearReg(op.a, &known_num, &known_non_heap);
+                    if (op.a < 64) known_non_heap |= (@as(u64, 1) << @intCast(op.a));
+                } else {
+                    clearReg(op.a, &known_num, &known_non_heap);
+                }
             },
             .jump_if_false, .jump_if_true => {
                 const target_pc = (@as(usize, op.b) << 8) | op.c;
@@ -749,11 +869,17 @@ fn compileImpl(
             },
             .add, .add_num, .sub_num, .mul_num => {
                 try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
-                try a.cmpRegReg(.rax, .r15);
-                try a.jcc(.ae, bailout_label);
+                if (!isKnownNum(known_num, op.b)) {
+                    try a.cmpRegReg(.rax, .r15);
+                    try a.jcc(.ae, bailout_label);
+                    markNum(op.b, &known_num, &known_non_heap);
+                }
                 try a.movRegMem(.rcx, .r12, @intCast(@as(usize, op.c) * 8));
-                try a.cmpRegReg(.rcx, .r15);
-                try a.jcc(.ae, bailout_label);
+                if (!isKnownNum(known_num, op.c)) {
+                    try a.cmpRegReg(.rcx, .r15);
+                    try a.jcc(.ae, bailout_label);
+                    markNum(op.c, &known_num, &known_non_heap);
+                }
                 try a.movqXmmReg(.xmm0, .rax);
                 try a.movqXmmReg(.xmm1, .rcx);
                 switch (op.opcode) {
@@ -762,17 +888,32 @@ fn compileImpl(
                     .mul_num => try a.mulsd(.xmm0, .xmm1),
                     else => unreachable,
                 }
-                try a.movqRegXmm(.rax, .xmm0);
-                try a.ucomisd(.xmm0, .xmm0);
-                try a.movRegImm64(.rcx, JSValue.CANONICAL_NAN);
-                try a.cmovpRegReg(.rax, .rcx);
-                try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+                if (ip + 1 < block.ops.len and !is_jump_target[ip + 1] and block.ops[ip + 1].opcode == .return_value and block.ops[ip + 1].a == op.a) {
+                    try a.movqRegXmm(.rcx, .xmm0);
+                    try a.ucomisd(.xmm0, .xmm0);
+                    try a.movRegImm64(.rax, JSValue.CANONICAL_NAN);
+                    try a.cmovpRegReg(.rcx, .rax);
+                    try a.xorRegReg(.rax, .rax);
+                    try a.ret();
+                    a.bindLabel(op_labels[ip + 1]);
+                    ip += 1;
+                } else {
+                    try a.movqRegXmm(.rax, .xmm0);
+                    try a.ucomisd(.xmm0, .xmm0);
+                    try a.movRegImm64(.rcx, JSValue.CANONICAL_NAN);
+                    try a.cmovpRegReg(.rax, .rcx);
+                    try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+                    markNum(op.a, &known_num, &known_non_heap);
+                }
             },
             .add_local_const, .sub_local_const => {
                 const c_bits = JSValue.fromNumber(block.constants[op.c].number).bits;
                 try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
-                try a.cmpRegReg(.rax, .r15);
-                try a.jcc(.ae, bailout_label);
+                if (!isKnownNum(known_num, op.b)) {
+                    try a.cmpRegReg(.rax, .r15);
+                    try a.jcc(.ae, bailout_label);
+                    markNum(op.b, &known_num, &known_non_heap);
+                }
                 try a.movqXmmReg(.xmm0, .rax);
                 try a.movRegImm64(.rcx, c_bits);
                 try a.movqXmmReg(.xmm1, .rcx);
@@ -781,11 +922,62 @@ fn compileImpl(
                 } else {
                     try a.subsd(.xmm0, .xmm1);
                 }
+                if (ip + 1 < block.ops.len and !is_jump_target[ip + 1] and block.ops[ip + 1].opcode == .return_value and block.ops[ip + 1].a == op.a) {
+                    try a.movqRegXmm(.rcx, .xmm0);
+                    try a.ucomisd(.xmm0, .xmm0);
+                    try a.movRegImm64(.rax, JSValue.CANONICAL_NAN);
+                    try a.cmovpRegReg(.rcx, .rax);
+                    try a.xorRegReg(.rax, .rax);
+                    try a.ret();
+                    a.bindLabel(op_labels[ip + 1]);
+                    ip += 1;
+                } else {
+                    try a.movqRegXmm(.rax, .xmm0);
+                    try a.ucomisd(.xmm0, .xmm0);
+                    try a.movRegImm64(.rcx, JSValue.CANONICAL_NAN);
+                    try a.cmovpRegReg(.rax, .rcx);
+                    try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+                    markNum(op.a, &known_num, &known_non_heap);
+                }
+            },
+            .div_num => {
+                try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
+                if (!isKnownNum(known_num, op.b)) {
+                    try a.cmpRegReg(.rax, .r15);
+                    try a.jcc(.ae, bailout_label);
+                    markNum(op.b, &known_num, &known_non_heap);
+                }
+                try a.movRegMem(.rcx, .r12, @intCast(@as(usize, op.c) * 8));
+                if (!isKnownNum(known_num, op.c)) {
+                    try a.cmpRegReg(.rcx, .r15);
+                    try a.jcc(.ae, bailout_label);
+                    markNum(op.c, &known_num, &known_non_heap);
+                }
+                try a.movqXmmReg(.xmm0, .rax);
+                try a.movqXmmReg(.xmm1, .rcx);
+                try a.divsd(.xmm0, .xmm1);
                 try a.movqRegXmm(.rax, .xmm0);
                 try a.ucomisd(.xmm0, .xmm0);
                 try a.movRegImm64(.rcx, JSValue.CANONICAL_NAN);
                 try a.cmovpRegReg(.rax, .rcx);
                 try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+                markNum(op.a, &known_num, &known_non_heap);
+            },
+            .neg => {
+                try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
+                if (!isKnownNum(known_num, op.b)) {
+                    try a.cmpRegReg(.rax, .r15);
+                    try a.jcc(.ae, bailout_label);
+                    markNum(op.b, &known_num, &known_non_heap);
+                }
+                try a.movqXmmReg(.xmm0, .rax);
+                try a.movRegImm64(.rcx, 0x8000_0000_0000_0000);
+                try a.xorRegReg64(.rax, .rcx);
+                try a.ucomisd(.xmm0, .xmm0);
+                try a.movRegImm64(.rcx, JSValue.CANONICAL_NAN);
+                try a.cmovpRegReg(.rax, .rcx);
+                try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+                markNum(op.a, &known_num, &known_non_heap);
             },
             .jeq_local_const_false,
             .jlt_local_const_false,
@@ -796,8 +988,11 @@ fn compileImpl(
                 const c_bits = JSValue.fromNumber(block.constants[op.b].number).bits;
                 const target_lbl = op_labels[ip + @as(usize, op.c)];
                 try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.a) * 8));
-                try a.cmpRegReg(.rax, .r15);
-                try a.jcc(.ae, bailout_label);
+                if (!isKnownNum(known_num, op.a)) {
+                    try a.cmpRegReg(.rax, .r15);
+                    try a.jcc(.ae, bailout_label);
+                    markNum(op.a, &known_num, &known_non_heap);
+                }
                 try a.movqXmmReg(.xmm0, .rax);
                 try a.movRegImm64(.rcx, c_bits);
                 try a.movqXmmReg(.xmm1, .rcx);
@@ -829,6 +1024,9 @@ fn compileImpl(
             .jump => {
                 const target_pc = (@as(usize, op.b) << 8) | op.c;
                 try a.jmp(op_labels[target_pc]);
+                known_num = 0;
+                known_non_heap = 0;
+                global_ver_checked = false;
             },
             .call_global => {
                 const cs = &block.call_target_cache[op.c];
@@ -844,6 +1042,12 @@ fn compileImpl(
                 try a.testRegReg(.rax, .rax);
                 try a.jcc(.ne, bailout_label);
                 try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rcx);
+                if (pure_numeric_returns) {
+                    markNum(op.a, &known_num, &known_non_heap);
+                } else {
+                    clearReg(op.a, &known_num, &known_non_heap);
+                }
+                global_ver_checked = true;
             },
             .load_global => {
                 const slots = slots_opt.?;
@@ -857,6 +1061,7 @@ fn compileImpl(
                 try a.cmpRegReg(.rax, .r15);
                 try a.jcc(.ae, bailout_label);
                 try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+                markNum(op.a, &known_num, &known_non_heap);
             },
             .store_global => {
                 const slots = slots_opt.?;
@@ -865,8 +1070,11 @@ fn compileImpl(
                 const name = constantName(block, op.a).?;
                 // Validate regs[op.b] is number (< BASE_TAG) before lookup
                 try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
-                try a.cmpRegReg(.rax, .r15);
-                try a.jcc(.ae, bailout_label);
+                if (!isKnownNum(known_num, op.b)) {
+                    try a.cmpRegReg(.rax, .r15);
+                    try a.jcc(.ae, bailout_label);
+                    markNum(op.b, &known_num, &known_non_heap);
+                }
 
                 try emitGlobalSlotLookup(&a, slot_addr, ver_addr, name, bailout_label);
                 // Validate slot.is_mutable != 0 (offset 24)
@@ -884,12 +1092,17 @@ fn compileImpl(
                 try a.movMemReg(.rcx, 0, .rax);
                 try a.movRegImm64(.r11, global_ver_addr);
                 try a.incMem64(.r11, 0);
+                if (can_mutate_globals) {
+                    global_ver_checked = false;
+                }
             },
             .return_value => {
                 try a.movRegMem(.rcx, .r12, @intCast(@as(usize, op.a) * 8));
-                try a.movRegImm64(.rdx, JSValue.HEAP_BASE);
-                try a.cmpRegReg(.rcx, .rdx);
-                try a.jcc(.ae, bailout_label);
+                if (!pure_numeric_returns and !isKnownNonHeap(known_non_heap, op.a)) {
+                    try a.movRegImm64(.rdx, JSValue.HEAP_BASE);
+                    try a.cmpRegReg(.rcx, .rdx);
+                    try a.jcc(.ae, bailout_label);
+                }
                 try a.xorRegReg(.rax, .rax);
                 try a.ret();
             },
@@ -900,6 +1113,7 @@ fn compileImpl(
             },
             else => {
                 if (!(try emitSharedOp(&a, block, op, false, bailout_label))) unreachable;
+                clearReg(op.a, &known_num, &known_non_heap);
             },
         }
     }
