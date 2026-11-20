@@ -31,11 +31,31 @@ pub const Reg = enum(u4) {
     }
 };
 
-pub const Xmm = enum(u3) {
+pub const Xmm = enum(u4) {
     xmm0 = 0,
     xmm1 = 1,
     xmm2 = 2,
     xmm3 = 3,
+    xmm4 = 4,
+    xmm5 = 5,
+    xmm6 = 6,
+    xmm7 = 7,
+    xmm8 = 8,
+    xmm9 = 9,
+    xmm10 = 10,
+    xmm11 = 11,
+    xmm12 = 12,
+    xmm13 = 13,
+    xmm14 = 14,
+    xmm15 = 15,
+
+    pub inline fn low3(self: Xmm) u3 {
+        return @truncate(@intFromEnum(self));
+    }
+
+    pub inline fn isExt(self: Xmm) bool {
+        return (@intFromEnum(self) & 8) != 0;
+    }
 };
 
 pub const Cond = enum(u4) {
@@ -76,6 +96,11 @@ pub const Assembler = struct {
 
     inline fn rexW(r_ext: bool, b_ext: bool) u8 {
         return 0x48 | (if (r_ext) @as(u8, 4) else 0) | (if (b_ext) @as(u8, 1) else 0);
+    }
+
+    inline fn rexSSE(r_ext: bool, b_ext: bool) ?u8 {
+        if (!r_ext and !b_ext) return null;
+        return 0x40 | (if (r_ext) @as(u8, 4) else 0) | (if (b_ext) @as(u8, 1) else 0);
     }
 
     inline fn modRM(mod: u2, reg: u3, rm: u3) u8 {
@@ -212,6 +237,24 @@ pub const Assembler = struct {
             try self.emitByte(modRM(0b11, 5, dst.low3()));
             try self.emitI32(imm);
         }
+    }
+
+    pub fn subRegReg(self: *Assembler, dst: Reg, src: Reg) !void {
+        try self.emitByte(rexW(src.isExt(), dst.isExt()));
+        try self.emitByte(0x29);
+        try self.emitByte(modRM(0b11, src.low3(), dst.low3()));
+    }
+
+    pub fn decReg64(self: *Assembler, reg: Reg) !void {
+        try self.emitByte(rexW(false, reg.isExt()));
+        try self.emitByte(0xFF);
+        try self.emitByte(modRM(0b11, 1, reg.low3()));
+    }
+
+    pub fn incReg64(self: *Assembler, reg: Reg) !void {
+        try self.emitByte(rexW(false, reg.isExt()));
+        try self.emitByte(0xFF);
+        try self.emitByte(modRM(0b11, 0, reg.low3()));
     }
 
     pub fn cmpRegReg(self: *Assembler, lhs: Reg, rhs: Reg) !void {
@@ -426,82 +469,94 @@ pub const Assembler = struct {
 
     pub fn movqXmmReg(self: *Assembler, dst: Xmm, src: Reg) !void {
         try self.emitByte(0x66);
-        try self.emitByte(rexW(false, src.isExt()));
+        try self.emitByte(rexW(dst.isExt(), src.isExt()));
         try self.emitByte(0x0F);
         try self.emitByte(0x6E);
-        try self.emitByte(modRM(0b11, @intFromEnum(dst), src.low3()));
+        try self.emitByte(modRM(0b11, dst.low3(), src.low3()));
     }
 
     pub fn movqRegXmm(self: *Assembler, dst: Reg, src: Xmm) !void {
         try self.emitByte(0x66);
-        try self.emitByte(rexW(false, dst.isExt()));
+        try self.emitByte(rexW(src.isExt(), dst.isExt()));
         try self.emitByte(0x0F);
         try self.emitByte(0x7E);
-        try self.emitByte(modRM(0b11, @intFromEnum(src), dst.low3()));
+        try self.emitByte(modRM(0b11, src.low3(), dst.low3()));
     }
 
     pub fn movsdXmmMem(self: *Assembler, dst: Xmm, base: Reg, disp: i32) !void {
         try self.emitByte(0xF2);
-        if (base.isExt()) try self.emitByte(0x41);
+        if (rexSSE(dst.isExt(), base.isExt())) |r| try self.emitByte(r);
         try self.emitByte(0x0F);
         try self.emitByte(0x10);
-        try self.emitMemOperand(@intFromEnum(dst), base, disp);
+        try self.emitMemOperand(dst.low3(), base, disp);
     }
 
     pub fn movsdMemXmm(self: *Assembler, base: Reg, disp: i32, src: Xmm) !void {
         try self.emitByte(0xF2);
-        if (base.isExt()) try self.emitByte(0x41);
+        if (rexSSE(src.isExt(), base.isExt())) |r| try self.emitByte(r);
         try self.emitByte(0x0F);
         try self.emitByte(0x11);
-        try self.emitMemOperand(@intFromEnum(src), base, disp);
+        try self.emitMemOperand(src.low3(), base, disp);
     }
 
     pub fn addsd(self: *Assembler, dst: Xmm, src: Xmm) !void {
-        try self.emitBytes(&.{ 0xF2, 0x0F, 0x58, modRM(0b11, @intFromEnum(dst), @intFromEnum(src)) });
+        try self.emitByte(0xF2);
+        if (rexSSE(dst.isExt(), src.isExt())) |r| try self.emitByte(r);
+        try self.emitBytes(&.{ 0x0F, 0x58, modRM(0b11, dst.low3(), src.low3()) });
     }
 
     pub fn subsd(self: *Assembler, dst: Xmm, src: Xmm) !void {
-        try self.emitBytes(&.{ 0xF2, 0x0F, 0x5C, modRM(0b11, @intFromEnum(dst), @intFromEnum(src)) });
+        try self.emitByte(0xF2);
+        if (rexSSE(dst.isExt(), src.isExt())) |r| try self.emitByte(r);
+        try self.emitBytes(&.{ 0x0F, 0x5C, modRM(0b11, dst.low3(), src.low3()) });
     }
 
     pub fn mulsd(self: *Assembler, dst: Xmm, src: Xmm) !void {
-        try self.emitBytes(&.{ 0xF2, 0x0F, 0x59, modRM(0b11, @intFromEnum(dst), @intFromEnum(src)) });
+        try self.emitByte(0xF2);
+        if (rexSSE(dst.isExt(), src.isExt())) |r| try self.emitByte(r);
+        try self.emitBytes(&.{ 0x0F, 0x59, modRM(0b11, dst.low3(), src.low3()) });
     }
 
     pub fn divsd(self: *Assembler, dst: Xmm, src: Xmm) !void {
-        try self.emitBytes(&.{ 0xF2, 0x0F, 0x5E, modRM(0b11, @intFromEnum(dst), @intFromEnum(src)) });
+        try self.emitByte(0xF2);
+        if (rexSSE(dst.isExt(), src.isExt())) |r| try self.emitByte(r);
+        try self.emitBytes(&.{ 0x0F, 0x5E, modRM(0b11, dst.low3(), src.low3()) });
     }
 
     pub fn xorpd(self: *Assembler, dst: Xmm, src: Xmm) !void {
-        try self.emitBytes(&.{ 0x66, 0x0F, 0x57, modRM(0b11, @intFromEnum(dst), @intFromEnum(src)) });
+        try self.emitByte(0x66);
+        if (rexSSE(dst.isExt(), src.isExt())) |r| try self.emitByte(r);
+        try self.emitBytes(&.{ 0x0F, 0x57, modRM(0b11, dst.low3(), src.low3()) });
     }
 
     pub fn cvttsd2siReg32Xmm(self: *Assembler, dst: Reg, src: Xmm) !void {
         try self.emitByte(0xF2);
-        if (dst.isExt()) try self.emitByte(0x44);
+        if (rexSSE(dst.isExt(), src.isExt())) |r| try self.emitByte(r);
         try self.emitByte(0x0F);
         try self.emitByte(0x2C);
-        try self.emitByte(modRM(0b11, dst.low3(), @intFromEnum(src)));
+        try self.emitByte(modRM(0b11, dst.low3(), src.low3()));
     }
 
     pub fn cvtsi2sdXmmReg32(self: *Assembler, dst: Xmm, src: Reg) !void {
         try self.emitByte(0xF2);
-        if (src.isExt()) try self.emitByte(0x41);
+        if (rexSSE(dst.isExt(), src.isExt())) |r| try self.emitByte(r);
         try self.emitByte(0x0F);
         try self.emitByte(0x2A);
-        try self.emitByte(modRM(0b11, @intFromEnum(dst), src.low3()));
+        try self.emitByte(modRM(0b11, dst.low3(), src.low3()));
     }
 
     pub fn cvtsi2sdqXmmReg64(self: *Assembler, dst: Xmm, src: Reg) !void {
         try self.emitByte(0xF2);
-        try self.emitByte(rexW(false, src.isExt()));
+        try self.emitByte(rexW(dst.isExt(), src.isExt()));
         try self.emitByte(0x0F);
         try self.emitByte(0x2A);
-        try self.emitByte(modRM(0b11, @intFromEnum(dst), src.low3()));
+        try self.emitByte(modRM(0b11, dst.low3(), src.low3()));
     }
 
     pub fn ucomisd(self: *Assembler, lhs: Xmm, rhs: Xmm) !void {
-        try self.emitBytes(&.{ 0x66, 0x0F, 0x2E, modRM(0b11, @intFromEnum(lhs), @intFromEnum(rhs)) });
+        try self.emitByte(0x66);
+        if (rexSSE(lhs.isExt(), rhs.isExt())) |r| try self.emitByte(r);
+        try self.emitBytes(&.{ 0x0F, 0x2E, modRM(0b11, lhs.low3(), rhs.low3()) });
     }
 
     pub fn jmp(self: *Assembler, target: Label) !void {

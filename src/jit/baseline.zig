@@ -9,6 +9,7 @@ const vm = @import("../bytecode/vm.zig");
 const x64_asm = @import("x64_asm.zig");
 const Assembler = x64_asm.Assembler;
 const Label = x64_asm.Label;
+const Xmm = x64_asm.Xmm;
 
 pub const JitFn = codeblock.JitFn;
 pub const OsrFn = codeblock.OsrFn;
@@ -50,6 +51,70 @@ pub fn jitResolveGlobalSlot(
         }
     }
     return 1;
+}
+
+pub fn canUseFastSelfRec(block: *const codeblock.CodeBlock) bool {
+    if (!comptime x64_asm.is_supported_host) return false;
+    if (block.exception_table.len > 0 or block.flags.has_try) return false;
+    if (block.flags.is_generator or block.flags.is_async or block.flags.needs_arguments) return false;
+    if (block.ops.len == 0) return false;
+    if (block.param_count != 1) return false;
+    if (block.register_count == 0 or block.register_count > 8) return false;
+    if (block.local_count > block.register_count) return false;
+    const bname = block.name orelse return false;
+
+    var has_self_call = false;
+    for (block.ops, 0..) |op, ip| {
+        switch (op.opcode) {
+            .nop => {},
+            .jle_local_const_false,
+            .jlt_local_const_false,
+            .jge_local_const_false,
+            .jgt_local_const_false,
+            .jeq_local_const_false => {
+                if (op.a >= block.register_count or op.b >= block.constants.len) return false;
+                if (block.constants[op.b] != .number) return false;
+                const target = ip + @as(usize, op.c);
+                if (target >= block.ops.len) return false;
+            },
+            .add_local_const, .sub_local_const => {
+                if (op.a >= block.register_count or op.b >= block.register_count or op.c >= block.constants.len) return false;
+                if (block.constants[op.c] != .number) return false;
+            },
+            .add, .add_num, .sub_num, .mul_num, .div_num => {
+                if (op.a >= block.register_count or op.b >= block.register_count or op.c >= block.register_count) return false;
+            },
+            .neg => {
+                if (op.a >= block.register_count or op.b >= block.register_count) return false;
+            },
+            .load_const => {
+                if (op.a >= block.register_count or op.b >= block.constants.len) return false;
+                if (block.constants[op.b] != .number) return false;
+            },
+            .load_local, .move => {
+                if (op.a >= block.register_count or op.b >= block.register_count) return false;
+            },
+            .jump => {
+                const target = (@as(usize, op.b) << 8) | op.c;
+                if (target >= block.ops.len) return false;
+            },
+            .return_value => {
+                if (op.a >= block.register_count) return false;
+            },
+            .call_global => {
+                if (op.a >= block.register_count) return false;
+                if (op.c >= block.call_target_cache.len) return false;
+                const cs = &block.call_target_cache[op.c];
+                if (cs.this_reg != null or cs.arg_count != 1) return false;
+                const gname = cs.global_name orelse return false;
+                if (!std.mem.eql(u8, gname, bname)) return false;
+                if ((@as(usize, op.b) + 1 + 1) > block.register_count) return false;
+                has_self_call = true;
+            },
+            else => return false,
+        }
+    }
+    return has_self_call;
 }
 
 pub fn canCompile(block: *const codeblock.CodeBlock) bool {
@@ -204,9 +269,355 @@ pub fn canCompile(block: *const codeblock.CodeBlock) bool {
     return true;
 }
 
+fn findPreloadXmm(val: f64, const_vals: []const f64) ?Xmm {
+    for (const_vals, 0..) |cv, i| {
+        if (@as(u64, @bitCast(cv)) == @as(u64, @bitCast(val))) {
+            return switch (i) {
+                0 => .xmm12,
+                1 => .xmm13,
+                2 => .xmm14,
+                3 => .xmm15,
+                else => unreachable,
+            };
+        }
+    }
+    return null;
+}
+
+fn compileFastSelfRec(
+    allocator: Allocator,
+    block: *const codeblock.CodeBlock,
+) ![]align(std.heap.page_size_min) u8 {
+    var a = Assembler.init(allocator);
+    defer a.deinit();
+
+    var op_labels = try allocator.alloc(Label, block.ops.len);
+    defer allocator.free(op_labels);
+    for (0..block.ops.len) |i| {
+        op_labels[i] = try a.createLabel();
+    }
+
+    const fast_entry = try a.createLabel();
+    const fast_overflow = try a.createLabel();
+    const fast_unwind = try a.createLabel();
+    const wrapper_bailout = try a.createLabel();
+    const ext_done = try a.createLabel();
+
+    // System V ABI Entry:
+    // fn(regs: [*]JSValue, out: *JSValue, regs_limit: [*]JSValue, env: ?*anyopaque) callconv(.c) u8
+    // %rdi = regs, %rsi = out, %rdx = regs_limit, %rcx = env
+    try a.pushReg(.rbx);
+    try a.pushReg(.r12);
+    try a.pushReg(.r13);
+    try a.pushReg(.r14);
+    try a.pushReg(.r15);
+    // 5 callee-saved registers pushed -> %rsp % 16 == 0 !
+    // Save `out` (%rsi) in %r12 so we don't need an extra push:
+    try a.movRegReg(.r12, .rsi);
+
+    // 1. Validate regs[0] < BASE_TAG
+    try a.movRegMem(.rax, .rdi, 0);
+    try a.movRegImm64(.r15, JSValue.BASE_TAG);
+    try a.cmpRegReg(.rax, .r15);
+    try a.jcc(.ae, wrapper_bailout);
+
+    // 2. Validate global_version == cache.global_version once per distinct call_target_cache index
+    const gver_addr: u64 = @intFromPtr(&vm.global_version);
+    var checked_cs: [64]bool = @splat(false);
+    for (block.ops) |op| {
+        if (op.opcode == .call_global) {
+            if (op.c < checked_cs.len and !checked_cs[op.c]) {
+                checked_cs[op.c] = true;
+                const cs = &block.call_target_cache[op.c];
+                const cs_gver_addr: u64 = @intFromPtr(&cs.global_version);
+                try a.movRegImm64(.rax, gver_addr);
+                try a.movRegMem(.rax, .rax, 0);
+                try a.movRegImm64(.rcx, cs_gver_addr);
+                try a.movRegMem(.rcx, .rcx, 0);
+                try a.cmpRegReg(.rax, .rcx);
+                try a.jcc(.ne, wrapper_bailout);
+            }
+        }
+    }
+
+    // 3. Max depth in %rbx: (regs_limit - regs) / reg_count bounded to 4096 (if <= 0 -> bailout)
+    try a.cmpRegReg(.rdx, .rdi);
+    try a.jcc(.be, wrapper_bailout);
+
+    try a.movRegReg(.rax, .rdx);
+    try a.subRegReg(.rax, .rdi);
+
+    const frame_bytes_caller: u32 = @as(u32, block.register_count) * 8;
+    try a.movRegImm32(.rcx, frame_bytes_caller);
+    try a.xorReg32Reg32(.rdx, .rdx);
+    try a.divReg32(.rcx);
+
+    try a.testRegReg(.rax, .rax);
+    try a.jcc(.e, wrapper_bailout);
+
+    const cap_lbl = try a.createLabel();
+    try a.cmpRegImm32(.rax, 4096);
+    try a.jcc(.be, cap_lbl);
+    try a.movRegImm32(.rax, 4096);
+    a.bindLabel(cap_lbl);
+    try a.movRegReg(.rbx, .rax);
+
+    // 4. Load xmm0 = regs[0] (as raw f64)
+    try a.movsdXmmMem(.xmm0, .rdi, 0);
+
+    // 5. Preload up to 4 distinct constants into xmm12..xmm15
+    var const_vals: [4]f64 = undefined;
+    var const_count: usize = 0;
+    for (block.ops) |op| {
+        const c_idx: ?usize = switch (op.opcode) {
+            .jle_local_const_false,
+            .jlt_local_const_false,
+            .jge_local_const_false,
+            .jgt_local_const_false,
+            .jeq_local_const_false => op.b,
+            .add_local_const,
+            .sub_local_const => op.c,
+            else => null,
+        };
+        if (c_idx) |idx| {
+            if (idx < block.constants.len and block.constants[idx] == .number) {
+                const val = block.constants[idx].number;
+                var found = false;
+                for (const_vals[0..const_count]) |cv| {
+                    if (@as(u64, @bitCast(cv)) == @as(u64, @bitCast(val))) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found and const_count < 4) {
+                    const_vals[const_count] = val;
+                    const_count += 1;
+                }
+            }
+        }
+    }
+
+    const preload_xmms = [_]Xmm{ .xmm12, .xmm13, .xmm14, .xmm15 };
+    for (0..const_count) |i| {
+        const bits = @as(u64, @bitCast(const_vals[i]));
+        try a.movRegImm64(.rax, bits);
+        try a.movqXmmReg(preload_xmms[i], .rax);
+    }
+
+    // Call fast_entry (%rsp % 16 == 0 before call)
+    try a.callLabel(fast_entry);
+    try a.testRegReg(.rax, .rax);
+    try a.jcc(.ne, ext_done);
+
+    // Success: canonicalize NaN in %xmm0
+    try a.movqRegXmm(.rax, .xmm0);
+    try a.ucomisd(.xmm0, .xmm0);
+    try a.movRegImm64(.rcx, JSValue.CANONICAL_NAN);
+    try a.cmovpRegReg(.rax, .rcx);
+    try a.movMemReg(.r12, 0, .rax); // out.* = canonicalized JSValue
+    try a.xorRegReg(.rax, .rax);    // return 0
+    try a.jmp(ext_done);
+
+    a.bindLabel(wrapper_bailout);
+    try a.movRegImm32(.rax, 1);
+
+    a.bindLabel(ext_done);
+    try a.popReg(.r15);
+    try a.popReg(.r14);
+    try a.popReg(.r13);
+    try a.popReg(.r12);
+    try a.popReg(.rbx);
+    try a.ret();
+
+    // Internal fast_entry
+    a.bindLabel(fast_entry);
+    const frame_bytes: i32 = @intCast(((@as(usize, block.register_count) * 8 + 15) & ~@as(usize, 15)) + 8);
+
+    try a.testRegReg(.rbx, .rbx);
+    try a.jcc(.e, fast_overflow);
+    try a.decReg64(.rbx);
+    try a.subRegImm32(.rsp, frame_bytes);
+    try a.movsdMemXmm(.rsp, 0, .xmm0); // store initial argument to slot 0
+
+    const is_jump_target = try allocator.alloc(bool, block.ops.len);
+    defer allocator.free(is_jump_target);
+    @memset(is_jump_target, false);
+
+    for (block.ops, 0..) |op, op_idx| {
+        switch (op.opcode) {
+            .jump => {
+                const target = (@as(usize, op.b) << 8) | op.c;
+                if (target < block.ops.len) is_jump_target[target] = true;
+            },
+            .jle_local_const_false,
+            .jlt_local_const_false,
+            .jge_local_const_false,
+            .jgt_local_const_false,
+            .jeq_local_const_false => {
+                const target = op_idx + @as(usize, op.c);
+                if (target < block.ops.len) is_jump_target[target] = true;
+            },
+            else => {},
+        }
+    }
+
+    var ip: usize = 0;
+    while (ip < block.ops.len) : (ip += 1) {
+        a.bindLabel(op_labels[ip]);
+        const op = block.ops[ip];
+        switch (op.opcode) {
+            .nop => {},
+            .jle_local_const_false,
+            .jlt_local_const_false,
+            .jge_local_const_false,
+            .jgt_local_const_false,
+            .jeq_local_const_false => {
+                const c_val = block.constants[op.b].number;
+                const target_lbl = op_labels[ip + @as(usize, op.c)];
+                try a.movsdXmmMem(.xmm0, .rsp, @intCast(@as(usize, op.a) * 8));
+                const preload = findPreloadXmm(c_val, const_vals[0..const_count]);
+                const rhs_reg: Xmm = if (preload) |x| x else blk: {
+                    try a.movRegImm64(.rax, @as(u64, @bitCast(c_val)));
+                    try a.movqXmmReg(.xmm1, .rax);
+                    break :blk .xmm1;
+                };
+                switch (op.opcode) {
+                    .jeq_local_const_false => {
+                        try a.ucomisd(.xmm0, rhs_reg);
+                        try a.jcc(.p, target_lbl);
+                        try a.jcc(.ne, target_lbl);
+                    },
+                    .jlt_local_const_false => {
+                        try a.ucomisd(rhs_reg, .xmm0);
+                        try a.jcc(.be, target_lbl);
+                    },
+                    .jle_local_const_false => {
+                        try a.ucomisd(rhs_reg, .xmm0);
+                        try a.jcc(.b, target_lbl);
+                    },
+                    .jgt_local_const_false => {
+                        try a.ucomisd(.xmm0, rhs_reg);
+                        try a.jcc(.be, target_lbl);
+                    },
+                    .jge_local_const_false => {
+                        try a.ucomisd(.xmm0, rhs_reg);
+                        try a.jcc(.b, target_lbl);
+                    },
+                    else => unreachable,
+                }
+            },
+            .add_local_const, .sub_local_const => {
+                const c_val = block.constants[op.c].number;
+                try a.movsdXmmMem(.xmm0, .rsp, @intCast(@as(usize, op.b) * 8));
+                const preload = findPreloadXmm(c_val, const_vals[0..const_count]);
+                const rhs_reg: Xmm = if (preload) |x| x else blk: {
+                    try a.movRegImm64(.rax, @as(u64, @bitCast(c_val)));
+                    try a.movqXmmReg(.xmm1, .rax);
+                    break :blk .xmm1;
+                };
+                if (op.opcode == .add_local_const) {
+                    try a.addsd(.xmm0, rhs_reg);
+                } else {
+                    try a.subsd(.xmm0, rhs_reg);
+                }
+                if (ip + 1 < block.ops.len and !is_jump_target[ip + 1] and block.ops[ip + 1].opcode == .return_value and block.ops[ip + 1].a == op.a) {
+                    try a.addRegImm32(.rsp, frame_bytes);
+                    try a.incReg64(.rbx);
+                    try a.xorRegReg(.rax, .rax);
+                    try a.ret();
+                    a.bindLabel(op_labels[ip + 1]);
+                    ip += 1;
+                } else {
+                    try a.movsdMemXmm(.rsp, @intCast(@as(usize, op.a) * 8), .xmm0);
+                }
+            },
+            .add, .add_num, .sub_num, .mul_num, .div_num => {
+                try a.movsdXmmMem(.xmm0, .rsp, @intCast(@as(usize, op.b) * 8));
+                try a.movsdXmmMem(.xmm1, .rsp, @intCast(@as(usize, op.c) * 8));
+                switch (op.opcode) {
+                    .add, .add_num => try a.addsd(.xmm0, .xmm1),
+                    .sub_num => try a.subsd(.xmm0, .xmm1),
+                    .mul_num => try a.mulsd(.xmm0, .xmm1),
+                    .div_num => try a.divsd(.xmm0, .xmm1),
+                    else => unreachable,
+                }
+                if (ip + 1 < block.ops.len and !is_jump_target[ip + 1] and block.ops[ip + 1].opcode == .return_value and block.ops[ip + 1].a == op.a) {
+                    try a.addRegImm32(.rsp, frame_bytes);
+                    try a.incReg64(.rbx);
+                    try a.xorRegReg(.rax, .rax);
+                    try a.ret();
+                    a.bindLabel(op_labels[ip + 1]);
+                    ip += 1;
+                } else {
+                    try a.movsdMemXmm(.rsp, @intCast(@as(usize, op.a) * 8), .xmm0);
+                }
+            },
+            .neg => {
+                try a.movsdXmmMem(.xmm0, .rsp, @intCast(@as(usize, op.b) * 8));
+                try a.movRegImm64(.rax, 0x8000_0000_0000_0000);
+                try a.movqXmmReg(.xmm1, .rax);
+                try a.xorpd(.xmm0, .xmm1);
+                try a.movsdMemXmm(.rsp, @intCast(@as(usize, op.a) * 8), .xmm0);
+            },
+            .load_const => {
+                const c_val = block.constants[op.b].number;
+                try a.movRegImm64(.rax, @as(u64, @bitCast(c_val)));
+                try a.movqXmmReg(.xmm0, .rax);
+                try a.movsdMemXmm(.rsp, @intCast(@as(usize, op.a) * 8), .xmm0);
+            },
+            .load_local, .move => {
+                try a.movsdXmmMem(.xmm0, .rsp, @intCast(@as(usize, op.b) * 8));
+                try a.movsdMemXmm(.rsp, @intCast(@as(usize, op.a) * 8), .xmm0);
+            },
+            .jump => {
+                const target_pc = (@as(usize, op.b) << 8) | op.c;
+                try a.jmp(op_labels[target_pc]);
+            },
+            .call_global => {
+                try a.movsdXmmMem(.xmm0, .rsp, @intCast((@as(usize, op.b) + 1) * 8));
+                try a.callLabel(fast_entry);
+                try a.testRegReg(.rax, .rax);
+                try a.jcc(.ne, fast_unwind);
+                try a.movsdMemXmm(.rsp, @intCast(@as(usize, op.a) * 8), .xmm0);
+            },
+            .return_value => {
+                try a.movsdXmmMem(.xmm0, .rsp, @intCast(@as(usize, op.a) * 8));
+                try a.addRegImm32(.rsp, frame_bytes);
+                try a.incReg64(.rbx);
+                try a.xorRegReg(.rax, .rax);
+                try a.ret();
+            },
+            else => unreachable,
+        }
+    }
+
+    a.bindLabel(fast_overflow);
+    try a.movRegImm32(.rax, 1);
+    try a.ret();
+
+    a.bindLabel(fast_unwind);
+    try a.addRegImm32(.rsp, frame_bytes);
+    try a.incReg64(.rbx);
+    try a.movRegImm32(.rax, 1);
+    try a.ret();
+
+    return a.finalizeExecutable();
+}
+
 pub fn compile(allocator: Allocator, block: *codeblock.CodeBlock) bool {
     if (block.jit_fn != null) return true;
     if (block.jit_failed) return false;
+
+    if (canUseFastSelfRec(block)) {
+        const exec = compileFastSelfRec(allocator, block) catch {
+            block.jit_failed = true;
+            return false;
+        };
+        block.jit_code = exec;
+        block.jit_fn = @ptrCast(exec.ptr);
+        return true;
+    }
+
     if (!canCompile(block)) {
         block.jit_failed = true;
         return false;
@@ -2492,5 +2903,74 @@ test "baseline JIT OSR compiles direct calls to closures and helper functions, h
         defer res.deinit();
         try std.testing.expect(res.isNumber());
         try std.testing.expectEqual(@as(f64, 1), res.asNumber());
+    }
+}
+
+test "baseline JIT Phase 4B fast self-recursion executes fib(20), handles deep recursion bailout, and handles global reassignment" {
+    if (!comptime x64_asm.is_supported_host) return;
+    const Interpreter = @import("../interpreter.zig").Interpreter;
+
+    // 1. fib(20) == 6765 with 0 leaks
+    {
+        var allocating = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer allocating.deinit();
+        var interp = try Interpreter.init(std.testing.allocator, &allocating.writer);
+        defer interp.deinit();
+        interp.compile_options.use_bytecode_vm = true;
+
+        const res = try interp.run(
+            \\function fib(n) {
+            \\    if (n <= 1) return n;
+            \\    return fib(n - 1) + fib(n - 2);
+            \\}
+            \\fib(20);
+        );
+        defer res.deinit();
+        try std.testing.expect(res.isNumber());
+        try std.testing.expectEqual(@as(f64, 6765), res.asNumber());
+    }
+
+    // 2. Infinite recursion function inf(n) { return inf(n + 1); } inf(0);
+    // Bails out cleanly from fast_entry to interpreter and throws error.StackOverflow
+    {
+        var allocating = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer allocating.deinit();
+        var interp = try Interpreter.init(std.testing.allocator, &allocating.writer);
+        defer interp.deinit();
+        interp.compile_options.use_bytecode_vm = true;
+
+        try std.testing.expectError(
+            error.StackOverflow,
+            interp.run(
+                \\function inf(n) {
+                \\    return inf(n + 1);
+                \\}
+                \\inf(0);
+            ),
+        );
+    }
+
+    // 3. Global function reassignment mid-execution invalidates global_version and gives correct result
+    {
+        var allocating = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer allocating.deinit();
+        var interp = try Interpreter.init(std.testing.allocator, &allocating.writer);
+        defer interp.deinit();
+        interp.compile_options.use_bytecode_vm = true;
+
+        const res = try interp.run(
+            \\function fib(n) {
+            \\    if (n <= 1) return n;
+            \\    return fib(n - 1) + fib(n - 2);
+            \\}
+            \\var r20 = fib(20);
+            \\var orig = fib;
+            \\fib = function(n) { return 100; };
+            \\var r_reassigned = orig(5);
+            \\r20 * 1000 + r_reassigned;
+        );
+        defer res.deinit();
+        try std.testing.expect(res.isNumber());
+        try std.testing.expectEqual(@as(f64, 6765200), res.asNumber());
     }
 }
