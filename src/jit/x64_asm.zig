@@ -483,6 +483,12 @@ pub const Assembler = struct {
         try self.emitByte(modRM(0b11, src.low3(), dst.low3()));
     }
 
+    pub fn movsdXmmXmm(self: *Assembler, dst: Xmm, src: Xmm) !void {
+        try self.emitByte(0xF2);
+        if (rexSSE(dst.isExt(), src.isExt())) |r| try self.emitByte(r);
+        try self.emitBytes(&.{ 0x0F, 0x10, modRM(0b11, dst.low3(), src.low3()) });
+    }
+
     pub fn movsdXmmMem(self: *Assembler, dst: Xmm, base: Reg, disp: i32) !void {
         try self.emitByte(0xF2);
         if (rexSSE(dst.isExt(), base.isExt())) |r| try self.emitByte(r);
@@ -642,4 +648,29 @@ test "x64_asm emits and executes double addition with W^X mmap" {
     const rc = f(&vals);
     try std.testing.expectEqual(@as(u8, 0), rc);
     try std.testing.expectEqual(@as(f64, 42.0), @as(f64, @bitCast(vals[0])));
+}
+
+test "x64_asm emits and executes movsdXmmXmm with extended Xmm registers" {
+    if (!comptime is_supported_host) return;
+    var a = Assembler.init(std.testing.allocator);
+    defer a.deinit();
+
+    // fn(ptr: [*]u64) callconv(.c) u8: ptr[0] = as_f64(ptr[0]) + as_f64(ptr[1]); return 0;
+    try a.movsdXmmMem(.xmm12, .rdi, 0);
+    try a.movsdXmmMem(.xmm15, .rdi, 8);
+    try a.movsdXmmXmm(.xmm4, .xmm12);
+    try a.addsd(.xmm4, .xmm15);
+    try a.movsdMemXmm(.rdi, 0, .xmm4);
+    try a.xorRegReg(.rax, .rax);
+    try a.ret();
+
+    const exec = try a.finalizeExecutable();
+    defer freeExecutable(exec);
+
+    const Fn = *const fn ([*]u64) callconv(.c) u8;
+    const f: Fn = @ptrCast(exec.ptr);
+    var vals = [2]u64{ @bitCast(@as(f64, 100.5)), @bitCast(@as(f64, 200.25)) };
+    const rc = f(&vals);
+    try std.testing.expectEqual(@as(u8, 0), rc);
+    try std.testing.expectEqual(@as(f64, 300.75), @as(f64, @bitCast(vals[0])));
 }
