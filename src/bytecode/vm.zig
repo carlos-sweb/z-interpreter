@@ -1076,6 +1076,7 @@ noinline fn tryEnterOsr(
     prop_ic: *[256]PropIC,
     start_ip: usize,
     end_ip: usize,
+    regs_limit: [*]JSValue,
 ) usize {
     @branchHint(.cold);
     const mut_cb = @constCast(frame.block);
@@ -1090,6 +1091,8 @@ noinline fn tryEnterOsr(
         .allocator_ptr = allocator,
         .frame_ptr = frame,
         .prop_ic_ptr = prop_ic,
+        .regs_limit = regs_limit,
+        .global_version_ptr = &global_version,
     };
     const next_ip: usize = ofn(frame_regs.ptr, &ctx);
     if (next_ip >= start_ip and next_ip <= end_ip) {
@@ -1782,7 +1785,9 @@ noinline fn vmCallDispatch(
         .jump => {
             const target_ip: usize = @intCast(try jumpTarget(frame.block, code[ip]));
             if (target_ip < ip and !frame.block.osr_failed) {
-                ip = tryEnterOsr(&allocator, frame, frame_regs, &prop_ic, target_ip, ip);
+                const remaining_frames = MAX_FRAMES - frame_count;
+                const limit_idx = @min(MAX_REGISTERS, frame.reg_base + remaining_frames * @as(usize, frame.block.register_count));
+                ip = tryEnterOsr(&allocator, frame, frame_regs, &prop_ic, target_ip, ip, registers.ptr + limit_idx);
             } else {
                 ip = target_ip;
             }

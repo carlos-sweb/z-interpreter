@@ -1010,6 +1010,26 @@ pub fn canCompileOsr(block: *const codeblock.CodeBlock, start_ip: usize, end_ip:
                 if (op.a >= block.register_count or op.b >= block.register_count) return false;
                 if (constantName(block, op.c) == null) return false;
             },
+            .call => {
+                if (op.a >= block.register_count or op.b >= block.register_count) return false;
+                if (op.c >= block.call_target_cache.len) return false;
+                const cs = &block.call_target_cache[op.c];
+                if (cs.this_reg != null) return false;
+                const tb = cs.target_block orelse return false;
+                if (tb.param_count != cs.arg_count) return false;
+                if ((@as(usize, op.b) + 1 + cs.arg_count) > block.register_count) return false;
+                if (tb.jit_fn == null and !canCompile(tb)) return false;
+            },
+            .call_global => {
+                if (op.a >= block.register_count) return false;
+                if (op.c >= block.call_target_cache.len) return false;
+                const cs = &block.call_target_cache[op.c];
+                if (cs.this_reg != null) return false;
+                const tb = cs.target_block orelse return false;
+                if (tb.param_count != cs.arg_count) return false;
+                if ((@as(usize, op.b) + 1 + cs.arg_count) > block.register_count) return false;
+                if (tb.jit_fn == null and !canCompile(tb)) return false;
+            },
             else => return false,
         }
     }
@@ -1022,6 +1042,19 @@ pub fn compileOsr(allocator: Allocator, block: *codeblock.CodeBlock, start_ip: u
     if (!canCompileOsr(block, start_ip, end_ip)) {
         block.osr_failed = true;
         return false;
+    }
+
+    var ip = start_ip;
+    while (ip <= end_ip) : (ip += 1) {
+        const op = block.ops[ip];
+        if (op.opcode == .call or op.opcode == .call_global) {
+            const cs = &block.call_target_cache[op.c];
+            if (cs.target_block) |tb| {
+                if (tb.jit_fn == null) {
+                    _ = compile(allocator, @constCast(tb));
+                }
+            }
+        }
     }
 
     const exec = compileOsrImpl(allocator, block, start_ip, end_ip) catch {
@@ -1524,6 +1557,101 @@ fn compileOsrImpl(
                 try a.testRegReg(.rax, .rax);
                 try a.jcc(.ne, bail_lbl);
             },
+            .call, .call_global => {
+                const cs = &block.call_target_cache[op.c];
+                const cache_addr: u64 = @intFromPtr(cs);
+                const tb = cs.target_block.?;
+                const target_addr: u64 = @intFromPtr(tb);
+                const arg_count = cs.arg_count;
+                const caller_regs = block.register_count;
+                const callee_regs_off: i32 = @intCast(@as(usize, caller_regs) * 8);
+                const total_regs = caller_regs + tb.register_count;
+                const total_bytes: i32 = @intCast(@as(usize, total_regs) * 8);
+
+                const regs_limit_off: i32 = @intCast(@offsetOf(codeblock.OsrContext, "regs_limit"));
+                const global_ver_ptr_off: i32 = @intCast(@offsetOf(codeblock.OsrContext, "global_version_ptr"));
+                const jit_fn_off: i32 = @intCast(@offsetOf(codeblock.CodeBlock, "jit_fn"));
+                const closure_env_off: i32 = @intCast(@offsetOf(codeblock.CallSiteCache, "closure_env"));
+
+                // Guard 1: regs[op.a] < HEAP_BASE (%r14)
+                try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.a) * 8));
+                try a.cmpRegReg(.rax, .r14);
+                try a.jcc(.ae, bail_lbl);
+
+                // Guard 2:
+                if (op.opcode == .call) {
+                    const expected_callee = cs.callee orelse return error.CannotCompile;
+                    try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
+                    try a.movRegImm64(.rcx, expected_callee.bits);
+                    try a.cmpRegReg(.rax, .rcx);
+                    try a.jcc(.ne, bail_lbl);
+                } else {
+                    try a.movRegMem(.rcx, .r13, global_ver_ptr_off);
+                    try a.movRegMem(.rax, .rcx, 0);
+                    try a.movRegImm64(.rdx, cache_addr);
+                    try a.movRegMem(.rdx, .rdx, @intCast(@offsetOf(codeblock.CallSiteCache, "global_version")));
+                    try a.cmpRegReg(.rax, .rdx);
+                    try a.jcc(.ne, bail_lbl);
+                }
+
+                // Guard 3: target_block.jit_fn != null
+                try a.movRegImm64(.rcx, target_addr);
+                try a.movRegMem(.r11, .rcx, jit_fn_off);
+                try a.testRegReg(.r11, .r11);
+                try a.jcc(.e, bail_lbl);
+
+                // Guard 4: All arguments regs[op.b + 1 + i] < HEAP_BASE
+                const arg_start = @as(usize, op.b) + 1;
+                for (0..arg_count) |i| {
+                    try a.movRegMem(.rax, .r12, @intCast((arg_start + i) * 8));
+                    try a.cmpRegReg(.rax, .r14);
+                    try a.jcc(.ae, bail_lbl);
+                }
+
+                // Guard 5: Stack check: callee_regs + target_block.register_count <= regs_limit
+                try a.lea(.rax, .r12, total_bytes);
+                try a.movRegMem(.rcx, .r13, regs_limit_off);
+                try a.cmpRegReg(.rax, .rcx);
+                try a.jcc(.a, bail_lbl);
+
+                // Copy arguments to callee_regs[0..arg_count]
+                for (0..arg_count) |i| {
+                    try a.movRegMem(.rax, .r12, @intCast((arg_start + i) * 8));
+                    try a.movMemReg(.r12, callee_regs_off + @as(i32, @intCast(i * 8)), .rax);
+                }
+
+                // Set up arguments for jit_fn:
+                // %rdi = callee_regs
+                try a.lea(.rdi, .r12, callee_regs_off);
+                // %rdx = regs_limit
+                try a.movRegMem(.rdx, .r13, regs_limit_off);
+                // %rcx = cache.closure_env
+                try a.movRegImm64(.rcx, cache_addr);
+                try a.movRegMem(.rcx, .rcx, closure_env_off);
+
+                // Allocate 16 bytes on stack for out_val
+                try a.subRegImm32(.rsp, 16);
+                // %rsi = &out_val
+                try a.movRegReg(.rsi, .rsp);
+
+                // Call jit_fn (%r11)
+                try a.callReg(.r11);
+
+                // Check return code
+                try a.testRegReg(.rax, .rax);
+                const call_ok_lbl = try a.createLabel();
+                try a.jcc(.e, call_ok_lbl);
+
+                // Bailout path: restore %rsp and jump to bail_lbl
+                try a.addRegImm32(.rsp, 16);
+                try a.jmp(bail_lbl);
+
+                // Success path:
+                a.bindLabel(call_ok_lbl);
+                try a.movRegMem(.rax, .rsp, 0);
+                try a.addRegImm32(.rsp, 16);
+                try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+            },
             else => {
                 if (!(try emitSharedOp(&a, block, op, true, bail_lbl))) unreachable;
             },
@@ -1974,6 +2102,125 @@ test "baseline JIT Phase 3B executes div_num, mod_num, neg, bitwise, comparisons
             \\const r_nan = ieeeCheck(0, 0);
             \\const r_inf = ieeeCheck(1, 0);
             \\(r_num === 101 && r_nan === 10 && r_inf === 101) ? 1 : 0;
+        );
+        defer res.deinit();
+        try std.testing.expect(res.isNumber());
+        try std.testing.expectEqual(@as(f64, 1), res.asNumber());
+    }
+}
+
+test "baseline JIT OSR compiles direct calls to closures and helper functions, handles callee/global reassignment bailout, and handles heap arg bailout" {
+    if (!comptime x64_asm.is_supported_host) return;
+    const Interpreter = @import("../interpreter.zig").Interpreter;
+
+    // 1. OSR loop calling closure c() (arg_count == 0) and helper add2(x, y) (arg_count == 2) > 200 times (0 leaks)
+    {
+        var allocating = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer allocating.deinit();
+        var interp = try Interpreter.init(std.testing.allocator, &allocating.writer);
+        defer interp.deinit();
+        interp.compile_options.use_bytecode_vm = true;
+
+        const res = try interp.run(
+            \\function makeCounter() {
+            \\    let count = 0;
+            \\    return function() { count++; return count; };
+            \\}
+            \\function add2(x, y) {
+            \\    return x + y;
+            \\}
+            \\function run() {
+            \\    const c = makeCounter();
+            \\    let total = 0;
+            \\    for (let i = 0; i < 250; i++) {
+            \\        const v = c();
+            \\        total = add2(total, v);
+            \\    }
+            \\    return total;
+            \\}
+            \\run();
+        );
+        defer res.deinit();
+        try std.testing.expect(res.isNumber());
+        // sum_{v=1}^{250} v = 250 * 251 / 2 = 31375
+        try std.testing.expectEqual(@as(f64, 31375), res.asNumber());
+    }
+
+    // 2. Target function reassignment mid-loop (callee invalidation & global_version invalidation)
+    {
+        var allocating = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer allocating.deinit();
+        var interp = try Interpreter.init(std.testing.allocator, &allocating.writer);
+        defer interp.deinit();
+        interp.compile_options.use_bytecode_vm = true;
+
+        // 2a. Callee reassignment (.call)
+        {
+            const res = try interp.run(
+                \\function testCalleeReassign() {
+                \\    function fnA(x) { return x + 1; }
+                \\    function fnB(x) { return x + 10; }
+                \\    let fn = fnA;
+                \\    let total = 0;
+                \\    for (let i = 0; i < 200; i++) {
+                \\        if (i == 100) fn = fnB;
+                \\        total += fn(i);
+                \\    }
+                \\    return total;
+                \\}
+                \\testCalleeReassign();
+            );
+            defer res.deinit();
+            try std.testing.expect(res.isNumber());
+            // sum_{i=0}^{99} (i + 1) = 4950 + 100 = 5050
+            // sum_{i=100}^{199} (i + 10) = 14950 + 1000 = 15950
+            // total = 21000
+            try std.testing.expectEqual(@as(f64, 21000), res.asNumber());
+        }
+
+        // 2b. Global function reassignment (.call_global / global_version)
+        {
+            const res = try interp.run(
+                \\function gTargetA(x) { return x + 1; }
+                \\function gTargetB(x) { return x + 10; }
+                \\var gFn = gTargetA;
+                \\function testGlobalReassign() {
+                \\    let total = 0;
+                \\    for (let i = 0; i < 200; i++) {
+                \\        if (i == 100) gFn = gTargetB;
+                \\        total += gFn(i);
+                \\    }
+                \\    return total;
+                \\}
+                \\testGlobalReassign();
+            );
+            defer res.deinit();
+            try std.testing.expect(res.isNumber());
+            try std.testing.expectEqual(@as(f64, 21000), res.asNumber());
+        }
+    }
+
+    // 3. Call from OSR loop with string/object argument (clean bailout and 0 leaks)
+    {
+        var allocating = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer allocating.deinit();
+        var interp = try Interpreter.init(std.testing.allocator, &allocating.writer);
+        defer interp.deinit();
+        interp.compile_options.use_bytecode_vm = true;
+
+        const res = try interp.run(
+            \\function helper(x) { return x; }
+            \\function testHeapArg() {
+            \\    let had_str = 0;
+            \\    for (let i = 0; i < 200; i++) {
+            \\        let arg = i;
+            \\        if (i == 100) arg = "bailout_str";
+            \\        const r = helper(arg);
+            \\        if (r === "bailout_str") had_str = 1;
+            \\    }
+            \\    return had_str;
+            \\}
+            \\testHeapArg();
         );
         defer res.deinit();
         try std.testing.expect(res.isNumber());

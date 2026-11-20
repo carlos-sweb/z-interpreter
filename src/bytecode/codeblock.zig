@@ -142,6 +142,8 @@ pub const OsrContext = extern struct {
     allocator_ptr: *const anyopaque,
     frame_ptr: *anyopaque,
     prop_ic_ptr: *anyopaque,
+    regs_limit: [*]JSValue,
+    global_version_ptr: *const u64,
 };
 
 pub const JitFn = *const fn (regs: [*]JSValue, out: *JSValue, regs_limit: [*]JSValue, env: ?*anyopaque) callconv(.c) u8;
