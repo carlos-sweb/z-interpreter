@@ -39,6 +39,8 @@ const Environment = interpreter_mod.Environment;
 const Completion = interpreter_mod.Completion;
 const FiberState = interpreter_mod.FiberState;
 const invokeFunctionNode = interpreter_mod.invokeFunctionNode;
+const prepareCallEnv = interpreter_mod.prepareCallEnv;
+const evalPreparedFunctionBody = interpreter_mod.evalPreparedFunctionBody;
 const native_helpers = @import("native_helpers.zig");
 const interp = native_helpers.interp;
 const builtins = @import("builtins.zig");
@@ -53,7 +55,11 @@ fn fiberEntry(arg: *anyopaque) void {
     const fs: *FiberState = @ptrCast(@alignCast(arg));
     const self = fs.interp;
     const arena = self.gc_allocator;
-    const result = invokeFunctionNode(self, fs.fnode, fs.closure_env, arena, fs.this_value, null, null, fs.private_ctx, fs.args, null) catch |err0| {
+    const res_or_err = if (fs.is_generator)
+        evalPreparedFunctionBody(self, fs.fnode, fs.closure_env)
+    else
+        invokeFunctionNode(self, fs.fnode, fs.closure_env, arena, fs.this_value, null, null, fs.private_ctx, fs.args, null);
+    const result = res_or_err catch |err0| {
         const err = self.throwIfGap(err0);
         if (err == error.JsThrow) {
             const ex = self.pending_exception.?;
@@ -525,10 +531,21 @@ fn retainedCopy(allocator: std.mem.Allocator, args: []const JSValue) ![]JSValue 
 }
 
 /// Calling `function*` builds the generator object -- a plain object
-/// whose `next` native drives the (not-yet-started) fiber. The body
-/// runs nothing until the first next() (real semantics).
-pub fn makeGeneratorObject(self: *Interpreter, fnode: *zfunctions.FunctionNode, closure_env: *Environment, this_value: ?JSValue, private_ctx: ?*anyopaque, args: []const JSValue) anyerror!JSValue {
+/// whose `next` native drives the (not-yet-started) fiber. Parameter
+/// binding runs synchronously at call time (ECMA-262 GeneratorStart);
+/// the body runs nothing until the first next().
+pub fn makeGeneratorObject(
+    self: *Interpreter,
+    fnode: *zfunctions.FunctionNode,
+    closure_env: *Environment,
+    this_value: ?JSValue,
+    super_proto: ?JSValue,
+    private_ctx: ?*anyopaque,
+    args: []const JSValue,
+    home_object: ?JSValue,
+) anyerror!JSValue {
     const arena = self.gc_allocator;
+    const call_env = try prepareCallEnv(self, fnode, closure_env, arena, this_value, super_proto, null, private_ctx, args, home_object, true);
     const fs = try arena.create(FiberState);
     fs.* = .{
         .is_generator = true,
@@ -536,17 +553,17 @@ pub fn makeGeneratorObject(self: *Interpreter, fnode: *zfunctions.FunctionNode, 
         .interp = self,
         .fiber = undefined,
         .fnode = fnode,
-        .closure_env = closure_env,
-        .this_value = if (this_value) |tv| tv.retain() else null,
+        .closure_env = call_env,
+        .this_value = null,
         .private_ctx = private_ctx,
-        .args = try retainedCopy(arena, args),
+        .args = try arena.alloc(JSValue, 0),
     };
     fs.fiber = try fiber_mod.Fiber.init(arena, fiberEntry, fs);
     try self.gcTrackFiberState(fs);
     var obj = try self.gcNewObject();
     if (self.iterator_prototype) |p| try obj.asObject().value.setPrototype(&p.asObject().value);
-    try obj.asObject().value.set("next", try self.gcNewFunction(.{ .ctx = fs, .name = "next", .call = generatorNext }));
-    try obj.asObject().value.set("return", try self.gcNewFunction(.{ .ctx = fs, .name = "return", .call = generatorReturn }));
+    try obj.asObject().value.set("next", try self.gcNewFunction(.{ .ctx = fs, .name = "next", .arity = 1, .call = generatorNext }));
+    try obj.asObject().value.set("return", try self.gcNewFunction(.{ .ctx = fs, .name = "return", .arity = 1, .call = generatorReturn }));
     // A generator IS its own iterable: `gen()[Symbol.iterator]()`
     // returns the generator itself (so `[...gen()]` works via the
     // Symbol.iterator path too, and `gen()[Symbol.iterator]() === gen()`).
@@ -594,10 +611,20 @@ pub fn runAsyncFunction(self: *Interpreter, fnode: *zfunctions.FunctionNode, clo
 /// asyncGeneratorNext (returns a promise per call) and the
 /// self-iterator hook is keyed by Symbol.asyncIterator, not
 /// Symbol.iterator (spec: AsyncGenerator.prototype[Symbol.asyncIterator]
-/// returns `this`). The body runs nothing until the first next(),
-/// same as a sync generator.
-pub fn makeAsyncGeneratorObject(self: *Interpreter, fnode: *zfunctions.FunctionNode, closure_env: *Environment, this_value: ?JSValue, private_ctx: ?*anyopaque, args: []const JSValue) anyerror!JSValue {
+/// returns `this`). Parameter binding runs synchronously at call time;
+/// the body runs nothing until the first next(), same as a sync generator.
+pub fn makeAsyncGeneratorObject(
+    self: *Interpreter,
+    fnode: *zfunctions.FunctionNode,
+    closure_env: *Environment,
+    this_value: ?JSValue,
+    super_proto: ?JSValue,
+    private_ctx: ?*anyopaque,
+    args: []const JSValue,
+    home_object: ?JSValue,
+) anyerror!JSValue {
     const arena = self.gc_allocator;
+    const call_env = try prepareCallEnv(self, fnode, closure_env, arena, this_value, super_proto, null, private_ctx, args, home_object, true);
     const fs = try arena.create(FiberState);
     fs.* = .{
         .is_generator = true,
@@ -605,16 +632,16 @@ pub fn makeAsyncGeneratorObject(self: *Interpreter, fnode: *zfunctions.FunctionN
         .interp = self,
         .fiber = undefined,
         .fnode = fnode,
-        .closure_env = closure_env,
-        .this_value = if (this_value) |tv| tv.retain() else null,
+        .closure_env = call_env,
+        .this_value = null,
         .private_ctx = private_ctx,
-        .args = try retainedCopy(arena, args),
+        .args = try arena.alloc(JSValue, 0),
     };
     fs.fiber = try fiber_mod.Fiber.init(arena, fiberEntry, fs);
     try self.gcTrackFiberState(fs);
     var obj = try self.gcNewObject();
-    try obj.asObject().value.set("next", try self.gcNewFunction(.{ .ctx = fs, .name = "next", .call = asyncGeneratorNext }));
-    try obj.asObject().value.set("return", try self.gcNewFunction(.{ .ctx = fs, .name = "return", .call = asyncGeneratorReturn }));
+    try obj.asObject().value.set("next", try self.gcNewFunction(.{ .ctx = fs, .name = "next", .arity = 1, .call = asyncGeneratorNext }));
+    try obj.asObject().value.set("return", try self.gcNewFunction(.{ .ctx = fs, .name = "return", .arity = 1, .call = asyncGeneratorReturn }));
     if (self.symbol_async_iterator) |sym| {
         const key = try self.encodeKey(sym);
         defer self.gc_allocator.free(key);

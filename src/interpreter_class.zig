@@ -122,6 +122,12 @@ fn functionNeedsArguments(self: *Interpreter, fnode: *zfunctions.FunctionNode) b
 
 fn functionBodyUsesArguments(fnode: *const zfunctions.FunctionNode) bool {
     for (fnode.params.items) |param| {
+        if (bindingPatternBindsName(param.pattern, "arguments")) return false;
+    }
+    if (fnode.params.rest) |rest| {
+        if (bindingPatternBindsName(rest, "arguments")) return false;
+    }
+    for (fnode.params.items) |param| {
         if (bindingPatternUsesArguments(param.pattern)) return true;
         if (param.default) |default_value| if (nodeUsesArguments(default_value)) return true;
     }
@@ -130,6 +136,44 @@ fn functionBodyUsesArguments(fnode: *const zfunctions.FunctionNode) bool {
         .block => |body| statementUsesArguments(body),
         .expression => |body| nodeUsesArguments(body),
     };
+}
+
+fn bindingPatternBindsName(pattern: *const zstatements.BindingPattern, target: []const u8) bool {
+    return switch (pattern.*) {
+        .identifier => |id| std.mem.eql(u8, id.name, target),
+        .array => |array| blk: {
+            for (array.elements) |element| if (element) |item| {
+                if (bindingPatternBindsName(item.pattern, target)) break :blk true;
+            };
+            if (array.rest) |rest| if (bindingPatternBindsName(rest, target)) break :blk true;
+            break :blk false;
+        },
+        .object => |object| blk: {
+            for (object.properties) |property| {
+                if (bindingPatternBindsName(property.value, target)) break :blk true;
+            }
+            if (object.rest) |rest| if (std.mem.eql(u8, rest.name, target)) break :blk true;
+            break :blk false;
+        },
+    };
+}
+
+fn markParamPatternTDZ(env: *Environment, allocator: Allocator, pattern: *const zstatements.BindingPattern) !void {
+    switch (pattern.*) {
+        .identifier => |id| if (!env.containsBinding(id.name)) try env.markTDZ(allocator, id.name),
+        .array => |array| {
+            for (array.elements) |element| if (element) |item| {
+                try markParamPatternTDZ(env, allocator, item.pattern);
+            };
+            if (array.rest) |rest| try markParamPatternTDZ(env, allocator, rest);
+        },
+        .object => |object| {
+            for (object.properties) |property| {
+                try markParamPatternTDZ(env, allocator, property.value);
+            }
+            if (object.rest) |rest| if (!env.containsBinding(rest.name)) try env.markTDZ(allocator, rest.name);
+        },
+    }
 }
 
 fn bindingPatternUsesArguments(pattern: *const zstatements.BindingPattern) bool {
@@ -750,15 +794,7 @@ pub fn getOrCompileBytecode(self: *Interpreter, fnode: *const zfunctions.Functio
     return cb;
 }
 
-/// The shared body of every user-code invocation: fresh call env off the
-/// closure env, this/super bindings, parameter binding (defaults, rest,
-/// destructuring via bindPattern), then the body. `this_value` null =
-/// don't bind (arrows -- resolveThis walks up instead).
-// z-interpreter-refactor.md, Step 5 Phase C batch 3: `pub` so
-// interpreter_runtime.zig's fiberEntry (async cluster) can reach it --
-// also used by evalClass/closureCall/classConstructorCall (future
-// class-cluster batch), staying here since multiple clusters need it.
-pub fn invokeFunctionNode(
+pub fn prepareCallEnv(
     self: *Interpreter,
     fnode: *zfunctions.FunctionNode,
     closure_env: *Environment,
@@ -769,52 +805,23 @@ pub fn invokeFunctionNode(
     private_ctx: ?*anyopaque,
     args: []const JSValue,
     home_object: ?JSValue,
-) anyerror!JSValue {
-    if (self.compile_options.use_bytecode_vm and private_ctx == null and super_proto == null and super_ctor == null and home_object == null and closure_env.resolvePrivateCtx() == null) {
-        // Unsupported AST shapes have no CodeBlock and stay on the existing
-        // walker. The VM is selected only after a CodeBlock was emitted.
-        if (getOrCompileBytecode(self, fnode)) |cb| {
-            var resolved_this = false;
-            const actual_this = if (this_value) |tv| tv else blk: {
-                resolved_this = true;
-                break :blk closure_env.resolveThis();
-            };
-            defer if (resolved_this) actual_this.deinit();
-            const vm_result = bytecode_vm.vmCall(self.gc_allocator, &cb.block, closure_env, actual_this, args, self) catch |err| switch (err) {
-                error.UnsupportedOpcode => return err,
-                else => return err,
-            };
-            return vm_result;
-        }
-    }
-    const escaping = functionMayEscape(fnode);
+    force_escaping: bool,
+) anyerror!*Environment {
+    const escaping = force_escaping or functionMayEscape(fnode);
     const call_env = if (escaping)
         try self.gcChildEnv(closure_env)
     else
         try closure_env.child(self.gc_allocator);
     call_env.escaping = escaping;
-    defer if (!call_env.escaping) {
+    errdefer if (!call_env.escaping) {
         call_env.destroy(self.gc_allocator);
     };
-    // Etapa 2 de uniform-ownership-contract.md: estos 4 campos son
-    // JSValue planos sin mecanismo de liberación propio (viven hasta
-    // que el Environment entero se destruye en el teardown del
-    // intérprete) -- antes era seguro guardarlos sin retener porque
-    // nada liberaba un valor descartado; ahora sí, así que cada
-    // call_env necesita su propia copia retenida (mismo patrón que
-    // cualquier otro sitio de guardado del motor).
     if (this_value) |tv| call_env.this_value = tv.retain();
     if (super_proto) |sp| call_env.super_proto = sp.retain();
     if (super_ctor) |sc| call_env.super_ctor = sc.retain();
     call_env.private_ctx = private_ctx;
     if (home_object) |ho| call_env.home_object = ho.retain();
 
-    // `arguments`: arrows inherit the enclosing function's binding. A body
-    // that can use it gets the real snapshot; otherwise keep only retained
-    // values, avoiding one GC array for every callback invocation.
-    // Materialized as a real array snapshot (always-strict => unmapped;
-    // narrowing: not the exotic Arguments object -- see README). Defined
-    // BEFORE params so a parameter/rest named `arguments` shadows it.
     if (functionNeedsArguments(self, fnode)) {
         var arguments = try self.gcNewArray();
         for (args) |a| _ = try arguments.asArray().value.push(a.retain());
@@ -822,6 +829,13 @@ pub fn invokeFunctionNode(
         try call_env.define(allocator, "arguments", arguments);
     } else if (fnode.kind != .arrow) {
         try call_env.retainLazyArguments(allocator, args);
+    }
+
+    for (fnode.params.items) |param| {
+        try markParamPatternTDZ(call_env, allocator, param.pattern);
+    }
+    if (fnode.params.rest) |rest| {
+        try markParamPatternTDZ(call_env, allocator, rest);
     }
 
     for (fnode.params.items, 0..) |param, i| {
@@ -851,15 +865,16 @@ pub fn invokeFunctionNode(
         if (start < args.len) {
             for (args[start..]) |a| _ = try rest_arr.asArray().value.push(a.retain());
         }
-        // Real spec: a rest parameter can be a destructuring pattern
-        // (`function f(...[a, b]) {}`), not just a plain identifier --
-        // confirmed against real Node (test262 exercises this too).
-        // bindPattern already handles both shapes (its `.identifier`
-        // case is exactly the old `call_env.define(rest.name, ...)`
-        // path), same as every other parameter above.
         try self.bindPattern(call_env, rest, rest_arr, .define);
     }
+    return call_env;
+}
 
+pub fn evalPreparedFunctionBody(
+    self: *Interpreter,
+    fnode: *zfunctions.FunctionNode,
+    call_env: *Environment,
+) anyerror!JSValue {
     switch (fnode.body) {
         .block => |body_stmt| {
             const c = try self.evalBody(call_env, body_stmt.data.block);
@@ -870,6 +885,46 @@ pub fn invokeFunctionNode(
     }
 }
 
+/// The shared body of every user-code invocation: fresh call env off the
+/// closure env, this/super bindings, parameter binding (defaults, rest,
+/// destructuring via bindPattern), then the body. `this_value` null =
+/// don't bind (arrows -- resolveThis walks up instead).
+pub fn invokeFunctionNode(
+    self: *Interpreter,
+    fnode: *zfunctions.FunctionNode,
+    closure_env: *Environment,
+    allocator: Allocator,
+    this_value: ?JSValue,
+    super_proto: ?JSValue,
+    super_ctor: ?JSValue,
+    private_ctx: ?*anyopaque,
+    args: []const JSValue,
+    home_object: ?JSValue,
+) anyerror!JSValue {
+    if (self.compile_options.use_bytecode_vm and private_ctx == null and super_proto == null and super_ctor == null and home_object == null and closure_env.resolvePrivateCtx() == null) {
+        // Unsupported AST shapes have no CodeBlock and stay on the existing
+        // walker. The VM is selected only after a CodeBlock was emitted.
+        if (getOrCompileBytecode(self, fnode)) |cb| {
+            var resolved_this = false;
+            const actual_this = if (this_value) |tv| tv else blk: {
+                resolved_this = true;
+                break :blk closure_env.resolveThis();
+            };
+            defer if (resolved_this) actual_this.deinit();
+            const vm_result = bytecode_vm.vmCall(self.gc_allocator, &cb.block, closure_env, actual_this, args, self) catch |err| switch (err) {
+                error.UnsupportedOpcode => return err,
+                else => return err,
+            };
+            return vm_result;
+        }
+    }
+    const call_env = try prepareCallEnv(self, fnode, closure_env, allocator, this_value, super_proto, super_ctor, private_ctx, args, home_object, false);
+    defer if (!call_env.escaping) {
+        call_env.destroy(self.gc_allocator);
+    };
+    return evalPreparedFunctionBody(self, fnode, call_env);
+}
+
 pub fn closureCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const closure_ctx: *ClosureCtx = @ptrCast(@alignCast(ctx));
     const fnode = closure_ctx.function_node;
@@ -878,10 +933,10 @@ pub fn closureCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     // `this` inheritance.
     const this: ?JSValue = if (fnode.kind != .arrow) this_value else null;
     if (fnode.is_generator and fnode.is_async) {
-        return closure_ctx.interp.makeAsyncGeneratorObject(fnode, closure_ctx.closure_env, this, closure_ctx.private_ctx, args);
+        return closure_ctx.interp.makeAsyncGeneratorObject(fnode, closure_ctx.closure_env, this, closure_ctx.super_proto, closure_ctx.private_ctx, args, closure_ctx.home_object);
     }
     if (fnode.is_generator) {
-        return closure_ctx.interp.makeGeneratorObject(fnode, closure_ctx.closure_env, this, closure_ctx.private_ctx, args);
+        return closure_ctx.interp.makeGeneratorObject(fnode, closure_ctx.closure_env, this, closure_ctx.super_proto, closure_ctx.private_ctx, args, closure_ctx.home_object);
     }
     if (fnode.is_async) {
         return closure_ctx.interp.runAsyncFunction(fnode, closure_ctx.closure_env, this, closure_ctx.private_ctx, args);

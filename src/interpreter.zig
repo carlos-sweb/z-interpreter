@@ -1168,6 +1168,8 @@ pub const Interpreter = struct {
 };
 
 pub const invokeFunctionNode = interpreter_class.invokeFunctionNode;
+pub const prepareCallEnv = interpreter_class.prepareCallEnv;
+pub const evalPreparedFunctionBody = interpreter_class.evalPreparedFunctionBody;
 
 // ---- GC tests (roadmap item 15, phase 5) -----------------------------
 // White-box: collectGarbage()/gc_registry are private, so these live here
@@ -2554,6 +2556,35 @@ test "OSR hoisted invariant array bails out cleanly on out-of-bounds set_elem co
     defer result.deinit();
     try testing.expect(result.isBool() and result.asBool());
 }
+
+test "generator and async generator evaluate parameters synchronously and enforce parameter TDZ" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    const result = try interp.run(
+        \\var bodyRuns = 0;
+        \\function* g1(_ = (() => { throw new TypeError("boom1"); })()) { bodyRuns++; }
+        \\async function* ag1(_ = (() => { throw new TypeError("boom2"); })()) { bodyRuns++; }
+        \\var x = 99;
+        \\function* gTdz1(x = x) { bodyRuns++; }
+        \\async function* agTdz2(a = b, b = 1) { bodyRuns++; }
+        \\var fSelf = (x = x) => x;
+        \\var c1 = false, c2 = false, c3 = false, c4 = false, c5 = false;
+        \\try { g1(); } catch (e) { c1 = e instanceof TypeError; }
+        \\try { ag1(); } catch (e) { c2 = e instanceof TypeError; }
+        \\try { gTdz1(); } catch (e) { c3 = e instanceof ReferenceError; }
+        \\try { agTdz2(); } catch (e) { c4 = e instanceof ReferenceError; }
+        \\try { fSelf(); } catch (e) { c5 = e instanceof ReferenceError; }
+        \\function* gOk([a, b = a * 2] = [21]) { yield a + b; }
+        \\var vOk = gOk().next().value;
+        \\bodyRuns === 0 && c1 && c2 && c3 && c4 && c5 && vOk === 63;
+    );
+    defer result.deinit();
+    try testing.expect(result.isBool() and result.asBool());
+}
+
 
 
 
