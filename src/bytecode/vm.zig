@@ -43,7 +43,16 @@ pub const CallFrame = struct {
     reg_base: u32,
     return_reg: u8,
     has_rc: bool = false,
+    saved_strict: bool = false,
 };
+
+fn resolveLexicalThis(env: ?*Environment) JSValue {
+    var cur = env;
+    while (cur) |e| : (cur = e.parent) {
+        if (e.this_value) |v| return v;
+    }
+    return JSValue.UNDEFINED;
+}
 
 const PropIC = struct {
     block: ?*const codeblock.CodeBlock = null,
@@ -273,8 +282,12 @@ fn setProp(frame: *CallFrame, allocator: Allocator, obj: JSValue, key: []const u
     _ = allocator;
     if (obj.isObject()) {
         const box = obj.asObject();
+        const is_strict = if (frame.interp) |it| it.strict_mode else false;
+        if (is_strict and (box.value.is_frozen or !box.value.is_extensible)) {
+            if (frame.interp) |it| return it.setPropertyOnValue(obj, key, val);
+        }
         if (box.value.getOwnRecord(key)) |rec| {
-            if (rec.isAccessor()) {
+            if (rec.isAccessor() or (is_strict and !rec.descriptor.writable)) {
                 if (frame.interp) |it| return it.setPropertyOnValue(obj, key, val);
                 return error.UnsupportedOpcode;
             }
@@ -342,6 +355,14 @@ noinline fn setElem(frame: *CallFrame, allocator: Allocator, obj: JSValue, key_v
     if (obj.isArray() and key_val.isNumber()) {
         const arr = &obj.asArray().value;
         const frozen = if (@hasField(@TypeOf(arr.*), "is_frozen")) arr.is_frozen else false;
+        const is_strict = if (frame.interp) |it| it.strict_mode else false;
+        if (is_strict and frozen) {
+            if (frame.interp) |it| {
+                var buf: [32]u8 = undefined;
+                const key = try std.fmt.bufPrint(&buf, "{d}", .{key_val.asNumber()});
+                return it.setPropertyOnValue(obj, key, val);
+            }
+        }
         if (!frozen and arr.holey == null) {
             const n = key_val.asNumber();
             if (n >= 0 and !std.math.isNan(n) and !std.math.isInf(n)) {
@@ -543,6 +564,15 @@ noinline fn setElemConstSlow(frame: *CallFrame, allocator: Allocator, obj: JSVal
     @branchHint(.cold);
     if (obj.isArray()) {
         const arr = &obj.asArray().value;
+        const frozen = if (@hasField(@TypeOf(arr.*), "is_frozen")) arr.is_frozen else false;
+        const is_strict = if (frame.interp) |it| it.strict_mode else false;
+        if (is_strict and frozen) {
+            if (frame.interp) |it| {
+                var buf: [32]u8 = undefined;
+                const key = try std.fmt.bufPrint(&buf, "{d}", .{idx});
+                return it.setPropertyOnValue(obj, key, val);
+            }
+        }
         const val_to_store = if (needsDeinit(val)) val.retain() else val;
         const cur = arr.length();
         if (idx < cur) {
@@ -681,6 +711,7 @@ noinline fn handleJsThrow(
             frame_count.* -= 1;
         }
         const cur_frame = &frames[target_frame_idx];
+        if (cur_frame.interp) |it| it.strict_mode = cur_frame.saved_strict;
         for (registers[handler.reg_top..reg_top.*]) |*r| deinitSlot(r);
         reg_top.* = handler.reg_top;
         cur_frame.pc = handler.target_pc;
@@ -808,11 +839,15 @@ noinline fn vmCallCleanup(registers: []JSValue, reg_top: usize, prev_obj_pool_le
     }
 }
 
-noinline fn allocCapturedEnv(interp_opt: ?*interpreter_mod.Interpreter, parent_opt: ?*Environment) !?*Environment {
+noinline fn allocCapturedEnv(interp_opt: ?*interpreter_mod.Interpreter, parent_opt: ?*Environment, this_val_opt: ?JSValue) !?*Environment {
     @branchHint(.cold);
     const itp = interp_opt orelse return parent_opt;
     const parent = parent_opt orelse return parent_opt;
-    return try itp.gcChildEnv(parent);
+    const child_env = try itp.gcChildEnv(parent);
+    if (this_val_opt) |tv| {
+        child_env.this_value = tv.retain();
+    }
+    return child_env;
 }
 
 fn checkSelfRecursionGuard(callee_block: *const codeblock.CodeBlock, env_opt: ?*Environment) bool {
@@ -1262,15 +1297,27 @@ noinline fn vmCallDispatch(
     }
     @memset(registers[parameter_count..reg_top], JSValue.UNDEFINED);
 
+    const prev_strict = if (interp) |it| it.strict_mode else false;
+    if (block.flags.is_strict) {
+        if (interp) |it| it.strict_mode = true;
+    }
+    defer {
+        if (interp) |it| it.strict_mode = prev_strict;
+    }
+
+    const needs_env = block.capture_count > 0 or (!block.flags.is_arrow and block.flags.has_nested_fn);
+    const initial_cenv = if (needs_env) try allocCapturedEnv(interp, closure_env, initial_this) else closure_env;
+
     frames[0] = CallFrame{
         .block = block,
         .pc = 0,
         .reg_base = 0,
         .this_value = initial_this,
-        .closure_env = if (block.capture_count > 0) try allocCapturedEnv(interp, closure_env) else closure_env,
+        .closure_env = initial_cenv,
         .has_rc = init_has_rc,
         .return_reg = 0,
         .interp = interp,
+        .saved_strict = prev_strict,
     };
     frame_count = 1;
 
@@ -2060,16 +2107,24 @@ noinline fn vmExecLoop(
                 }
 
                 const base_cenv: ?*Environment = if (cache.closure_env) |env| @ptrCast(@alignCast(env)) else null;
+                const callee_this = if (callee_block.flags.lexical_this)
+                    resolveLexicalThis(base_cenv)
+                else
+                    this_value;
+                const cur_strict = if (frame.interp) |it| it.strict_mode else false;
+                if (callee_block.flags.is_strict and frame.interp != null) frame.interp.?.strict_mode = true;
+                const needs_env = callee_block.capture_count > 0 or (!callee_block.flags.is_arrow and callee_block.flags.has_nested_fn);
                 frame.pc = @intCast(ip + 1);
                 frames[frame_count] = CallFrame{
                     .block = callee_block,
                     .pc = 0,
                     .reg_base = @intCast(callee_reg_base),
-                    .this_value = this_value,
-                    .closure_env = if (callee_block.capture_count > 0) try allocCapturedEnv(frame.interp, base_cenv) else base_cenv,
+                    .this_value = callee_this,
+                    .closure_env = if (needs_env) try allocCapturedEnv(frame.interp, base_cenv, callee_this) else base_cenv,
                     .has_rc = callee_has_rc,
                     .return_reg = op.a,
                     .interp = if (cache.interp) |itp| @ptrCast(@alignCast(itp)) else null,
+                    .saved_strict = cur_strict,
                 };
                 frame = &frames[frame_count];
                 frame_count += 1;
@@ -2144,16 +2199,24 @@ noinline fn vmExecLoop(
                 }
 
                 const base_cenv: ?*Environment = if (cache.closure_env) |cenv| @ptrCast(@alignCast(cenv)) else null;
+                const callee_this = if (callee_block.flags.lexical_this)
+                    resolveLexicalThis(base_cenv)
+                else
+                    JSValue.UNDEFINED;
+                const cur_strict = if (frame.interp) |it| it.strict_mode else false;
+                if (callee_block.flags.is_strict and frame.interp != null) frame.interp.?.strict_mode = true;
+                const needs_env = callee_block.capture_count > 0 or (!callee_block.flags.is_arrow and callee_block.flags.has_nested_fn);
                 frame.pc = @intCast(ip + 1);
                 frames[frame_count] = CallFrame{
                     .block = callee_block,
                     .pc = 0,
                     .reg_base = @intCast(callee_reg_base),
-                    .this_value = JSValue.UNDEFINED,
-                    .closure_env = if (callee_block.capture_count > 0) try allocCapturedEnv(frame.interp, base_cenv) else base_cenv,
+                    .this_value = callee_this,
+                    .closure_env = if (needs_env) try allocCapturedEnv(frame.interp, base_cenv, callee_this) else base_cenv,
                     .has_rc = callee_has_rc,
                     .return_reg = op.a,
                     .interp = if (cache.interp) |itp| @ptrCast(@alignCast(itp)) else null,
+                    .saved_strict = cur_strict,
                 };
                 frame = &frames[frame_count];
                 frame_count += 1;
@@ -2181,6 +2244,7 @@ noinline fn vmExecLoop(
             if (catch_top > 0) {
                 while (catch_top > 0 and catch_stack[catch_top - 1].frame_idx >= frame_count - 1) catch_top -= 1;
             }
+            if (frame.interp) |it| it.strict_mode = frame.saved_strict;
             const return_reg = frame.return_reg;
             frame_count -= 1;
             if (frame_count == 0) return val;
@@ -2203,6 +2267,7 @@ noinline fn vmExecLoop(
             if (catch_top > 0) {
                 while (catch_top > 0 and catch_stack[catch_top - 1].frame_idx >= frame_count - 1) catch_top -= 1;
             }
+            if (frame.interp) |it| it.strict_mode = frame.saved_strict;
             const return_reg = frame.return_reg;
             frame_count -= 1;
             if (frame_count == 0) return JSValue.UNDEFINED;
@@ -2731,6 +2796,11 @@ noinline fn storeGlobalSlow(
             };
             return;
         }
+    }
+    const is_strict = if (frame.interp) |it| it.strict_mode else false;
+    if (is_strict) {
+        if (frame.interp) |it| return it.throwError(.reference_error, "{s} is not defined", .{name});
+        return error.UnsupportedOpcode;
     }
     clearGlobalCache();
     try env.define(allocator, name, val.retain());

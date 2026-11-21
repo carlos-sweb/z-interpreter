@@ -646,6 +646,7 @@ pub const Interpreter = struct {
     /// `GcRegistry`'s own doc comments.
     gc_registry: GcRegistry = .empty,
     global_env: *Environment,
+    strict_mode: bool = false,
     /// Injected, not hardcoded to real stdout -- lets tests point this at
     /// an in-memory buffer instead of touching the process's actual
     /// stdout. console.log/info/debug write here.
@@ -1989,6 +1990,76 @@ test "bytecode typeof unresolvable identifier returns undefined" {
         \\  return typeof noExiste === "undefined";
         \\}
         \\testTypeof();
+    );
+    defer result.deinit();
+    try testing.expect(result.isBool() and result.asBool());
+}
+
+test "bytecode lexical block shadowing falls back to ast and preserves outer let" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+    const result = try interp.run(
+        \\let x = "outside";
+        \\{
+        \\  let x = "inside";
+        \\}
+        \\x === "outside";
+    );
+    defer result.deinit();
+    try testing.expect(result.isBool() and result.asBool());
+}
+
+test "bytecode use strict throws ReferenceError on undeclared global write" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+    const err = interp.run(
+        \\"use strict";
+        \\noExiste = 1;
+    );
+    try testing.expectError(error.UncaughtException, err);
+}
+
+test "bytecode arrow function resolves lexical this" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+    const result = try interp.run(
+        \\const o = { v: 42, f() { return (() => this.v)(); } };
+        \\o.f();
+    );
+    defer result.deinit();
+    try testing.expect(result.isNumber());
+    try testing.expectEqual(@as(f64, 42), result.asNumber());
+}
+
+test "bytecode direct eval and arguments fall back cleanly to AST without error" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+    const result = try interp.run(
+        \\function testEval() {
+        \\  var a = 0;
+        \\  eval("a = 10");
+        \\  return a;
+        \\}
+        \\function testArgs() {
+        \\  return arguments[0] + arguments[1];
+        \\}
+        \\testEval() === 10 && testArgs(3, 7) === 10;
     );
     defer result.deinit();
     try testing.expect(result.isBool() and result.asBool());

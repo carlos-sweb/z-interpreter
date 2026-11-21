@@ -210,6 +210,7 @@ pub fn run(self: *Interpreter, source: []const u8) anyerror!JSValue {
             else => return err,
         };
         if (compiled) |*block| {
+            if (self.strict_mode) block.block.flags.is_strict = true;
             defer block.deinit(self.gc_allocator);
             try self.hoistVarScope(self.script_env.?, program);
             try self.hoistLexical(self.script_env.?, program);

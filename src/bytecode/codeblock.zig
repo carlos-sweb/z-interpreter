@@ -105,14 +105,17 @@ pub const Constant = union(enum) {
     function_node: *zfunctions.FunctionNode,
 };
 
-pub const Flags = packed struct(u8) {
+pub const Flags = packed struct(u16) {
     is_arrow: bool = false,
     is_generator: bool = false,
     is_async: bool = false,
     needs_arguments: bool = false,
     lexical_this: bool = false,
     has_try: bool = false,
-    _reserved: u2 = 0,
+    is_strict: bool = false,
+    has_super: bool = false,
+    has_nested_fn: bool = false,
+    _reserved: u7 = 0,
 };
 
 pub const ExceptionHandler = struct {
@@ -229,7 +232,38 @@ pub const ScopeAnalysis = struct {
         for (self.captured_locals) |captured| if (std.mem.eql(u8, captured, name)) return true;
         return false;
     }
+
+    pub fn localKind(self: *const ScopeAnalysis, name: []const u8) ?LocalKind {
+        for (self.locals) |local| if (std.mem.eql(u8, local.name, name)) return local.kind;
+        return null;
+    }
 };
+
+pub fn hasUseStrict(statements: anytype) bool {
+    for (statements) |stmt| {
+        switch (stmt.data) {
+            .expr_stmt => |expr| {
+                if (expr.data == .string_literal) {
+                    if (std.mem.eql(u8, expr.data.string_literal, "use strict")) return true;
+                } else break;
+            },
+            else => break,
+        }
+    }
+    return false;
+}
+
+pub fn functionHasUseStrict(function: *const zfunctions.FunctionNode) bool {
+    switch (function.body) {
+        .block => |block_stmt| {
+            if (block_stmt.data == .block) {
+                return hasUseStrict(block_stmt.data.block);
+            }
+        },
+        .expression => {},
+    }
+    return false;
+}
 
 /// Conservative function-scope analysis. It allocates unique slots for every
 /// parameter and declaration. Precise block-scope TDZ placement is deferred
@@ -244,6 +278,8 @@ pub const ScopeAnalyzer = struct {
     free: std.ArrayListUnmanaged([]const u8) = .empty,
     free_names: std.StringHashMapUnmanaged(void) = .empty,
     param_count: u16 = 0,
+    has_super: bool = false,
+    has_nested_fn: bool = false,
 
     pub fn analyze(allocator: Allocator, function: *const zfunctions.FunctionNode) anyerror!ScopeAnalysis {
         var self = ScopeAnalyzer{ .allocator = allocator };
@@ -254,7 +290,10 @@ pub const ScopeAnalyzer = struct {
         errdefer self.captured.deinit(allocator);
         errdefer self.free.deinit(allocator);
 
-        for (function.params.items) |param| try self.addPattern(param.pattern, .parameter);
+        for (function.params.items) |param| {
+            try self.addPattern(param.pattern, .parameter);
+            if (param.default) |default| try self.scanNode(default);
+        }
         self.param_count = @intCast(self.locals.items.len);
         if (function.params.rest) |rest| {
             try self.addPattern(rest, .parameter);
@@ -282,6 +321,9 @@ pub const ScopeAnalyzer = struct {
                 .is_generator = function.is_generator,
                 .is_async = function.is_async,
                 .lexical_this = function.kind == .arrow,
+                .has_super = self.has_super,
+                .has_nested_fn = self.has_nested_fn,
+                .is_strict = functionHasUseStrict(function),
             },
         };
     }
@@ -312,12 +354,33 @@ pub const ScopeAnalyzer = struct {
             .local_count = count,
             .register_count = count,
             .param_count = 0,
-            .flags = .{},
+            .flags = .{
+                .has_super = self.has_super,
+                .has_nested_fn = self.has_nested_fn,
+                .is_strict = hasUseStrict(statements),
+            },
         };
     }
 
     fn addLocal(self: *ScopeAnalyzer, name: []const u8, kind: LocalKind) anyerror!void {
-        if (self.local_names.contains(name)) return;
+        if (self.local_names.contains(name)) {
+            const is_lexical_new = switch (kind) {
+                .let, .@"const", .class, .catch_binding => true,
+                else => false,
+            };
+            var is_lexical_old = false;
+            for (self.locals.items) |loc| {
+                if (std.mem.eql(u8, loc.name, name)) {
+                    is_lexical_old = switch (loc.kind) {
+                        .let, .@"const", .class, .catch_binding => true,
+                        else => false,
+                    };
+                    break;
+                }
+            }
+            if (is_lexical_new or is_lexical_old) return error.UnsupportedSyntax;
+            return;
+        }
         const slot: u16 = @intCast(self.locals.items.len);
         try self.local_names.put(self.allocator, name, {});
         try self.locals.append(self.allocator, .{ .name = name, .slot = slot, .kind = kind });
@@ -467,8 +530,10 @@ pub const ScopeAnalyzer = struct {
     }
 
     fn scanNested(self: *ScopeAnalyzer, nested: *const zfunctions.FunctionNode) anyerror!void {
+        self.has_nested_fn = true;
         var analysis = try ScopeAnalyzer.analyze(self.allocator, nested);
         defer analysis.deinit(self.allocator);
+        if (analysis.flags.has_super) self.has_super = true;
         for (analysis.free_names) |name| {
             if (self.local_names.contains(name)) try self.markCaptured(name) else try self.addFree(name);
         }
@@ -533,6 +598,7 @@ pub const ScopeAnalyzer = struct {
             .function_like => |ptr| try self.scanNested(zfunctions.asFunctionNode(ptr)),
             .class_like => |ptr| try self.scanClass(zfunctions.asClassNode(ptr)),
             .yield_expr => |yield_expr| if (yield_expr.argument) |argument| try self.scanNode(argument),
+            .super_expr => self.has_super = true,
             else => {},
         }
     }

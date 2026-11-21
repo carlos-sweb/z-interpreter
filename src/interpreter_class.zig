@@ -738,6 +738,7 @@ pub fn getOrCompileBytecode(self: *Interpreter, fnode: *const zfunctions.Functio
     };
     const cb = self.gc_allocator.create(bytecode_emitter.CompiledCodeBlock) catch return null;
     cb.* = compiled;
+    if (self.strict_mode) cb.block.flags.is_strict = true;
     if (self.compile_options.disasm) {
         const text = bytecode_emitter.disassemble(self.gc_allocator, &cb.block) catch null;
         if (text) |t| {
