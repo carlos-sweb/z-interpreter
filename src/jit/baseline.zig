@@ -1833,11 +1833,11 @@ fn analyzeOsrLoop(block: *const codeblock.CodeBlock, start_ip: usize, end_ip: us
     var result = OsrCachedAnalysis{};
 
     // 1. Pureza del bucle (is_pure_loop): true solo si ningún opcode en [start_ip .. end_ip]
-    // es .new_array, .new_object, .call, .call_global
+    // es .call, .call_global
     var is_pure_loop = true;
     for (start_ip..end_ip + 1) |ip| {
         switch (block.ops[ip].opcode) {
-            .new_array, .new_object, .call, .call_global => {
+            .call, .call_global => {
                 is_pure_loop = false;
                 break;
             },
@@ -1968,6 +1968,9 @@ fn analyzeOsrLoop(block: *const codeblock.CodeBlock, start_ip: usize, end_ip: us
                     if (!written[op.c]) read_before_written[op.c] = true;
                     use_count[op.c] += 1;
                 }
+            },
+            .new_array, .new_object => {
+                if (op.a < 64) invalid[op.a] = true;
             },
             .load_const => {
                 if (op.a < 64) {
@@ -2791,6 +2794,9 @@ fn compileOsrImpl(
                 try a.jmp(done_lbl);
 
                 a.bindLabel(slow_lbl);
+                if (cached_count > 0) {
+                    try emitFlushCached(&a, cached_regs, cached_count);
+                }
                 try a.movRegReg(.rdi, .r13);
                 try a.movRegReg(.rsi, .r12);
                 try a.movRegImm32(.rdx, op.a);
@@ -2799,6 +2805,9 @@ fn compileOsrImpl(
                 try a.callReg(.rax);
                 try a.testRegReg(.rax, .rax);
                 try a.jcc(.ne, bail_lbl);
+                if (cached_count > 0) {
+                    try emitReloadCached(&a, cached_regs, cached_count);
+                }
                 a.bindLabel(done_lbl);
             },
             .set_elem_const => {
@@ -2945,6 +2954,107 @@ fn compileOsrImpl(
                 a.bindLabel(done_lbl);
             },
             .new_object => {
+                const obj_rc_off: i32 = @intCast(@offsetOf(ObjectBox, "_count"));
+                const zobj_is_sealed_offset: i32 = box_val_offset + @offsetOf(ZObj, "is_sealed");
+                const zobj_is_error_data_offset: i32 = box_val_offset + @offsetOf(ZObj, "is_error_data");
+
+                const slow_lbl = try a.createLabel();
+                const check_loop_lbl = try a.createLabel();
+                const clear_loop_lbl = try a.createLabel();
+                const done_lbl = try a.createLabel();
+
+                try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.a) * 8));
+                try a.movRegReg(.rcx, .rax);
+                try a.shrRegImm8(.rcx, 47);
+                try a.cmpRegImm32(.rcx, @intCast(HEADER_OBJECT));
+                try a.jcc(.ne, slow_lbl);
+
+                try a.movRegImm64(.rcx, JSValue.PTR_MASK);
+                try a.andRegReg(.rax, .rcx);
+                try a.movRegMem(.rcx, .rax, obj_rc_off);
+                try a.cmpRegImm32(.rcx, 1);
+                try a.jcc(.ne, slow_lbl);
+
+                try a.movzxReg64Mem16(.rcx, .rax, zobj_cached_len_offset);
+                try a.testRegReg(.rcx, .rcx);
+                try a.jcc(.ne, slow_lbl);
+
+                try a.movzxReg64Mem8(.rcx, .rax, zobj_is_frozen_offset);
+                try a.testRegReg(.rcx, .rcx);
+                try a.jcc(.ne, slow_lbl);
+
+                try a.movzxReg64Mem8(.rcx, .rax, zobj_is_sealed_offset);
+                try a.testRegReg(.rcx, .rcx);
+                try a.jcc(.ne, slow_lbl);
+
+                try a.movzxReg64Mem8(.rcx, .rax, zobj_is_extensible_offset);
+                try a.testRegReg(.rcx, .rcx);
+                try a.jcc(.e, slow_lbl);
+
+                try a.movzxReg64Mem8(.rcx, .rax, zobj_is_error_data_offset);
+                try a.testRegReg(.rcx, .rcx);
+                try a.jcc(.ne, slow_lbl);
+
+                try a.movReg32Mem(.rcx, .rax, zobj_shape_id_offset);
+                try a.cmpReg32Imm32(.rcx, 1);
+                try a.jcc(.be, slow_lbl);
+                try a.shrRegImm8(.rcx, 31);
+                try a.testRegReg(.rcx, .rcx);
+                try a.jcc(.ne, slow_lbl);
+
+                try a.movRegMem(.rsi, .rax, zobj_entries_cap_offset);
+                try a.cmpRegImm32(.rsi, 16);
+                try a.jcc(.a, slow_lbl);
+
+                try a.movRegMem(.rcx, .rax, zobj_entries_len_offset);
+                try a.testRegReg(.rcx, .rcx);
+                try a.jcc(.e, slow_lbl);
+                try a.cmpRegImm32(.rcx, 8);
+                try a.jcc(.a, slow_lbl);
+
+                try a.movRegMem(.rdx, .rax, zobj_entries_bytes_offset);
+                if (comptime value_byte_offset_multiplier == 16) {
+                    try a.shlRegImm8(.rsi, 4);
+                } else {
+                    try a.imulRegRegImm32(.rsi, .rsi, @intCast(value_byte_offset_multiplier));
+                }
+                try a.addRegReg(.rdx, .rsi);
+
+                try a.movRegReg(.r8, .rcx);
+                try a.movRegReg(.r9, .rdx);
+                a.bindLabel(check_loop_lbl);
+                try a.movReg32Mem(.rsi, .r9, prop_desc_offset);
+                try a.andRegImm8(.rsi, 0x1F);
+                try a.cmpRegImm32(.rsi, 0x17);
+                try a.jcc(.ne, slow_lbl);
+                try a.movRegMem(.rsi, .r9, prop_val_offset);
+                try a.cmpRegReg(.rsi, .r14);
+                try a.jcc(.ae, slow_lbl);
+                try a.addRegImm32(.r9, prop_size);
+                try a.decReg64(.r8);
+                try a.jcc(.ne, check_loop_lbl);
+
+                try a.movRegReg(.r8, .rcx);
+                try a.movRegReg(.r9, .rdx);
+                a.bindLabel(clear_loop_lbl);
+                try a.movMemReg(.r9, prop_val_offset, .r15);
+                try a.addRegImm32(.r9, prop_size);
+                try a.decReg64(.r8);
+                try a.jcc(.ne, clear_loop_lbl);
+
+                try a.movReg32Mem(.rsi, .rax, zobj_shape_id_offset);
+                try a.movMem32Reg(.rax, zobj_cached_shape_id_offset, .rsi);
+                try a.movMem16Reg(.rax, zobj_cached_len_offset, .rcx);
+                try a.xorReg32Reg32(.rsi, .rsi);
+                try a.movMem16Reg(.rax, zobj_active_len_offset, .rsi);
+                try a.movRegImm32(.rsi, 1);
+                try a.movMem32Reg(.rax, zobj_shape_id_offset, .rsi);
+                try a.jmp(done_lbl);
+
+                a.bindLabel(slow_lbl);
+                if (cached_count > 0) {
+                    try emitFlushCached(&a, cached_regs, cached_count);
+                }
                 try a.movRegReg(.rdi, .r13);
                 try a.movRegReg(.rsi, .r12);
                 try a.movRegImm32(.rdx, op.a);
@@ -2952,6 +3062,10 @@ fn compileOsrImpl(
                 try a.callReg(.rax);
                 try a.testRegReg(.rax, .rax);
                 try a.jcc(.ne, bail_lbl);
+                if (cached_count > 0) {
+                    try emitReloadCached(&a, cached_regs, cached_count);
+                }
+                a.bindLabel(done_lbl);
             },
             .set_prop, .set_prop_transition => {
                 const ic_idx: u8 = @intCast(((@intFromPtr(block) >> 4) +% ip) & 255);
