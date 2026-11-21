@@ -1303,7 +1303,7 @@ noinline fn tryEnterOsr(
     if (mut_cb.osr_fn == null) {
         mut_cb.osr_count +%= 1;
         if (mut_cb.osr_count < baseline_jit.OSR_THRESHOLD) return start_ip;
-        if (!baseline_jit.compileOsr(allocator.*, mut_cb, start_ip, end_ip)) return start_ip;
+        if (!baseline_jit.compileOsr(allocator.*, mut_cb, start_ip, end_ip, prop_ic)) return start_ip;
     }
     const ofn = mut_cb.osr_fn orelse return start_ip;
     if (mut_cb.osr_header_ip != start_ip or mut_cb.osr_end_ip != end_ip) return start_ip;

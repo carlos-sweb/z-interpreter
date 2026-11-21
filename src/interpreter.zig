@@ -2440,6 +2440,32 @@ test "OSR inline new_array recycles primitive arrays and falls back safely for h
     try testing.expect(result.isBool() and result.asBool());
 }
 
+test "OSR specialized PropIC falls back cleanly when object shape changes mid-loop" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+    const result = try interp.run(
+        \\function runShapeChange() {
+        \\  var o1 = { x: 1, y: 2 };
+        \\  var o2 = { y: 10, x: 20, z: 30 };
+        \\  var sum = 0;
+        \\  for (var i = 0; i < 200; i++) {
+        \\    var cur = i < 120 ? o1 : o2;
+        \\    cur.x = cur.x + 1;
+        \\    sum += cur.x + cur.y;
+        \\  }
+        \\  return o1.x === 121 && o2.x === 100 && sum === 7620 + 5640;
+        \\}
+        \\runShapeChange();
+    );
+    defer result.deinit();
+    try testing.expect(result.isBool() and result.asBool());
+}
+
+
 
 
 

@@ -1790,7 +1790,7 @@ pub fn canCompileOsr(block: *const codeblock.CodeBlock, start_ip: usize, end_ip:
     return true;
 }
 
-pub fn compileOsr(allocator: Allocator, block: *codeblock.CodeBlock, start_ip: usize, end_ip: usize) bool {
+pub fn compileOsr(allocator: Allocator, block: *codeblock.CodeBlock, start_ip: usize, end_ip: usize, prop_ic_ptr: ?*const anyopaque) bool {
     if (block.osr_fn != null) return true;
     if (block.osr_failed) return false;
     if (!canCompileOsr(block, start_ip, end_ip)) {
@@ -1811,7 +1811,7 @@ pub fn compileOsr(allocator: Allocator, block: *codeblock.CodeBlock, start_ip: u
         }
     }
 
-    const exec = compileOsrImpl(allocator, block, start_ip, end_ip) catch {
+    const exec = compileOsrImpl(allocator, block, start_ip, end_ip, prop_ic_ptr) catch {
         block.osr_failed = true;
         return false;
     };
@@ -2162,9 +2162,11 @@ fn compileOsrImpl(
     block: *const codeblock.CodeBlock,
     start_ip: usize,
     end_ip: usize,
+    prop_ic_ptr: ?*const anyopaque,
 ) ![]align(std.heap.page_size_min) u8 {
     var a = Assembler.init(allocator);
     defer a.deinit();
+    const prop_ic: ?*const [256]PropIC = if (prop_ic_ptr) |p| @ptrCast(@alignCast(p)) else null;
 
     const analysis = analyzeOsrLoop(block, start_ip, end_ip);
     const cached_regs = analysis.cached_regs;
@@ -2990,73 +2992,116 @@ fn compileOsrImpl(
                     try a.testRegReg(.rcx, .rcx);
                     try a.jcc(.ne, slow_path);
 
-                    // 5. ic_ptr = ctx.prop_ic_ptr + ic_idx * @sizeOf(PropIC)
-                    try a.movRegMem(.rsi, .r13, ctx_prop_ic_ptr_offset);
-                    const ic_byte_offset: i32 = @intCast(@as(usize, ic_idx) * @sizeOf(PropIC));
-                    if (ic_byte_offset != 0) {
-                        try a.addRegImm32(.rsi, ic_byte_offset);
+                    const maybe_ic: ?PropIC = if (prop_ic) |table| blk: {
+                        const entry = table[ic_idx];
+                        if (entry.block == block and entry.pc == ip and @intFromPtr(entry.key_ptr) == expected_key_ptr and entry.shape_id != 0 and entry.next_shape == 0) {
+                            break :blk entry;
+                        }
+                        break :blk null;
+                    } else null;
+
+                    if (maybe_ic) |ic_val| {
+                        // Monomorphic PropIC specialization at OSR compile time
+                        try a.movReg32Mem(.rdx, .rax, zobj_shape_id_offset);
+                        try a.cmpReg32Imm32(.rdx, @bitCast(ic_val.shape_id));
+                        try a.jcc(.ne, slow_path);
+
+                        try a.movRegMem(.rdx, .rax, zobj_entries_len_offset);
+                        try a.cmpRegImm32(.rdx, @intCast(ic_val.slot_idx));
+                        try a.jcc(.be, slow_path);
+
+                        try a.movRegMem(.rdx, .rax, zobj_entries_bytes_offset);
+                        try a.movRegMem(.rsi, .rax, zobj_entries_cap_offset);
+                        if (comptime value_byte_offset_multiplier == 16) {
+                            try a.shlRegImm8(.rsi, 4);
+                        } else {
+                            try a.imulRegRegImm32(.rsi, .rsi, @intCast(value_byte_offset_multiplier));
+                        }
+                        try a.addRegReg(.rdx, .rsi);
+
+                        const slot_byte_off: i32 = @intCast(@as(usize, ic_val.slot_idx) * @as(usize, @intCast(prop_size)));
+                        try a.movReg32Mem(.rcx, .rdx, slot_byte_off + prop_desc_offset);
+                        try a.andRegImm8(.rcx, 9);
+                        try a.cmpRegImm32(.rcx, 1);
+                        try a.jcc(.ne, slow_path);
+
+                        try a.movRegMem(.rcx, .rdx, slot_byte_off + prop_val_offset);
+                        try a.cmpRegReg(.rcx, .r14);
+                        try a.jcc(.ae, slow_path);
+
+                        try a.movMemReg(.rdx, slot_byte_off + prop_val_offset, .r8);
+                        try a.jmp(done_lbl);
+                    } else {
+                        // 5. ic_ptr = ctx.prop_ic_ptr + ic_idx * @sizeOf(PropIC)
+                        try a.movRegMem(.rsi, .r13, ctx_prop_ic_ptr_offset);
+                        const ic_byte_offset: i32 = @intCast(@as(usize, ic_idx) * @sizeOf(PropIC));
+                        if (ic_byte_offset != 0) {
+                            try a.addRegImm32(.rsi, ic_byte_offset);
+                        }
+
+                        // 6. Check ic.block == @intFromPtr(block)
+                        try a.movRegMem(.rcx, .rsi, ic_block_offset);
+                        try a.movRegImm64(.rdx, @intFromPtr(block));
+                        try a.cmpRegReg(.rcx, .rdx);
+                        try a.jcc(.ne, slow_path);
+
+                        // 7. Check ic.pc == ip
+                        try a.movReg32Mem(.rcx, .rsi, ic_pc_offset);
+                        try a.cmpReg32Imm32(.rcx, @intCast(ip));
+                        try a.jcc(.ne, slow_path);
+
+                        // 8. Check ic.next_shape == 0 (no shape transition)
+                        try a.movReg32Mem(.rcx, .rsi, ic_next_shape_offset);
+                        try a.testReg32Reg32(.rcx, .rcx);
+                        try a.jcc(.ne, slow_path);
+
+                        // 9. Check ic.shape_id != 0 and zobj.shape_id == ic.shape_id
+                        try a.movReg32Mem(.rcx, .rsi, ic_shape_id_offset);
+                        try a.testReg32Reg32(.rcx, .rcx);
+                        try a.jcc(.e, slow_path);
+                        try a.movReg32Mem(.rdx, .rax, zobj_shape_id_offset);
+                        try a.cmpReg32Reg32(.rdx, .rcx);
+                        try a.jcc(.ne, slow_path);
+
+                        // 10. Check ic.key_ptr == expected_key_ptr
+                        try a.movRegMem(.rcx, .rsi, ic_key_ptr_offset);
+                        try a.movRegImm64(.rdx, expected_key_ptr);
+                        try a.cmpRegReg(.rcx, .rdx);
+                        try a.jcc(.ne, slow_path);
+
+                        // 11. slot_idx < entries.len
+                        try a.movReg32Mem(.rcx, .rsi, ic_slot_idx_offset); // %rcx = slot_idx
+                        try a.movRegMem(.rdx, .rax, zobj_entries_len_offset); // %rdx = len
+                        try a.cmpRegReg(.rcx, .rdx);
+                        try a.jcc(.ae, slow_path);
+
+                        // 12. Compute &prop:
+                        try a.movRegMem(.rdx, .rax, zobj_entries_bytes_offset); // %rdx = bytes
+                        try a.movRegMem(.rsi, .rax, zobj_entries_cap_offset); // %rsi = capacity
+                        if (comptime value_byte_offset_multiplier == 16) {
+                            try a.shlRegImm8(.rsi, 4);
+                        } else {
+                            try a.imulRegRegImm32(.rsi, .rsi, @intCast(value_byte_offset_multiplier));
+                        }
+                        try a.addRegReg(.rdx, .rsi); // %rdx = prop_array
+                        try a.imulRegRegImm32(.rsi, .rcx, prop_size);
+                        try a.addRegReg(.rdx, .rsi); // %rdx = &prop
+
+                        // 13. Check writable (bit 0) and !is_accessor (bit 3): desc & 9 == 1
+                        try a.movReg32Mem(.rcx, .rdx, prop_desc_offset);
+                        try a.andRegImm8(.rcx, 9);
+                        try a.cmpRegImm32(.rcx, 1);
+                        try a.jcc(.ne, slow_path);
+
+                        // 14. Check old prop.value < HEAP_BASE
+                        try a.movRegMem(.rcx, .rdx, prop_val_offset);
+                        try a.cmpRegReg(.rcx, .r14); // %r14 = HEAP_BASE
+                        try a.jcc(.ae, slow_path);
+
+                        // Fast write: prop.value = regs[val_reg]
+                        try a.movMemReg(.rdx, prop_val_offset, .r8);
+                        try a.jmp(done_lbl);
                     }
-
-                    // 6. Check ic.block == @intFromPtr(block)
-                    try a.movRegMem(.rcx, .rsi, ic_block_offset);
-                    try a.movRegImm64(.rdx, @intFromPtr(block));
-                    try a.cmpRegReg(.rcx, .rdx);
-                    try a.jcc(.ne, slow_path);
-
-                    // 7. Check ic.pc == ip
-                    try a.movReg32Mem(.rcx, .rsi, ic_pc_offset);
-                    try a.cmpReg32Imm32(.rcx, @intCast(ip));
-                    try a.jcc(.ne, slow_path);
-
-                    // 8. Check ic.next_shape == 0 (no shape transition)
-                    try a.movReg32Mem(.rcx, .rsi, ic_next_shape_offset);
-                    try a.testReg32Reg32(.rcx, .rcx);
-                    try a.jcc(.ne, slow_path);
-
-                    // 9. Check ic.shape_id != 0 and zobj.shape_id == ic.shape_id
-                    try a.movReg32Mem(.rcx, .rsi, ic_shape_id_offset);
-                    try a.testReg32Reg32(.rcx, .rcx);
-                    try a.jcc(.e, slow_path);
-                    try a.movReg32Mem(.rdx, .rax, zobj_shape_id_offset);
-                    try a.cmpReg32Reg32(.rdx, .rcx);
-                    try a.jcc(.ne, slow_path);
-
-                    // 10. Check ic.key_ptr == expected_key_ptr
-                    try a.movRegMem(.rcx, .rsi, ic_key_ptr_offset);
-                    try a.movRegImm64(.rdx, expected_key_ptr);
-                    try a.cmpRegReg(.rcx, .rdx);
-                    try a.jcc(.ne, slow_path);
-
-                    // 11. slot_idx < entries.len
-                    try a.movReg32Mem(.rcx, .rsi, ic_slot_idx_offset); // %rcx = slot_idx
-                    try a.movRegMem(.rdx, .rax, zobj_entries_len_offset); // %rdx = len
-                    try a.cmpRegReg(.rcx, .rdx);
-                    try a.jcc(.ae, slow_path);
-
-                    // 12. Compute &prop:
-                    // prop_array = bytes + value_byte_offset_multiplier * capacity
-                    // &prop = prop_array + slot_idx * @sizeOf(Prop)
-                    try a.movRegMem(.rdx, .rax, zobj_entries_bytes_offset); // %rdx = bytes
-                    try a.movRegMem(.rsi, .rax, zobj_entries_cap_offset); // %rsi = capacity
-                    try a.imulRegRegImm32(.rsi, .rsi, @intCast(value_byte_offset_multiplier));
-                    try a.addRegReg(.rdx, .rsi); // %rdx = prop_array
-                    try a.imulRegRegImm32(.rsi, .rcx, prop_size);
-                    try a.addRegReg(.rdx, .rsi); // %rdx = &prop
-
-                    // 13. Check writable (bit 0) and !is_accessor (bit 3): desc & 9 == 1
-                    try a.movReg32Mem(.rcx, .rdx, prop_desc_offset);
-                    try a.andRegImm8(.rcx, 9);
-                    try a.cmpRegImm32(.rcx, 1);
-                    try a.jcc(.ne, slow_path);
-
-                    // 14. Check old prop.value < HEAP_BASE
-                    try a.movRegMem(.rcx, .rdx, prop_val_offset);
-                    try a.cmpRegReg(.rcx, .r14); // %r14 = HEAP_BASE
-                    try a.jcc(.ae, slow_path);
-
-                    // Fast write: prop.value = regs[val_reg]
-                    try a.movMemReg(.rdx, prop_val_offset, .r8);
-                    try a.jmp(done_lbl);
                 } else {
                     // .set_prop_transition inline fast-path for recycled objects with preserved shape
                     // 1. Check regs[obj_reg] is object: (bits >> 47) == HEADER_OBJECT
@@ -3091,95 +3136,174 @@ fn compileOsrImpl(
                     try a.testRegReg(.rcx, .rcx);
                     try a.jcc(.e, slow_path);
 
-                    // 5. ic_ptr = ctx.prop_ic_ptr + ic_idx * @sizeOf(PropIC)
-                    try a.movRegMem(.rsi, .r13, ctx_prop_ic_ptr_offset);
-                    const ic_byte_offset: i32 = @intCast(@as(usize, ic_idx) * @sizeOf(PropIC));
-                    if (ic_byte_offset != 0) {
-                        try a.addRegImm32(.rsi, ic_byte_offset);
-                    }
+                    const maybe_trans_ic: ?PropIC = if (prop_ic) |table| blk: {
+                        const entry = table[ic_idx];
+                        if (entry.block == block and entry.pc == ip and entry.shape_id != 0 and entry.next_shape != 0 and entry.cached_shape_id != 0 and entry.interned_key_ptr != null) {
+                            break :blk entry;
+                        }
+                        break :blk null;
+                    } else null;
 
-                    // 6. Check ic.block == @intFromPtr(block) and ic.pc == ip
-                    try a.movRegMem(.rcx, .rsi, ic_block_offset);
-                    try a.movRegImm64(.rdx, @intFromPtr(block));
-                    try a.cmpRegReg(.rcx, .rdx);
-                    try a.jcc(.ne, slow_path);
+                    if (maybe_trans_ic) |ic_val| {
+                        try a.movReg32Mem(.rdx, .rax, zobj_shape_id_offset);
+                        try a.cmpReg32Imm32(.rdx, @bitCast(ic_val.shape_id));
+                        try a.jcc(.ne, slow_path);
 
-                    try a.movReg32Mem(.rcx, .rsi, ic_pc_offset);
-                    try a.cmpReg32Imm32(.rcx, @intCast(ip));
-                    try a.jcc(.ne, slow_path);
+                        try a.movReg32Mem(.rdx, .rax, zobj_cached_shape_id_offset);
+                        try a.cmpReg32Imm32(.rdx, @bitCast(ic_val.cached_shape_id));
+                        try a.jcc(.ne, slow_path);
 
-                    // 7. Check ic.next_shape != 0, zobj.shape_id == ic.shape_id, zobj.cached_shape_id == ic.cached_shape_id
-                    try a.movReg32Mem(.rcx, .rsi, ic_next_shape_offset);
-                    try a.testReg32Reg32(.rcx, .rcx);
-                    try a.jcc(.e, slow_path);
+                        try a.movzxReg64Mem16(.rdx, .rax, zobj_active_len_offset);
+                        try a.cmpRegImm32(.rdx, @intCast(ic_val.slot_idx));
+                        try a.jcc(.ne, slow_path);
 
-                    try a.movReg32Mem(.rcx, .rsi, ic_shape_id_offset);
-                    try a.movReg32Mem(.rdx, .rax, zobj_shape_id_offset);
-                    try a.cmpReg32Reg32(.rdx, .rcx);
-                    try a.jcc(.ne, slow_path);
+                        try a.movzxReg64Mem16(.rdx, .rax, zobj_cached_len_offset);
+                        try a.cmpRegImm32(.rdx, @intCast(ic_val.slot_idx));
+                        try a.jcc(.be, slow_path);
 
-                    try a.movReg32Mem(.rcx, .rsi, ic_cached_shape_id_offset);
-                    try a.movReg32Mem(.rdx, .rax, zobj_cached_shape_id_offset);
-                    try a.cmpReg32Reg32(.rdx, .rcx);
-                    try a.jcc(.ne, slow_path);
+                        try a.movRegMem(.rdx, .rax, zobj_entries_bytes_offset);
+                        const key_slot_off: i32 = @intCast(@as(usize, ic_val.slot_idx) * @as(usize, @intCast(key_size)) + @as(usize, @intCast(key_ptr_offset)));
+                        if (comptime key_byte_offset_multiplier == 0) {
+                            try a.movRegMem(.rcx, .rdx, key_slot_off);
+                        } else {
+                            try a.movRegMem(.r9, .rax, zobj_entries_cap_offset);
+                            try a.imulRegRegImm32(.r9, .r9, @intCast(key_byte_offset_multiplier));
+                            try a.addRegReg(.r9, .rdx);
+                            try a.movRegMem(.rcx, .r9, key_slot_off);
+                        }
+                        try a.movRegImm64(.r9, @intFromPtr(ic_val.interned_key_ptr.?));
+                        try a.cmpRegReg(.rcx, .r9);
+                        try a.jcc(.ne, slow_path);
 
-                    // 8. Check zobj.active_len == ic.slot_idx and ic.slot_idx < zobj.cached_len
-                    try a.movReg32Mem(.rcx, .rsi, ic_slot_idx_offset); // %rcx = slot_idx
-                    try a.movzxReg64Mem16(.rdx, .rax, zobj_active_len_offset);
-                    try a.cmpRegReg(.rdx, .rcx);
-                    try a.jcc(.ne, slow_path);
-
-                    try a.movzxReg64Mem16(.rdx, .rax, zobj_cached_len_offset);
-                    try a.cmpRegReg(.rcx, .rdx);
-                    try a.jcc(.ae, slow_path);
-
-                    // 9. Check entries.items(.key)[slot].ptr == ic.interned_key_ptr
-                    try a.movRegMem(.rdx, .rax, zobj_entries_bytes_offset);
-                    if (key_byte_offset_multiplier != 0) {
                         try a.movRegMem(.r9, .rax, zobj_entries_cap_offset);
-                        try a.imulRegRegImm32(.r9, .r9, @intCast(key_byte_offset_multiplier));
+                        if (comptime value_byte_offset_multiplier == 16) {
+                            try a.shlRegImm8(.r9, 4);
+                        } else {
+                            try a.imulRegRegImm32(.r9, .r9, @intCast(value_byte_offset_multiplier));
+                        }
                         try a.addRegReg(.rdx, .r9);
+
+                        const slot_byte_off: i32 = @intCast(@as(usize, ic_val.slot_idx) * @as(usize, @intCast(prop_size)));
+                        try a.movRegMem(.r9, .rdx, slot_byte_off + prop_val_offset);
+                        try a.cmpRegReg(.r9, .r14);
+                        try a.jcc(.ae, slow_path);
+
+                        try a.movMemReg(.rdx, slot_byte_off + prop_val_offset, .r8);
+
+                        try a.movRegImm32(.r9, ic_val.next_shape);
+                        try a.movMem32Reg(.rax, zobj_shape_id_offset, .r9);
+
+                        const next_active: u32 = ic_val.slot_idx + 1;
+                        try a.movzxReg64Mem16(.rdx, .rax, zobj_cached_len_offset);
+                        const not_full_lbl = try a.createLabel();
+                        try a.cmpRegImm32(.rdx, @intCast(next_active));
+                        try a.jcc(.ne, not_full_lbl);
+
+                        try a.xorReg32Reg32(.r9, .r9);
+                        try a.movMem16Reg(.rax, zobj_cached_len_offset, .r9);
+                        try a.movMem32Reg(.rax, zobj_cached_shape_id_offset, .r9);
+                        try a.movMem16Reg(.rax, zobj_active_len_offset, .r9);
+                        try a.jmp(done_lbl);
+
+                        a.bindLabel(not_full_lbl);
+                        try a.movRegImm32(.rcx, next_active);
+                        try a.movMem16Reg(.rax, zobj_active_len_offset, .rcx);
+                        try a.jmp(done_lbl);
+                    } else {
+                        // 5. ic_ptr = ctx.prop_ic_ptr + ic_idx * @sizeOf(PropIC)
+                        try a.movRegMem(.rsi, .r13, ctx_prop_ic_ptr_offset);
+                        const ic_byte_offset: i32 = @intCast(@as(usize, ic_idx) * @sizeOf(PropIC));
+                        if (ic_byte_offset != 0) {
+                            try a.addRegImm32(.rsi, ic_byte_offset);
+                        }
+
+                        // 6. Check ic.block == @intFromPtr(block) and ic.pc == ip
+                        try a.movRegMem(.rcx, .rsi, ic_block_offset);
+                        try a.movRegImm64(.rdx, @intFromPtr(block));
+                        try a.cmpRegReg(.rcx, .rdx);
+                        try a.jcc(.ne, slow_path);
+
+                        try a.movReg32Mem(.rcx, .rsi, ic_pc_offset);
+                        try a.cmpReg32Imm32(.rcx, @intCast(ip));
+                        try a.jcc(.ne, slow_path);
+
+                        // 7. Check ic.next_shape != 0, zobj.shape_id == ic.shape_id, zobj.cached_shape_id == ic.cached_shape_id
+                        try a.movReg32Mem(.rcx, .rsi, ic_next_shape_offset);
+                        try a.testReg32Reg32(.rcx, .rcx);
+                        try a.jcc(.e, slow_path);
+
+                        try a.movReg32Mem(.rcx, .rsi, ic_shape_id_offset);
+                        try a.movReg32Mem(.rdx, .rax, zobj_shape_id_offset);
+                        try a.cmpReg32Reg32(.rdx, .rcx);
+                        try a.jcc(.ne, slow_path);
+
+                        try a.movReg32Mem(.rcx, .rsi, ic_cached_shape_id_offset);
+                        try a.movReg32Mem(.rdx, .rax, zobj_cached_shape_id_offset);
+                        try a.cmpReg32Reg32(.rdx, .rcx);
+                        try a.jcc(.ne, slow_path);
+
+                        // 8. Check zobj.active_len == ic.slot_idx and ic.slot_idx < zobj.cached_len
+                        try a.movReg32Mem(.rcx, .rsi, ic_slot_idx_offset); // %rcx = slot_idx
+                        try a.movzxReg64Mem16(.rdx, .rax, zobj_active_len_offset);
+                        try a.cmpRegReg(.rdx, .rcx);
+                        try a.jcc(.ne, slow_path);
+
+                        try a.movzxReg64Mem16(.rdx, .rax, zobj_cached_len_offset);
+                        try a.cmpRegReg(.rcx, .rdx);
+                        try a.jcc(.ae, slow_path);
+
+                        // 9. Check entries.items(.key)[slot].ptr == ic.interned_key_ptr
+                        try a.movRegMem(.rdx, .rax, zobj_entries_bytes_offset);
+                        if (key_byte_offset_multiplier != 0) {
+                            try a.movRegMem(.r9, .rax, zobj_entries_cap_offset);
+                            try a.imulRegRegImm32(.r9, .r9, @intCast(key_byte_offset_multiplier));
+                            try a.addRegReg(.rdx, .r9);
+                        }
+                        try a.imulRegRegImm32(.r9, .rcx, key_size);
+                        try a.addRegReg(.rdx, .r9);
+                        try a.movRegMem(.rdx, .rdx, key_ptr_offset);
+                        try a.movRegMem(.r9, .rsi, ic_interned_key_ptr_offset);
+                        try a.cmpRegReg(.rdx, .r9);
+                        try a.jcc(.ne, slow_path);
+
+                        // 10. Compute &entries.items(.value)[slot], guard old value < HEAP_BASE, and write %r8
+                        try a.movRegMem(.rdx, .rax, zobj_entries_bytes_offset);
+                        try a.movRegMem(.r9, .rax, zobj_entries_cap_offset);
+                        if (comptime value_byte_offset_multiplier == 16) {
+                            try a.shlRegImm8(.r9, 4);
+                        } else {
+                            try a.imulRegRegImm32(.r9, .r9, @intCast(value_byte_offset_multiplier));
+                        }
+                        try a.addRegReg(.rdx, .r9);
+                        try a.imulRegRegImm32(.r9, .rcx, prop_size);
+                        try a.addRegReg(.rdx, .r9);
+
+                        try a.movRegMem(.r9, .rdx, prop_val_offset);
+                        try a.cmpRegReg(.r9, .r14);
+                        try a.jcc(.ae, slow_path);
+
+                        try a.movMemReg(.rdx, prop_val_offset, .r8);
+
+                        // 11. Advance zobj.shape_id = ic.next_shape and update active_len
+                        try a.movReg32Mem(.r9, .rsi, ic_next_shape_offset);
+                        try a.movMem32Reg(.rax, zobj_shape_id_offset, .r9);
+
+                        try a.addRegImm32(.rcx, 1);
+                        try a.movzxReg64Mem16(.rdx, .rax, zobj_cached_len_offset);
+                        const not_full_lbl = try a.createLabel();
+                        try a.cmpRegReg(.rcx, .rdx);
+                        try a.jcc(.ne, not_full_lbl);
+
+                        try a.xorReg32Reg32(.r9, .r9);
+                        try a.movMem16Reg(.rax, zobj_cached_len_offset, .r9);
+                        try a.movMem32Reg(.rax, zobj_cached_shape_id_offset, .r9);
+                        try a.movMem16Reg(.rax, zobj_active_len_offset, .r9);
+                        try a.jmp(done_lbl);
+
+                        a.bindLabel(not_full_lbl);
+                        try a.movMem16Reg(.rax, zobj_active_len_offset, .rcx);
+                        try a.jmp(done_lbl);
                     }
-                    try a.imulRegRegImm32(.r9, .rcx, key_size);
-                    try a.addRegReg(.rdx, .r9);
-                    try a.movRegMem(.rdx, .rdx, key_ptr_offset);
-                    try a.movRegMem(.r9, .rsi, ic_interned_key_ptr_offset);
-                    try a.cmpRegReg(.rdx, .r9);
-                    try a.jcc(.ne, slow_path);
-
-                    // 10. Compute &entries.items(.value)[slot], guard old value < HEAP_BASE, and write %r8
-                    try a.movRegMem(.rdx, .rax, zobj_entries_bytes_offset);
-                    try a.movRegMem(.r9, .rax, zobj_entries_cap_offset);
-                    try a.imulRegRegImm32(.r9, .r9, @intCast(value_byte_offset_multiplier));
-                    try a.addRegReg(.rdx, .r9);
-                    try a.imulRegRegImm32(.r9, .rcx, prop_size);
-                    try a.addRegReg(.rdx, .r9);
-
-                    try a.movRegMem(.r9, .rdx, prop_val_offset);
-                    try a.cmpRegReg(.r9, .r14);
-                    try a.jcc(.ae, slow_path);
-
-                    try a.movMemReg(.rdx, prop_val_offset, .r8);
-
-                    // 11. Advance zobj.shape_id = ic.next_shape and update active_len
-                    try a.movReg32Mem(.r9, .rsi, ic_next_shape_offset);
-                    try a.movMem32Reg(.rax, zobj_shape_id_offset, .r9);
-
-                    try a.addRegImm32(.rcx, 1);
-                    try a.movzxReg64Mem16(.rdx, .rax, zobj_cached_len_offset);
-                    const not_full_lbl = try a.createLabel();
-                    try a.cmpRegReg(.rcx, .rdx);
-                    try a.jcc(.ne, not_full_lbl);
-
-                    try a.xorReg32Reg32(.r9, .r9);
-                    try a.movMem16Reg(.rax, zobj_cached_len_offset, .r9);
-                    try a.movMem32Reg(.rax, zobj_cached_shape_id_offset, .r9);
-                    try a.movMem16Reg(.rax, zobj_active_len_offset, .r9);
-                    try a.jmp(done_lbl);
-
-                    a.bindLabel(not_full_lbl);
-                    try a.movMem16Reg(.rax, zobj_active_len_offset, .rcx);
-                    try a.jmp(done_lbl);
                 }
 
                 a.bindLabel(slow_path);
@@ -3226,62 +3350,99 @@ fn compileOsrImpl(
                 try a.movRegImm64(.rcx, JSValue.PTR_MASK);
                 try a.andRegReg(.rax, .rcx); // %rax = *ObjectBox
 
-                // 4. ic_ptr = ctx.prop_ic_ptr + ic_idx * @sizeOf(PropIC)
-                try a.movRegMem(.rsi, .r13, ctx_prop_ic_ptr_offset);
-                const ic_byte_offset: i32 = @intCast(@as(usize, ic_idx) * @sizeOf(PropIC));
-                if (ic_byte_offset != 0) {
-                    try a.addRegImm32(.rsi, ic_byte_offset);
+                const maybe_get_ic: ?PropIC = if (prop_ic) |table| blk: {
+                    const entry = table[ic_idx];
+                    if (entry.block == block and entry.pc == ip and @intFromPtr(entry.key_ptr) == expected_key_ptr and entry.shape_id != 0) {
+                        break :blk entry;
+                    }
+                    break :blk null;
+                } else null;
+
+                if (maybe_get_ic) |ic_val| {
+                    try a.movReg32Mem(.rdx, .rax, zobj_shape_id_offset);
+                    try a.cmpReg32Imm32(.rdx, @bitCast(ic_val.shape_id));
+                    try a.jcc(.ne, slow_path);
+
+                    try a.movRegMem(.rdx, .rax, zobj_entries_len_offset);
+                    try a.cmpRegImm32(.rdx, @intCast(ic_val.slot_idx));
+                    try a.jcc(.be, slow_path);
+
+                    try a.movRegMem(.rdx, .rax, zobj_entries_bytes_offset);
+                    try a.movRegMem(.rsi, .rax, zobj_entries_cap_offset);
+                    if (comptime value_byte_offset_multiplier == 16) {
+                        try a.shlRegImm8(.rsi, 4);
+                    } else {
+                        try a.imulRegRegImm32(.rsi, .rsi, @intCast(value_byte_offset_multiplier));
+                    }
+                    try a.addRegReg(.rdx, .rsi);
+
+                    const slot_byte_off: i32 = @intCast(@as(usize, ic_val.slot_idx) * @as(usize, @intCast(prop_size)));
+                    try a.movReg32Mem(.rcx, .rdx, slot_byte_off + prop_desc_offset);
+                    try a.andRegImm8(.rcx, 8);
+                    try a.testReg32Reg32(.rcx, .rcx);
+                    try a.jcc(.ne, slow_path);
+
+                    try a.movRegMem(.rax, .rdx, slot_byte_off + prop_val_offset);
+                } else {
+                    // 4. ic_ptr = ctx.prop_ic_ptr + ic_idx * @sizeOf(PropIC)
+                    try a.movRegMem(.rsi, .r13, ctx_prop_ic_ptr_offset);
+                    const ic_byte_offset: i32 = @intCast(@as(usize, ic_idx) * @sizeOf(PropIC));
+                    if (ic_byte_offset != 0) {
+                        try a.addRegImm32(.rsi, ic_byte_offset);
+                    }
+
+                    // 5. Check ic.block == @intFromPtr(block)
+                    try a.movRegMem(.rcx, .rsi, ic_block_offset);
+                    try a.movRegImm64(.rdx, @intFromPtr(block));
+                    try a.cmpRegReg(.rcx, .rdx);
+                    try a.jcc(.ne, slow_path);
+
+                    // 6. Check ic.pc == ip
+                    try a.movReg32Mem(.rcx, .rsi, ic_pc_offset);
+                    try a.cmpReg32Imm32(.rcx, @intCast(ip));
+                    try a.jcc(.ne, slow_path);
+
+                    // 7. Check ic.shape_id != 0 and zobj.shape_id == ic.shape_id
+                    try a.movReg32Mem(.rcx, .rsi, ic_shape_id_offset);
+                    try a.testReg32Reg32(.rcx, .rcx);
+                    try a.jcc(.e, slow_path);
+                    try a.movReg32Mem(.rdx, .rax, zobj_shape_id_offset);
+                    try a.cmpReg32Reg32(.rdx, .rcx);
+                    try a.jcc(.ne, slow_path);
+
+                    // 8. Check ic.key_ptr == expected_key_ptr
+                    try a.movRegMem(.rcx, .rsi, ic_key_ptr_offset);
+                    try a.movRegImm64(.rdx, expected_key_ptr);
+                    try a.cmpRegReg(.rcx, .rdx);
+                    try a.jcc(.ne, slow_path);
+
+                    // 9. Check slot_idx < entries.len
+                    try a.movReg32Mem(.rcx, .rsi, ic_slot_idx_offset); // %rcx = slot_idx
+                    try a.movRegMem(.rdx, .rax, zobj_entries_len_offset); // %rdx = len
+                    try a.cmpRegReg(.rcx, .rdx);
+                    try a.jcc(.ae, slow_path);
+
+                    // 10. Compute &prop:
+                    try a.movRegMem(.rdx, .rax, zobj_entries_bytes_offset); // %rdx = bytes
+                    try a.movRegMem(.rsi, .rax, zobj_entries_cap_offset); // %rsi = capacity
+                    if (comptime value_byte_offset_multiplier == 16) {
+                        try a.shlRegImm8(.rsi, 4);
+                    } else {
+                        try a.imulRegRegImm32(.rsi, .rsi, @intCast(value_byte_offset_multiplier));
+                    }
+                    try a.addRegReg(.rdx, .rsi); // %rdx = prop_array
+                    try a.imulRegRegImm32(.rsi, .rcx, prop_size);
+                    try a.addRegReg(.rdx, .rsi); // %rdx = &prop
+
+                    // 11. Check !is_accessor (bit 3 of descriptor at offset 40 is 0)
+                    try a.movReg32Mem(.rcx, .rdx, prop_desc_offset);
+                    try a.andRegImm8(.rcx, 8);
+                    try a.testReg32Reg32(.rcx, .rcx);
+                    try a.jcc(.ne, slow_path);
+
+                    // 12. Load prop.value
+                    try a.movRegMem(.rax, .rdx, prop_val_offset);
                 }
-
-                // 5. Check ic.block == @intFromPtr(block)
-                try a.movRegMem(.rcx, .rsi, ic_block_offset);
-                try a.movRegImm64(.rdx, @intFromPtr(block));
-                try a.cmpRegReg(.rcx, .rdx);
-                try a.jcc(.ne, slow_path);
-
-                // 6. Check ic.pc == ip
-                try a.movReg32Mem(.rcx, .rsi, ic_pc_offset);
-                try a.cmpReg32Imm32(.rcx, @intCast(ip));
-                try a.jcc(.ne, slow_path);
-
-                // 7. Check ic.shape_id != 0 and zobj.shape_id == ic.shape_id
-                try a.movReg32Mem(.rcx, .rsi, ic_shape_id_offset);
-                try a.testReg32Reg32(.rcx, .rcx);
-                try a.jcc(.e, slow_path);
-                try a.movReg32Mem(.rdx, .rax, zobj_shape_id_offset);
-                try a.cmpReg32Reg32(.rdx, .rcx);
-                try a.jcc(.ne, slow_path);
-
-                // 8. Check ic.key_ptr == expected_key_ptr
-                try a.movRegMem(.rcx, .rsi, ic_key_ptr_offset);
-                try a.movRegImm64(.rdx, expected_key_ptr);
-                try a.cmpRegReg(.rcx, .rdx);
-                try a.jcc(.ne, slow_path);
-
-                // 9. Check slot_idx < entries.len
-                try a.movReg32Mem(.rcx, .rsi, ic_slot_idx_offset); // %rcx = slot_idx
-                try a.movRegMem(.rdx, .rax, zobj_entries_len_offset); // %rdx = len
-                try a.cmpRegReg(.rcx, .rdx);
-                try a.jcc(.ae, slow_path);
-
-                // 10. Compute &prop:
-                // prop_array = bytes + value_byte_offset_multiplier * capacity
-                // &prop = prop_array + slot_idx * @sizeOf(Prop)
-                try a.movRegMem(.rdx, .rax, zobj_entries_bytes_offset); // %rdx = bytes
-                try a.movRegMem(.rsi, .rax, zobj_entries_cap_offset); // %rsi = capacity
-                try a.imulRegRegImm32(.rsi, .rsi, @intCast(value_byte_offset_multiplier));
-                try a.addRegReg(.rdx, .rsi); // %rdx = prop_array
-                try a.imulRegRegImm32(.rsi, .rcx, prop_size);
-                try a.addRegReg(.rdx, .rsi); // %rdx = &prop
-
-                // 11. Check !is_accessor (bit 3 of descriptor at offset 40 is 0)
-                try a.movReg32Mem(.rcx, .rdx, prop_desc_offset);
-                try a.andRegImm8(.rcx, 8);
-                try a.testReg32Reg32(.rcx, .rcx);
-                try a.jcc(.ne, slow_path);
-
-                // 12. Load prop.value and store into cached Xmm or regs[dst_reg]
-                try a.movRegMem(.rax, .rdx, prop_val_offset);
                 if (op.a < 64 and reg_to_xmm[op.a] != null) {
                     const xmm_dst = reg_to_xmm[op.a].?;
                     try a.cmpRegReg(.rax, .r15); // %r15 = BASE_TAG
