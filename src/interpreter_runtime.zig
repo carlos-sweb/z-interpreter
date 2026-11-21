@@ -94,6 +94,7 @@ fn generatorNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     _ = this_value;
     const fs: *FiberState = @ptrCast(@alignCast(ctx));
     const self = fs.interp;
+    if (self.current_fiber == fs) return self.throwError(.type_error, "Generator is already running", .{});
     if (fs.fiber.finished) return iterResult(self, JSValue.UNDEFINED, true);
 
     fs.setResumeValue(if (args.len > 0) args[0].retain() else JSValue.UNDEFINED);
@@ -119,6 +120,7 @@ fn generatorReturn(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     _ = this_value;
     const fs: *FiberState = @ptrCast(@alignCast(ctx));
     const self = fs.interp;
+    if (self.current_fiber == fs) return self.throwError(.type_error, "Generator is already running", .{});
     fs.fiber.finished = true;
     const val = if (args.len > 0) args[0] else JSValue.UNDEFINED;
     return iterResult(self, val, true);
@@ -129,6 +131,7 @@ fn asyncGeneratorReturn(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     _ = this_value;
     const fs: *FiberState = @ptrCast(@alignCast(ctx));
     const self = fs.interp;
+    if (self.current_fiber == fs) return self.throwError(.type_error, "Generator is already running", .{});
     fs.fiber.finished = true;
     const val = if (args.len > 0) args[0] else JSValue.UNDEFINED;
     return self.fulfilledPromise(try iterResult(self, val, true));

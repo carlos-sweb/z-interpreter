@@ -435,6 +435,8 @@ noinline fn deinitFrameRegs(slots: []JSValue) void {
 noinline fn loadConstSlow(allocator: Allocator, frame: *CallFrame, frame_regs: []JSValue, op: codeblock.Op) !void {
     @branchHint(.cold);
     const v = try constantValue(allocator, frame.block, op.b);
+    errdefer v.deinit();
+    if (frame.interp) |itp| try itp.gcTrack(v);
     try setRegValue(frame, frame_regs, op.a, v);
 }
 
@@ -446,7 +448,7 @@ noinline fn newObjectSlow(allocator: Allocator, frame: *CallFrame, frame_regs: [
 
 noinline fn newArraySlow(allocator: Allocator, frame: *CallFrame, frame_regs: []JSValue, op: codeblock.Op) !void {
     @branchHint(.cold);
-    const arr = try JSValue.newArray(allocator);
+    const arr = if (frame.interp) |itp| try itp.gcNewArray() else try JSValue.newArray(allocator);
     const cap = @max(@as(usize, op.b), 4);
     try arr.asArray().value.reserve(cap);
     try setRegValue(frame, frame_regs, op.a, arr);
@@ -1037,7 +1039,7 @@ pub fn jitNewArray(ctx: *codeblock.OsrContext, regs: [*]JSValue, dst: u32, len_h
         frame.has_rc = true;
         return 0;
     }
-    const arr = JSValue.newArray(allocator.*) catch return 1;
+    const arr = (if (frame.interp) |itp| itp.gcNewArray() else JSValue.newArray(allocator.*)) catch return 1;
     arr.asArray().value.reserve(cap) catch {
         arr.deinit();
         return 1;

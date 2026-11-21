@@ -2258,3 +2258,57 @@ test "G6: object literal with __proto__ falls back cleanly to AST" {
     try testing.expect(result.isBool() and result.asBool());
 }
 
+test "generator return() from executing state throws TypeError and marks completed" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+    const result = try interp.run(
+        \\var iter;
+        \\function* g() { iter.return(42); }
+        \\iter = g();
+        \\var threw = false;
+        \\try { iter.next(); } catch (e) { threw = e instanceof TypeError; }
+        \\var r = iter.next();
+        \\threw && r.value === undefined && r.done === true;
+    );
+    defer result.deinit();
+    try testing.expect(result.isBool() and result.asBool());
+}
+
+test "bytecode new_array tracked by GC avoids double-release on teardown with AST environment" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+    const result = try interp.run(
+        \\function runWithCtors(f, ctors) {
+        \\  switch (ctors.length) {
+        \\    case 2:
+        \\      for (var i = 0; i < ctors.length; i++) {
+        \\        var c = ctors[i];
+        \\        var bound = (function(C, n) { return new C(n); }).bind(undefined, c);
+        \\        f(c, bound);
+        \\      }
+        \\      break;
+        \\  }
+        \\}
+        \\function wrap(f) {
+        \\  runWithCtors(f, [Int32Array, Uint8Array]);
+        \\}
+        \\var sum = 0;
+        \\wrap((TA, make) => {
+        \\  const v = make(4);
+        \\  sum += Atomics.compareExchange(v, 0, 0, 1) + Atomics.load(v, 0);
+        \\});
+        \\sum === 2;
+    );
+    defer result.deinit();
+    try testing.expect(result.isBool() and result.asBool());
+}
+
+
