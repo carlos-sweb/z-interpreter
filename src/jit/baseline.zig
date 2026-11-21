@@ -1935,12 +1935,80 @@ fn analyzePromotedProps(
     return res;
 }
 
+fn analyzeHoistedArray(
+    block: *const codeblock.CodeBlock,
+    start_ip: usize,
+    end_ip: usize,
+    promoted_count: usize,
+) ?u8 {
+    if (promoted_count > 0) return null;
+    var has_arr = false;
+    var arr_reg: u8 = 0;
+
+    for (start_ip..end_ip + 1) |ip| {
+        const op = block.ops[ip];
+        switch (op.opcode) {
+            .call, .call_global, .new_array => return null,
+            .get_elem, .get_elem_const => {
+                if (op.a == op.b) return null;
+                if (!has_arr) {
+                    has_arr = true;
+                    arr_reg = op.b;
+                } else if (arr_reg != op.b) {
+                    return null;
+                }
+            },
+            .set_elem, .set_elem_const => {
+                if (!has_arr) {
+                    has_arr = true;
+                    arr_reg = op.a;
+                } else if (arr_reg != op.a) {
+                    return null;
+                }
+            },
+            else => {},
+        }
+    }
+
+    if (!has_arr) return null;
+
+    for (start_ip..end_ip + 1) |ip| {
+        const op = block.ops[ip];
+        switch (op.opcode) {
+            .nop,
+            .jump,
+            .jeq_local_const_false,
+            .jlt_local_const_false,
+            .jle_local_const_false,
+            .jgt_local_const_false,
+            .jge_local_const_false,
+            .set_elem,
+            .set_elem_const,
+            .set_prop,
+            .set_prop_transition,
+            => {},
+            .jump_if_false, .jump_if_true => {
+                if (op.a == arr_reg) return null;
+            },
+            .move, .load_local, .store_local => {
+                if (op.a == arr_reg or op.b == arr_reg) return null;
+            },
+            else => {
+                if (op.a == arr_reg) return null;
+            },
+        }
+    }
+
+    return arr_reg;
+}
+
 const OsrCachedAnalysis = struct {
     cached_regs: [12]u8 = @splat(0),
     cached_count: usize = 0,
     reg_to_xmm: [64]?Xmm = @splat(null),
     read_before_written: [64]bool = @splat(false),
     promoted: PromotedPropsAnalysis = .{},
+    hoisted_arr_reg: ?u8 = null,
 };
 
 fn analyzeOsrLoop(
@@ -2176,6 +2244,7 @@ fn analyzeOsrLoop(
     result.cached_count = max_cached;
     result.read_before_written = read_before_written;
     result.promoted = promoted;
+    result.hoisted_arr_reg = analyzeHoistedArray(block, start_ip, end_ip, promoted.count);
 
     return result;
 }
@@ -2400,7 +2469,9 @@ fn compileOsrImpl(
     const cached_count = analysis.cached_count;
     const reg_to_xmm = analysis.reg_to_xmm;
     const promoted = analysis.promoted;
+    const hoisted_arr_reg = analysis.hoisted_arr_reg;
     const has_flush = (cached_count > 0 or promoted.count > 0);
+    const has_preheader_bailout = (has_flush or hoisted_arr_reg != null);
 
     const loop_len = end_ip - start_ip + 1;
     var op_labels = try allocator.alloc(Label, loop_len);
@@ -2521,6 +2592,25 @@ fn compileOsrImpl(
             try a.jcc(.ae, preheader_bailout);
             try a.movqXmmReg(promoted.xmms[p], .rax);
         }
+    } else if (hoisted_arr_reg) |arr_r| {
+        const ArrayBox = zvalue.Rc(zvalue.ZArray(JSValue));
+        const ZArr = zvalue.ZArray(JSValue);
+        const arr_val_off: i32 = @intCast(@offsetOf(ArrayBox, "value"));
+        const arr_holey_off: i32 = arr_val_off + @as(i32, @intCast(@offsetOf(ZArr, "holey")));
+
+        try a.movRegMem(.rax, .r12, @intCast(@as(usize, arr_r) * 8));
+        try a.movRegReg(.rcx, .rax);
+        try a.shrRegImm8(.rcx, 47);
+        try a.cmpRegImm32(.rcx, HEADER_ARRAY);
+        try a.jcc(.ne, preheader_bailout);
+
+        try a.movRegImm64(.rcx, JSValue.PTR_MASK);
+        try a.andRegReg(.rax, .rcx);
+        try a.movRegReg(.rbx, .rax); // %rbx = *ArrayBox
+
+        try a.movRegMem(.rcx, .rbx, arr_holey_off);
+        try a.testRegReg(.rcx, .rcx);
+        try a.jcc(.ne, preheader_bailout);
     }
 
     // Pre-header for cached registers
@@ -2559,6 +2649,13 @@ fn compileOsrImpl(
     var incoming_uint31 = try allocator.alloc([64]bool, loop_len);
     defer allocator.free(incoming_uint31);
 
+    const ElemStorePair = struct { idx_reg: u8, val_reg: u8 };
+    var last_elem_store: ?ElemStorePair = null;
+    var known_valid_elem_idx: ?u8 = null;
+    var incoming_elem_store = try allocator.alloc(?ElemStorePair, loop_len);
+    defer allocator.free(incoming_elem_store);
+    @memset(incoming_elem_store, null);
+
     for (0..loop_len) |idx| {
         const ip = start_ip + idx;
         const op = block.ops[ip];
@@ -2566,30 +2663,53 @@ fn compileOsrImpl(
         a.bindLabel(op_labels[idx]);
         if (is_jump_target[idx]) {
             known_f64 = @splat(null);
+            known_valid_elem_idx = null;
         }
         if (is_back_target[idx]) {
             reg_is_int32 = @splat(false);
             reg_is_uint31 = @splat(false);
+            last_elem_store = null;
         } else if (incoming_has_edge[idx]) {
             const prev_uncond_jump = idx > 0 and block.ops[start_ip + idx - 1].opcode == .jump;
             if (prev_uncond_jump) {
                 reg_is_int32 = incoming_int32[idx];
                 reg_is_uint31 = incoming_uint31[idx];
+                last_elem_store = incoming_elem_store[idx];
             } else {
                 for (0..64) |r_i| {
                     reg_is_int32[r_i] = reg_is_int32[r_i] and incoming_int32[idx][r_i];
                     reg_is_uint31[r_i] = reg_is_uint31[r_i] and incoming_uint31[idx][r_i];
+                }
+                if (last_elem_store != null and incoming_elem_store[idx] != null and
+                    last_elem_store.?.idx_reg == incoming_elem_store[idx].?.idx_reg and
+                    last_elem_store.?.val_reg == incoming_elem_store[idx].?.val_reg)
+                {
+                    // keep last_elem_store
+                } else {
+                    last_elem_store = null;
                 }
             }
         }
         defer {
             switch (op.opcode) {
                 .nop,
-                .set_elem,
-                .set_elem_const,
                 .set_prop,
                 .set_prop_transition,
                 => {},
+                .set_elem => {
+                    if (hoisted_arr_reg != null and hoisted_arr_reg.? == op.a) {
+                        last_elem_store = .{ .idx_reg = op.b, .val_reg = op.c };
+                    } else {
+                        last_elem_store = null;
+                    }
+                    if (known_valid_elem_idx != null and known_valid_elem_idx.? != op.b) {
+                        known_valid_elem_idx = null;
+                    }
+                },
+                .set_elem_const => {
+                    last_elem_store = null;
+                    known_valid_elem_idx = null;
+                },
                 .jump, .jump_if_false, .jump_if_true => {
                     const t = (@as(usize, op.b) << 8) | op.c;
                     if (t > ip and t <= end_ip) {
@@ -2598,10 +2718,19 @@ fn compileOsrImpl(
                             incoming_has_edge[t_idx] = true;
                             incoming_int32[t_idx] = reg_is_int32;
                             incoming_uint31[t_idx] = reg_is_uint31;
+                            incoming_elem_store[t_idx] = last_elem_store;
                         } else {
                             for (0..64) |r_i| {
                                 incoming_int32[t_idx][r_i] = incoming_int32[t_idx][r_i] and reg_is_int32[r_i];
                                 incoming_uint31[t_idx][r_i] = incoming_uint31[t_idx][r_i] and reg_is_uint31[r_i];
+                            }
+                            if (incoming_elem_store[t_idx] != null and last_elem_store != null and
+                                incoming_elem_store[t_idx].?.idx_reg == last_elem_store.?.idx_reg and
+                                incoming_elem_store[t_idx].?.val_reg == last_elem_store.?.val_reg)
+                            {
+                                // keep incoming_elem_store[t_idx]
+                            } else {
+                                incoming_elem_store[t_idx] = null;
                             }
                         }
                     }
@@ -2619,15 +2748,30 @@ fn compileOsrImpl(
                             incoming_has_edge[t_idx] = true;
                             incoming_int32[t_idx] = reg_is_int32;
                             incoming_uint31[t_idx] = reg_is_uint31;
+                            incoming_elem_store[t_idx] = last_elem_store;
                         } else {
                             for (0..64) |r_i| {
                                 incoming_int32[t_idx][r_i] = incoming_int32[t_idx][r_i] and reg_is_int32[r_i];
                                 incoming_uint31[t_idx][r_i] = incoming_uint31[t_idx][r_i] and reg_is_uint31[r_i];
                             }
+                            if (incoming_elem_store[t_idx] != null and last_elem_store != null and
+                                incoming_elem_store[t_idx].?.idx_reg == last_elem_store.?.idx_reg and
+                                incoming_elem_store[t_idx].?.val_reg == last_elem_store.?.val_reg)
+                            {
+                                // keep incoming_elem_store[t_idx]
+                            } else {
+                                incoming_elem_store[t_idx] = null;
+                            }
                         }
                     }
                 },
                 .load_const => {
+                    if (last_elem_store) |les| {
+                        if (op.a == les.idx_reg or op.a == les.val_reg) last_elem_store = null;
+                    }
+                    if (known_valid_elem_idx) |kvi| {
+                        if (op.a == kvi) known_valid_elem_idx = null;
+                    }
                     if (op.a < 64) {
                         if (block.constants[op.b] == .number) {
                             const n = block.constants[op.b].number;
@@ -2647,6 +2791,12 @@ fn compileOsrImpl(
                     }
                 },
                 .move, .load_local, .store_local => {
+                    if (last_elem_store) |les| {
+                        if (op.a == les.idx_reg or op.a == les.val_reg) last_elem_store = null;
+                    }
+                    if (known_valid_elem_idx) |kvi| {
+                        if (op.a == kvi) known_valid_elem_idx = null;
+                    }
                     if (op.a < 64) {
                         known_f64[op.a] = if (op.b < 64) known_f64[op.b] else null;
                         reg_is_int32[op.a] = if (op.b < 64) reg_is_int32[op.b] else false;
@@ -2654,6 +2804,12 @@ fn compileOsrImpl(
                     }
                 },
                 .not_bits, .or_bits, .xor_bits, .shl, .shr => {
+                    if (last_elem_store) |les| {
+                        if (op.a == les.idx_reg or op.a == les.val_reg) last_elem_store = null;
+                    }
+                    if (known_valid_elem_idx) |kvi| {
+                        if (op.a == kvi) known_valid_elem_idx = null;
+                    }
                     if (op.a < 64) {
                         known_f64[op.a] = null;
                         reg_is_int32[op.a] = true;
@@ -2661,6 +2817,12 @@ fn compileOsrImpl(
                     }
                 },
                 .and_bits => {
+                    if (last_elem_store) |les| {
+                        if (op.a == les.idx_reg or op.a == les.val_reg) last_elem_store = null;
+                    }
+                    if (known_valid_elem_idx) |kvi| {
+                        if (op.a == kvi) known_valid_elem_idx = null;
+                    }
                     if (op.a < 64) {
                         const rhs_nonneg = if (op.c < 64 and known_f64[op.c] != null)
                             (if (asExactInt32(known_f64[op.c].?)) |v| v >= 0 else false)
@@ -2673,6 +2835,12 @@ fn compileOsrImpl(
                     }
                 },
                 .ushr => {
+                    if (last_elem_store) |les| {
+                        if (op.a == les.idx_reg or op.a == les.val_reg) last_elem_store = null;
+                    }
+                    if (known_valid_elem_idx) |kvi| {
+                        if (op.a == kvi) known_valid_elem_idx = null;
+                    }
                     if (op.a < 64) {
                         const sh_gt0 = if (op.c < 64 and known_f64[op.c] != null) blk: {
                             if (asExactInt32(known_f64[op.c].?)) |v| {
@@ -2686,6 +2854,12 @@ fn compileOsrImpl(
                     }
                 },
                 .mod_num => {
+                    if (last_elem_store) |les| {
+                        if (op.a == les.idx_reg or op.a == les.val_reg) last_elem_store = null;
+                    }
+                    if (known_valid_elem_idx) |kvi| {
+                        if (op.a == kvi) known_valid_elem_idx = null;
+                    }
                     if (op.a < 64) {
                         known_f64[op.a] = null;
                         reg_is_int32[op.a] = true;
@@ -2693,6 +2867,14 @@ fn compileOsrImpl(
                     }
                 },
                 else => {
+                    if (last_elem_store) |les| {
+                        if (op.a == les.idx_reg or op.a == les.val_reg) last_elem_store = null;
+                    }
+                    if (op.opcode == .get_elem and hoisted_arr_reg != null and hoisted_arr_reg.? == op.b and op.a != op.c) {
+                        known_valid_elem_idx = op.c;
+                    } else if (known_valid_elem_idx) |kvi| {
+                        if (op.a == kvi) known_valid_elem_idx = null;
+                    }
                     if (op.a < 64) {
                         known_f64[op.a] = null;
                         reg_is_int32[op.a] = false;
@@ -2802,19 +2984,32 @@ fn compileOsrImpl(
                 const arr_items_ptr_off: i32 = arr_list_off + @as(i32, @intCast(@offsetOf(ArrList, "items")));
                 const arr_items_len_off: i32 = arr_items_ptr_off + 8;
 
-                // arr = regs[op.b]; guard (arr >> 47) == 0x1FFF4 (HEADER_ARRAY)
-                try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
-                try a.movRegReg(.rcx, .rax);
-                try a.shrRegImm8(.rcx, 47);
-                try a.cmpRegImm32(.rcx, HEADER_ARRAY);
-                try a.jcc(.ne, bail_lbl);
-                try a.movRegImm64(.rcx, JSValue.PTR_MASK);
-                try a.andRegReg(.rax, .rcx);
+                if (hoisted_arr_reg != null and hoisted_arr_reg.? == op.b) {
+                    if (last_elem_store) |les| {
+                        if (les.idx_reg == op.c) {
+                            try emitLoadNumToXmm(&a, reg_to_xmm, les.val_reg, .xmm0, bail_lbl);
+                            try emitStoreXmmToNum(&a, reg_to_xmm, cached_regs, cached_count, op.a, .xmm0, bail_lbl);
+                            continue;
+                        }
+                    }
+                }
 
-                // guard box.holey == null
-                try a.movRegMem(.rcx, .rax, arr_holey_off);
-                try a.testRegReg(.rcx, .rcx);
-                try a.jcc(.ne, bail_lbl);
+                const box_reg: x64_asm.Reg = if (hoisted_arr_reg != null and hoisted_arr_reg.? == op.b) .rbx else blk: {
+                    // arr = regs[op.b]; guard (arr >> 47) == 0x1FFF4 (HEADER_ARRAY)
+                    try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
+                    try a.movRegReg(.rcx, .rax);
+                    try a.shrRegImm8(.rcx, 47);
+                    try a.cmpRegImm32(.rcx, HEADER_ARRAY);
+                    try a.jcc(.ne, bail_lbl);
+                    try a.movRegImm64(.rcx, JSValue.PTR_MASK);
+                    try a.andRegReg(.rax, .rcx);
+
+                    // guard box.holey == null
+                    try a.movRegMem(.rcx, .rax, arr_holey_off);
+                    try a.testRegReg(.rcx, .rcx);
+                    try a.jcc(.ne, bail_lbl);
+                    break :blk .rax;
+                };
 
                 // key = regs[op.c]; guard key < BASE_TAG and exact int32 >= 0
                 try emitLoadNumToXmm(&a, reg_to_xmm, op.c, .xmm0, bail_lbl);
@@ -2834,12 +3029,12 @@ fn compileOsrImpl(
                 }
 
                 // guard idx < box.items.len
-                try a.movRegMem(.rdx, .rax, arr_items_len_off);
+                try a.movRegMem(.rdx, box_reg, arr_items_len_off);
                 try a.cmpRegReg(.rcx, .rdx);
                 try a.jcc(.ae, bail_lbl);
 
                 // elem = box.items.ptr[idx]; guard elem < BASE_TAG
-                try a.movRegMem(.rax, .rax, arr_items_ptr_off);
+                try a.movRegMem(.rax, box_reg, arr_items_ptr_off);
                 try a.movRegMemIndexed8(.rax, .rax, .rcx, 0);
                 try a.cmpRegReg(.rax, .r15);
                 try a.jcc(.ae, bail_lbl);
@@ -2864,9 +3059,6 @@ fn compileOsrImpl(
                 const arr_items_len_off: i32 = arr_items_ptr_off + 8;
                 const arr_items_cap_off: i32 = arr_list_off + @as(i32, @intCast(@offsetOf(ArrList, "capacity")));
 
-                const append_lbl = try a.createLabel();
-                const done_lbl = try a.createLabel();
-
                 // val = regs[op.c]; guard val < BASE_TAG
                 if (op.c < 64 and reg_to_xmm[op.c] != null) {
                     const xmm_val = reg_to_xmm[op.c].?;
@@ -2880,19 +3072,33 @@ fn compileOsrImpl(
                     try a.jcc(.ae, bail_lbl);
                 }
 
-                // arr = regs[op.a]; guard (arr >> 47) == HEADER_ARRAY
-                try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.a) * 8));
-                try a.movRegReg(.rcx, .rax);
-                try a.shrRegImm8(.rcx, 47);
-                try a.cmpRegImm32(.rcx, HEADER_ARRAY);
-                try a.jcc(.ne, bail_lbl);
-                try a.movRegImm64(.rcx, JSValue.PTR_MASK);
-                try a.andRegReg(.rax, .rcx);
+                if (hoisted_arr_reg != null and hoisted_arr_reg.? == op.a and known_valid_elem_idx != null and known_valid_elem_idx.? == op.b) {
+                    try emitLoadNumToXmm(&a, reg_to_xmm, op.b, .xmm0, bail_lbl);
+                    try a.cvttsd2siReg32Xmm(.rcx, .xmm0);
+                    try a.movRegMem(.r11, .rbx, arr_items_ptr_off);
+                    try a.movMemIndexed8Reg(.r11, .rcx, 0, .r10);
+                    continue;
+                }
 
-                // guard box.holey == null
-                try a.movRegMem(.rcx, .rax, arr_holey_off);
-                try a.testRegReg(.rcx, .rcx);
-                try a.jcc(.ne, bail_lbl);
+                const append_lbl = try a.createLabel();
+                const done_lbl = try a.createLabel();
+
+                const box_reg: x64_asm.Reg = if (hoisted_arr_reg != null and hoisted_arr_reg.? == op.a) .rbx else blk: {
+                    // arr = regs[op.a]; guard (arr >> 47) == HEADER_ARRAY
+                    try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.a) * 8));
+                    try a.movRegReg(.rcx, .rax);
+                    try a.shrRegImm8(.rcx, 47);
+                    try a.cmpRegImm32(.rcx, HEADER_ARRAY);
+                    try a.jcc(.ne, bail_lbl);
+                    try a.movRegImm64(.rcx, JSValue.PTR_MASK);
+                    try a.andRegReg(.rax, .rcx);
+
+                    // guard box.holey == null
+                    try a.movRegMem(.rcx, .rax, arr_holey_off);
+                    try a.testRegReg(.rcx, .rcx);
+                    try a.jcc(.ne, bail_lbl);
+                    break :blk .rax;
+                };
 
                 // key = regs[op.b]; guard key < BASE_TAG and exact int32 >= 0
                 try emitLoadNumToXmm(&a, reg_to_xmm, op.b, .xmm0, bail_lbl);
@@ -2911,13 +3117,13 @@ fn compileOsrImpl(
                 }
 
                 // len = box.items.len
-                try a.movRegMem(.rdx, .rax, arr_items_len_off);
+                try a.movRegMem(.rdx, box_reg, arr_items_len_off);
                 try a.cmpRegReg(.rcx, .rdx);
                 try a.jcc(.e, append_lbl);
                 try a.jcc(.a, bail_lbl);
 
                 // Overwrite: idx < len; guard old elem < HEAP_BASE (%r14)
-                try a.movRegMem(.r11, .rax, arr_items_ptr_off);
+                try a.movRegMem(.r11, box_reg, arr_items_ptr_off);
                 try a.movRegMemIndexed8(.rdx, .r11, .rcx, 0);
                 try a.cmpRegReg(.rdx, .r14);
                 try a.jcc(.ae, bail_lbl);
@@ -2926,13 +3132,13 @@ fn compileOsrImpl(
 
                 // Append: idx == len; guard idx < box.items.capacity
                 a.bindLabel(append_lbl);
-                try a.movRegMem(.r11, .rax, arr_items_cap_off);
+                try a.movRegMem(.r11, box_reg, arr_items_cap_off);
                 try a.cmpRegReg(.rcx, .r11);
                 try a.jcc(.ae, bail_lbl);
-                try a.movRegMem(.r11, .rax, arr_items_ptr_off);
+                try a.movRegMem(.r11, box_reg, arr_items_ptr_off);
                 try a.movMemIndexed8Reg(.r11, .rcx, 0, .r10);
                 try a.addRegImm32(.rdx, 1);
-                try a.movMemReg(.rax, arr_items_len_off, .rdx);
+                try a.movMemReg(box_reg, arr_items_len_off, .rdx);
 
                 a.bindLabel(done_lbl);
             },
@@ -4349,7 +4555,9 @@ fn compileOsrImpl(
             try emitFlushPromoted(&a, promoted);
         }
         try a.jmp(osr_epilogue);
+    }
 
+    if (has_preheader_bailout) {
         a.bindLabel(preheader_bailout);
         try a.movRegImm32(.rax, @intCast(start_ip));
         try a.jmp(osr_epilogue);

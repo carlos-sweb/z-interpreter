@@ -2531,6 +2531,31 @@ test "OSR bitwise and arithmetic constant specialization handles overflow, NaN, 
     try testing.expect(result.isBool() and result.asBool());
 }
 
+test "OSR hoisted invariant array bails out cleanly on out-of-bounds set_elem converting to holey" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+    const result = try interp.run(
+        \\function runHoistedArr() {
+        \\  var arr = [1, 2, 3, 4, 5, 6, 7, 8];
+        \\  var acc = 0;
+        \\  for (var i = 0; i < 200; i++) {
+        \\    var idx = i < 150 ? (i & 7) : 20;
+        \\    arr[idx] = i;
+        \\    acc += arr[idx];
+        \\  }
+        \\  return arr.length === 21 && arr[15] === undefined && arr[20] === 199 && acc === 19900;
+        \\}
+        \\runHoistedArr();
+    );
+    defer result.deinit();
+    try testing.expect(result.isBool() and result.asBool());
+}
+
+
 
 
 
