@@ -226,6 +226,12 @@ pub const Assembler = struct {
         }
     }
 
+    pub fn addRegReg(self: *Assembler, dst: Reg, src: Reg) !void {
+        try self.emitByte(rexW(src.isExt(), dst.isExt()));
+        try self.emitByte(0x01);
+        try self.emitByte(modRM(0b11, src.low3(), dst.low3()));
+    }
+
     pub fn subRegImm32(self: *Assembler, dst: Reg, imm: i32) !void {
         try self.emitByte(rexW(false, dst.isExt()));
         if (imm >= -128 and imm <= 127) {
@@ -281,6 +287,27 @@ pub const Assembler = struct {
         try self.emitByte(0xC1);
         try self.emitByte(modRM(0b11, 5, dst.low3()));
         try self.emitByte(count);
+    }
+
+    pub fn shlRegImm8(self: *Assembler, dst: Reg, count: u8) !void {
+        try self.emitByte(rexW(false, dst.isExt()));
+        try self.emitByte(0xC1);
+        try self.emitByte(modRM(0b11, 4, dst.low3()));
+        try self.emitByte(count);
+    }
+
+    pub fn imulRegRegImm32(self: *Assembler, dst: Reg, src: Reg, imm: i32) !void {
+        if (imm >= -128 and imm <= 127) {
+            try self.emitByte(rexW(dst.isExt(), src.isExt()));
+            try self.emitByte(0x6B);
+            try self.emitByte(modRM(0b11, dst.low3(), src.low3()));
+            try self.emitByte(@bitCast(@as(i8, @intCast(imm))));
+        } else {
+            try self.emitByte(rexW(dst.isExt(), src.isExt()));
+            try self.emitByte(0x69);
+            try self.emitByte(modRM(0b11, dst.low3(), src.low3()));
+            try self.emitI32(imm);
+        }
     }
 
     pub fn testRegReg(self: *Assembler, a: Reg, b: Reg) !void {
@@ -393,6 +420,12 @@ pub const Assembler = struct {
         try self.emitByte(modRM(0b11, b.low3(), a.low3()));
     }
 
+    pub fn cmpReg32Reg32(self: *Assembler, lhs: Reg, rhs: Reg) !void {
+        try self.emitRex32(rhs.isExt(), lhs.isExt());
+        try self.emitByte(0x39);
+        try self.emitByte(modRM(0b11, rhs.low3(), lhs.low3()));
+    }
+
     pub fn setcc(self: *Assembler, cond: Cond, dst: Reg) !void {
         if (dst.isExt() or @intFromEnum(dst) >= 4) {
             try self.emitByte(0x40 | (if (dst.isExt()) @as(u8, 1) else 0));
@@ -407,6 +440,19 @@ pub const Assembler = struct {
         try self.emitByte(0x0F);
         try self.emitByte(0xB6);
         try self.emitByte(modRM(0b11, dst.low3(), src.low3()));
+    }
+
+    pub fn movzxReg64Mem8(self: *Assembler, dst: Reg, base: Reg, disp: i32) !void {
+        try self.emitByte(rexW(dst.isExt(), base.isExt()));
+        try self.emitByte(0x0F);
+        try self.emitByte(0xB6);
+        try self.emitMemOperand(dst.low3(), base, disp);
+    }
+
+    pub fn movReg32Mem(self: *Assembler, dst: Reg, base: Reg, disp: i32) !void {
+        try self.emitRex32(dst.isExt(), base.isExt());
+        try self.emitByte(0x8B);
+        try self.emitMemOperand(dst.low3(), base, disp);
     }
 
     pub fn movRegMemIndexed8(self: *Assembler, dst: Reg, base: Reg, index: Reg, disp: i32) !void {

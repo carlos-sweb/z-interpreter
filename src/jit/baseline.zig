@@ -24,6 +24,59 @@ const HEADER_ARRAY: u32 = blk: {
     const dummy: JSValue = JSValue.fromHeap(.array, @as(*zvalue.Rc(zvalue.ZArray(JSValue)), @ptrFromInt(8)));
     break :blk @intCast(dummy.bits >> 47);
 };
+const HEADER_OBJECT: u32 = blk: {
+    const dummy: JSValue = JSValue.fromHeap(.object, @as(*zvalue.Rc(zvalue.ZObject(JSValue)), @ptrFromInt(8)));
+    break :blk @intCast(dummy.bits >> 47);
+};
+
+const ObjectBox = zvalue.Rc(zvalue.ZObject(JSValue));
+const ZObj = zvalue.ZObject(JSValue);
+const PropMap = @TypeOf(@as(ZObj, undefined).properties);
+const PropDataList = PropMap.DataList;
+const PropEntry = PropMap.Data;
+const Prop = @TypeOf(@as(PropEntry, undefined).value);
+
+const PropIC = struct {
+    block: ?*const codeblock.CodeBlock = null,
+    key_ptr: [*]const u8 = undefined,
+    interned_key_ptr: ?[*]const u8 = null,
+    pc: u32 = 0,
+    shape_id: u32 = 0,
+    next_shape: u32 = 0,
+    cached_shape_id: u32 = 0,
+    slot_idx: u32 = 0,
+};
+
+const value_byte_offset_multiplier: usize = blk: {
+    var dummy: PropDataList = .empty;
+    dummy.capacity = 1;
+    dummy.len = 1;
+    dummy.bytes = @ptrFromInt(0x1000);
+    const slice_ptr = @intFromPtr(dummy.items(.value).ptr);
+    break :blk slice_ptr - 0x1000;
+};
+
+const box_val_offset: i32 = @offsetOf(ObjectBox, "value");
+const zobj_shape_id_offset: i32 = box_val_offset + @offsetOf(ZObj, "shape_id");
+const zobj_is_frozen_offset: i32 = box_val_offset + @offsetOf(ZObj, "is_frozen");
+const zobj_entries_offset: i32 = box_val_offset + @offsetOf(ZObj, "properties") + @offsetOf(PropMap, "entries");
+const zobj_entries_bytes_offset: i32 = zobj_entries_offset + @offsetOf(PropDataList, "bytes");
+const zobj_entries_len_offset: i32 = zobj_entries_offset + @offsetOf(PropDataList, "len");
+const zobj_entries_cap_offset: i32 = zobj_entries_offset + @offsetOf(PropDataList, "capacity");
+
+const prop_val_offset: i32 = @offsetOf(Prop, "value");
+const prop_desc_offset: i32 = @offsetOf(Prop, "descriptor");
+const prop_size: i32 = @intCast(@sizeOf(Prop));
+
+const ic_size: i32 = @intCast(@sizeOf(PropIC));
+const ic_block_offset: i32 = @offsetOf(PropIC, "block");
+const ic_key_ptr_offset: i32 = @offsetOf(PropIC, "key_ptr");
+const ic_pc_offset: i32 = @offsetOf(PropIC, "pc");
+const ic_shape_id_offset: i32 = @offsetOf(PropIC, "shape_id");
+const ic_next_shape_offset: i32 = @offsetOf(PropIC, "next_shape");
+const ic_slot_idx_offset: i32 = @offsetOf(PropIC, "slot_idx");
+
+const ctx_prop_ic_ptr_offset: i32 = @offsetOf(codeblock.OsrContext, "prop_ic_ptr");
 
 fn constantName(block: *const codeblock.CodeBlock, idx: u8) ?[]const u8 {
     if (idx >= block.constants.len) return null;
@@ -1954,6 +2007,8 @@ fn emitReleaseHeapIfRefGt1(
     try a.cmpRegImm32(.rcx, HEADER_ARRAY);
     try a.jcc(.e, is_ref_lbl);
     try a.cmpRegImm32(.rcx, HEADER_FUNCTION);
+    try a.jcc(.e, is_ref_lbl);
+    try a.cmpRegImm32(.rcx, HEADER_OBJECT);
     try a.jcc(.ne, bail_lbl); // Other heap type -> bail out
 
     // Array or Function: ptr = rax & PTR_MASK
@@ -2157,6 +2212,8 @@ fn compileOsrImpl(
                         try a.cmpRegImm32(.rcx, HEADER_ARRAY);
                         try a.jcc(.e, inc_rc_lbl);
                         try a.cmpRegImm32(.rcx, HEADER_FUNCTION);
+                        try a.jcc(.e, inc_rc_lbl);
+                        try a.cmpRegImm32(.rcx, HEADER_OBJECT);
                         try a.jcc(.ne, bail_lbl);
 
                         // Retain: ptr = val & PTR_MASK; ptr._count += 1
@@ -2755,28 +2812,212 @@ fn compileOsrImpl(
             .set_prop, .set_prop_transition => {
                 const ic_idx: u8 = @intCast(((@intFromPtr(block) >> 4) +% ip) & 255);
                 const key = constantName(block, op.b).?;
+                const expected_key_ptr = @intFromPtr(key.ptr);
                 const packed_info: u64 = (@as(u64, @intCast(ip)) << 32) | (@as(u64, ic_idx) << 16) | (@as(u64, op.c) << 8) | @as(u64, op.a);
+
+                const slow_path = try a.createLabel();
+                const done_lbl = try a.createLabel();
+
+                if (op.opcode == .set_prop) {
+                    // 1. Check regs[obj_reg] is object: (bits >> 47) == HEADER_OBJECT
+                    try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.a) * 8));
+                    try a.movRegReg(.rcx, .rax);
+                    try a.shrRegImm8(.rcx, 47);
+                    try a.cmpRegImm32(.rcx, @intCast(HEADER_OBJECT));
+                    try a.jcc(.ne, slow_path);
+
+                    // 2. Check regs[val_reg] < HEAP_BASE (primitive, pure numeric / boolean)
+                    try a.movRegMem(.r8, .r12, @intCast(@as(usize, op.c) * 8));
+                    try a.cmpRegReg(.r8, .r14); // %r14 = HEAP_BASE
+                    try a.jcc(.ae, slow_path);
+
+                    // 3. Extract box ptr: rax = rax & PTR_MASK
+                    try a.movRegImm64(.rcx, JSValue.PTR_MASK);
+                    try a.andRegReg(.rax, .rcx); // %rax = *ObjectBox
+
+                    // 4. Check !zobj.is_frozen
+                    try a.movzxReg64Mem8(.rcx, .rax, zobj_is_frozen_offset);
+                    try a.testRegReg(.rcx, .rcx);
+                    try a.jcc(.ne, slow_path);
+
+                    // 5. ic_ptr = ctx.prop_ic_ptr + ic_idx * @sizeOf(PropIC)
+                    try a.movRegMem(.rsi, .r13, ctx_prop_ic_ptr_offset);
+                    const ic_byte_offset: i32 = @intCast(@as(usize, ic_idx) * @sizeOf(PropIC));
+                    if (ic_byte_offset != 0) {
+                        try a.addRegImm32(.rsi, ic_byte_offset);
+                    }
+
+                    // 6. Check ic.block == @intFromPtr(block)
+                    try a.movRegMem(.rcx, .rsi, ic_block_offset);
+                    try a.movRegImm64(.rdx, @intFromPtr(block));
+                    try a.cmpRegReg(.rcx, .rdx);
+                    try a.jcc(.ne, slow_path);
+
+                    // 7. Check ic.pc == ip
+                    try a.movReg32Mem(.rcx, .rsi, ic_pc_offset);
+                    try a.cmpReg32Imm32(.rcx, @intCast(ip));
+                    try a.jcc(.ne, slow_path);
+
+                    // 8. Check ic.next_shape == 0 (no shape transition)
+                    try a.movReg32Mem(.rcx, .rsi, ic_next_shape_offset);
+                    try a.testReg32Reg32(.rcx, .rcx);
+                    try a.jcc(.ne, slow_path);
+
+                    // 9. Check ic.shape_id != 0 and zobj.shape_id == ic.shape_id
+                    try a.movReg32Mem(.rcx, .rsi, ic_shape_id_offset);
+                    try a.testReg32Reg32(.rcx, .rcx);
+                    try a.jcc(.e, slow_path);
+                    try a.movReg32Mem(.rdx, .rax, zobj_shape_id_offset);
+                    try a.cmpReg32Reg32(.rdx, .rcx);
+                    try a.jcc(.ne, slow_path);
+
+                    // 10. Check ic.key_ptr == expected_key_ptr
+                    try a.movRegMem(.rcx, .rsi, ic_key_ptr_offset);
+                    try a.movRegImm64(.rdx, expected_key_ptr);
+                    try a.cmpRegReg(.rcx, .rdx);
+                    try a.jcc(.ne, slow_path);
+
+                    // 11. slot_idx < entries.len
+                    try a.movReg32Mem(.rcx, .rsi, ic_slot_idx_offset); // %rcx = slot_idx
+                    try a.movRegMem(.rdx, .rax, zobj_entries_len_offset); // %rdx = len
+                    try a.cmpRegReg(.rcx, .rdx);
+                    try a.jcc(.ae, slow_path);
+
+                    // 12. Compute &prop:
+                    // prop_array = bytes + value_byte_offset_multiplier * capacity
+                    // &prop = prop_array + slot_idx * @sizeOf(Prop)
+                    try a.movRegMem(.rdx, .rax, zobj_entries_bytes_offset); // %rdx = bytes
+                    try a.movRegMem(.rsi, .rax, zobj_entries_cap_offset); // %rsi = capacity
+                    try a.imulRegRegImm32(.rsi, .rsi, @intCast(value_byte_offset_multiplier));
+                    try a.addRegReg(.rdx, .rsi); // %rdx = prop_array
+                    try a.imulRegRegImm32(.rsi, .rcx, prop_size);
+                    try a.addRegReg(.rdx, .rsi); // %rdx = &prop
+
+                    // 13. Check writable (bit 0) and !is_accessor (bit 3): desc & 9 == 1
+                    try a.movReg32Mem(.rcx, .rdx, prop_desc_offset);
+                    try a.andRegImm8(.rcx, 9);
+                    try a.cmpRegImm32(.rcx, 1);
+                    try a.jcc(.ne, slow_path);
+
+                    // 14. Check old prop.value < HEAP_BASE
+                    try a.movRegMem(.rcx, .rdx, prop_val_offset);
+                    try a.cmpRegReg(.rcx, .r14); // %r14 = HEAP_BASE
+                    try a.jcc(.ae, slow_path);
+
+                    // Fast write: prop.value = regs[val_reg]
+                    try a.movMemReg(.rdx, prop_val_offset, .r8);
+                    try a.jmp(done_lbl);
+                }
+
+                a.bindLabel(slow_path);
                 try a.movRegReg(.rdi, .r13);
                 try a.movRegReg(.rsi, .r12);
                 try a.movRegImm64(.rdx, packed_info);
-                try a.movRegImm64(.rcx, @intFromPtr(key.ptr));
+                try a.movRegImm64(.rcx, expected_key_ptr);
                 try a.movRegImm64(.rax, @intFromPtr(&vm.jitSetProp));
                 try a.callReg(.rax);
                 try a.testRegReg(.rax, .rax);
                 try a.jcc(.ne, bail_lbl);
+                a.bindLabel(done_lbl);
             },
             .get_prop => {
                 const ic_idx: u8 = @intCast(((@intFromPtr(block) >> 4) +% ip) & 255);
                 const key = constantName(block, op.c).?;
+                const expected_key_ptr = @intFromPtr(key.ptr);
                 const packed_info: u64 = (@as(u64, @intCast(ip)) << 32) | (@as(u64, ic_idx) << 16) | (@as(u64, op.b) << 8) | @as(u64, op.a);
+
+                const slow_path = try a.createLabel();
+                const done_lbl = try a.createLabel();
+
+                // 1. Check regs[obj_reg] is object: (bits >> 47) == HEADER_OBJECT
+                try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
+                try a.movRegReg(.rcx, .rax);
+                try a.shrRegImm8(.rcx, 47);
+                try a.cmpRegImm32(.rcx, @intCast(HEADER_OBJECT));
+                try a.jcc(.ne, slow_path);
+
+                // 2. Check regs[dst_reg] < HEAP_BASE (avoid RC management on overwritten slot in fast path)
+                try a.movRegMem(.rcx, .r12, @intCast(@as(usize, op.a) * 8));
+                try a.cmpRegReg(.rcx, .r14); // %r14 = HEAP_BASE
+                try a.jcc(.ae, slow_path);
+
+                // 3. Extract box ptr: rax = rax & PTR_MASK
+                try a.movRegImm64(.rcx, JSValue.PTR_MASK);
+                try a.andRegReg(.rax, .rcx); // %rax = *ObjectBox
+
+                // 4. ic_ptr = ctx.prop_ic_ptr + ic_idx * @sizeOf(PropIC)
+                try a.movRegMem(.rsi, .r13, ctx_prop_ic_ptr_offset);
+                const ic_byte_offset: i32 = @intCast(@as(usize, ic_idx) * @sizeOf(PropIC));
+                if (ic_byte_offset != 0) {
+                    try a.addRegImm32(.rsi, ic_byte_offset);
+                }
+
+                // 5. Check ic.block == @intFromPtr(block)
+                try a.movRegMem(.rcx, .rsi, ic_block_offset);
+                try a.movRegImm64(.rdx, @intFromPtr(block));
+                try a.cmpRegReg(.rcx, .rdx);
+                try a.jcc(.ne, slow_path);
+
+                // 6. Check ic.pc == ip
+                try a.movReg32Mem(.rcx, .rsi, ic_pc_offset);
+                try a.cmpReg32Imm32(.rcx, @intCast(ip));
+                try a.jcc(.ne, slow_path);
+
+                // 7. Check ic.shape_id != 0 and zobj.shape_id == ic.shape_id
+                try a.movReg32Mem(.rcx, .rsi, ic_shape_id_offset);
+                try a.testReg32Reg32(.rcx, .rcx);
+                try a.jcc(.e, slow_path);
+                try a.movReg32Mem(.rdx, .rax, zobj_shape_id_offset);
+                try a.cmpReg32Reg32(.rdx, .rcx);
+                try a.jcc(.ne, slow_path);
+
+                // 8. Check ic.key_ptr == expected_key_ptr
+                try a.movRegMem(.rcx, .rsi, ic_key_ptr_offset);
+                try a.movRegImm64(.rdx, expected_key_ptr);
+                try a.cmpRegReg(.rcx, .rdx);
+                try a.jcc(.ne, slow_path);
+
+                // 9. Check slot_idx < entries.len
+                try a.movReg32Mem(.rcx, .rsi, ic_slot_idx_offset); // %rcx = slot_idx
+                try a.movRegMem(.rdx, .rax, zobj_entries_len_offset); // %rdx = len
+                try a.cmpRegReg(.rcx, .rdx);
+                try a.jcc(.ae, slow_path);
+
+                // 10. Compute &prop:
+                // prop_array = bytes + value_byte_offset_multiplier * capacity
+                // &prop = prop_array + slot_idx * @sizeOf(Prop)
+                try a.movRegMem(.rdx, .rax, zobj_entries_bytes_offset); // %rdx = bytes
+                try a.movRegMem(.rsi, .rax, zobj_entries_cap_offset); // %rsi = capacity
+                try a.imulRegRegImm32(.rsi, .rsi, @intCast(value_byte_offset_multiplier));
+                try a.addRegReg(.rdx, .rsi); // %rdx = prop_array
+                try a.imulRegRegImm32(.rsi, .rcx, prop_size);
+                try a.addRegReg(.rdx, .rsi); // %rdx = &prop
+
+                // 11. Check !is_accessor (bit 3 of descriptor at offset 40 is 0)
+                try a.movReg32Mem(.rcx, .rdx, prop_desc_offset);
+                try a.andRegImm8(.rcx, 8);
+                try a.testReg32Reg32(.rcx, .rcx);
+                try a.jcc(.ne, slow_path);
+
+                // 12. Check prop.value < HEAP_BASE
+                try a.movRegMem(.rax, .rdx, prop_val_offset);
+                try a.cmpRegReg(.rax, .r14); // %r14 = HEAP_BASE
+                try a.jcc(.ae, slow_path);
+
+                // Store prop.value into regs[dst_reg]
+                try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+                try a.jmp(done_lbl);
+
+                a.bindLabel(slow_path);
                 try a.movRegReg(.rdi, .r13);
                 try a.movRegReg(.rsi, .r12);
                 try a.movRegImm64(.rdx, packed_info);
-                try a.movRegImm64(.rcx, @intFromPtr(key.ptr));
+                try a.movRegImm64(.rcx, expected_key_ptr);
                 try a.movRegImm64(.rax, @intFromPtr(&vm.jitGetProp));
                 try a.callReg(.rax);
                 try a.testRegReg(.rax, .rax);
                 try a.jcc(.ne, bail_lbl);
+                a.bindLabel(done_lbl);
             },
             .call, .call_global => {
                 const cs = &block.call_target_cache[op.c];
@@ -3674,4 +3915,100 @@ test "baseline JIT Phase 4D eliminates bailouts in bitwise sieve with array, mod
     defer res.deinit();
     try std.testing.expect(res.isNumber());
     try std.testing.expectEqual(@as(f64, 418157123), res.asNumber());
+}
+
+test "baseline JIT Phase 5A hot loop reading and writing object properties (IC hit, 0 leaks)" {
+    if (!comptime x64_asm.is_supported_host) return;
+    const Interpreter = @import("../interpreter.zig").Interpreter;
+
+    var allocating = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(std.testing.allocator, &allocating.writer);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+
+    const res = try interp.run(
+        \\function runHotProps(n) {
+        \\    const o = { x: 1, y: 2, z: 3 };
+        \\    let acc = 0;
+        \\    for (let i = 0; i < n; i++) {
+        \\        o.x = o.x + 1;
+        \\        o.y = o.y + 2;
+        \\        o.z = o.z + 3;
+        \\        acc = o.x + o.y + o.z;
+        \\    }
+        \\    return acc;
+        \\}
+        \\runHotProps(2000);
+    );
+    defer res.deinit();
+    try std.testing.expect(res.isNumber());
+    try std.testing.expectEqual(@as(f64, 12006), res.asNumber());
+}
+
+test "baseline JIT Phase 5A polymorphic loop alternating 2 shapes fallback" {
+    if (!comptime x64_asm.is_supported_host) return;
+    const Interpreter = @import("../interpreter.zig").Interpreter;
+
+    var allocating = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(std.testing.allocator, &allocating.writer);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+
+    const res = try interp.run(
+        \\function runPoly(n) {
+        \\    const o1 = { x: 1, y: 2 };
+        \\    const o2 = { a: 10, x: 20 };
+        \\    let total = 0;
+        \\    for (let i = 0; i < n; i++) {
+        \\        const target = (i % 2 === 0) ? o1 : o2;
+        \\        target.x = target.x + 1;
+        \\        total = total + target.x;
+        \\    }
+        \\    return total;
+        \\}
+        \\runPoly(2000);
+    );
+    defer res.deinit();
+    try std.testing.expect(res.isNumber());
+    try std.testing.expectEqual(@as(f64, 1022000), res.asNumber());
+}
+
+test "baseline JIT Phase 5A frozen object and accessor fall back to slow path" {
+    if (!comptime x64_asm.is_supported_host) return;
+    const Interpreter = @import("../interpreter.zig").Interpreter;
+
+    var allocating = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(std.testing.allocator, &allocating.writer);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+
+    const res = try interp.run(
+        \\function runFrozenAndAccessor() {
+        \\    let getter_called = 0;
+        \\    let setter_called = 0;
+        \\    const o_acc = {
+        \\        get x() { getter_called = getter_called + 1; return 42; },
+        \\        set x(v) { setter_called = setter_called + 1; }
+        \\    };
+        \\    let acc = 0;
+        \\    for (let i = 0; i < 100; i++) {
+        \\        o_acc.x = o_acc.x + 1;
+        \\        acc = acc + o_acc.x;
+        \\    }
+        \\
+        \\    const o_frozen = Object.freeze({ x: 100 });
+        \\    let frozen_sum = 0;
+        \\    for (let i = 0; i < 100; i++) {
+        \\        frozen_sum = frozen_sum + o_frozen.x;
+        \\    }
+        \\    return getter_called + setter_called + acc + frozen_sum;
+        \\}
+        \\runFrozenAndAccessor();
+    );
+    defer res.deinit();
+    try std.testing.expect(res.isNumber());
+    try std.testing.expectEqual(@as(f64, 14500), res.asNumber());
 }
