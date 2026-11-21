@@ -152,6 +152,7 @@ fn functionConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
     const node = parser.parseExpression() catch |err| {
         return self.throwError(.syntax_error, "Function constructor: {s}", .{@errorName(err)});
     };
+    try interpreter_mod.normalizePrivateInNode(ast_allocator, src.items, node);
     const fnode_ptr = switch (node.data) {
         .paren => |inner| switch (inner.data) {
             .function_like => |ptr| ptr,

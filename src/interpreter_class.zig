@@ -415,7 +415,203 @@ pub fn makeObjectMethodClosure(self: *Interpreter, env: *Environment, fnode: *zf
 
 /// Encodes a private member's storage key for a given class identity.
 pub fn encodePrivateKey(self: *Interpreter, class_id: *anyopaque, name: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(self.gc_allocator, "\x00P{x}|{s}", .{ @intFromPtr(class_id), name });
+    const bare = if (name.len > 0 and name[0] == '#') name[1..] else name;
+    return std.fmt.allocPrint(self.gc_allocator, "\x00P{x}|#{s}", .{ @intFromPtr(class_id), bare });
+}
+
+pub fn normalizePrivateInProgram(allocator: Allocator, source: []const u8, stmts: []const *zstatements.Statement) anyerror!void {
+    for (stmts) |stmt| try normalizePrivateInStatement(allocator, source, stmt);
+}
+
+fn normalizePrivateInPattern(allocator: Allocator, source: []const u8, pattern: *const zstatements.BindingPattern) anyerror!void {
+    switch (pattern.*) {
+        .identifier => {},
+        .array => |arr| {
+            for (arr.elements) |maybe_el| if (maybe_el) |el| {
+                try normalizePrivateInPattern(allocator, source, el.pattern);
+                if (el.default) |d| try normalizePrivateInNode(allocator, source, d);
+            };
+            if (arr.rest) |r| try normalizePrivateInPattern(allocator, source, r);
+        },
+        .object => |obj| {
+            for (obj.properties) |p| {
+                try normalizePrivateInPattern(allocator, source, p.value);
+                if (p.default) |d| try normalizePrivateInNode(allocator, source, d);
+            }
+        },
+    }
+}
+
+fn normalizePrivateInFunction(allocator: Allocator, source: []const u8, fnode: *zfunctions.FunctionNode) anyerror!void {
+    for (fnode.params.items) |param| {
+        try normalizePrivateInPattern(allocator, source, param.pattern);
+        if (param.default) |d| try normalizePrivateInNode(allocator, source, d);
+    }
+    if (fnode.params.rest) |r| try normalizePrivateInPattern(allocator, source, r);
+    switch (fnode.body) {
+        .block => |b| try normalizePrivateInStatement(allocator, source, b),
+        .expression => |e| try normalizePrivateInNode(allocator, source, e),
+    }
+}
+
+fn normalizePrivateInClass(allocator: Allocator, source: []const u8, cnode: *zfunctions.ClassNode) anyerror!void {
+    if (cnode.superclass) |sc| try normalizePrivateInNode(allocator, source, sc);
+    for (cnode.elements) |el| {
+        switch (el.key) {
+            .private => |n| {
+                if ((n.len == 0 or n[0] != '#') and el.function != null) {
+                    const fn_node = el.function.?;
+                    if (fn_node.kind == .method) {
+                        fn_node.kind = .{ .method = .{ .name = try std.fmt.allocPrint(allocator, "#{s}", .{n}) } };
+                    }
+                }
+            },
+            .computed => |expr| try normalizePrivateInNode(allocator, source, expr),
+            .ident => {},
+        }
+        if (el.function) |fn_node| try normalizePrivateInFunction(allocator, source, fn_node);
+        if (el.value) |vexpr| try normalizePrivateInNode(allocator, source, vexpr);
+    }
+}
+
+fn normalizePrivateInStatement(allocator: Allocator, source: []const u8, stmt: *const zstatements.Statement) anyerror!void {
+    switch (stmt.data) {
+        .empty, .continue_stmt, .break_stmt, .debugger, .import_decl => {},
+        .expr_stmt, .throw_stmt => |e| try normalizePrivateInNode(allocator, source, e),
+        .return_stmt => |maybe_e| if (maybe_e) |e| try normalizePrivateInNode(allocator, source, e),
+        .block => |stmts| try normalizePrivateInProgram(allocator, source, stmts),
+        .variable => |v| for (v.declarators) |decl| {
+            try normalizePrivateInPattern(allocator, source, decl.pattern);
+            if (decl.init) |init| try normalizePrivateInNode(allocator, source, init);
+        },
+        .if_stmt => |s| {
+            try normalizePrivateInNode(allocator, source, s.test_expr);
+            try normalizePrivateInStatement(allocator, source, s.consequent);
+            if (s.alternate) |alt| try normalizePrivateInStatement(allocator, source, alt);
+        },
+        .while_stmt => |s| {
+            try normalizePrivateInNode(allocator, source, s.test_expr);
+            try normalizePrivateInStatement(allocator, source, s.body);
+        },
+        .do_while => |s| {
+            try normalizePrivateInStatement(allocator, source, s.body);
+            try normalizePrivateInNode(allocator, source, s.test_expr);
+        },
+        .for_stmt => |s| {
+            switch (s.head) {
+                .c_style => |h| {
+                    if (h.init) |ic| switch (ic) {
+                        .decl => |d| for (d.declarators) |decl| {
+                            try normalizePrivateInPattern(allocator, source, decl.pattern);
+                            if (decl.init) |init| try normalizePrivateInNode(allocator, source, init);
+                        },
+                        .expr => |e| try normalizePrivateInNode(allocator, source, e),
+                    };
+                    if (h.test_expr) |te| try normalizePrivateInNode(allocator, source, te);
+                    if (h.update) |up| try normalizePrivateInNode(allocator, source, up);
+                },
+                .for_in => |h| {
+                    switch (h.binding) {
+                        .declared => |d| try normalizePrivateInPattern(allocator, source, d.pattern),
+                        .existing => {},
+                        .existing_pattern => |e| try normalizePrivateInNode(allocator, source, e),
+                    }
+                    try normalizePrivateInNode(allocator, source, h.object);
+                },
+                .for_of => |h| {
+                    switch (h.binding) {
+                        .declared => |d| try normalizePrivateInPattern(allocator, source, d.pattern),
+                        .existing => {},
+                        .existing_pattern => |e| try normalizePrivateInNode(allocator, source, e),
+                    }
+                    try normalizePrivateInNode(allocator, source, h.iterable);
+                },
+            }
+            try normalizePrivateInStatement(allocator, source, s.body);
+        },
+        .labelled => |s| try normalizePrivateInStatement(allocator, source, s.body),
+        .try_stmt => |s| {
+            try normalizePrivateInStatement(allocator, source, s.block);
+            if (s.handler) |h| {
+                if (h.param) |p| try normalizePrivateInPattern(allocator, source, p);
+                try normalizePrivateInStatement(allocator, source, h.body);
+            }
+            if (s.finalizer) |fin| try normalizePrivateInStatement(allocator, source, fin);
+        },
+        .switch_stmt => |s| {
+            try normalizePrivateInNode(allocator, source, s.discriminant);
+            for (s.cases) |c| {
+                if (c.test_expr) |te| try normalizePrivateInNode(allocator, source, te);
+                try normalizePrivateInProgram(allocator, source, c.consequent);
+            }
+        },
+        .with_stmt => |s| {
+            try normalizePrivateInNode(allocator, source, s.object);
+            try normalizePrivateInStatement(allocator, source, s.body);
+        },
+        .function_declaration => |ptr| try normalizePrivateInFunction(allocator, source, zfunctions.asFunctionNode(ptr)),
+        .class_declaration => |ptr| try normalizePrivateInClass(allocator, source, zfunctions.asClassNode(ptr)),
+        .export_decl => |e| switch (e) {
+            .declaration => |inner| try normalizePrivateInStatement(allocator, source, inner),
+            .default => |expr| try normalizePrivateInNode(allocator, source, expr),
+            .named, .all => {},
+        },
+    }
+}
+
+pub fn normalizePrivateInNode(allocator: Allocator, source: []const u8, node: *zparser.Node) anyerror!void {
+    switch (node.data) {
+        .identifier => |*name| {
+            if (node.start < source.len and source[node.start] == '#' and (name.len == 0 or name.*[0] != '#')) {
+                name.* = try std.fmt.allocPrint(allocator, "#{s}", .{name.*});
+            }
+        },
+        .template_literal => |t| for (t.expressions) |e| try normalizePrivateInNode(allocator, source, e),
+        .array_literal => |items| for (items) |maybe_e| if (maybe_e) |e| try normalizePrivateInNode(allocator, source, e),
+        .object_literal => |items| for (items) |item| switch (item) {
+            .spread => |e| try normalizePrivateInNode(allocator, source, e),
+            .property => |p| {
+                if (p.computed) try normalizePrivateInNode(allocator, source, p.key);
+                try normalizePrivateInNode(allocator, source, p.value);
+            },
+        },
+        .spread, .paren, .await_expr => |op| try normalizePrivateInNode(allocator, source, op),
+        .unary => |u| try normalizePrivateInNode(allocator, source, u.operand),
+        .binary => |b| {
+            try normalizePrivateInNode(allocator, source, b.left);
+            try normalizePrivateInNode(allocator, source, b.right);
+        },
+        .logical => |l| {
+            try normalizePrivateInNode(allocator, source, l.left);
+            try normalizePrivateInNode(allocator, source, l.right);
+        },
+        .assignment => |a| {
+            try normalizePrivateInNode(allocator, source, a.target);
+            try normalizePrivateInNode(allocator, source, a.value);
+        },
+        .conditional => |c| {
+            try normalizePrivateInNode(allocator, source, c.test_expr);
+            try normalizePrivateInNode(allocator, source, c.consequent);
+            try normalizePrivateInNode(allocator, source, c.alternate);
+        },
+        .sequence => |items| for (items) |e| try normalizePrivateInNode(allocator, source, e),
+        .call => |c| {
+            try normalizePrivateInNode(allocator, source, c.callee);
+            for (c.args) |a| try normalizePrivateInNode(allocator, source, a);
+        },
+        .new_expr => |n| {
+            try normalizePrivateInNode(allocator, source, n.callee);
+            if (n.args) |args| for (args) |a| try normalizePrivateInNode(allocator, source, a);
+        },
+        .member => |m| {
+            try normalizePrivateInNode(allocator, source, m.object);
+            try normalizePrivateInNode(allocator, source, m.property);
+        },
+        .function_like => |ptr| try normalizePrivateInFunction(allocator, source, zfunctions.asFunctionNode(ptr)),
+        .class_like => |ptr| try normalizePrivateInClass(allocator, source, zfunctions.asClassNode(ptr)),
+        .yield_expr => |y| if (y.argument) |a| try normalizePrivateInNode(allocator, source, a),
+        .number_literal, .bigint_literal, .string_literal, .boolean_literal, .null_literal, .regex_literal, .this_expr, .super_expr => {},
+    }
 }
 
 /// The object that actually stores a receiver's private members:

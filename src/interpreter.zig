@@ -1170,6 +1170,8 @@ pub const Interpreter = struct {
 pub const invokeFunctionNode = interpreter_class.invokeFunctionNode;
 pub const prepareCallEnv = interpreter_class.prepareCallEnv;
 pub const evalPreparedFunctionBody = interpreter_class.evalPreparedFunctionBody;
+pub const normalizePrivateInProgram = interpreter_class.normalizePrivateInProgram;
+pub const normalizePrivateInNode = interpreter_class.normalizePrivateInNode;
 
 // ---- GC tests (roadmap item 15, phase 5) -----------------------------
 // White-box: collectGarbage()/gc_registry are private, so these live here
@@ -2584,6 +2586,32 @@ test "generator and async generator evaluate parameters synchronously and enforc
     defer result.deinit();
     try testing.expect(result.isBool() and result.asBool());
 }
+
+test "class private fields, getters, setters, methods, and in-operator handle Unicode escapes" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    const result = try interp.run(
+        \\class C {
+        \\  #\u{6F}_ = 10;
+        \\  get #\u{6F}() { return this.#\u{6F}_; }
+        \\  set #\u{6F}(v) { this.#\u{6F}_ = v * 2; }
+        \\  #m\u{6F}() { return this.#\u{6F} + 5; }
+        \\  \u{6F}(v) {
+        \\    this.#\u{6F} = v;
+        \\    return this.#m\u{6F}();
+        \\  }
+        \\  hasPriv(obj) { return #\u{6F}_ in obj && #\u{6F} in obj && #m\u{6F} in obj; }
+        \\}
+        \\var c = new C();
+        \\c.o(7) === 19 && c.hasPriv(c) && !c.hasPriv({});
+    );
+    defer result.deinit();
+    try testing.expect(result.isBool() and result.asBool());
+}
+
 
 
 

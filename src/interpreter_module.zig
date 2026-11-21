@@ -87,6 +87,7 @@ pub fn loadModule(self: *Interpreter, specifier: []const u8, referrer: ?[]const 
     const parser = try zfunctions.Parser.init(ast_arena, loaded.source);
     parser.setStackLimit(self.stack_limit);
     const program = try parser.parseProgram();
+    try interpreter_mod.normalizePrivateInProgram(ast_arena, loaded.source, program);
     const module_env = try self.gcChildEnv(self.global_env);
     // The entry file (no referrer -- never a dependency reached via
     // `import`) still gets classic-script globalThis semantics: z-run

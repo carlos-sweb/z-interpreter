@@ -231,6 +231,7 @@ pub fn run(self: *Interpreter, source: []const u8) anyerror!JSValue {
     const parser = try zfunctions.Parser.init(ast_arena, source);
     parser.setStackLimit(self.stack_limit);
     const program = try parser.parseProgram();
+    try interpreter_mod.normalizePrivateInProgram(ast_arena, source, program);
     if (codeblock.hasUseStrict(program)) self.strict_mode = true;
     if (self.compile_options.use_bytecode_vm) {
         var compiled = bytecode_emitter.BytecodeEmitter.emitScript(self.gc_allocator, program) catch |err| switch (err) {
@@ -304,6 +305,7 @@ pub fn evalSource(self: *Interpreter, scope: *Environment, src: []const u8) anye
         error.MaxNestingDepthExceeded => return self.throwError(.range_error, "Maximum call stack size exceeded", .{}),
         else => return self.throwError(.syntax_error, "Invalid or unexpected token in eval", .{}),
     };
+    try interpreter_mod.normalizePrivateInProgram(ast_arena, owned_src, program);
     const eval_scope = try self.gcChildEnv(scope);
     const c = try self.evalBody(eval_scope, program);
     return c.value;
