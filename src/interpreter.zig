@@ -2367,6 +2367,34 @@ test "OSR caches numeric registers in Xmm across get_prop and set_prop without l
     try testing.expect(result.isBool() and result.asBool());
 }
 
+test "OSR inline set_prop_transition handles recycled objects with primitive and object values" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+    const result = try interp.run(
+        \\function runRecycled() {
+        \\  var acc = 0;
+        \\  var sub = { k: 10 };
+        \\  for (var i = 0; i < 300; i++) {
+        \\    var p = { x: i, y: i + 1, z: i + 2 };
+        \\    acc += p.x + p.y + p.z;
+        \\  }
+        \\  for (var j = 0; j < 200; j++) {
+        \\    var q = { a: j, b: sub, c: j + 1 };
+        \\    acc += q.a + q.b.k + q.c;
+        \\  }
+        \\  return acc === 135450 + 42000;
+        \\}
+        \\runRecycled();
+    );
+    defer result.deinit();
+    try testing.expect(result.isBool() and result.asBool());
+}
+
+
 
 
 

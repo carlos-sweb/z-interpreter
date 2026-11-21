@@ -449,10 +449,30 @@ pub const Assembler = struct {
         try self.emitMemOperand(dst.low3(), base, disp);
     }
 
+    pub fn movzxReg64Mem16(self: *Assembler, dst: Reg, base: Reg, disp: i32) !void {
+        try self.emitByte(rexW(dst.isExt(), base.isExt()));
+        try self.emitByte(0x0F);
+        try self.emitByte(0xB7);
+        try self.emitMemOperand(dst.low3(), base, disp);
+    }
+
     pub fn movReg32Mem(self: *Assembler, dst: Reg, base: Reg, disp: i32) !void {
         try self.emitRex32(dst.isExt(), base.isExt());
         try self.emitByte(0x8B);
         try self.emitMemOperand(dst.low3(), base, disp);
+    }
+
+    pub fn movMem32Reg(self: *Assembler, base: Reg, disp: i32, src: Reg) !void {
+        try self.emitRex32(src.isExt(), base.isExt());
+        try self.emitByte(0x89);
+        try self.emitMemOperand(src.low3(), base, disp);
+    }
+
+    pub fn movMem16Reg(self: *Assembler, base: Reg, disp: i32, src: Reg) !void {
+        try self.emitByte(0x66);
+        try self.emitRex32(src.isExt(), base.isExt());
+        try self.emitByte(0x89);
+        try self.emitMemOperand(src.low3(), base, disp);
     }
 
     pub fn movRegMemIndexed8(self: *Assembler, dst: Reg, base: Reg, index: Reg, disp: i32) !void {
