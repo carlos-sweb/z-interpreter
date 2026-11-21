@@ -2465,6 +2465,47 @@ test "OSR specialized PropIC falls back cleanly when object shape changes mid-lo
     try testing.expect(result.isBool() and result.asBool());
 }
 
+test "OSR scalar property promotion writes back on normal exit, mid-loop bailout, and frozen objects" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+    const result = try interp.run(
+        \\function runPromoted(o) {
+        \\  for (var i = 0; i < 200; i++) {
+        \\    o.x = o.x + 1;
+        \\    o.y = o.y + 2;
+        \\    o.z = o.z + 3;
+        \\  }
+        \\  return o.x + o.y + o.z;
+        \\}
+        \\function runBailout() {
+        \\  var o = { x: 0, y: 0 };
+        \\  for (var i = 0; i < 200; i++) {
+        \\    o.x = o.x + 1;
+        \\    var v = i < 150 ? i : "done";
+        \\    o.y = v;
+        \\  }
+        \\  return o.x === 200 && o.y === "done";
+        \\}
+        \\var a = { x: 0, y: 0, z: 0 };
+        \\var r1 = runPromoted(a);
+        \\var frozen = Object.freeze({ x: 10, y: 20, z: 30 });
+        \\var caught = false;
+        \\try {
+        \\  runPromoted(frozen);
+        \\} catch (e) {
+        \\  caught = frozen.x === 10 && frozen.y === 20 && frozen.z === 30;
+        \\}
+        \\r1 === 1200 && a.x === 200 && a.y === 400 && a.z === 600 && caught && runBailout();
+    );
+    defer result.deinit();
+    try testing.expect(result.isBool() and result.asBool());
+}
+
+
 
 
 

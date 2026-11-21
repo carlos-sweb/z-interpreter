@@ -1822,14 +1822,133 @@ pub fn compileOsr(allocator: Allocator, block: *codeblock.CodeBlock, start_ip: u
     return true;
 }
 
+const PromotedPropsAnalysis = struct {
+    count: usize = 0,
+    obj_reg: u8 = 0,
+    shape_id: u32 = 0,
+    max_slot: u32 = 0,
+    slots: [6]u32 = @splat(0),
+    xmms: [6]Xmm = @splat(.xmm0),
+    written: [6]bool = @splat(false),
+
+    fn findSlot(self: *const PromotedPropsAnalysis, slot_idx: u32) ?usize {
+        for (0..self.count) |i| {
+            if (self.slots[i] == slot_idx) return i;
+        }
+        return null;
+    }
+};
+
+fn analyzePromotedProps(
+    block: *const codeblock.CodeBlock,
+    start_ip: usize,
+    end_ip: usize,
+    prop_ic: ?*const [256]PropIC,
+) PromotedPropsAnalysis {
+    const table = prop_ic orelse return .{};
+    var res = PromotedPropsAnalysis{};
+    var has_obj = false;
+    var keys: [6][]const u8 = undefined;
+
+    for (start_ip..end_ip + 1) |ip| {
+        const op = block.ops[ip];
+        switch (op.opcode) {
+            .call,
+            .call_global,
+            .new_object,
+            .new_array,
+            .set_prop_transition,
+            .get_elem,
+            .set_elem,
+            .get_elem_const,
+            .set_elem_const,
+            => return .{},
+            .get_prop, .set_prop => {
+                const is_set = (op.opcode == .set_prop);
+                const obj_r = if (is_set) op.a else op.b;
+                const key_c = if (is_set) op.b else op.c;
+                if (!is_set and op.a == obj_r) return .{};
+                if (is_set and op.c == obj_r) return .{};
+                if (!has_obj) {
+                    has_obj = true;
+                    res.obj_reg = obj_r;
+                } else if (res.obj_reg != obj_r) {
+                    return .{};
+                }
+                const key = constantName(block, key_c) orelse return .{};
+                const ic_idx: u8 = @intCast(((@intFromPtr(block) >> 4) +% ip) & 255);
+                const entry = table[ic_idx];
+                if (entry.block != block or entry.pc != ip or @intFromPtr(entry.key_ptr) != @intFromPtr(key.ptr) or entry.shape_id == 0 or entry.next_shape != 0) {
+                    return .{};
+                }
+                if (res.count == 0 and res.shape_id == 0) {
+                    res.shape_id = entry.shape_id;
+                } else if (res.shape_id != entry.shape_id) {
+                    return .{};
+                }
+                if (res.findSlot(entry.slot_idx)) |idx| {
+                    if (!std.mem.eql(u8, keys[idx], key)) return .{};
+                    if (is_set) res.written[idx] = true;
+                } else {
+                    for (0..res.count) |k_idx| {
+                        if (std.mem.eql(u8, keys[k_idx], key)) return .{};
+                    }
+                    if (res.count >= 6) return .{};
+                    const idx = res.count;
+                    res.slots[idx] = entry.slot_idx;
+                    keys[idx] = key;
+                    if (is_set) res.written[idx] = true;
+                    if (entry.slot_idx > res.max_slot) res.max_slot = entry.slot_idx;
+                    res.count += 1;
+                }
+            },
+            else => {},
+        }
+    }
+
+    if (res.count == 0) return .{};
+
+    for (start_ip..end_ip + 1) |ip| {
+        const op = block.ops[ip];
+        switch (op.opcode) {
+            .nop,
+            .jump,
+            .jeq_local_const_false,
+            .jlt_local_const_false,
+            .jle_local_const_false,
+            .jgt_local_const_false,
+            .jge_local_const_false,
+            .set_prop,
+            => {},
+            .jump_if_false, .jump_if_true => {
+                if (op.a == res.obj_reg) return .{};
+            },
+            .move, .load_local, .store_local => {
+                if (op.a == res.obj_reg or op.b == res.obj_reg) return .{};
+            },
+            else => {
+                if (op.a == res.obj_reg) return .{};
+            },
+        }
+    }
+
+    return res;
+}
+
 const OsrCachedAnalysis = struct {
     cached_regs: [12]u8 = @splat(0),
     cached_count: usize = 0,
     reg_to_xmm: [64]?Xmm = @splat(null),
     read_before_written: [64]bool = @splat(false),
+    promoted: PromotedPropsAnalysis = .{},
 };
 
-fn analyzeOsrLoop(block: *const codeblock.CodeBlock, start_ip: usize, end_ip: usize) OsrCachedAnalysis {
+fn analyzeOsrLoop(
+    block: *const codeblock.CodeBlock,
+    start_ip: usize,
+    end_ip: usize,
+    prop_ic: ?*const [256]PropIC,
+) OsrCachedAnalysis {
     var result = OsrCachedAnalysis{};
 
     // 1. Pureza del bucle (is_pure_loop): true solo si ningún opcode en [start_ip .. end_ip]
@@ -2044,16 +2163,42 @@ fn analyzeOsrLoop(block: *const codeblock.CodeBlock, start_ip: usize, end_ip: us
         }
     }
 
-    const max_cached = @min(num_candidates, 12);
+    var promoted = analyzePromotedProps(block, start_ip, end_ip, prop_ic);
+    const max_cached = @min(num_candidates, 12 - promoted.count);
     for (0..max_cached) |k| {
         const reg = candidates[k].reg;
         result.cached_regs[k] = reg;
         result.reg_to_xmm[reg] = @enumFromInt(4 + k);
     }
+    for (0..promoted.count) |p| {
+        promoted.xmms[p] = @enumFromInt(4 + max_cached + p);
+    }
     result.cached_count = max_cached;
     result.read_before_written = read_before_written;
+    result.promoted = promoted;
 
     return result;
+}
+
+fn emitFlushPromoted(a: *Assembler, promoted: PromotedPropsAnalysis) !void {
+    for (0..promoted.count) |p| {
+        if (!promoted.written[p]) continue;
+        const slot_byte_off: i32 = @intCast(@as(usize, promoted.slots[p]) * @as(usize, @intCast(prop_size)));
+        const xmm_p = promoted.xmms[p];
+        try a.movqRegXmm(.rcx, xmm_p);
+        try a.ucomisd(xmm_p, xmm_p);
+        try a.movRegImm64(.rdx, JSValue.CANONICAL_NAN);
+        try a.cmovpRegReg(.rcx, .rdx);
+        try a.movMemReg(.rbx, slot_byte_off + prop_val_offset, .rcx);
+    }
+}
+
+fn emitReloadPromoted(a: *Assembler, promoted: PromotedPropsAnalysis) !void {
+    for (0..promoted.count) |p| {
+        const slot_byte_off: i32 = @intCast(@as(usize, promoted.slots[p]) * @as(usize, @intCast(prop_size)));
+        const xmm_p = promoted.xmms[p];
+        try a.movsdXmmMem(xmm_p, .rbx, slot_byte_off + prop_val_offset);
+    }
 }
 
 fn emitFlushCached(a: *Assembler, cached_regs: [12]u8, cached_count: usize) !void {
@@ -2171,10 +2316,12 @@ fn compileOsrImpl(
     defer a.deinit();
     const prop_ic: ?*const [256]PropIC = if (prop_ic_ptr) |p| @ptrCast(@alignCast(p)) else null;
 
-    const analysis = analyzeOsrLoop(block, start_ip, end_ip);
+    const analysis = analyzeOsrLoop(block, start_ip, end_ip, prop_ic);
     const cached_regs = analysis.cached_regs;
     const cached_count = analysis.cached_count;
     const reg_to_xmm = analysis.reg_to_xmm;
+    const promoted = analysis.promoted;
+    const has_flush = (cached_count > 0 or promoted.count > 0);
 
     const loop_len = end_ip - start_ip + 1;
     var op_labels = try allocator.alloc(Label, loop_len);
@@ -2209,6 +2356,57 @@ fn compileOsrImpl(
     try a.movRegReg(.r13, .rsi); // %r13 = ctx
     try a.movRegImm64(.r14, JSValue.HEAP_BASE); // %r14 = HEAP_BASE
     try a.movRegImm64(.r15, JSValue.BASE_TAG); // %r15 = BASE_TAG
+
+    // Pre-header for promoted invariant object properties (stores prop_array in %rbx)
+    if (promoted.count > 0) {
+        try a.movRegMem(.rax, .r12, @intCast(@as(usize, promoted.obj_reg) * 8));
+        try a.movRegReg(.rcx, .rax);
+        try a.shrRegImm8(.rcx, 47);
+        try a.cmpRegImm32(.rcx, @intCast(HEADER_OBJECT));
+        try a.jcc(.ne, preheader_bailout);
+
+        try a.movRegImm64(.rcx, JSValue.PTR_MASK);
+        try a.andRegReg(.rax, .rcx);
+
+        try a.movzxReg64Mem8(.rcx, .rax, zobj_is_frozen_offset);
+        try a.testRegReg(.rcx, .rcx);
+        try a.jcc(.ne, preheader_bailout);
+
+        try a.movReg32Mem(.rcx, .rax, zobj_shape_id_offset);
+        try a.cmpReg32Imm32(.rcx, @bitCast(promoted.shape_id));
+        try a.jcc(.ne, preheader_bailout);
+
+        try a.movRegMem(.rcx, .rax, zobj_entries_len_offset);
+        try a.cmpRegImm32(.rcx, @intCast(promoted.max_slot));
+        try a.jcc(.be, preheader_bailout);
+
+        try a.movRegMem(.rbx, .rax, zobj_entries_bytes_offset);
+        try a.movRegMem(.rsi, .rax, zobj_entries_cap_offset);
+        if (comptime value_byte_offset_multiplier == 16) {
+            try a.shlRegImm8(.rsi, 4);
+        } else {
+            try a.imulRegRegImm32(.rsi, .rsi, @intCast(value_byte_offset_multiplier));
+        }
+        try a.addRegReg(.rbx, .rsi); // %rbx = prop_array
+
+        for (0..promoted.count) |p| {
+            const slot_byte_off: i32 = @intCast(@as(usize, promoted.slots[p]) * @as(usize, @intCast(prop_size)));
+            try a.movReg32Mem(.rcx, .rbx, slot_byte_off + prop_desc_offset);
+            if (promoted.written[p]) {
+                try a.andRegImm8(.rcx, 9);
+                try a.cmpRegImm32(.rcx, 1);
+                try a.jcc(.ne, preheader_bailout);
+            } else {
+                try a.andRegImm8(.rcx, 8);
+                try a.testReg32Reg32(.rcx, .rcx);
+                try a.jcc(.ne, preheader_bailout);
+            }
+            try a.movRegMem(.rax, .rbx, slot_byte_off + prop_val_offset);
+            try a.cmpRegReg(.rax, .r15); // %r15 = BASE_TAG (numeric guard)
+            try a.jcc(.ae, preheader_bailout);
+            try a.movqXmmReg(promoted.xmms[p], .rax);
+        }
+    }
 
     // Pre-header for cached registers
     if (cached_count > 0) {
@@ -2624,6 +2822,9 @@ fn compileOsrImpl(
                 if (cached_count > 0) {
                     try emitFlushCached(&a, cached_regs, cached_count);
                 }
+                if (promoted.count > 0) {
+                    try emitFlushPromoted(&a, promoted);
+                }
                 try a.movRegReg(.rdi, .r12);
                 try a.movRegImm32(.rsi, op.a);
                 try a.movRegImm32(.rdx, op.b);
@@ -2635,6 +2836,9 @@ fn compileOsrImpl(
                 try a.jcc(.ne, bail_lbl);
                 if (cached_count > 0) {
                     try emitReloadCached(&a, cached_regs, cached_count);
+                }
+                if (promoted.count > 0) {
+                    try emitReloadPromoted(&a, promoted);
                 }
                 a.bindLabel(done_lbl);
             },
@@ -2683,6 +2887,9 @@ fn compileOsrImpl(
                 if (cached_count > 0) {
                     try emitFlushCached(&a, cached_regs, cached_count);
                 }
+                if (promoted.count > 0) {
+                    try emitFlushPromoted(&a, promoted);
+                }
                 const kind_u32: u32 = switch (op.opcode) {
                     .and_bits => 0,
                     .or_bits => 1,
@@ -2703,6 +2910,9 @@ fn compileOsrImpl(
                 try a.jcc(.ne, bail_lbl);
                 if (cached_count > 0) {
                     try emitReloadCached(&a, cached_regs, cached_count);
+                }
+                if (promoted.count > 0) {
+                    try emitReloadPromoted(&a, promoted);
                 }
                 a.bindLabel(done_lbl);
             },
@@ -2728,7 +2938,7 @@ fn compileOsrImpl(
                     try a.jmp(op_labels[target_pc - start_ip]);
                 } else {
                     try a.movRegImm32(.rax, @intCast(target_pc));
-                    if (cached_count > 0) {
+                    if (has_flush) {
                         try a.jmp(flush_and_exit);
                     } else {
                         try a.jmp(osr_epilogue);
@@ -3069,6 +3279,20 @@ fn compileOsrImpl(
             },
             .set_prop, .set_prop_transition => {
                 const ic_idx: u8 = @intCast(((@intFromPtr(block) >> 4) +% ip) & 255);
+                if (promoted.count > 0 and op.opcode == .set_prop) {
+                    const slot_idx = prop_ic.?[ic_idx].slot_idx;
+                    const p_idx = promoted.findSlot(slot_idx).?;
+                    const xmm_prop = promoted.xmms[p_idx];
+                    if (op.c < 64 and reg_to_xmm[op.c] != null) {
+                        const xmm_src = reg_to_xmm[op.c].?;
+                        if (xmm_prop != xmm_src) {
+                            try a.movsdXmmXmm(xmm_prop, xmm_src);
+                        }
+                    } else {
+                        try emitLoadNumToXmm(&a, reg_to_xmm, op.c, xmm_prop, bail_lbl);
+                    }
+                    continue;
+                }
                 const key = constantName(block, op.b).?;
                 const expected_key_ptr = @intFromPtr(key.ptr);
                 const packed_info: u64 = (@as(u64, @intCast(ip)) << 32) | (@as(u64, ic_idx) << 16) | (@as(u64, op.c) << 8) | @as(u64, op.a);
@@ -3439,6 +3663,20 @@ fn compileOsrImpl(
             },
             .get_prop => {
                 const ic_idx: u8 = @intCast(((@intFromPtr(block) >> 4) +% ip) & 255);
+                if (promoted.count > 0) {
+                    const slot_idx = prop_ic.?[ic_idx].slot_idx;
+                    const p_idx = promoted.findSlot(slot_idx).?;
+                    const xmm_prop = promoted.xmms[p_idx];
+                    if (op.a < 64 and reg_to_xmm[op.a] != null) {
+                        const xmm_dst = reg_to_xmm[op.a].?;
+                        if (xmm_dst != xmm_prop) {
+                            try a.movsdXmmXmm(xmm_dst, xmm_prop);
+                        }
+                    } else {
+                        try emitStoreXmmToNum(&a, reg_to_xmm, cached_regs, cached_count, op.a, xmm_prop, bail_lbl);
+                    }
+                    continue;
+                }
                 const key = constantName(block, op.c).?;
                 const expected_key_ptr = @intFromPtr(key.ptr);
                 const packed_info: u64 = (@as(u64, @intCast(ip)) << 32) | (@as(u64, ic_idx) << 16) | (@as(u64, op.b) << 8) | @as(u64, op.a);
@@ -3731,7 +3969,7 @@ fn compileOsrImpl(
     for (exit_stubs.items) |stub| {
         a.bindLabel(stub.label);
         try a.movRegImm32(.rax, stub.target_ip);
-        if (cached_count > 0) {
+        if (has_flush) {
             try a.jmp(flush_and_exit);
         } else {
             try a.jmp(osr_epilogue);
@@ -3741,16 +3979,21 @@ fn compileOsrImpl(
     for (0..loop_len) |idx| {
         a.bindLabel(bailout_labels[idx]);
         try a.movRegImm32(.rax, @intCast(start_ip + idx));
-        if (cached_count > 0) {
+        if (has_flush) {
             try a.jmp(flush_and_exit);
         } else {
             try a.jmp(osr_epilogue);
         }
     }
 
-    if (cached_count > 0) {
+    if (has_flush) {
         a.bindLabel(flush_and_exit);
-        try emitFlushCached(&a, cached_regs, cached_count);
+        if (cached_count > 0) {
+            try emitFlushCached(&a, cached_regs, cached_count);
+        }
+        if (promoted.count > 0) {
+            try emitFlushPromoted(&a, promoted);
+        }
         try a.jmp(osr_epilogue);
 
         a.bindLabel(preheader_bailout);
