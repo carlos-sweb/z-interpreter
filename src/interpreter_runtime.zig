@@ -561,7 +561,13 @@ pub fn resumeFiber(self: *Interpreter, fs: *FiberState) anyerror!void {
 /// evaluator, AsyncGeneratorYield's implicit Await of a yielded value,
 /// and `for await`'s per-value Await.
 pub fn awaitValue(self: *Interpreter, fs: *FiberState, operand: JSValue) anyerror!JSValue {
-    const p = if (operand.isPromise() and self.extraProps(operand) == null)
+    const is_native_promise = if (operand.isPromise()) blk: {
+        if (self.extraProps(operand)) |bag| {
+            break :blk bag.asObject().value.getOwnRecord("constructor") == null;
+        }
+        break :blk true;
+    } else false;
+    const p = if (is_native_promise)
         operand
     else blk: {
         const fresh = try self.gcNewPromise();

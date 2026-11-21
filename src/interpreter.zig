@@ -2703,6 +2703,40 @@ test "ES2025 Set.prototype methods and Map.prototype.getOrInsert / getOrInsertCo
     try testing.expect(result.isBool() and result.asBool());
 }
 
+test "Promise.any on empty string rejects with AggregateError and await ignores monkey-patched then on native Promise" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    const r1 = try interp.run(
+        \\var emptyStrAggErr = false;
+        \\Promise.any("").then(() => {}, (e) => {
+        \\  emptyStrAggErr = (e instanceof AggregateError) && Object.getPrototypeOf(e) === AggregateError.prototype && e.errors.length === 0;
+        \\});
+        \\var thenCalls = 0;
+        \\var order = [];
+        \\var patched = Promise.resolve(42);
+        \\patched.then = function(...args) {
+        \\  thenCalls++;
+        \\  return Promise.prototype.then.apply(this, args);
+        \\};
+        \\async function trigger() {
+        \\  order.push("Await:" + (await patched));
+        \\}
+        \\trigger();
+        \\new Promise((res) => { order.push("P1"); res(); }).then(() => { order.push("P2"); });
+        \\true;
+    );
+    defer r1.deinit();
+    const r2 = try interp.run(
+        \\emptyStrAggErr && thenCalls === 0 && order.join(",") === "P1,Await:42,P2";
+    );
+    defer r2.deinit();
+    try testing.expect(r2.isBool() and r2.asBool());
+}
+
+
 
 
 

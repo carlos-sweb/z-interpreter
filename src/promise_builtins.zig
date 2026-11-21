@@ -471,6 +471,25 @@ fn getIteratorStrict(self: *Interpreter, allocator: Allocator, iterable: JSValue
     defer self.gc_allocator.free(key);
     const method = try self.getProperty(iterable, key);
     defer method.deinit();
+    if (method.isUndefined()) {
+        const str: ?JSValue = if (iterable.isString())
+            iterable
+        else if (self.unboxPrimitiveWrapper(iterable)) |u|
+            (if (u.isString()) u else null)
+        else
+            null;
+        if (str) |sv| {
+            const cps = try self.iterableItems(sv);
+            defer self.gc_allocator.free(cps);
+            var arr = try self.gcNewArray();
+            defer arr.deinit();
+            for (cps) |cp| _ = try arr.asArray().value.push(cp);
+            const iter = try builtin_helpers.makeArrayIterator(self, allocator, arr, .values);
+            errdefer iter.deinit();
+            const next_fn = try self.getProperty(iter, "next");
+            return .{ .iter = iter, .next_fn = next_fn };
+        }
+    }
     if (!method.isFunction()) {
         return self.throwError(.type_error, "{s} is not iterable", .{iterable.typeOf()});
     }
