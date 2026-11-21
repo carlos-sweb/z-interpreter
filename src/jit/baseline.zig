@@ -1812,11 +1812,11 @@ fn analyzeOsrLoop(block: *const codeblock.CodeBlock, start_ip: usize, end_ip: us
     var result = OsrCachedAnalysis{};
 
     // 1. Pureza del bucle (is_pure_loop): true solo si ningún opcode en [start_ip .. end_ip]
-    // es .new_array, .new_object, .get_prop, .set_prop, .set_prop_transition, .call, .call_global
+    // es .new_array, .new_object, .call, .call_global
     var is_pure_loop = true;
     for (start_ip..end_ip + 1) |ip| {
         switch (block.ops[ip].opcode) {
-            .new_array, .new_object, .get_prop, .set_prop, .set_prop_transition, .call, .call_global => {
+            .new_array, .new_object, .call, .call_global => {
                 is_pure_loop = false;
                 break;
             },
@@ -1928,6 +1928,20 @@ fn analyzeOsrLoop(block: *const codeblock.CodeBlock, start_ip: usize, end_ip: us
                 }
             },
             .set_elem_const => {
+                if (op.a < 64) invalid[op.a] = true;
+                if (op.c < 64) {
+                    if (!written[op.c]) read_before_written[op.c] = true;
+                    use_count[op.c] += 1;
+                }
+            },
+            .get_prop => {
+                if (op.b < 64) invalid[op.b] = true;
+                if (op.a < 64) {
+                    use_count[op.a] += 1;
+                    written[op.a] = true;
+                }
+            },
+            .set_prop, .set_prop_transition => {
                 if (op.a < 64) invalid[op.a] = true;
                 if (op.c < 64) {
                     if (!written[op.c]) read_before_written[op.c] = true;
@@ -2874,10 +2888,18 @@ fn compileOsrImpl(
                     try a.cmpRegImm32(.rcx, @intCast(HEADER_OBJECT));
                     try a.jcc(.ne, slow_path);
 
-                    // 2. Check regs[val_reg] < HEAP_BASE (primitive, pure numeric / boolean)
-                    try a.movRegMem(.r8, .r12, @intCast(@as(usize, op.c) * 8));
-                    try a.cmpRegReg(.r8, .r14); // %r14 = HEAP_BASE
-                    try a.jcc(.ae, slow_path);
+                    // 2. Load value into %r8 (from cached Xmm or regs[val_reg] < HEAP_BASE)
+                    if (op.c < 64 and reg_to_xmm[op.c] != null) {
+                        const xmm_val = reg_to_xmm[op.c].?;
+                        try a.movqRegXmm(.r8, xmm_val);
+                        try a.ucomisd(xmm_val, xmm_val);
+                        try a.movRegImm64(.rcx, JSValue.CANONICAL_NAN);
+                        try a.cmovpRegReg(.r8, .rcx);
+                    } else {
+                        try a.movRegMem(.r8, .r12, @intCast(@as(usize, op.c) * 8));
+                        try a.cmpRegReg(.r8, .r14); // %r14 = HEAP_BASE
+                        try a.jcc(.ae, slow_path);
+                    }
 
                     // 3. Extract box ptr: rax = rax & PTR_MASK
                     try a.movRegImm64(.rcx, JSValue.PTR_MASK);
@@ -2958,6 +2980,9 @@ fn compileOsrImpl(
                 }
 
                 a.bindLabel(slow_path);
+                if (cached_count > 0) {
+                    try emitFlushCached(&a, cached_regs, cached_count);
+                }
                 try a.movRegReg(.rdi, .r13);
                 try a.movRegReg(.rsi, .r12);
                 try a.movRegImm64(.rdx, packed_info);
@@ -2966,6 +2991,9 @@ fn compileOsrImpl(
                 try a.callReg(.rax);
                 try a.testRegReg(.rax, .rax);
                 try a.jcc(.ne, bail_lbl);
+                if (cached_count > 0) {
+                    try emitReloadCached(&a, cached_regs, cached_count);
+                }
                 a.bindLabel(done_lbl);
             },
             .get_prop => {
@@ -2985,9 +3013,11 @@ fn compileOsrImpl(
                 try a.jcc(.ne, slow_path);
 
                 // 2. Check regs[dst_reg] < HEAP_BASE (avoid RC management on overwritten slot in fast path)
-                try a.movRegMem(.rcx, .r12, @intCast(@as(usize, op.a) * 8));
-                try a.cmpRegReg(.rcx, .r14); // %r14 = HEAP_BASE
-                try a.jcc(.ae, slow_path);
+                if (!(op.a < 64 and reg_to_xmm[op.a] != null)) {
+                    try a.movRegMem(.rcx, .r12, @intCast(@as(usize, op.a) * 8));
+                    try a.cmpRegReg(.rcx, .r14); // %r14 = HEAP_BASE
+                    try a.jcc(.ae, slow_path);
+                }
 
                 // 3. Extract box ptr: rax = rax & PTR_MASK
                 try a.movRegImm64(.rcx, JSValue.PTR_MASK);
@@ -3047,16 +3077,24 @@ fn compileOsrImpl(
                 try a.testReg32Reg32(.rcx, .rcx);
                 try a.jcc(.ne, slow_path);
 
-                // 12. Check prop.value < HEAP_BASE
+                // 12. Load prop.value and store into cached Xmm or regs[dst_reg]
                 try a.movRegMem(.rax, .rdx, prop_val_offset);
-                try a.cmpRegReg(.rax, .r14); // %r14 = HEAP_BASE
-                try a.jcc(.ae, slow_path);
-
-                // Store prop.value into regs[dst_reg]
-                try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+                if (op.a < 64 and reg_to_xmm[op.a] != null) {
+                    const xmm_dst = reg_to_xmm[op.a].?;
+                    try a.cmpRegReg(.rax, .r15); // %r15 = BASE_TAG
+                    try a.jcc(.ae, slow_path);
+                    try a.movqXmmReg(xmm_dst, .rax);
+                } else {
+                    try a.cmpRegReg(.rax, .r14); // %r14 = HEAP_BASE
+                    try a.jcc(.ae, slow_path);
+                    try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+                }
                 try a.jmp(done_lbl);
 
                 a.bindLabel(slow_path);
+                if (cached_count > 0) {
+                    try emitFlushCached(&a, cached_regs, cached_count);
+                }
                 try a.movRegReg(.rdi, .r13);
                 try a.movRegReg(.rsi, .r12);
                 try a.movRegImm64(.rdx, packed_info);
@@ -3065,6 +3103,14 @@ fn compileOsrImpl(
                 try a.callReg(.rax);
                 try a.testRegReg(.rax, .rax);
                 try a.jcc(.ne, bail_lbl);
+                if (op.a < 64 and reg_to_xmm[op.a] != null) {
+                    try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.a) * 8));
+                    try a.cmpRegReg(.rax, .r15);
+                    try a.jcc(.ae, bail_lbl);
+                }
+                if (cached_count > 0) {
+                    try emitReloadCached(&a, cached_regs, cached_count);
+                }
                 a.bindLabel(done_lbl);
             },
             .call, .call_global => {

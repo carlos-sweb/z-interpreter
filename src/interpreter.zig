@@ -2344,5 +2344,29 @@ test "JIT and OSR compile numeric loose_eq/loose_ne and bail out cleanly on mixe
     try testing.expect(result.isBool() and result.asBool());
 }
 
+test "OSR caches numeric registers in Xmm across get_prop and set_prop without load_local churn" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+    const result = try interp.run(
+        \\function runPropLoop() {
+        \\  var o = { x: 1, y: 2, z: 3 };
+        \\  var acc = 0;
+        \\  for (var i = 0; i < 300; i++) {
+        \\    acc += o.x + o.y + o.z;
+        \\    o.x = (o.x + 1) & 1023;
+        \\  }
+        \\  return acc === 46650 && o.x === 301;
+        \\}
+        \\runPropLoop();
+    );
+    defer result.deinit();
+    try testing.expect(result.isBool() and result.asBool());
+}
+
+
 
 

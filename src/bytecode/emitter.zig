@@ -456,17 +456,44 @@ pub const BytecodeEmitter = struct {
                     } else if (assignment.target.data == .member) {
                         const m = assignment.target.data.member;
                         if (m.optional) return error.UnsupportedSyntax;
-                        const obj_reg = try self.emitExpression(m.object);
+                        const rhs_mutates = exprMayMutateLocal(assignment.value);
                         if (!m.computed) {
                             if (m.property.data != .identifier) return error.UnsupportedSyntax;
                             if (m.property.data.identifier.len > 0 and m.property.data.identifier[0] == '#') return error.UnsupportedSyntax;
+                            var obj_reg = if (!rhs_mutates)
+                                try self.emitReadOperand(m.object)
+                            else
+                                try self.emitExpression(m.object);
+                            if (rhs_mutates and obj_reg < self.scope.local_count) {
+                                const tmp = try self.allocRegister();
+                                try self.emitOp(.{ .opcode = .load_local, .a = tmp, .b = obj_reg });
+                                obj_reg = tmp;
+                            }
                             const key_const = try self.addConstant(.{ .property_key = m.property.data.identifier });
                             const val_reg = try self.emitExpression(assignment.value);
                             try self.emitOp(.{ .opcode = .set_prop, .a = obj_reg, .b = key_const, .c = val_reg });
                             self.freeRegister(obj_reg);
                             return val_reg;
                         } else {
-                            const key_reg = try self.emitExpression(m.property);
+                            const prop_mutates = exprMayMutateLocal(m.property);
+                            var obj_reg = if (!prop_mutates and !rhs_mutates)
+                                try self.emitReadOperand(m.object)
+                            else
+                                try self.emitExpression(m.object);
+                            if ((prop_mutates or rhs_mutates) and obj_reg < self.scope.local_count) {
+                                const tmp = try self.allocRegister();
+                                try self.emitOp(.{ .opcode = .load_local, .a = tmp, .b = obj_reg });
+                                obj_reg = tmp;
+                            }
+                            var key_reg = if (!rhs_mutates)
+                                try self.emitReadOperand(m.property)
+                            else
+                                try self.emitExpression(m.property);
+                            if (rhs_mutates and key_reg < self.scope.local_count) {
+                                const tmp = try self.allocRegister();
+                                try self.emitOp(.{ .opcode = .load_local, .a = tmp, .b = key_reg });
+                                key_reg = tmp;
+                            }
                             const val_reg = try self.emitExpression(assignment.value);
                             try self.emitOp(.{ .opcode = .set_elem, .a = obj_reg, .b = key_reg, .c = val_reg });
                             self.freeRegister(key_reg);
