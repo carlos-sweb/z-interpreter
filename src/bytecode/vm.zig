@@ -100,6 +100,7 @@ fn getBytecodeTarget(callee: JSValue) ?BytecodeTarget {
     if (callee.asFunction().value.call != interpreter_class.closureCall) return null;
     const cc: *ClosureCtx = @ptrCast(@alignCast(callee.asFunction().value.ctx));
     if (cc.function_node.is_generator or cc.function_node.is_async) return null;
+    if (cc.private_ctx != null or cc.super_proto != null or cc.home_object != null or cc.closure_env.resolvePrivateCtx() != null) return null;
     if (!cc.interp.compile_options.use_bytecode_vm) return null;
     const cb = interpreter_class.getOrCompileBytecode(cc.interp, cc.function_node) orelse return null;
     return .{
@@ -236,6 +237,13 @@ fn keyToString(allocator: Allocator, key_val: JSValue, buf: *[32]u8) ![]const u8
 }
 
 fn getProp(frame: *CallFrame, allocator: Allocator, obj: JSValue, key: []const u8) !JSValue {
+    if (frame.interp) |it| {
+        if (it.global_object) |go| {
+            if (obj.isObject() and obj.asObject() == go.asObject()) {
+                return it.getProperty(obj, key);
+            }
+        }
+    }
     if (obj.isObject()) {
         const box = obj.asObject();
         if (box.value.getOwnRecord(key)) |rec| {
@@ -280,6 +288,13 @@ fn getProp(frame: *CallFrame, allocator: Allocator, obj: JSValue, key: []const u
 
 fn setProp(frame: *CallFrame, allocator: Allocator, obj: JSValue, key: []const u8, val: JSValue) !void {
     _ = allocator;
+    if (frame.interp) |it| {
+        if (it.global_object) |go| {
+            if (obj.isObject() and obj.asObject() == go.asObject()) {
+                return it.setPropertyOnValue(obj, key, val);
+            }
+        }
+    }
     if (obj.isObject()) {
         const box = obj.asObject();
         const is_strict = if (frame.interp) |it| it.strict_mode else false;
@@ -434,7 +449,8 @@ noinline fn newArraySlow(allocator: Allocator, frame: *CallFrame, frame_regs: []
 
 noinline fn getPropSlow(allocator: Allocator, frame: *CallFrame, frame_regs: []JSValue, op: codeblock.Op, op_pc: u32, obj: JSValue, key: []const u8, ic: *PropIC) !void {
     @branchHint(.cold);
-    if (obj.isObject()) {
+    const is_global = if (frame.interp) |it| (if (it.global_object) |go| (obj.isObject() and obj.asObject() == go.asObject()) else false) else false;
+    if (obj.isObject() and !is_global) {
         const box = obj.asObject();
         if (box.value.properties.getIndex(key)) |slot_idx| {
             const rec = &box.value.properties.entries.items(.value)[slot_idx];
@@ -465,7 +481,8 @@ noinline fn getPropSlow(allocator: Allocator, frame: *CallFrame, frame_regs: []J
 
 noinline fn setPropSlow(allocator: Allocator, frame: *CallFrame, op: codeblock.Op, op_pc: u32, obj: JSValue, key: []const u8, val: JSValue, ic: *PropIC) !void {
     @branchHint(.cold);
-    if (obj.isObject()) {
+    const is_global = if (frame.interp) |it| (if (it.global_object) |go| (obj.isObject() and obj.asObject() == go.asObject()) else false) else false;
+    if (obj.isObject() and !is_global) {
         const box = obj.asObject();
         if (ic.block == frame.block and ic.pc == op_pc and ic.shape_id == box.value.shape_id and ic.key_ptr == key.ptr) {
             if (ic.next_shape != 0) {
@@ -1133,6 +1150,11 @@ pub fn jitSetProp(ctx: *codeblock.OsrContext, regs: [*]JSValue, packed_info: u64
     const obj = regs[obj_reg];
     if (!obj.isObject()) return 1;
     const box = obj.asObject();
+    if (frame.interp) |it| {
+        if (it.global_object) |go| {
+            if (box == go.asObject()) return 1;
+        }
+    }
     const val = regs[val_reg];
     const ic = &prop_ic[ic_idx];
     const slot = ic.slot_idx;
@@ -1187,6 +1209,11 @@ pub fn jitGetProp(ctx: *codeblock.OsrContext, regs: [*]JSValue, packed_info: u64
     const obj = regs[obj_reg];
     if (!obj.isObject()) return 1;
     const box = obj.asObject();
+    if (frame.interp) |it| {
+        if (it.global_object) |go| {
+            if (box == go.asObject()) return 1;
+        }
+    }
     const ic = &prop_ic[ic_idx];
     if (ic.block == frame.block and ic.pc == op_pc and ic.shape_id == box.value.shape_id and ic.key_ptr == key_ptr and ic.slot_idx < box.value.properties.count()) {
         const rec = &box.value.properties.entries.items(.value)[ic.slot_idx];
@@ -1460,7 +1487,8 @@ noinline fn vmExecLoop(
             const ic = &prop_ic[ic_idx];
             if (obj.isObject()) {
                 const box = obj.asObject();
-                if (ic.block == frame.block and ic.pc == op_pc and ic.shape_id == box.value.shape_id and ic.key_ptr == key.ptr and ic.slot_idx < box.value.properties.count()) {
+                const is_global = if (frame.interp) |it| (if (it.global_object) |go| box == go.asObject() else false) else false;
+                if (!is_global and ic.block == frame.block and ic.pc == op_pc and ic.shape_id == box.value.shape_id and ic.key_ptr == key.ptr and ic.slot_idx < box.value.properties.count()) {
                     const rec = &box.value.properties.entries.items(.value)[ic.slot_idx];
                     if (!rec.isAccessor()) {
                         if (!needsDeinit(rec.value)) {
@@ -1489,7 +1517,8 @@ noinline fn vmExecLoop(
             const ic = &prop_ic[ic_idx];
             if (obj.isObject()) {
                 const box = obj.asObject();
-                if (ic.block == frame.block and ic.pc == op_pc and ic.shape_id == box.value.shape_id and ic.key_ptr == key.ptr and ic.next_shape == 0 and ic.slot_idx < box.value.properties.count()) {
+                const is_global = if (frame.interp) |it| (if (it.global_object) |go| box == go.asObject() else false) else false;
+                if (!is_global and ic.block == frame.block and ic.pc == op_pc and ic.shape_id == box.value.shape_id and ic.key_ptr == key.ptr and ic.next_shape == 0 and ic.slot_idx < box.value.properties.count()) {
                     const rec = &box.value.properties.entries.items(.value)[ic.slot_idx];
                     if (!rec.isAccessor() and rec.descriptor.writable and !box.value.is_frozen) {
                         if (!needsDeinit(rec.value) and !needsDeinit(val)) {
@@ -1519,8 +1548,10 @@ noinline fn vmExecLoop(
             const ic = &prop_ic[ic_idx];
             if (obj.isObject()) {
                 const box = obj.asObject();
+                const is_global = if (frame.interp) |it| (if (it.global_object) |go| box == go.asObject() else false) else false;
                 const slot = ic.slot_idx;
-                if (ic.block == frame.block and
+                if (!is_global and
+                    ic.block == frame.block and
                     ic.pc == op_pc and
                     box.value.shape_id == ic.shape_id and
                     box.value.cached_shape_id == ic.cached_shape_id and

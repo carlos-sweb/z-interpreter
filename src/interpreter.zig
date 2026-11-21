@@ -2064,3 +2064,59 @@ test "bytecode direct eval and arguments fall back cleanly to AST without error"
     defer result.deinit();
     try testing.expect(result.isBool() and result.asBool());
 }
+
+test "bytecode function with branching return falling off end returns undefined" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+    const result = try interp.run(
+        \\function f(c) {
+        \\  if (c) { return 1; }
+        \\}
+        \\f(false);
+    );
+    defer result.deinit();
+    try testing.expect(result.isUndefined());
+}
+
+test "class with private fields falls back cleanly from bytecode without crash" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+    const result = try interp.run(
+        \\class C {
+        \\  #x = 42;
+        \\  m() {
+        \\    const fn = () => this.#x;
+        \\    return fn();
+        \\  }
+        \\}
+        \\new C().m();
+    );
+    defer result.deinit();
+    try testing.expect(result.isNumber());
+    try testing.expectEqual(@as(f64, 42), result.asNumber());
+}
+
+test "TDZ lexical variable access throws UncaughtException" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+    const err = interp.run(
+        \\function f() {
+        \\  return x;
+        \\  let x = 1;
+        \\}
+        \\f();
+    );
+    try testing.expectError(error.UncaughtException, err);
+}

@@ -40,6 +40,7 @@ pub fn setModuleLoader(self: *Interpreter, loader: ModuleLoader) void {
 /// The loader must be set first.
 pub fn runModule(self: *Interpreter, specifier: []const u8) anyerror!JSValue {
     self.pending_exception = null;
+    self.strict_mode = true;
     self.stack_limit = @frameAddress() -| Interpreter.main_stack_budget;
     if (!self.globals_ready) {
         try builtins.setupGlobals(self);
@@ -64,6 +65,7 @@ pub fn runModule(self: *Interpreter, specifier: []const u8) anyerror!JSValue {
 /// the end of a module's evaluation instead of staying live, so a
 /// dependency cycle can't be linked -- catchable error instead.
 pub fn loadModule(self: *Interpreter, specifier: []const u8, referrer: ?[]const u8) anyerror!*ModuleRecord {
+    self.strict_mode = true;
     // AST nodes stay on the arena; the module record/env/exports and
     // everything else this function creates are GC-tracked.
     const ast_arena = self.arena_state.allocator();

@@ -770,7 +770,7 @@ pub fn invokeFunctionNode(
     args: []const JSValue,
     home_object: ?JSValue,
 ) anyerror!JSValue {
-    if (self.compile_options.use_bytecode_vm) {
+    if (self.compile_options.use_bytecode_vm and private_ctx == null and super_proto == null and super_ctor == null and home_object == null and closure_env.resolvePrivateCtx() == null) {
         // Unsupported AST shapes have no CodeBlock and stay on the existing
         // walker. The VM is selected only after a CodeBlock was emitted.
         if (getOrCompileBytecode(self, fnode)) |cb| {

@@ -37,6 +37,7 @@ pub const BytecodeEmitter = struct {
     call_sites: std.ArrayListUnmanaged(codeblock.CallSiteCache) = .empty,
     next_register: u16,
     max_register: u16,
+    uninitialized_lexical: [256]bool = @splat(false),
 
     pub fn emit(allocator: Allocator, function: *const zfunctions.FunctionNode) !CompiledCodeBlock {
         if (function.is_generator or function.is_async) return error.UnsupportedSyntax;
@@ -57,6 +58,11 @@ pub const BytecodeEmitter = struct {
             .next_register = scope.local_count,
             .max_register = scope.local_count,
         };
+        for (self.scope.locals) |local| {
+            if (local.kind == .let or local.kind == .@"const") {
+                if (local.slot < 256) self.uninitialized_lexical[local.slot] = true;
+            }
+        }
         defer self.scope.deinit(allocator);
         defer self.free_registers.deinit(allocator);
         defer self.call_sites.deinit(allocator);
@@ -100,6 +106,11 @@ pub const BytecodeEmitter = struct {
             .next_register = scope.local_count,
             .max_register = scope.local_count,
         };
+        for (self.scope.locals) |local| {
+            if (local.kind == .let or local.kind == .@"const") {
+                if (local.slot < 256) self.uninitialized_lexical[local.slot] = true;
+            }
+        }
         defer self.scope.deinit(allocator);
         defer self.free_registers.deinit(allocator);
         defer self.call_sites.deinit(allocator);
@@ -164,8 +175,7 @@ pub const BytecodeEmitter = struct {
             },
             .block => |block| {
                 for (block.data.block) |statement| try self.emitStatement(statement);
-                if (self.ops.items.len == 0 or self.ops.items[self.ops.items.len - 1].opcode != .return_value)
-                    try self.emitOp(.{ .opcode = .return_undefined });
+                try self.emitOp(.{ .opcode = .return_undefined });
             },
         }
     }
@@ -199,6 +209,9 @@ pub const BytecodeEmitter = struct {
         if (std.mem.eql(u8, name, "arguments") and self.scope.localSlot("arguments") == null) {
             return error.UnsupportedSyntax;
         }
+        if (self.scope.localSlot(name)) |slot| {
+            if (slot < 256 and self.uninitialized_lexical[slot]) return error.UnsupportedSyntax;
+        }
         if (self.scope.localKind(name)) |kind| {
             if (kind == .@"const") return error.UnsupportedSyntax;
         }
@@ -230,6 +243,7 @@ pub const BytecodeEmitter = struct {
                     } else {
                         try self.emitOp(.{ .opcode = .load_undefined, .a = local_slot });
                     }
+                    if (slot < 256) self.uninitialized_lexical[slot] = false;
                     continue;
                 }
             }
@@ -237,6 +251,9 @@ pub const BytecodeEmitter = struct {
                 try self.emitExpression(init)
             else
                 try self.emitSimple(.load_undefined);
+            if (self.scope.localSlot(name)) |slot| {
+                if (slot < 256) self.uninitialized_lexical[slot] = false;
+            }
             try self.emitStoreDirect(name, val_reg);
             self.freeRegister(val_reg);
         }
@@ -431,6 +448,7 @@ pub const BytecodeEmitter = struct {
                         const obj_reg = try self.emitExpression(m.object);
                         if (!m.computed) {
                             if (m.property.data != .identifier) return error.UnsupportedSyntax;
+                            if (m.property.data.identifier.len > 0 and m.property.data.identifier[0] == '#') return error.UnsupportedSyntax;
                             const key_const = try self.addConstant(.{ .property_key = m.property.data.identifier });
                             const val_reg = try self.emitExpression(assignment.value);
                             try self.emitOp(.{ .opcode = .set_prop, .a = obj_reg, .b = key_const, .c = val_reg });
@@ -494,6 +512,9 @@ pub const BytecodeEmitter = struct {
     fn emitIdentifier(self: *BytecodeEmitter, name: []const u8) !u8 {
         if (std.mem.eql(u8, name, "arguments") and self.scope.localSlot("arguments") == null) {
             return error.UnsupportedSyntax;
+        }
+        if (self.scope.localSlot(name)) |slot| {
+            if (slot < 256 and self.uninitialized_lexical[slot]) return error.UnsupportedSyntax;
         }
         const destination = try self.allocRegister();
         if (self.scope.localSlot(name)) |slot| {
@@ -617,6 +638,7 @@ pub const BytecodeEmitter = struct {
         if (unwrap.data == .identifier) {
             const name = unwrap.data.identifier;
             if (self.scope.localSlot(name)) |slot| {
+                if (slot < 256 and self.uninitialized_lexical[slot]) return null;
                 if (!self.scope.capturesLocal(name)) {
                     return small(slot) catch null;
                 }
@@ -932,7 +954,9 @@ pub const BytecodeEmitter = struct {
         const dst = try self.allocRegister();
         if (!member.computed) {
             if (member.property.data != .identifier) return error.UnsupportedSyntax;
-            const key_const = try self.addConstant(.{ .property_key = member.property.data.identifier });
+            const prop_name = member.property.data.identifier;
+            if (prop_name.len > 0 and prop_name[0] == '#') return error.UnsupportedSyntax;
+            const key_const = try self.addConstant(.{ .property_key = prop_name });
             try self.emitOp(.{ .opcode = .get_prop, .a = dst, .b = obj_reg, .c = key_const });
         } else if (asIntegerIndex(member.property)) |num| {
             if (self.constants.items.len < std.math.maxInt(u8)) {
@@ -1292,7 +1316,8 @@ test "emitter disassembles an add function" {
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings(
         "0000 add r2, r0, r1\n" ++
-            "0001 return_value r2\n",
+            "0001 return_value r2\n" ++
+            "0002 return_undefined\n",
         text,
     );
 }

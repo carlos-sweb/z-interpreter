@@ -30,6 +30,7 @@ const zvalue = @import("zvalue");
 const JSValue = zvalue.JSValue;
 const bytecode_emitter = @import("bytecode/emitter.zig");
 const bytecode_vm = @import("bytecode/vm.zig");
+const codeblock = @import("bytecode/codeblock.zig");
 const fiber_mod = @import("fiber.zig");
 
 const interpreter_mod = @import("interpreter.zig");
@@ -201,6 +202,7 @@ pub fn run(self: *Interpreter, source: []const u8) anyerror!JSValue {
     const parser = try zfunctions.Parser.init(ast_arena, source);
     parser.setStackLimit(self.stack_limit);
     const program = try parser.parseProgram();
+    if (codeblock.hasUseStrict(program)) self.strict_mode = true;
     if (self.compile_options.use_bytecode_vm) {
         var compiled = bytecode_emitter.BytecodeEmitter.emitScript(self.gc_allocator, program) catch |err| switch (err) {
             error.UnsupportedSyntax, error.UnknownLocal => blk: {
