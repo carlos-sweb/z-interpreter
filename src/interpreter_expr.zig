@@ -803,7 +803,7 @@ fn numericBinaryFastPath(op: zparser.BinaryOp, left: JSValue, right: JSValue) ?J
 /// primitives. `==`/`!=` keep `looseEqualsJS`, which does its own
 /// spec-shaped reduction. Shared by binary expressions and compound
 /// assignment.
-fn applyBinaryOp(self: *Interpreter, op: zparser.BinaryOp, l: JSValue, r: JSValue) anyerror!JSValue {
+pub fn applyBinaryOp(self: *Interpreter, op: zparser.BinaryOp, l: JSValue, r: JSValue) anyerror!JSValue {
     const allocator = self.gc_allocator;
     switch (op) {
         .instanceof, .in => unreachable,

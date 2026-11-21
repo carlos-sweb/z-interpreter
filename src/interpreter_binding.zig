@@ -236,7 +236,51 @@ const BindMode = enum { define, assign };
 /// replace callback explicitly `.deinit()`s every `call_args` entry
 /// after the call). Reverted -- the retain here is load-bearing, not
 /// redundant, given that wider convention.
+pub const DestructureResult = struct {
+    items: []const JSValue,
+    iter_to_close: ?JSValue = null,
+};
+
+pub fn getDestructureItems(self: *Interpreter, arena: std.mem.Allocator, value: JSValue, count: usize, has_rest: bool) anyerror!DestructureResult {
+    if (value.isArray()) {
+        const src = value.asArray().value.toSlice();
+        const out = try arena.alloc(JSValue, src.len);
+        @memcpy(out, src);
+        return .{ .items = out };
+    }
+    if (value.isString() or value.isSet() or value.isMap() or value.isTypedArray()) {
+        const out = try self.iterableItems(value);
+        return .{ .items = out };
+    }
+    if (value.isObject()) {
+        const iter = try self.resolveIterator(value);
+        const next_fn = try self.getProperty(iter, "next");
+        if (!next_fn.isFunction()) return self.throwError(.type_error, "iterator.next is not a function", .{});
+        var list: std.ArrayList(JSValue) = .empty;
+        errdefer {
+            for (list.items) |item| item.deinit();
+            list.deinit(arena);
+        }
+        var done = false;
+        while (!done) {
+            if (!has_rest and list.items.len >= count) break;
+            const step = try next_fn.asFunction().value.call(next_fn.asFunction().value.ctx, arena, iter, &.{});
+            if (!step.isObject()) return self.throwError(.type_error, "Iterator result {s} is not an object", .{step.typeOf()});
+            done = coercion.isTruthy(try self.getProperty(step, "done"));
+            if (done) break;
+            try list.append(arena, try self.getProperty(step, "value"));
+        }
+        const iter_to_close: ?JSValue = if (!has_rest and !done) iter else null;
+        return .{
+            .items = try list.toOwnedSlice(arena),
+            .iter_to_close = iter_to_close,
+        };
+    }
+    return self.throwError(.type_error, "{s} is not iterable", .{value.typeOf()});
+}
+
 pub fn bindPattern(self: *Interpreter, env: *Environment, pattern: *const zstatements.BindingPattern, value: JSValue, mode: BindMode) anyerror!void {
+
     const arena = self.gc_allocator;
     switch (pattern.*) {
         .identifier => |id| {
@@ -249,8 +293,14 @@ pub fn bindPattern(self: *Interpreter, env: *Environment, pattern: *const zstate
             }
         },
         .array => |arr_pat| {
-            const items = try self.iterableItems(value);
+            const has_rest = arr_pat.rest != null;
+            const des = try self.getDestructureItems(arena, value, arr_pat.elements.len, has_rest);
+            const items = des.items;
             defer arena.free(items);
+            var closed = false;
+            defer if (!closed) {
+                if (des.iter_to_close) |itc| closeIterator(self, itc) catch {};
+            };
             for (arr_pat.elements, 0..) |maybe_el, i| {
                 const el = maybe_el orelse continue; // elision hole
                 var v = if (i < items.len) items[i] else JSValue.UNDEFINED;
@@ -281,6 +331,10 @@ pub fn bindPattern(self: *Interpreter, env: *Environment, pattern: *const zstate
                     }
                 }
                 try self.bindPattern(env, rest_pat, rest_arr, mode);
+            }
+            if (des.iter_to_close) |itc| {
+                closed = true;
+                try closeIterator(self, itc);
             }
         },
         .object => |obj_pat| {
@@ -358,8 +412,22 @@ pub fn destructuringAssign(self: *Interpreter, env: *Environment, target: *zpars
     const arena = self.gc_allocator;
     switch (target.data) {
         .array_literal => |elements| {
-            const items = try self.iterableItems(value);
+            var has_spread = false;
+            for (elements) |maybe_el| {
+                if (maybe_el) |el| {
+                    if (el.data == .spread) {
+                        has_spread = true;
+                        break;
+                    }
+                }
+            }
+            const des = try self.getDestructureItems(arena, value, elements.len, has_spread);
+            const items = des.items;
             defer arena.free(items);
+            var closed = false;
+            defer if (!closed) {
+                if (des.iter_to_close) |itc| closeIterator(self, itc) catch {};
+            };
             for (elements, 0..) |maybe_el, i| {
                 const el = maybe_el orelse continue; // hole still consumes its index
                 if (el.data == .spread) {
@@ -387,6 +455,10 @@ pub fn destructuringAssign(self: *Interpreter, env: *Environment, target: *zpars
                     el_target = el.data.assignment.target;
                 }
                 try self.destructuringAssignTarget(env, el_target, v);
+            }
+            if (des.iter_to_close) |itc| {
+                closed = true;
+                try closeIterator(self, itc);
             }
         },
         .object_literal => |elements| {

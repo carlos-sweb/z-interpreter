@@ -211,6 +211,8 @@ pub fn run(self: *Interpreter, source: []const u8) anyerror!JSValue {
         };
         if (compiled) |*block| {
             defer block.deinit(self.gc_allocator);
+            try self.hoistVarScope(self.script_env.?, program);
+            try self.hoistLexical(self.script_env.?, program);
             if (self.compile_options.disasm) {
                 const text = bytecode_emitter.disassemble(self.gc_allocator, &block.block) catch null;
                 if (text) |t| {
@@ -218,7 +220,8 @@ pub fn run(self: *Interpreter, source: []const u8) anyerror!JSValue {
                     _ = self.console_error_writer.writeAll(t) catch {};
                 }
             }
-            const vm_result = bytecode_vm.vmCall(self.gc_allocator, &block.block, self.script_env, &.{}, self) catch |err| switch (err) {
+            const this_val = if (self.global_object) |go| go else JSValue.UNDEFINED;
+            const vm_result = bytecode_vm.vmCall(self.gc_allocator, &block.block, self.script_env, this_val, &.{}, self) catch |err| switch (err) {
                 error.UnsupportedOpcode => null,
                 else => return err,
             };

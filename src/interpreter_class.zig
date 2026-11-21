@@ -773,13 +773,17 @@ pub fn invokeFunctionNode(
         // Unsupported AST shapes have no CodeBlock and stay on the existing
         // walker. The VM is selected only after a CodeBlock was emitted.
         if (getOrCompileBytecode(self, fnode)) |cb| {
-            const vm_result = bytecode_vm.vmCall(self.gc_allocator, &cb.block, closure_env, args, self) catch |err| switch (err) {
-                // An older/emitted block may contain an opcode not implemented
-                // by this VM revision. Preserve the AST path in that case.
-                error.UnsupportedOpcode => null,
+            var resolved_this = false;
+            const actual_this = if (this_value) |tv| tv else blk: {
+                resolved_this = true;
+                break :blk closure_env.resolveThis();
+            };
+            defer if (resolved_this) actual_this.deinit();
+            const vm_result = bytecode_vm.vmCall(self.gc_allocator, &cb.block, closure_env, actual_this, args, self) catch |err| switch (err) {
+                error.UnsupportedOpcode => return err,
                 else => return err,
             };
-            if (vm_result) |value| return value;
+            return vm_result;
         }
     }
     const escaping = functionMayEscape(fnode);

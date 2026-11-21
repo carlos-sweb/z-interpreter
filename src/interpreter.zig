@@ -1065,6 +1065,8 @@ pub const Interpreter = struct {
     pub const drainIterator = interpreter_binding.drainIterator;
     pub const evalYieldDelegate = interpreter_binding.evalYieldDelegate;
     pub const bindPattern = interpreter_binding.bindPattern;
+    pub const getDestructureItems = interpreter_binding.getDestructureItems;
+    pub const closeIterator = interpreter_binding.closeIterator;
     pub const destructuringAssign = interpreter_binding.destructuringAssign;
     pub const destructuringAssignTarget = interpreter_binding.destructuringAssignTarget;
     pub const bindForIteration = interpreter_binding.bindForIteration;
@@ -1077,6 +1079,7 @@ pub const Interpreter = struct {
     // z-interpreter-refactor.md, Step 5 Phase C batch 9 (FINAL): expr+
     // propkey cluster, split into interpreter_expr.zig.
     pub const evalExpression = interpreter_expr.evalExpression;
+    pub const applyBinaryOp = interpreter_expr.applyBinaryOp;
     pub const encodeKey = interpreter_expr.encodeKey;
     pub const isSymbolKey = interpreter_expr.isSymbolKey;
     pub const PropKey = interpreter_expr.PropKey;
@@ -1878,4 +1881,53 @@ test "collectGarbage keeps a reachable suspended generator context" {
     const result = try interp.run("g.next().value;");
     defer result.deinit();
     try testing.expectEqual(@as(f64, 42), result.asNumber());
+}
+
+test "destructuring array pattern closes unexhausted iterator without infinite loop" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    const result = try interp.run(
+        \\var returnCount = 0;
+        \\var iter = {
+        \\  [Symbol.iterator]: function() {
+        \\    return {
+        \\      next: function() { return { value: 42, done: false }; },
+        \\      return: function() { returnCount++; return { done: true }; }
+        \\    };
+        \\  }
+        \\};
+        \\var fn_destruct = ([x]) => x;
+        \\var val = fn_destruct(iter);
+        \\returnCount === 1 && val === 42;
+    );
+    defer result.deinit();
+    try testing.expect(result.isBool() and result.asBool());
+}
+
+test "bytecode function with string concat and lexical this executes exactly once" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    const result = try interp.run(
+        \\var calls = 0;
+        \\var obj = {
+        \\  prefix: "count: ",
+        \\  getFn: function() {
+        \\    return () => {
+        \\      calls++;
+        \\      return this.prefix + calls;
+        \\    };
+        \\  }
+        \\};
+        \\var fn_call = obj.getFn();
+        \\var str = fn_call();
+        \\calls === 1 && str === "count: 1";
+    );
+    defer result.deinit();
+    try testing.expect(result.isBool() and result.asBool());
 }
