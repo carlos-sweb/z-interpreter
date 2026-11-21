@@ -80,7 +80,9 @@ pub const ArrayIterCtx = builtin_helpers.ArrayIterCtx;
 const arrayIterNext = builtin_helpers.arrayIterNext;
 const makeArrayIterator = builtin_helpers.makeArrayIterator;
 const iteratorSelfBuiltin = builtin_helpers.iteratorSelfBuiltin;
-const isObjectLike = builtin_helpers.isObjectLike;
+pub const isObjectLike = builtin_helpers.isObjectLike;
+pub const capResolve = promise_builtins.capResolve;
+pub const capReject = promise_builtins.capReject;
 
 // z-interpreter-refactor.md, Step 5 Phase A: first domain-file batch
 // (smallest/cleanest per the plan -- Promise+Timers, Function, Symbol,

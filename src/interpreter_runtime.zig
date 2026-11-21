@@ -370,18 +370,69 @@ pub fn runPendingJob(self: *Interpreter) anyerror!void {
     if (job.derived) |d| try self.resolvePromise(d, result);
 }
 
-/// ECMA-262 27.2.1.3.2 resolve, narrowed: resolving with another
-/// promise ADOPTS its eventual state (thenables that aren't real
-/// promises are not detected -- documented narrowing); resolving with
-/// itself is the spec's chaining-cycle TypeError; anything else
-/// fulfills.
+fn thenableJobCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const c: *builtins.FinallyCtx = @ptrCast(@alignCast(ctx));
+    const self = c.interp;
+    const thenable = if (args.len > 0) args[0] else JSValue.UNDEFINED;
+    const cap = try allocator.create(builtins.PromiseCapCtx);
+    cap.* = .{ .interp = self, .promise = c.aux.retain() };
+    try self.gcTrackPromiseCapCtx(cap);
+    const resolve_fn = try self.gcNewFunction(.{ .ctx = cap, .name = "", .arity = 1, .call = builtins.capResolve });
+    const reject_fn = try self.gcNewFunction(.{ .ctx = cap, .name = "", .arity = 1, .call = builtins.capReject });
+    const res = c.handler.asFunction().value.call(c.handler.asFunction().value.ctx, allocator, thenable, &.{ resolve_fn, reject_fn }) catch |err0| {
+        const err = self.throwIfGap(err0);
+        if (err != error.JsThrow) return err;
+        const ex = self.pending_exception.?;
+        self.pending_exception = null;
+        if (!cap.already_resolved) {
+            cap.already_resolved = true;
+            try self.rejectPromiseValue(c.aux, ex);
+        } else {
+            ex.deinit();
+        }
+        return JSValue.UNDEFINED;
+    };
+    res.deinit();
+    return JSValue.UNDEFINED;
+}
+
+/// ECMA-262 27.2.1.3.2 resolve: resolving with itself is the spec's
+/// chaining-cycle TypeError; resolving with an object/promise checks
+/// for a callable `then` property (enqueueing a PromiseResolveThenableJob
+/// if custom, or fast-subscribing if native Promise); anything else fulfills.
 pub fn resolvePromise(self: *Interpreter, p: JSValue, value: JSValue) anyerror!void {
     if (value.isPromise()) {
         if (value.asPromise() == p.asPromise()) {
             const cycle = try self.gcNewError(.type_error, "Chaining cycle detected for promise");
             return self.settlePromise(p, .rejected, cycle);
         }
-        return self.subscribePromise(value, null, null, p);
+        if (self.extraProps(value) == null) {
+            return self.subscribePromise(value, null, null, p);
+        }
+    }
+    if (builtins.isObjectLike(value)) {
+        const then_val = self.getProperty(value, "then") catch |err0| {
+            const err = self.throwIfGap(err0);
+            if (err != error.JsThrow) return err;
+            const ex = self.pending_exception.?;
+            self.pending_exception = null;
+            return self.settlePromise(p, .rejected, ex);
+        };
+        if (then_val.isFunction()) {
+            const c = try self.gc_allocator.create(builtins.FinallyCtx);
+            c.* = .{ .interp = self, .handler = then_val, .aux = p.retain() };
+            try self.gcTrackFinallyCtx(c);
+            const job_fn = try self.gcNewFunction(.{ .ctx = c, .name = "", .call = thenableJobCall });
+            try self.pending_jobs.append(self.gc_allocator, .{
+                .handler = job_fn,
+                .argument = value.retain(),
+                .rejected = false,
+                .derived = null,
+            });
+            return;
+        }
+        then_val.deinit();
     }
     try self.settlePromise(p, .fulfilled, value);
 }
@@ -510,7 +561,13 @@ pub fn resumeFiber(self: *Interpreter, fs: *FiberState) anyerror!void {
 /// evaluator, AsyncGeneratorYield's implicit Await of a yielded value,
 /// and `for await`'s per-value Await.
 pub fn awaitValue(self: *Interpreter, fs: *FiberState, operand: JSValue) anyerror!JSValue {
-    const p = if (operand.isPromise()) operand else try self.fulfilledPromise(operand);
+    const p = if (operand.isPromise() and self.extraProps(operand) == null)
+        operand
+    else blk: {
+        const fresh = try self.gcNewPromise();
+        try self.resolvePromise(fresh, operand);
+        break :blk fresh;
+    };
     const on_f = try self.gcNewFunction(.{ .ctx = fs, .name = "", .call = awaitOnFulfilled });
     const on_r = try self.gcNewFunction(.{ .ctx = fs, .name = "", .call = awaitOnRejected });
     try self.subscribePromise(p, on_f, on_r, null);
@@ -650,6 +707,280 @@ pub fn makeAsyncGeneratorObject(
         try obj.asObject().value.set(key, try self.nativeMethod("asyncIterator", "self", 0, iteratorSelf));
     }
     return obj;
+}
+
+fn asyncCloseOnError(self: *Interpreter, fs: *FiberState, iter: JSValue) void {
+    const saved = self.pending_exception;
+    self.pending_exception = null;
+    defer self.pending_exception = saved;
+    const ret_fn = self.getProperty(iter, "return") catch {
+        if (self.pending_exception) |ie| ie.deinit();
+        self.pending_exception = null;
+        return;
+    };
+    defer ret_fn.deinit();
+    if (ret_fn.isFunction()) {
+        const res = ret_fn.asFunction().value.call(ret_fn.asFunction().value.ctx, self.gc_allocator, iter, &.{}) catch {
+            if (self.pending_exception) |ie| ie.deinit();
+            self.pending_exception = null;
+            return;
+        };
+        defer res.deinit();
+        const awaited = self.awaitValue(fs, res) catch {
+            if (self.pending_exception) |ie| ie.deinit();
+            self.pending_exception = null;
+            return;
+        };
+        awaited.deinit();
+    }
+}
+
+fn syncCloseOnError(self: *Interpreter, iter: JSValue) void {
+    const saved = self.pending_exception;
+    self.pending_exception = null;
+    defer self.pending_exception = saved;
+    self.closeIterator(iter) catch {
+        if (self.pending_exception) |ie| ie.deinit();
+        self.pending_exception = null;
+    };
+}
+
+fn createDataPropOnFromAsyncTarget(self: *Interpreter, target: JSValue, index: usize, value: JSValue) anyerror!void {
+    if (target.isArray()) {
+        var arr = &target.asArray().value;
+        if (index == arr.toSlice().len) {
+            _ = try arr.push(value.retain());
+            return;
+        }
+    }
+    var buf: [32]u8 = undefined;
+    const pk = std.fmt.bufPrint(&buf, "{d}", .{index}) catch unreachable;
+    if (target.isObject()) {
+        var obj = &target.asObject().value;
+        if (obj.getOwnRecord(pk)) |rec| {
+            if (!rec.descriptor.configurable) {
+                return self.throwError(.type_error, "Cannot redefine property: {s}", .{pk});
+            }
+        } else if (!obj.is_extensible) {
+            return self.throwError(.type_error, "Cannot add property {s}, object is not extensible", .{pk});
+        }
+        try obj.defineProperty(pk, value.retain(), .{ .writable = true, .enumerable = true, .configurable = true });
+        return;
+    }
+    try self.setPropertyOnValue(target, pk, value);
+}
+
+fn fromAsyncBody(self: *Interpreter, fs: *FiberState) anyerror!JSValue {
+    const arena = self.gc_allocator;
+    const c_val = fs.this_value orelse JSValue.UNDEFINED;
+    const items = if (fs.args.len > 0) fs.args[0] else JSValue.UNDEFINED;
+    const mapfn = if (fs.args.len > 1) fs.args[1] else JSValue.UNDEFINED;
+    const this_arg = if (fs.args.len > 2) fs.args[2] else JSValue.UNDEFINED;
+
+    const has_map = !mapfn.isUndefined();
+    if (has_map and !mapfn.isFunction()) {
+        return self.throwError(.type_error, "Array.fromAsync mapper is not a function", .{});
+    }
+    if (items.isUndefined() or items.isNull()) {
+        return self.throwError(.type_error, "Cannot convert undefined or null to object", .{});
+    }
+
+    var using_async: JSValue = JSValue.UNDEFINED;
+    if (self.symbol_async_iterator) |sym| {
+        const key = try self.encodeKey(sym);
+        defer arena.free(key);
+        using_async = try self.getProperty(items, key);
+        if (!using_async.isUndefined() and !using_async.isNull() and !using_async.isFunction()) {
+            using_async.deinit();
+            return self.throwError(.type_error, "Symbol.asyncIterator is not a function", .{});
+        }
+    }
+    defer using_async.deinit();
+
+    var using_sync: JSValue = JSValue.UNDEFINED;
+    if (using_async.isUndefined() or using_async.isNull()) {
+        if (self.symbol_iterator) |sym| {
+            const key = try self.encodeKey(sym);
+            defer arena.free(key);
+            using_sync = try self.getProperty(items, key);
+            if (!using_sync.isUndefined() and !using_sync.isNull() and !using_sync.isFunction()) {
+                using_sync.deinit();
+                return self.throwError(.type_error, "Symbol.iterator is not a function", .{});
+            }
+        }
+    }
+    defer using_sync.deinit();
+
+    const coercion = @import("coercion.zig");
+    if (using_async.isFunction() or using_sync.isFunction()) {
+        const is_async_iter = using_async.isFunction();
+        const method = if (is_async_iter) using_async else using_sync;
+        const iter = try method.asFunction().value.call(method.asFunction().value.ctx, arena, items, &.{});
+        defer iter.deinit();
+        if (!builtins.isObjectLike(iter)) {
+            return self.throwError(.type_error, "Iterator is not an object", .{});
+        }
+        const next_fn = try self.getProperty(iter, "next");
+        defer next_fn.deinit();
+        if (!next_fn.isFunction()) {
+            return self.throwError(.type_error, "iterator.next is not a function", .{});
+        }
+
+        const result_arr = if (self.isConstructor(c_val))
+            try self.constructValue(c_val, &.{}, "")
+        else
+            try self.gcNewArray();
+        errdefer result_arr.deinit();
+
+        var k: usize = 0;
+        while (true) : (k += 1) {
+            if (k >= 9007199254740991) {
+                _ = self.throwError(.type_error, "Array length exceeded maximum safe integer", .{}) catch {};
+                if (is_async_iter) asyncCloseOnError(self, fs, iter) else syncCloseOnError(self, iter);
+                return error.JsThrow;
+            }
+            const raw_step = try next_fn.asFunction().value.call(next_fn.asFunction().value.ctx, arena, iter, &.{});
+            const step = if (is_async_iter) blk: {
+                defer raw_step.deinit();
+                break :blk try self.awaitValue(fs, raw_step);
+            } else raw_step;
+            defer step.deinit();
+
+            if (!builtins.isObjectLike(step)) {
+                return self.throwError(.type_error, "Iterator result is not an object", .{});
+            }
+            const done_val = try self.getProperty(step, "done");
+            const done = coercion.isTruthy(done_val);
+            done_val.deinit();
+            if (done) {
+                if (result_arr.isArray()) {
+                    try self.setArrayProperty(result_arr, "length", JSValue.fromNumber(@floatFromInt(k)));
+                } else {
+                    try self.setPropertyOnValue(result_arr, "length", JSValue.fromNumber(@floatFromInt(k)));
+                }
+                return result_arr;
+            }
+
+            const raw_val = try self.getProperty(step, "value");
+            const next_val = if (!is_async_iter) blk: {
+                defer raw_val.deinit();
+                break :blk self.awaitValue(fs, raw_val) catch |err| {
+                    syncCloseOnError(self, iter);
+                    return err;
+                };
+            } else raw_val;
+            defer next_val.deinit();
+
+            const mapped_val = if (has_map) blk: {
+                const m = mapfn.asFunction().value.call(mapfn.asFunction().value.ctx, arena, this_arg, &.{ next_val, JSValue.fromNumber(@floatFromInt(k)) }) catch |err| {
+                    if (is_async_iter) asyncCloseOnError(self, fs, iter) else syncCloseOnError(self, iter);
+                    return err;
+                };
+                defer m.deinit();
+                break :blk self.awaitValue(fs, m) catch |err| {
+                    if (is_async_iter) asyncCloseOnError(self, fs, iter) else syncCloseOnError(self, iter);
+                    return err;
+                };
+            } else next_val.retain();
+            defer mapped_val.deinit();
+
+            createDataPropOnFromAsyncTarget(self, result_arr, k, mapped_val) catch |err| {
+                if (is_async_iter) asyncCloseOnError(self, fs, iter) else syncCloseOnError(self, iter);
+                return err;
+            };
+        }
+    }
+
+    const len_val = try self.getProperty(items, "length");
+    defer len_val.deinit();
+    const raw_len = try self.toNumberJS(len_val);
+    const clamped_len_f = if (std.math.isNan(raw_len) or raw_len <= 0)
+        0.0
+    else
+        @min(@trunc(raw_len), 9007199254740991.0);
+
+    const result_arr = if (self.isConstructor(c_val))
+        try self.constructValue(c_val, &.{JSValue.fromNumber(clamped_len_f)}, "")
+    else blk: {
+        if (clamped_len_f > 4294967295.0) {
+            return self.throwError(.range_error, "Invalid array length", .{});
+        }
+        break :blk try self.gcNewArray();
+    };
+    errdefer result_arr.deinit();
+
+    if (clamped_len_f > 4294967295.0) {
+        return self.throwError(.range_error, "Invalid array length", .{});
+    }
+    const len: usize = @intFromFloat(clamped_len_f);
+    var k: usize = 0;
+    while (k < len) : (k += 1) {
+        var buf: [32]u8 = undefined;
+        const pk = std.fmt.bufPrint(&buf, "{d}", .{k}) catch unreachable;
+        const k_val = try self.getProperty(items, pk);
+        const awaited_k = blk: {
+            defer k_val.deinit();
+            break :blk try self.awaitValue(fs, k_val);
+        };
+        defer awaited_k.deinit();
+
+        const mapped_val = if (has_map) blk: {
+            const m = try mapfn.asFunction().value.call(mapfn.asFunction().value.ctx, arena, this_arg, &.{ awaited_k, JSValue.fromNumber(@floatFromInt(k)) });
+            defer m.deinit();
+            break :blk try self.awaitValue(fs, m);
+        } else awaited_k.retain();
+        defer mapped_val.deinit();
+
+        try createDataPropOnFromAsyncTarget(self, result_arr, k, mapped_val);
+    }
+    if (result_arr.isArray()) {
+        try self.setArrayProperty(result_arr, "length", JSValue.fromNumber(@floatFromInt(len)));
+    } else {
+        try self.setPropertyOnValue(result_arr, "length", JSValue.fromNumber(@floatFromInt(len)));
+    }
+    return result_arr;
+}
+
+fn fromAsyncFiberEntry(arg: *anyopaque) void {
+    const fs: *FiberState = @ptrCast(@alignCast(arg));
+    const self = fs.interp;
+    const result = fromAsyncBody(self, fs) catch |err0| {
+        const err = self.throwIfGap(err0);
+        if (err == error.JsThrow) {
+            const ex = self.pending_exception.?;
+            self.pending_exception = null;
+            self.rejectPromiseValue(fs.promise.?, ex) catch |e2| {
+                fs.fatal_error = e2;
+            };
+        } else {
+            fs.fatal_error = err;
+        }
+        return;
+    };
+    self.resolvePromise(fs.promise.?, result) catch |e2| {
+        fs.fatal_error = e2;
+    };
+}
+
+pub fn runFromAsync(self: *Interpreter, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const arena = self.gc_allocator;
+    const fs = try arena.create(FiberState);
+    fs.* = .{
+        .is_generator = false,
+        .is_async = true,
+        .interp = self,
+        .fiber = undefined,
+        .fnode = undefined,
+        .closure_env = self.global_env,
+        .this_value = this_value.retain(),
+        .private_ctx = null,
+        .args = try retainedCopy(arena, args),
+        .promise = try self.gcNewPromise(),
+    };
+    fs.fiber = try fiber_mod.Fiber.init(arena, fromAsyncFiberEntry, fs);
+    try self.gcTrackFiberState(fs);
+    try self.resumeFiber(fs);
+    return fs.promise.?.retain();
 }
 
 // ===== Timers (setTimeout macrotasks) =====

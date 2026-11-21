@@ -218,14 +218,23 @@ const Marker = struct {
                 self.value(bc.bound_this);
                 for (bc.pre_args) |a| self.value(a);
             },
-            .finally_ctx => |c| self.value(c.handler),
+            .finally_ctx => |c| {
+                self.value(c.handler);
+                self.value(c.aux);
+            },
             .all_ctx => |c| {
                 for (c.results) |r| self.value(r);
                 self.value(c.derived);
+                self.value(c.resolve_fn);
+                self.value(c.reject_fn);
             },
             // The element callback keeps its shared AllCtx reachable.
             .all_elem_ctx => |c| self.context(c.all),
-            .race_ctx => |c| self.value(c.derived),
+            .race_ctx => |c| {
+                self.value(c.derived);
+                self.value(c.resolve_fn);
+                self.value(c.reject_fn);
+            },
             .revoke_ctx => |c| self.value(c.proxy),
             .array_iter_ctx => |c| for (c.items) |item| self.value(item),
             else => {},
@@ -1069,11 +1078,14 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
         },
         .finally_ctx => |c| {
             sweeper.value(c.handler);
+            sweeper.value(c.aux);
             self.gc_allocator.destroy(c);
         },
         .all_ctx => |c| {
             for (c.results) |r| sweeper.value(r);
             sweeper.value(c.derived);
+            sweeper.value(c.resolve_fn);
+            sweeper.value(c.reject_fn);
             self.gc_allocator.free(c.results);
             self.gc_allocator.destroy(c);
         },
@@ -1082,6 +1094,8 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
         .all_elem_ctx => |c| self.gc_allocator.destroy(c),
         .race_ctx => |c| {
             sweeper.value(c.derived);
+            sweeper.value(c.resolve_fn);
+            sweeper.value(c.reject_fn);
             self.gc_allocator.destroy(c);
         },
         .revoke_ctx => |c| {

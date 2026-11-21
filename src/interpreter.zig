@@ -1022,6 +1022,7 @@ pub const Interpreter = struct {
     pub const makeGeneratorObject = interpreter_runtime.makeGeneratorObject;
     pub const runAsyncFunction = interpreter_runtime.runAsyncFunction;
     pub const makeAsyncGeneratorObject = interpreter_runtime.makeAsyncGeneratorObject;
+    pub const runFromAsync = interpreter_runtime.runFromAsync;
     // ===== Timers (setTimeout macrotasks) =====
     pub const addTimer = interpreter_runtime.addTimer;
     pub const clearTimer = interpreter_runtime.clearTimer;
@@ -2611,6 +2612,52 @@ test "class private fields, getters, setters, methods, and in-operator handle Un
     defer result.deinit();
     try testing.expect(result.isBool() and result.asBool());
 }
+
+test "Promise combinators reject on synchronous errors, close iterators, unwrap thenables, and Array.fromAsync works" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    const result = try interp.run(
+        \\var resName = "";
+        \\var rejName = "";
+        \\var resLen = -1;
+        \\new Promise((res, rej) => { resName = res.name; rejName = rej.name; resLen = res.length; res(1); });
+        \\var allRejectedNonIter = false;
+        \\Promise.all(false).then(() => {}, (e) => { allRejectedNonIter = e instanceof TypeError; });
+        \\var raceRejectedNonIter = false;
+        \\Promise.race(null).then(() => {}, (e) => { raceRejectedNonIter = e instanceof TypeError; });
+        \\var closedCount = 0;
+        \\var badIter = {
+        \\  [Symbol.iterator]() {
+        \\    return {
+        \\      next() { return { value: { get then() { throw new TypeError("poisoned"); } }, done: false }; },
+        \\      return() { closedCount++; return {}; }
+        \\    };
+        \\  }
+        \\};
+        \\var origResolve = Promise.resolve;
+        \\Promise.resolve = function() { throw new RangeError("resolve boom"); };
+        \\var closeRejectOk = false;
+        \\Promise.all(badIter).then(() => {}, (e) => { closeRejectOk = e instanceof RangeError; });
+        \\Promise.resolve = origResolve;
+        \\var fromAsyncOut = "";
+        \\async function* ag() { yield 10; yield 20; yield 30; }
+        \\Array.fromAsync(ag(), (v, i) => ({ then(r) { r(v + i); } })).then((arr) => {
+        \\  fromAsyncOut = arr.join(",");
+        \\});
+        \\resName === "" && rejName === "" && resLen === 1;
+    );
+    defer result.deinit();
+    try testing.expect(result.isBool() and result.asBool());
+    const verify = try interp.run(
+        \\allRejectedNonIter && raceRejectedNonIter && closedCount === 1 && closeRejectOk && fromAsyncOut === "10,21,32";
+    );
+    defer verify.deinit();
+    try testing.expect(verify.isBool() and verify.asBool());
+}
+
 
 
 

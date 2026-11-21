@@ -1516,6 +1516,11 @@ fn arrayEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     return makeArrayIterator(interp(ctx), allocator, obj, .entries);
 }
 
+fn arrayFromAsync(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    return interp(ctx).runFromAsync(this_value, args);
+}
+
 /// Installs the `Array` constructor + statics.
 pub fn install(self: *Interpreter) !void {
     // Array: constructable (new Array(n) / Array(a, b, c)) + statics.
@@ -1523,5 +1528,6 @@ pub fn install(self: *Interpreter) !void {
         .{ .name = "isArray", .value = .{ .method = .{ .call = arrayIsArray, .arity = 1 } } },
         .{ .name = "of", .value = .{ .method = .{ .call = arrayOf, .arity = 0 } } },
         .{ .name = "from", .value = .{ .method = .{ .call = arrayFrom, .arity = 1 } } },
+        .{ .name = "fromAsync", .value = .{ .method = .{ .call = arrayFromAsync, .arity = 1 } } },
     } });
 }
