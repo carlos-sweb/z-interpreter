@@ -280,7 +280,13 @@ fn setProp(frame: *CallFrame, allocator: Allocator, obj: JSValue, key: []const u
             }
         }
         const old = box.value.getOwn(key);
-        try box.value.set(key, val.retain());
+        box.value.set(key, val.retain()) catch |err| switch (err) {
+            error.ObjectIsFrozen, error.ObjectNotExtensible, error.PropertyNotWritable => {
+                if (frame.interp) |it| return it.setPropertyOnValue(obj, key, val);
+                return err;
+            },
+            else => return err,
+        };
         if (old) |o| o.deinit();
     } else if (obj.isArray()) {
         const box = obj.asArray();
@@ -302,43 +308,77 @@ fn setProp(frame: *CallFrame, allocator: Allocator, obj: JSValue, key: []const u
 
 noinline fn getElem(frame: *CallFrame, allocator: Allocator, obj: JSValue, key_val: JSValue) !JSValue {
     if (obj.isArray() and key_val.isNumber()) {
-        const n = key_val.asNumber();
-        if (n >= 0 and !std.math.isNan(n) and !std.math.isInf(n)) {
-            const idx: usize = @intFromFloat(n);
-            if (@as(f64, @floatFromInt(idx)) == n) {
-                if (idx < obj.asArray().value.length()) return obj.asArray().value.get(idx).retain();
-                return JSValue.UNDEFINED;
+        const arr = &obj.asArray().value;
+        if (arr.holey == null) {
+            const n = key_val.asNumber();
+            if (n >= 0 and !std.math.isNan(n) and !std.math.isInf(n)) {
+                const idx: usize = @intFromFloat(n);
+                if (@as(f64, @floatFromInt(idx)) == n) {
+                    if (idx < arr.length()) return arr.get(idx).retain();
+                    return JSValue.UNDEFINED;
+                }
             }
         }
     }
     var buf: [32]u8 = undefined;
-    const key = try keyToString(allocator, key_val, &buf);
-    return try getProp(frame, allocator, obj, key);
+    if (keyToString(allocator, key_val, &buf)) |key| {
+        return getProp(frame, allocator, obj, key) catch |err| {
+            if (frame.interp) |it| {
+                return it.getProperty(obj, key);
+            }
+            return err;
+        };
+    } else |_| {
+        if (frame.interp) |it| {
+            const key = try it.encodeKey(key_val);
+            defer it.gc_allocator.free(key);
+            return try it.getProperty(obj, key);
+        }
+        return error.UnsupportedOpcode;
+    }
 }
 
 noinline fn setElem(frame: *CallFrame, allocator: Allocator, obj: JSValue, key_val: JSValue, val: JSValue) !void {
     if (obj.isArray() and key_val.isNumber()) {
-        const n = key_val.asNumber();
-        if (n >= 0 and !std.math.isNan(n) and !std.math.isInf(n)) {
-            const idx: usize = @intFromFloat(n);
-            if (@as(f64, @floatFromInt(idx)) == n) {
-                const cur = obj.asArray().value.length();
-                if (idx < cur) {
-                    obj.asArray().value.toSliceMut()[idx].deinit();
-                    obj.asArray().value.toSliceMut()[idx] = val.retain();
-                } else {
-                    while (obj.asArray().value.length() < idx) {
-                        _ = try obj.asArray().value.push(JSValue.UNDEFINED);
+        const arr = &obj.asArray().value;
+        const frozen = if (@hasField(@TypeOf(arr.*), "is_frozen")) arr.is_frozen else false;
+        if (!frozen and arr.holey == null) {
+            const n = key_val.asNumber();
+            if (n >= 0 and !std.math.isNan(n) and !std.math.isInf(n)) {
+                const idx: usize = @intFromFloat(n);
+                if (@as(f64, @floatFromInt(idx)) == n) {
+                    const cur = arr.length();
+                    if (idx < cur) {
+                        arr.toSliceMut()[idx].deinit();
+                        arr.toSliceMut()[idx] = val.retain();
+                    } else {
+                        while (arr.length() < idx) {
+                            _ = try arr.push(JSValue.UNDEFINED);
+                        }
+                        _ = try arr.push(val.retain());
                     }
-                    _ = try obj.asArray().value.push(val.retain());
+                    return;
                 }
-                return;
             }
         }
     }
     var buf: [32]u8 = undefined;
-    const key = try keyToString(allocator, key_val, &buf);
-    return try setProp(frame, allocator, obj, key, val);
+    if (keyToString(allocator, key_val, &buf)) |key| {
+        setProp(frame, allocator, obj, key, val) catch |err| {
+            if (frame.interp) |it| {
+                return it.setPropertyOnValue(obj, key, val);
+            }
+            return err;
+        };
+        return;
+    } else |_| {
+        if (frame.interp) |it| {
+            const key = try it.encodeKey(key_val);
+            defer it.gc_allocator.free(key);
+            return it.setPropertyOnValue(obj, key, val);
+        }
+        return error.UnsupportedOpcode;
+    }
 }
 
 /// Executes a CodeBlock without consulting the AST. The caller owns the
@@ -444,7 +484,7 @@ noinline fn setPropSlow(allocator: Allocator, frame: *CallFrame, op: codeblock.O
                 box.value.setBorrowedKey(interned, val_to_store) catch |err| switch (err) {
                     error.ObjectIsFrozen, error.ObjectNotExtensible, error.PropertyNotWritable => {
                         if (needsDeinit(val)) val_to_store.deinit();
-                        return error.UnsupportedOpcode;
+                        return itp.setPropertyOnValue(obj, key, val);
                     },
                     else => {
                         if (needsDeinit(val)) val_to_store.deinit();
@@ -708,6 +748,22 @@ noinline fn jcmpLocalConstSlow(frame: *CallFrame, frame_regs: []const JSValue, c
             .ne => !eq,
             else => error.UnsupportedOpcode,
         };
+    } else if (kind == .eq or kind == .ne) {
+        if (left.isNumber() and c != .number) {
+            return kind == .ne;
+        } else if (left.isString() and c != .string) {
+            return kind == .ne;
+        } else if (left.isBool() and c != .boolean) {
+            return kind == .ne;
+        } else if (left.isNull() or left.isUndefined()) {
+            return kind == .ne;
+        } else if (frame.interp) |it| {
+            var rval = try constantValue(it.gc_allocator, frame.block, op.b);
+            defer rval.deinit();
+            const res = try it.applyBinaryOp(comparisonToBinaryOp(kind), left, rval);
+            return res.isTruthy();
+        }
+        return error.UnsupportedOpcode;
     } else if (frame.interp) |it| {
         var rval = try constantValue(it.gc_allocator, frame.block, op.b);
         defer rval.deinit();
@@ -1218,10 +1274,62 @@ noinline fn vmCallDispatch(
     };
     frame_count = 1;
 
-    var frame: *CallFrame = &frames[0];
-    var code: []const codeblock.Op = block.ops;
-    var ip: usize = 0;
-    var frame_regs: []JSValue = registers[0..block.register_count];
+    while (true) {
+        const val = vmExecLoop(
+            allocator,
+            frames,
+            &frame_count,
+            registers,
+            &reg_top,
+            reg_top_out,
+            &max_reg_water_mark,
+            &catch_stack,
+            &catch_top,
+            &prop_ic,
+        ) catch |err| {
+            if (err == error.JsThrow and catch_top > 0 and interp != null and interp.?.pending_exception != null) {
+                const thrown = interp.?.pending_exception.?;
+                interp.?.pending_exception = null;
+                _ = try handleJsThrow(frames, &frame_count, registers, &reg_top, &catch_stack, &catch_top, thrown);
+                reg_top_out.* = reg_top;
+                continue;
+            }
+            return err;
+        };
+        return val;
+    }
+}
+
+noinline fn vmExecLoop(
+    allocator: Allocator,
+    frames: []CallFrame,
+    frame_count_ptr: *usize,
+    registers: []JSValue,
+    reg_top_ptr: *usize,
+    reg_top_out: *usize,
+    max_reg_water_mark_ptr: *usize,
+    catch_stack: []CatchHandler,
+    catch_top_ptr: *usize,
+    prop_ic: *[256]PropIC,
+) !JSValue {
+    var frame_count: usize = frame_count_ptr.*;
+    var reg_top: usize = reg_top_ptr.*;
+    var catch_top: usize = catch_top_ptr.*;
+    var max_reg_water_mark: usize = max_reg_water_mark_ptr.*;
+
+    var frame: *CallFrame = &frames[frame_count - 1];
+    var code: []const codeblock.Op = frame.block.ops;
+    var ip: usize = frame.pc;
+    var frame_regs: []JSValue = registers[frame.reg_base .. frame.reg_base + frame.block.register_count];
+
+    defer {
+        frame_count_ptr.* = frame_count;
+        reg_top_ptr.* = reg_top;
+        catch_top_ptr.* = catch_top;
+        max_reg_water_mark_ptr.* = max_reg_water_mark;
+        frame.pc = @intCast(ip);
+    }
+
     if (ip >= code.len) return error.MissingReturn;
 
     dispatch: switch (code[ip].opcode) {
@@ -1536,23 +1644,7 @@ noinline fn vmCallDispatch(
                     old.deinit();
                 }
             } else {
-                storeGlobalSlow(frame, allocator, env, name, val, entry) catch |err| switch (err) {
-                    error.JsThrow => {
-                        if (catch_top > 0 and frame.interp != null and frame.interp.?.pending_exception != null) {
-                            const thrown = frame.interp.?.pending_exception.?;
-                            frame.interp.?.pending_exception = null;
-                            frame = try handleJsThrow(frames, &frame_count, registers, &reg_top, &catch_stack, &catch_top, thrown);
-                            reg_top_out.* = reg_top;
-                            code = frame.block.ops;
-                            ip = frame.pc;
-                            frame_regs = registers[frame.reg_base .. frame.reg_base + frame.block.register_count];
-                            if (ip >= code.len) return error.MissingReturn;
-                            continue :dispatch code[ip].opcode;
-                        }
-                        return err;
-                    },
-                    else => return err,
-                };
+                try storeGlobalSlow(frame, allocator, env, name, val, entry);
             }
             ip += 1;
             if (ip >= code.len) return error.MissingReturn;
@@ -1643,38 +1735,50 @@ noinline fn vmCallDispatch(
             if (ip >= code.len) return error.MissingReturn;
             continue :dispatch code[ip].opcode;
         },
+        .loose_eq => {
+            try looseEquality(frame, frame_regs, code[ip], false);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .loose_ne => {
+            try looseEquality(frame, frame_regs, code[ip], true);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
         .and_bits => {
-            try bitwise(frame_regs, code[ip], .bit_and);
+            try bitwise(frame, frame_regs, code[ip], .bit_and);
             ip += 1;
             if (ip >= code.len) return error.MissingReturn;
             continue :dispatch code[ip].opcode;
         },
         .or_bits => {
-            try bitwise(frame_regs, code[ip], .bit_or);
+            try bitwise(frame, frame_regs, code[ip], .bit_or);
             ip += 1;
             if (ip >= code.len) return error.MissingReturn;
             continue :dispatch code[ip].opcode;
         },
         .xor_bits => {
-            try bitwise(frame_regs, code[ip], .bit_xor);
+            try bitwise(frame, frame_regs, code[ip], .bit_xor);
             ip += 1;
             if (ip >= code.len) return error.MissingReturn;
             continue :dispatch code[ip].opcode;
         },
         .shl => {
-            try bitwise(frame_regs, code[ip], .shl);
+            try bitwise(frame, frame_regs, code[ip], .shl);
             ip += 1;
             if (ip >= code.len) return error.MissingReturn;
             continue :dispatch code[ip].opcode;
         },
         .shr => {
-            try bitwise(frame_regs, code[ip], .shr);
+            try bitwise(frame, frame_regs, code[ip], .shr);
             ip += 1;
             if (ip >= code.len) return error.MissingReturn;
             continue :dispatch code[ip].opcode;
         },
         .ushr => {
-            try bitwise(frame_regs, code[ip], .ushr);
+            try bitwise(frame, frame_regs, code[ip], .ushr);
             ip += 1;
             if (ip >= code.len) return error.MissingReturn;
             continue :dispatch code[ip].opcode;
@@ -1845,10 +1949,7 @@ noinline fn vmCallDispatch(
             continue :dispatch code[ip].opcode;
         },
         .not_bits => {
-            const op = code[ip];
-            const src = try getRegister(frame_regs, op.b);
-            if (!src.isNumber()) return error.UnsupportedOpcode;
-            try setRegPrimitive(frame_regs, op.a, JSValue.fromNumber(@floatFromInt(~numberToInt32(src.asNumber()))));
+            try notBitsOp(frame, frame_regs, code[ip]);
             ip += 1;
             if (ip >= code.len) return error.MissingReturn;
             continue :dispatch code[ip].opcode;
@@ -1862,12 +1963,18 @@ noinline fn vmCallDispatch(
             if (ip >= code.len) return error.MissingReturn;
             continue :dispatch code[ip].opcode;
         },
+        .typeof_global => {
+            try typeofGlobal(allocator, frame, frame_regs, code[ip]);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
         .jump => {
             const target_ip: usize = @intCast(try jumpTarget(frame.block, code[ip]));
             if (target_ip < ip and !frame.block.osr_failed) {
                 const remaining_frames = MAX_FRAMES - frame_count;
                 const limit_idx = @min(MAX_REGISTERS, frame.reg_base + remaining_frames * @as(usize, frame.block.register_count));
-                ip = tryEnterOsr(&allocator, frame, frame_regs, &prop_ic, target_ip, ip, registers.ptr + limit_idx);
+                ip = tryEnterOsr(&allocator, frame, frame_regs, prop_ic, target_ip, ip, registers.ptr + limit_idx);
             } else {
                 ip = target_ip;
             }
@@ -2131,7 +2238,7 @@ noinline fn vmCallDispatch(
             continue :dispatch code[ip].opcode;
         },
         .setup_catch => {
-            try setupCatchOp(&catch_stack, &catch_top, frame_count, reg_top, frame.block, code[ip]);
+            try setupCatchOp(catch_stack, &catch_top, frame_count, reg_top, frame.block, code[ip]);
             ip += 1;
             if (ip >= code.len) return error.MissingReturn;
             continue :dispatch code[ip].opcode;
@@ -2143,7 +2250,7 @@ noinline fn vmCallDispatch(
             continue :dispatch code[ip].opcode;
         },
         .throw_value => {
-            frame = try throwValueOp(frames, &frame_count, registers, &reg_top, &catch_stack, &catch_top, frame_regs, code[ip]);
+            frame = try throwValueOp(frames, &frame_count, registers, &reg_top, catch_stack, &catch_top, frame_regs, code[ip]);
             reg_top_out.* = reg_top;
             code = frame.block.ops;
             ip = frame.pc;
@@ -2170,21 +2277,100 @@ fn numberToInt32(n: f64) i32 {
     return @bitCast(numberToUint32(n));
 }
 
-noinline fn bitwise(registers: []JSValue, op: codeblock.Op, kind: BitwiseOp) !void {
+fn isDifferentType(l: JSValue, r: JSValue) bool {
+    if (l.isNumber() != r.isNumber()) return true;
+    if (l.isString() != r.isString()) return true;
+    if (l.isBool() != r.isBool()) return true;
+    if (l.isNull() != r.isNull()) return true;
+    if (l.isUndefined() != r.isUndefined()) return true;
+    return false;
+}
+
+noinline fn looseEquality(frame: *CallFrame, registers: []JSValue, op: codeblock.Op, is_ne: bool) !void {
+    @branchHint(.cold);
+    if (frame.interp) |it| {
+        const left = try getRegister(registers, op.b);
+        const right = try getRegister(registers, op.c);
+        const res = try it.applyBinaryOp(if (is_ne) .ne else .eq, left, right);
+        try setRegTracked(frame, registers, op.a, res);
+    } else return error.UnsupportedOpcode;
+}
+
+noinline fn typeofGlobal(allocator: Allocator, frame: *CallFrame, frame_regs: []JSValue, op: codeblock.Op) !void {
+    @branchHint(.cold);
+    const name = try constantKey(frame.block, op.b);
+    if (frame.closure_env) |env| {
+        switch (env.lookup(name)) {
+            .value => |v| {
+                const str = try JSValue.newString(allocator, v.typeOf());
+                try setRegTracked(frame, frame_regs, op.a, str);
+                return;
+            },
+            .tdz => {
+                if (frame.interp) |it| {
+                    return it.throwError(.reference_error, "Cannot access '{s}' before initialization", .{name});
+                }
+                return error.UnsupportedOpcode;
+            },
+            .not_found => {},
+        }
+    }
+    if (frame.interp) |it| {
+        if (it.global_object) |go| {
+            if (go.isObject()) {
+                if (go.asObject().value.getOwn(name)) |v| {
+                    const str = try JSValue.newString(allocator, v.typeOf());
+                    try setRegTracked(frame, frame_regs, op.a, str);
+                    return;
+                }
+            }
+        }
+    }
+    const str = try JSValue.newString(allocator, "undefined");
+    try setRegTracked(frame, frame_regs, op.a, str);
+}
+
+noinline fn notBitsOp(frame: *CallFrame, frame_regs: []JSValue, op: codeblock.Op) !void {
+    const src = try getRegister(frame_regs, op.b);
+    if (src.isNumber()) {
+        try setRegPrimitive(frame_regs, op.a, JSValue.fromNumber(@floatFromInt(~numberToInt32(src.asNumber()))));
+    } else if (frame.interp) |it| {
+        const i = try it.toInt32JS(src);
+        try setRegPrimitive(frame_regs, op.a, JSValue.fromNumber(@floatFromInt(~i)));
+    } else return error.UnsupportedOpcode;
+}
+
+noinline fn bitwise(frame: *CallFrame, registers: []JSValue, op: codeblock.Op, kind: BitwiseOp) !void {
     const left = try getRegister(registers, op.b);
     const right = try getRegister(registers, op.c);
-    if (!left.isNumber() or !right.isNumber()) return error.UnsupportedOpcode;
-    const lnum = left.asNumber();
-    const rnum = right.asNumber();
-    const result: f64 = switch (kind) {
-        .bit_and => @floatFromInt(numberToInt32(lnum) & numberToInt32(rnum)),
-        .bit_or => @floatFromInt(numberToInt32(lnum) | numberToInt32(rnum)),
-        .bit_xor => @floatFromInt(numberToInt32(lnum) ^ numberToInt32(rnum)),
-        .shl => @floatFromInt(numberToInt32(lnum) << @as(u5, @intCast(numberToUint32(rnum) & 31))),
-        .shr => @floatFromInt(numberToInt32(lnum) >> @as(u5, @intCast(numberToUint32(rnum) & 31))),
-        .ushr => @floatFromInt(numberToUint32(lnum) >> @as(u5, @intCast(numberToUint32(rnum) & 31))),
-    };
-    try setRegister(registers, op.a, JSValue.fromNumberFast(result));
+    if (left.isNumber() and right.isNumber()) {
+        const lnum = left.asNumber();
+        const rnum = right.asNumber();
+        const result: f64 = switch (kind) {
+            .bit_and => @floatFromInt(numberToInt32(lnum) & numberToInt32(rnum)),
+            .bit_or => @floatFromInt(numberToInt32(lnum) | numberToInt32(rnum)),
+            .bit_xor => @floatFromInt(numberToInt32(lnum) ^ numberToInt32(rnum)),
+            .shl => @floatFromInt(numberToInt32(lnum) << @as(u5, @intCast(numberToUint32(rnum) & 31))),
+            .shr => @floatFromInt(numberToInt32(lnum) >> @as(u5, @intCast(numberToUint32(rnum) & 31))),
+            .ushr => @floatFromInt(numberToUint32(lnum) >> @as(u5, @intCast(numberToUint32(rnum) & 31))),
+        };
+        try setRegister(registers, op.a, JSValue.fromNumberFast(result));
+        return;
+    }
+    if (frame.interp) |it| {
+        const bop: zparser.BinaryOp = switch (kind) {
+            .bit_and => .bitand,
+            .bit_or => .bitor,
+            .bit_xor => .bitxor,
+            .shl => .shl,
+            .shr => .shr,
+            .ushr => .ushr,
+        };
+        const res = try it.applyBinaryOp(bop, left, right);
+        try setRegTracked(frame, registers, op.a, res);
+        return;
+    }
+    return error.UnsupportedOpcode;
 }
 
 fn arithmetic(frame: *CallFrame, registers: []JSValue, op: codeblock.Op, kind: Arithmetic) !void {
@@ -2222,8 +2408,8 @@ fn comparisonToBinaryOp(kind: Comparison) zparser.BinaryOp {
         .gt => .gt,
         .le => .le,
         .ge => .ge,
-        .eq => .eq,
-        .ne => .ne,
+        .eq => .eqeqeq,
+        .ne => .noteqeq,
     };
 }
 
@@ -2257,6 +2443,20 @@ fn comparison(frame: *CallFrame, registers: []JSValue, op: codeblock.Op, kind: C
             },
         };
         try setRegister(registers, op.a, JSValue.fromBool(result));
+    } else if (kind == .eq or kind == .ne) {
+        if (left.isBool() and right.isBool()) {
+            const eq = (left.asBool() == right.asBool());
+            try setRegister(registers, op.a, JSValue.fromBool(if (kind == .eq) eq else !eq));
+        } else if (left.isNull() and right.isNull()) {
+            try setRegister(registers, op.a, JSValue.fromBool(kind == .eq));
+        } else if (left.isUndefined() and right.isUndefined()) {
+            try setRegister(registers, op.a, JSValue.fromBool(kind == .eq));
+        } else if (isDifferentType(left, right)) {
+            try setRegister(registers, op.a, JSValue.fromBool(kind == .ne));
+        } else if (frame.interp) |it| {
+            const res = try it.applyBinaryOp(comparisonToBinaryOp(kind), left, right);
+            try setRegTracked(frame, registers, op.a, res);
+        } else return error.UnsupportedOpcode;
     } else if (frame.interp) |it| {
         const res = try it.applyBinaryOp(comparisonToBinaryOp(kind), left, right);
         try setRegTracked(frame, registers, op.a, res);
@@ -2363,6 +2563,21 @@ fn comparisonLocalConst(frame: *CallFrame, registers: []JSValue, block: *const c
             else => return error.UnsupportedOpcode,
         };
         try setRegister(registers, op.a, JSValue.fromBool(result));
+    } else if (kind == .eq or kind == .ne) {
+        if (left.isNumber() and c != .number) {
+            try setRegister(registers, op.a, JSValue.fromBool(kind == .ne));
+        } else if (left.isString() and c != .string) {
+            try setRegister(registers, op.a, JSValue.fromBool(kind == .ne));
+        } else if (left.isBool() and c != .boolean) {
+            try setRegister(registers, op.a, JSValue.fromBool(kind == .ne));
+        } else if (left.isNull() or left.isUndefined()) {
+            try setRegister(registers, op.a, JSValue.fromBool(kind == .ne));
+        } else if (frame.interp) |it| {
+            var rval = try constantValue(it.gc_allocator, block, op.c);
+            defer rval.deinit();
+            const res = try it.applyBinaryOp(comparisonToBinaryOp(kind), left, rval);
+            try setRegTracked(frame, registers, op.a, res);
+        } else return error.UnsupportedOpcode;
     } else if (frame.interp) |it| {
         var rval = try constantValue(it.gc_allocator, block, op.c);
         defer rval.deinit();

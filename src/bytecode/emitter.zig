@@ -535,6 +535,14 @@ pub const BytecodeEmitter = struct {
                 return operand;
             },
             .typeof => {
+                const unwrap = unwrapParen(unary.operand);
+                if (unwrap.data == .identifier and self.scope.localSlot(unwrap.data.identifier) == null) {
+                    const name = unwrap.data.identifier;
+                    const name_const = try self.addConstant(.{ .property_key = name });
+                    const destination = try self.allocRegister();
+                    try self.emitOp(.{ .opcode = .typeof_global, .a = destination, .b = name_const });
+                    return destination;
+                }
                 const operand = try self.emitReadOperand(unary.operand);
                 const destination = try self.allocRegister();
                 try self.emitOp(.{ .opcode = .typeof, .a = destination, .b = operand });
@@ -597,7 +605,7 @@ pub const BytecodeEmitter = struct {
                     .gt => .gt_local_const,
                     .le => .le_local_const,
                     .ge => .ge_local_const,
-                    .eq, .eqeqeq => .eq_local_const,
+                    .eqeqeq => .eq_local_const,
                     else => null,
                 };
                 if (super_opcode) |opc| {
@@ -608,7 +616,7 @@ pub const BytecodeEmitter = struct {
                 }
             }
         } else if (self.getLocalSlot(binary.right)) |local_slot| {
-            if (binary.op == .eq or binary.op == .eqeqeq) {
+            if (binary.op == .eqeqeq) {
                 if (asConstant(binary.left)) |const_val| {
                     const const_idx = try self.addConstant(const_val);
                     const destination = try self.allocRegister();
@@ -629,8 +637,10 @@ pub const BytecodeEmitter = struct {
             .gt => .gt_num,
             .le => .le_num,
             .ge => .ge_num,
-            .eq, .eqeqeq => .eq,
-            .ne, .noteqeq => .ne,
+            .eq => .loose_eq,
+            .ne => .loose_ne,
+            .eqeqeq => .eq,
+            .noteqeq => .ne,
             .bitand => .and_bits,
             .bitor => .or_bits,
             .bitxor => .xor_bits,
@@ -722,6 +732,9 @@ pub const BytecodeEmitter = struct {
             .ge_num,
             .eq,
             .ne,
+            .loose_eq,
+            .loose_ne,
+            .typeof_global,
             .and_bits,
             .or_bits,
             .xor_bits,
@@ -1198,7 +1211,8 @@ pub fn disassemble(allocator: Allocator, block: *const codeblock.CodeBlock) ![]u
             .load_local, .load_global, .load_capture => try output.print(allocator, " r{d}, @{d}", .{ op.a, op.b }),
             .store_local, .store_global, .store_capture => try output.print(allocator, " @{d}, r{d}", .{ op.a, op.b }),
             .neg, .not, .not_bits, .typeof => try output.print(allocator, " r{d}, r{d}", .{ op.a, op.b }),
-            .add, .sub_num, .mul_num, .div_num, .mod_num, .pow_num, .lt_num, .gt_num, .le_num, .ge_num, .eq, .ne, .and_bits, .or_bits, .xor_bits, .shl, .shr, .ushr => try output.print(allocator, " r{d}, r{d}, r{d}", .{ op.a, op.b, op.c }),
+            .typeof_global => try output.print(allocator, " r{d}, #{d}", .{ op.a, op.b }),
+            .add, .sub_num, .mul_num, .div_num, .mod_num, .pow_num, .lt_num, .gt_num, .le_num, .ge_num, .eq, .ne, .loose_eq, .loose_ne, .and_bits, .or_bits, .xor_bits, .shl, .shr, .ushr => try output.print(allocator, " r{d}, r{d}, r{d}", .{ op.a, op.b, op.c }),
             .add_local_const, .sub_local_const, .lt_local_const, .gt_local_const, .le_local_const, .ge_local_const, .eq_local_const => try output.print(allocator, " r{d}, @{d}, #{d}", .{ op.a, op.b, op.c }),
             .jeq_local_const_false, .jlt_local_const_false, .jle_local_const_false, .jgt_local_const_false, .jge_local_const_false => try output.print(allocator, " @{d}, #{d}, +{d}", .{ op.a, op.b, op.c }),
             .jump => try output.print(allocator, " {d}", .{jumpTarget(op)}),

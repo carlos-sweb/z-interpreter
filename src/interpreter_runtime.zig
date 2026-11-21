@@ -221,9 +221,11 @@ pub fn run(self: *Interpreter, source: []const u8) anyerror!JSValue {
                 }
             }
             const this_val = if (self.global_object) |go| go else JSValue.UNDEFINED;
-            const vm_result = bytecode_vm.vmCall(self.gc_allocator, &block.block, self.script_env, this_val, &.{}, self) catch |err| switch (err) {
-                error.UnsupportedOpcode => null,
-                else => return err,
+            const vm_result = bytecode_vm.vmCall(self.gc_allocator, &block.block, self.script_env, this_val, &.{}, self) catch |err0| blk: {
+                const err = self.throwIfGap(err0);
+                if (err == error.UnsupportedOpcode) break :blk null;
+                if (err == error.JsThrow) return error.UncaughtException;
+                return err;
             };
             if (vm_result) |value| {
                 try self.runEventLoop();

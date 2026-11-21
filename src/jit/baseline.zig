@@ -3849,7 +3849,7 @@ test "baseline JIT Phase 4C caches hot numeric locals in xmm4..xmm15, handles Na
             \\var acc = 10;
             \\for (var i = 0; i < 100; i++) {
             \\    acc = acc + 1;
-            \\    if (i == 80) acc = 0 / 0;
+            \\    if (i === 80) acc = 0 / 0;
             \\}
             \\acc;
         );

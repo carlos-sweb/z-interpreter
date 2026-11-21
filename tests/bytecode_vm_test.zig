@@ -250,7 +250,7 @@ test "bytecode VM superinstructions disasm" {
     interpreter.compile_options.use_bytecode_vm = true;
     interpreter.compile_options.disasm = true;
 
-    const result = try interpreter.run("function check(x) { return x == 5; } check(5);");
+    const result = try interpreter.run("function check(x) { return x === 5; } check(5);");
     defer result.deinit();
     try testing.expect(std.mem.indexOf(u8, output.written(), "eq_local_const") != null);
 }

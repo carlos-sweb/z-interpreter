@@ -1931,3 +1931,65 @@ test "bytecode function with string concat and lexical this executes exactly onc
     defer result.deinit();
     try testing.expect(result.isBool() and result.asBool());
 }
+
+test "bytecode strict equality differentiates types correctly" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    const result = try interp.run(
+        \\function check() {
+        \\  var a = (1 === "1");
+        \\  var b = (null === undefined);
+        \\  var c = (1 == "1");
+        \\  var d = (null == undefined);
+        \\  return !a && !b && c && d;
+        \\}
+        \\check();
+    );
+    defer result.deinit();
+    try testing.expect(result.isBool() and result.asBool());
+}
+
+test "bytecode try catch catches exception thrown from callee" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    const result = try interp.run(
+        \\function throwFromCallee() {
+        \\  throw "caught_err";
+        \\}
+        \\function testCatch() {
+        \\  var caught = "";
+        \\  try {
+        \\    throwFromCallee();
+        \\  } catch (e) {
+        \\    caught = e;
+        \\  }
+        \\  return caught;
+        \\}
+        \\testCatch();
+    );
+    defer result.deinit();
+    try testing.expect(result.isString());
+    try testing.expectEqualStrings("caught_err", result.asString().value.data);
+}
+
+test "bytecode typeof unresolvable identifier returns undefined" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    const result = try interp.run(
+        \\function testTypeof() {
+        \\  return typeof noExiste === "undefined";
+        \\}
+        \\testTypeof();
+    );
+    defer result.deinit();
+    try testing.expect(result.isBool() and result.asBool());
+}
