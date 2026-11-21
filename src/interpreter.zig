@@ -2658,6 +2658,52 @@ test "Promise combinators reject on synchronous errors, close iterators, unwrap 
     try testing.expect(verify.isBool() and verify.asBool());
 }
 
+test "ES2025 Set.prototype methods and Map.prototype.getOrInsert / getOrInsertComputed handle set-like objects and abrupt completions" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    const result = try interp.run(
+        \\var s1 = new Set([1, 2, 3]);
+        \\var s2 = new Set([2, 3, 4]);
+        \\var u = [...s1.union(s2)].join(",");
+        \\var inter = [...s1.intersection(s2)].join(",");
+        \\var diff = [...s1.difference(s2)].join(",");
+        \\var symDiff = [...s1.symmetricDifference(s2)].join(",");
+        \\var sub1 = new Set([1, 2]).isSubsetOf(s1);
+        \\var sub2 = s1.isSubsetOf(s2);
+        \\var sup1 = s1.isSupersetOf(new Set([2, 3]));
+        \\var disj1 = s1.isDisjointFrom(new Set([4, 5]));
+        \\var closedDisj = 0;
+        \\var setLike = {
+        \\  size: 1,
+        \\  has() { return false; },
+        \\  keys() {
+        \\    var i = 0;
+        \\    return {
+        \\      next() { i++; return { value: 2, done: false }; },
+        \\      return() { closedDisj++; return {}; }
+        \\    };
+        \\  }
+        \\};
+        \\var disj2 = s1.isDisjointFrom(setLike);
+        \\var errCaught = false;
+        \\try { s1.union({ size: NaN, has() {}, keys() {} }); } catch (e) { errCaught = e instanceof TypeError; }
+        \\var m = new Map();
+        \\var v1 = m.getOrInsert(-0, "a");
+        \\var v2 = m.getOrInsert(0, "b");
+        \\var v3 = m.getOrInsertComputed("k", (k) => k + "_val");
+        \\var v4 = m.getOrInsertComputed("k", () => { throw new Error("should not call"); });
+        \\u === "1,2,3,4" && inter === "2,3" && diff === "1" && symDiff === "1,4" &&
+        \\  sub1 && !sub2 && sup1 && disj1 && !disj2 && closedDisj === 1 && errCaught &&
+        \\  v1 === "a" && v2 === "a" && v3 === "k_val" && v4 === "k_val";
+    );
+    defer result.deinit();
+    try testing.expect(result.isBool() and result.asBool());
+}
+
+
 
 
 
