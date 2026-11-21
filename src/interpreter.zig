@@ -2120,3 +2120,57 @@ test "TDZ lexical variable access throws UncaughtException" {
     );
     try testing.expectError(error.UncaughtException, err);
 }
+
+test "captured local variable does not overwrite outer variable with same name" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+    const result = try interp.run(
+        \\var x = "outside";
+        \\function f() {
+        \\  var x = "inside";
+        \\  return () => x;
+        \\}
+        \\f();
+        \\x === "outside";
+    );
+    defer result.deinit();
+    try testing.expect(result.isBool() and result.asBool());
+}
+
+test "setting proto cycle on object throws TypeError" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+    const err = interp.run(
+        \\const o = {};
+        \\o.__proto__ = o;
+    );
+    try testing.expectError(error.UncaughtException, err);
+}
+
+test "hoisting of inner function called before declaration works in bytecode" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+    const result = try interp.run(
+        \\function f() {
+        \\  var g = inner();
+        \\  function inner() { return 42; }
+        \\  return g;
+        \\}
+        \\f();
+    );
+    defer result.deinit();
+    try testing.expect(result.isNumber());
+    try testing.expectEqual(@as(f64, 42), result.asNumber());
+}

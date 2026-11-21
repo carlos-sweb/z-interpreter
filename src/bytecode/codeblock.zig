@@ -161,6 +161,7 @@ pub const CodeBlock = struct {
     constants: []const Constant = &.{},
     exception_table: []const ExceptionHandler = &.{},
     call_target_cache: []CallSiteCache = &.{},
+    captured_names: []const []const u8 = &.{},
     local_count: u16 = 0,
     register_count: u16 = 0,
     param_count: u16 = 0,

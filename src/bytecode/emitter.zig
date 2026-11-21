@@ -15,6 +15,10 @@ pub const CompiledCodeBlock = struct {
         allocator.free(self.block.ops);
         allocator.free(self.block.constants);
         allocator.free(self.block.exception_table);
+        for (self.block.captured_names) |name| {
+            allocator.free(name);
+        }
+        allocator.free(self.block.captured_names);
         for (self.block.call_target_cache) |*c| {
             if (c.callee) |v| {
                 var val = v;
@@ -80,10 +84,19 @@ pub const BytecodeEmitter = struct {
         errdefer allocator.free(constants);
         const call_target_cache = try self.call_sites.toOwnedSlice(allocator);
         errdefer allocator.free(call_target_cache);
+        const captured_names = try allocator.alloc([]const u8, scope.captured_locals.len);
+        errdefer allocator.free(captured_names);
+        var duped_count: usize = 0;
+        errdefer for (captured_names[0..duped_count]) |n| allocator.free(n);
+        for (scope.captured_locals, 0..) |n, i| {
+            captured_names[i] = try allocator.dupe(u8, n);
+            duped_count += 1;
+        }
         return .{ .block = .{
             .ops = ops,
             .constants = constants,
             .call_target_cache = call_target_cache,
+            .captured_names = captured_names,
             .local_count = scope.local_count,
             .register_count = self.max_register,
             .param_count = scope.param_count,
@@ -148,10 +161,11 @@ pub const BytecodeEmitter = struct {
             .ops = ops,
             .constants = constants,
             .call_target_cache = call_target_cache,
+            .captured_names = &.{},
             .local_count = scope.local_count,
             .register_count = self.max_register,
             .param_count = 0,
-            .capture_count = @intCast(scope.captured_locals.len),
+            .capture_count = 0,
             .flags = scope.flags,
             .name = null,
         } };
@@ -174,7 +188,15 @@ pub const BytecodeEmitter = struct {
                 self.freeRegister(value);
             },
             .block => |block| {
-                for (block.data.block) |statement| try self.emitStatement(statement);
+                for (block.data.block) |statement| {
+                    if (statement.data == .function_declaration) {
+                        try self.emitStatement(statement);
+                    }
+                }
+                for (block.data.block) |statement| {
+                    if (statement.data == .function_declaration) continue;
+                    try self.emitStatement(statement);
+                }
                 try self.emitOp(.{ .opcode = .return_undefined });
             },
         }
@@ -235,6 +257,7 @@ pub const BytecodeEmitter = struct {
         for (variable.declarators) |declarator| {
             if (declarator.pattern.* != .identifier) return error.UnsupportedSyntax;
             const name = declarator.pattern.identifier.name;
+            if (declarator.init == null and variable.kind == .@"var") continue;
             if (self.scope.localSlot(name)) |slot| {
                 if (!self.scope.capturesLocal(name)) {
                     const local_slot = try small(slot);

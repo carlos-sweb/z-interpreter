@@ -289,6 +289,9 @@ fn getProp(frame: *CallFrame, allocator: Allocator, obj: JSValue, key: []const u
 fn setProp(frame: *CallFrame, allocator: Allocator, obj: JSValue, key: []const u8, val: JSValue) !void {
     _ = allocator;
     if (frame.interp) |it| {
+        if (std.mem.eql(u8, key, "__proto__")) {
+            return it.setPropertyOnValue(obj, key, val);
+        }
         if (it.global_object) |go| {
             if (obj.isObject() and obj.asObject() == go.asObject()) {
                 return it.setPropertyOnValue(obj, key, val);
@@ -298,11 +301,23 @@ fn setProp(frame: *CallFrame, allocator: Allocator, obj: JSValue, key: []const u
     if (obj.isObject()) {
         const box = obj.asObject();
         const is_strict = if (frame.interp) |it| it.strict_mode else false;
-        if (is_strict and (box.value.is_frozen or !box.value.is_extensible)) {
-            if (frame.interp) |it| return it.setPropertyOnValue(obj, key, val);
-        }
         if (box.value.getOwnRecord(key)) |rec| {
             if (rec.isAccessor() or (is_strict and !rec.descriptor.writable)) {
+                if (frame.interp) |it| return it.setPropertyOnValue(obj, key, val);
+                return error.UnsupportedOpcode;
+            }
+        } else {
+            var current = box.value.getPrototype();
+            while (current) |p| : (current = p.getPrototype()) {
+                if (p.getOwnRecord(key)) |rec| {
+                    if (rec.isAccessor() or !rec.descriptor.writable) {
+                        if (frame.interp) |it| return it.setPropertyOnValue(obj, key, val);
+                        return error.UnsupportedOpcode;
+                    }
+                    break;
+                }
+            }
+            if (!box.value.is_extensible or box.value.is_frozen) {
                 if (frame.interp) |it| return it.setPropertyOnValue(obj, key, val);
                 return error.UnsupportedOpcode;
             }
@@ -317,18 +332,10 @@ fn setProp(frame: *CallFrame, allocator: Allocator, obj: JSValue, key: []const u
         };
         if (old) |o| o.deinit();
     } else if (obj.isArray()) {
-        const box = obj.asArray();
-        const idx = std.fmt.parseInt(usize, key, 10) catch return if (frame.interp) |it| it.setPropertyOnValue(obj, key, val) else error.UnsupportedOpcode;
-        const cur = box.value.length();
-        if (idx < cur) {
-            box.value.toSliceMut()[idx].deinit();
-            box.value.toSliceMut()[idx] = val.retain();
-        } else {
-            while (box.value.length() < idx) {
-                _ = try box.value.push(JSValue.UNDEFINED);
-            }
-            _ = try box.value.push(val.retain());
+        if (frame.interp) |it| {
+            return it.setPropertyOnValue(obj, key, val);
         }
+        return error.UnsupportedOpcode;
     } else if (frame.interp) |it| {
         return it.setPropertyOnValue(obj, key, val);
     } else return error.UnsupportedOpcode;
@@ -371,6 +378,7 @@ noinline fn setElem(frame: *CallFrame, allocator: Allocator, obj: JSValue, key_v
         const arr = &obj.asArray().value;
         const frozen = if (@hasField(@TypeOf(arr.*), "is_frozen")) arr.is_frozen else false;
         const is_strict = if (frame.interp) |it| it.strict_mode else false;
+        const has_props = if (frame.interp) |it| it.array_props.get(@intFromPtr(obj.asArray())) != null else false;
         if (is_strict and frozen) {
             if (frame.interp) |it| {
                 var buf: [32]u8 = undefined;
@@ -378,34 +386,30 @@ noinline fn setElem(frame: *CallFrame, allocator: Allocator, obj: JSValue, key_v
                 return it.setPropertyOnValue(obj, key, val);
             }
         }
-        if (!frozen and arr.holey == null) {
+        if (!frozen and !has_props and arr.holey == null) {
             const n = key_val.asNumber();
             if (n >= 0 and !std.math.isNan(n) and !std.math.isInf(n)) {
                 const idx: usize = @intFromFloat(n);
                 if (@as(f64, @floatFromInt(idx)) == n) {
-                    const cur = arr.length();
-                    if (idx < cur) {
-                        arr.toSliceMut()[idx].deinit();
-                        arr.toSliceMut()[idx] = val.retain();
-                    } else {
-                        while (arr.length() < idx) {
-                            _ = try arr.push(JSValue.UNDEFINED);
-                        }
-                        _ = try arr.push(val.retain());
+                    if (idx < arr.items.items.len) {
+                        const old = arr.items.items[idx];
+                        arr.items.items[idx] = if (needsDeinit(val)) val.retain() else val;
+                        if (needsDeinit(old)) old.deinit();
+                        return;
+                    } else if (idx == arr.items.items.len) {
+                        try arr.items.append(arr.allocator, if (needsDeinit(val)) val.retain() else val);
+                        return;
                     }
-                    return;
                 }
             }
         }
     }
     var buf: [32]u8 = undefined;
     if (keyToString(allocator, key_val, &buf)) |key| {
-        setProp(frame, allocator, obj, key, val) catch |err| {
-            if (frame.interp) |it| {
-                return it.setPropertyOnValue(obj, key, val);
-            }
-            return err;
-        };
+        if (frame.interp) |it| {
+            return it.setPropertyOnValue(obj, key, val);
+        }
+        try setProp(frame, allocator, obj, key, val);
         return;
     } else |_| {
         if (frame.interp) |it| {
@@ -481,6 +485,9 @@ noinline fn getPropSlow(allocator: Allocator, frame: *CallFrame, frame_regs: []J
 
 noinline fn setPropSlow(allocator: Allocator, frame: *CallFrame, op: codeblock.Op, op_pc: u32, obj: JSValue, key: []const u8, val: JSValue, ic: *PropIC) !void {
     @branchHint(.cold);
+    if (std.mem.eql(u8, key, "__proto__")) {
+        if (frame.interp) |it| return it.setPropertyOnValue(obj, key, val);
+    }
     const is_global = if (frame.interp) |it| (if (it.global_object) |go| (obj.isObject() and obj.asObject() == go.asObject()) else false) else false;
     if (obj.isObject() and !is_global) {
         const box = obj.asObject();
@@ -511,35 +518,52 @@ noinline fn setPropSlow(allocator: Allocator, frame: *CallFrame, op: codeblock.O
         if (box.value.cached_len > 0) box.value.syncPartialRecycle();
         if (frame.interp) |itp| {
             const proto_is_obj_proto = if (box.value.prototype) |p| (itp.protos.object.isObject() and p == &itp.protos.object.asObject().value) else true;
-            if (box.value.properties.getIndex(key) == null and proto_is_obj_proto) {
-                const prev_shape = box.value.shape_id;
-                const prev_count = box.value.properties.count();
-                const interned = if (ic.block == frame.block and ic.pc == op_pc and ic.key_ptr == key.ptr and ic.interned_key_ptr != null)
-                    ic.interned_key_ptr.?[0..key.len]
-                else
-                    try itp.internPropKey(key);
-                const val_to_store = if (needsDeinit(val)) val.retain() else val;
-                box.value.setBorrowedKey(interned, val_to_store) catch |err| switch (err) {
-                    error.ObjectIsFrozen, error.ObjectNotExtensible, error.PropertyNotWritable => {
-                        if (needsDeinit(val)) val_to_store.deinit();
-                        return itp.setPropertyOnValue(obj, key, val);
-                    },
-                    else => {
-                        if (needsDeinit(val)) val_to_store.deinit();
-                        return err;
-                    },
-                };
-                ic.* = .{
-                    .block = frame.block,
-                    .pc = op_pc,
-                    .shape_id = prev_shape,
-                    .next_shape = box.value.shape_id,
-                    .cached_shape_id = 0,
-                    .slot_idx = @intCast(prev_count),
-                    .key_ptr = key.ptr,
-                    .interned_key_ptr = interned.ptr,
-                };
-                return;
+            if (box.value.properties.getIndex(key) == null) {
+                var has_proto_setter_or_non_writable = false;
+                if (!proto_is_obj_proto) {
+                    var current = box.value.getPrototype();
+                    while (current) |p| : (current = p.getPrototype()) {
+                        if (p.getOwnRecord(key)) |rec| {
+                            if (rec.isAccessor() or !rec.descriptor.writable) {
+                                has_proto_setter_or_non_writable = true;
+                            }
+                            break;
+                        }
+                    }
+                }
+                if (has_proto_setter_or_non_writable or !box.value.is_extensible or box.value.is_frozen) {
+                    return itp.setPropertyOnValue(obj, key, val);
+                }
+                if (proto_is_obj_proto) {
+                    const prev_shape = box.value.shape_id;
+                    const prev_count = box.value.properties.count();
+                    const interned = if (ic.block == frame.block and ic.pc == op_pc and ic.key_ptr == key.ptr and ic.interned_key_ptr != null)
+                        ic.interned_key_ptr.?[0..key.len]
+                    else
+                        try itp.internPropKey(key);
+                    const val_to_store = if (needsDeinit(val)) val.retain() else val;
+                    box.value.setBorrowedKey(interned, val_to_store) catch |err| switch (err) {
+                        error.ObjectIsFrozen, error.ObjectNotExtensible, error.PropertyNotWritable => {
+                            if (needsDeinit(val)) val_to_store.deinit();
+                            return itp.setPropertyOnValue(obj, key, val);
+                        },
+                        else => {
+                            if (needsDeinit(val)) val_to_store.deinit();
+                            return err;
+                        },
+                    };
+                    ic.* = .{
+                        .block = frame.block,
+                        .pc = op_pc,
+                        .shape_id = prev_shape,
+                        .next_shape = box.value.shape_id,
+                        .cached_shape_id = 0,
+                        .slot_idx = @intCast(prev_count),
+                        .key_ptr = key.ptr,
+                        .interned_key_ptr = interned.ptr,
+                    };
+                    return;
+                }
             }
         }
         try setProp(frame, allocator, obj, key, val);
@@ -579,6 +603,11 @@ noinline fn getElemConstSlow(allocator: Allocator, frame: *CallFrame, frame_regs
 
 noinline fn setElemConstSlow(frame: *CallFrame, allocator: Allocator, obj: JSValue, idx: usize, val: JSValue) !void {
     @branchHint(.cold);
+    if (frame.interp) |it| {
+        var buf: [32]u8 = undefined;
+        const key = try std.fmt.bufPrint(&buf, "{d}", .{idx});
+        return it.setPropertyOnValue(obj, key, val);
+    }
     if (obj.isArray()) {
         const arr = &obj.asArray().value;
         const frozen = if (@hasField(@TypeOf(arr.*), "is_frozen")) arr.is_frozen else false;
@@ -856,13 +885,18 @@ noinline fn vmCallCleanup(registers: []JSValue, reg_top: usize, prev_obj_pool_le
     }
 }
 
-noinline fn allocCapturedEnv(interp_opt: ?*interpreter_mod.Interpreter, parent_opt: ?*Environment, this_val_opt: ?JSValue) !?*Environment {
+noinline fn allocCapturedEnv(interp_opt: ?*interpreter_mod.Interpreter, parent_opt: ?*Environment, this_val_opt: ?JSValue, block: *const codeblock.CodeBlock) !?*Environment {
     @branchHint(.cold);
     const itp = interp_opt orelse return parent_opt;
     const parent = parent_opt orelse return parent_opt;
     const child_env = try itp.gcChildEnv(parent);
     if (this_val_opt) |tv| {
         child_env.this_value = tv.retain();
+    }
+    for (block.captured_names) |name| {
+        if (!child_env.containsBinding(name)) {
+            try child_env.define(itp.gc_allocator, name, JSValue.UNDEFINED);
+        }
     }
     return child_env;
 }
@@ -1333,7 +1367,7 @@ noinline fn vmCallDispatch(
     }
 
     const needs_env = block.capture_count > 0 or (!block.flags.is_arrow and block.flags.has_nested_fn);
-    const initial_cenv = if (needs_env) try allocCapturedEnv(interp, closure_env, initial_this) else closure_env;
+    const initial_cenv = if (needs_env) try allocCapturedEnv(interp, closure_env, initial_this, block) else closure_env;
 
     frames[0] = CallFrame{
         .block = block,
@@ -2151,7 +2185,7 @@ noinline fn vmExecLoop(
                     .pc = 0,
                     .reg_base = @intCast(callee_reg_base),
                     .this_value = callee_this,
-                    .closure_env = if (needs_env) try allocCapturedEnv(frame.interp, base_cenv, callee_this) else base_cenv,
+                    .closure_env = if (needs_env) try allocCapturedEnv(frame.interp, base_cenv, callee_this, callee_block) else base_cenv,
                     .has_rc = callee_has_rc,
                     .return_reg = op.a,
                     .interp = if (cache.interp) |itp| @ptrCast(@alignCast(itp)) else null,
@@ -2243,7 +2277,7 @@ noinline fn vmExecLoop(
                     .pc = 0,
                     .reg_base = @intCast(callee_reg_base),
                     .this_value = callee_this,
-                    .closure_env = if (needs_env) try allocCapturedEnv(frame.interp, base_cenv, callee_this) else base_cenv,
+                    .closure_env = if (needs_env) try allocCapturedEnv(frame.interp, base_cenv, callee_this, callee_block) else base_cenv,
                     .has_rc = callee_has_rc,
                     .return_reg = op.a,
                     .interp = if (cache.interp) |itp| @ptrCast(@alignCast(itp)) else null,

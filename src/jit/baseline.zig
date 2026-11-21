@@ -158,6 +158,7 @@ pub fn canUseFastSelfRec(block: *const codeblock.CodeBlock) bool {
             .return_value => {
                 if (op.a >= block.register_count) return false;
             },
+            .return_undefined => {},
             .call_global => {
                 if (op.a >= block.register_count) return false;
                 if (op.c >= block.call_target_cache.len) return false;
@@ -639,6 +640,14 @@ fn compileFastSelfRec(
             },
             .return_value => {
                 try a.movsdXmmMem(.xmm0, .rsp, @intCast(@as(usize, op.a) * 8));
+                try a.addRegImm32(.rsp, frame_bytes);
+                try a.incReg64(.rbx);
+                try a.xorRegReg(.rax, .rax);
+                try a.ret();
+            },
+            .return_undefined => {
+                try a.movRegImm64(.rax, JSValue.UNDEFINED.bits);
+                try a.movqXmmReg(.xmm0, .rax);
                 try a.addRegImm32(.rsp, frame_bytes);
                 try a.incReg64(.rbx);
                 try a.xorRegReg(.rax, .rax);
