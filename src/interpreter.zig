@@ -2311,4 +2311,38 @@ test "bytecode new_array tracked by GC avoids double-release on teardown with AS
     try testing.expect(result.isBool() and result.asBool());
 }
 
+test "JIT and OSR compile numeric loose_eq/loose_ne and bail out cleanly on mixed types" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+    const result = try interp.run(
+        \\function fib(n) {
+        \\  if (n == 0) return 0;
+        \\  if (n == 1) return 1;
+        \\  return fib(n - 1) + fib(n - 2);
+        \\}
+        \\function eqMix(a, b) { return a == b; }
+        \\function neMix(a, b) { return a != b; }
+        \\var hits = 0;
+        \\for (var i = 0; i < 150; i++) {
+        \\  if (eqMix(i, i)) hits++;
+        \\  if (neMix(i, i + 1)) hits++;
+        \\}
+        \\var mixedOk = eqMix(5, "5") === true && eqMix(5, "6") === false && neMix(5, "5") === false && neMix(5, "6") === true;
+        \\var osrHits = 0;
+        \\for (var j = 0; j < 200; j++) {
+        \\  var v = j < 150 ? j : "" + j;
+        \\  if (v == j) osrHits++;
+        \\  if (v != j + 1) osrHits++;
+        \\}
+        \\fib(15) === 610 && hits === 300 && mixedOk && osrHits === 400;
+    );
+    defer result.deinit();
+    try testing.expect(result.isBool() and result.asBool());
+}
+
+
 

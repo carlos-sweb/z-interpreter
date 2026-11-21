@@ -155,6 +155,22 @@ pub fn canUseFastSelfRec(block: *const codeblock.CodeBlock) bool {
                 const target = (@as(usize, op.b) << 8) | op.c;
                 if (target >= block.ops.len) return false;
             },
+            .loose_eq, .loose_ne, .eq, .ne => {
+                if (op.a == 0 or op.a >= block.register_count or op.b >= block.register_count or op.c >= block.register_count) return false;
+                if (ip + 1 >= block.ops.len) return false;
+                const next_op = block.ops[ip + 1];
+                if ((next_op.opcode != .jump_if_false and next_op.opcode != .jump_if_true) or next_op.a != op.a) return false;
+            },
+            .jump_if_false, .jump_if_true => {
+                if (ip == 0) return false;
+                const prev_op = block.ops[ip - 1];
+                switch (prev_op.opcode) {
+                    .loose_eq, .loose_ne, .eq, .ne => if (prev_op.a != op.a) return false,
+                    else => return false,
+                }
+                const target = (@as(usize, op.b) << 8) | op.c;
+                if (target >= block.ops.len) return false;
+            },
             .return_value => {
                 if (op.a >= block.register_count) return false;
             },
@@ -241,7 +257,7 @@ pub fn canCompile(block: *const codeblock.CodeBlock) bool {
                 if (op.a >= block.register_count or op.b >= block.register_count or op.c >= block.register_count) return false;
                 num_validated_regs |= reg_bit;
             },
-            .lt_num, .gt_num, .le_num, .ge_num, .eq, .ne => {
+            .lt_num, .gt_num, .le_num, .ge_num, .eq, .ne, .loose_eq, .loose_ne => {
                 if (seen_store_global) return false;
                 if (op.a >= block.register_count or op.b >= block.register_count or op.c >= block.register_count) return false;
                 num_validated_regs &= ~reg_bit;
@@ -503,7 +519,7 @@ fn compileFastSelfRec(
 
     for (block.ops, 0..) |op, op_idx| {
         switch (op.opcode) {
-            .jump => {
+            .jump, .jump_if_false, .jump_if_true => {
                 const target = (@as(usize, op.b) << 8) | op.c;
                 if (target < block.ops.len) is_jump_target[target] = true;
             },
@@ -630,6 +646,27 @@ fn compileFastSelfRec(
             .jump => {
                 const target_pc = (@as(usize, op.b) << 8) | op.c;
                 try a.jmp(op_labels[target_pc]);
+            },
+            .loose_eq, .loose_ne, .eq, .ne => {
+                const next_op = block.ops[ip + 1];
+                const target_pc = (@as(usize, next_op.b) << 8) | next_op.c;
+                const target_lbl = op_labels[target_pc];
+                try a.movsdXmmMem(.xmm0, .rsp, @intCast(@as(usize, op.b) * 8));
+                try a.movsdXmmMem(.xmm1, .rsp, @intCast(@as(usize, op.c) * 8));
+                try a.ucomisd(.xmm0, .xmm1);
+                const is_eq_op = (op.opcode == .loose_eq or op.opcode == .eq);
+                const is_true_jmp = (next_op.opcode == .jump_if_true);
+                if (is_eq_op != is_true_jmp) {
+                    try a.jcc(.p, target_lbl);
+                    try a.jcc(.ne, target_lbl);
+                } else {
+                    const skip_lbl = try a.createLabel();
+                    try a.jcc(.p, skip_lbl);
+                    try a.jcc(.e, target_lbl);
+                    a.bindLabel(skip_lbl);
+                }
+                a.bindLabel(op_labels[ip + 1]);
+                ip += 1;
             },
             .call_global => {
                 try a.movsdXmmMem(.xmm0, .rsp, @intCast((@as(usize, op.b) + 1) * 8));
@@ -793,14 +830,14 @@ fn emitCmpToBool(a: *Assembler, opcode: codeblock.Opcode) !void {
             try a.ucomisd(.xmm0, .xmm1);
             try a.jcc(.ae, true_lbl);
         },
-        .eq, .eq_local_const => {
+        .eq, .loose_eq, .eq_local_const => {
             const false_lbl = try a.createLabel();
             try a.ucomisd(.xmm0, .xmm1);
             try a.jcc(.p, false_lbl);
             try a.jcc(.e, true_lbl);
             a.bindLabel(false_lbl);
         },
-        .ne => {
+        .ne, .loose_ne => {
             try a.ucomisd(.xmm0, .xmm1);
             try a.jcc(.p, true_lbl);
             try a.jcc(.ne, true_lbl);
@@ -1099,7 +1136,7 @@ fn emitSharedOp(a: *Assembler, block: *const codeblock.CodeBlock, op: codeblock.
             a.bindLabel(done_lbl);
             return true;
         },
-        .lt_num, .gt_num, .le_num, .ge_num, .eq, .ne => {
+        .lt_num, .gt_num, .le_num, .ge_num, .eq, .ne, .loose_eq, .loose_ne => {
             try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
             try a.cmpRegReg(.rax, .r15);
             try a.jcc(.ae, bail_lbl);
@@ -1646,6 +1683,8 @@ pub fn canCompileOsr(block: *const codeblock.CodeBlock, start_ip: usize, end_ip:
             .ge_num,
             .eq,
             .ne,
+            .loose_eq,
+            .loose_ne,
             .get_elem,
             .set_elem,
             => {
@@ -1835,7 +1874,7 @@ fn analyzeOsrLoop(block: *const codeblock.CodeBlock, start_ip: usize, end_ip: us
                     use_count[op.a] += 1;
                 }
             },
-            .lt_num, .gt_num, .le_num, .ge_num, .eq, .ne => {
+            .lt_num, .gt_num, .le_num, .ge_num, .eq, .ne, .loose_eq, .loose_ne => {
                 if (op.b < 64) {
                     if (!written[op.b]) read_before_written[op.b] = true;
                     use_count[op.b] += 1;
@@ -2627,7 +2666,7 @@ fn compileOsrImpl(
                 }
                 a.bindLabel(done_lbl);
             },
-            .lt_num, .gt_num, .le_num, .ge_num, .eq, .ne => {
+            .lt_num, .gt_num, .le_num, .ge_num, .eq, .ne, .loose_eq, .loose_ne => {
                 try emitLoadNumToXmm(&a, reg_to_xmm, op.b, .xmm0, bail_lbl);
                 try emitLoadNumToXmm(&a, reg_to_xmm, op.c, .xmm1, bail_lbl);
                 try emitReleaseHeapIfRefGt1(&a, op.a, bail_lbl);
