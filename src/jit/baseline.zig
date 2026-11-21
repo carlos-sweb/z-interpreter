@@ -2413,6 +2413,10 @@ fn compileOsrImpl(
     defer allocator.free(is_jump_target);
     @memset(is_jump_target, false);
     is_jump_target[0] = true;
+    var is_back_target = try allocator.alloc(bool, loop_len);
+    defer allocator.free(is_back_target);
+    @memset(is_back_target, false);
+    is_back_target[0] = true;
 
     const ElidedConst = struct { reg: u8, bits: u64 };
     var elided_consts = try allocator.alloc(?ElidedConst, loop_len);
@@ -2428,11 +2432,17 @@ fn compileOsrImpl(
         switch (scan_op.opcode) {
             .jump, .jump_if_false, .jump_if_true => {
                 const t = (@as(usize, scan_op.b) << 8) | scan_op.c;
-                if (t >= start_ip and t <= end_ip) is_jump_target[t - start_ip] = true;
+                if (t >= start_ip and t <= end_ip) {
+                    is_jump_target[t - start_ip] = true;
+                    if (t <= scan_ip) is_back_target[t - start_ip] = true;
+                }
             },
             .jeq_local_const_false, .jlt_local_const_false, .jle_local_const_false, .jgt_local_const_false, .jge_local_const_false => {
                 const t = scan_ip + @as(usize, scan_op.c);
-                if (t >= start_ip and t <= end_ip) is_jump_target[t - start_ip] = true;
+                if (t >= start_ip and t <= end_ip) {
+                    is_jump_target[t - start_ip] = true;
+                    if (t <= scan_ip) is_back_target[t - start_ip] = true;
+                }
             },
             else => {},
         }
@@ -2539,6 +2549,15 @@ fn compileOsrImpl(
     }
 
     var known_f64: [64]?f64 = @splat(null);
+    var reg_is_int32: [64]bool = @splat(false);
+    var reg_is_uint31: [64]bool = @splat(false);
+    var incoming_has_edge = try allocator.alloc(bool, loop_len);
+    defer allocator.free(incoming_has_edge);
+    @memset(incoming_has_edge, false);
+    var incoming_int32 = try allocator.alloc([64]bool, loop_len);
+    defer allocator.free(incoming_int32);
+    var incoming_uint31 = try allocator.alloc([64]bool, loop_len);
+    defer allocator.free(incoming_uint31);
 
     for (0..loop_len) |idx| {
         const ip = start_ip + idx;
@@ -2548,32 +2567,137 @@ fn compileOsrImpl(
         if (is_jump_target[idx]) {
             known_f64 = @splat(null);
         }
+        if (is_back_target[idx]) {
+            reg_is_int32 = @splat(false);
+            reg_is_uint31 = @splat(false);
+        } else if (incoming_has_edge[idx]) {
+            const prev_uncond_jump = idx > 0 and block.ops[start_ip + idx - 1].opcode == .jump;
+            if (prev_uncond_jump) {
+                reg_is_int32 = incoming_int32[idx];
+                reg_is_uint31 = incoming_uint31[idx];
+            } else {
+                for (0..64) |r_i| {
+                    reg_is_int32[r_i] = reg_is_int32[r_i] and incoming_int32[idx][r_i];
+                    reg_is_uint31[r_i] = reg_is_uint31[r_i] and incoming_uint31[idx][r_i];
+                }
+            }
+        }
         defer {
             switch (op.opcode) {
                 .nop,
-                .jump,
-                .jump_if_false,
-                .jump_if_true,
-                .jeq_local_const_false,
-                .jlt_local_const_false,
-                .jle_local_const_false,
-                .jgt_local_const_false,
-                .jge_local_const_false,
                 .set_elem,
                 .set_elem_const,
                 .set_prop,
                 .set_prop_transition,
                 => {},
+                .jump, .jump_if_false, .jump_if_true => {
+                    const t = (@as(usize, op.b) << 8) | op.c;
+                    if (t > ip and t <= end_ip) {
+                        const t_idx = t - start_ip;
+                        if (!incoming_has_edge[t_idx]) {
+                            incoming_has_edge[t_idx] = true;
+                            incoming_int32[t_idx] = reg_is_int32;
+                            incoming_uint31[t_idx] = reg_is_uint31;
+                        } else {
+                            for (0..64) |r_i| {
+                                incoming_int32[t_idx][r_i] = incoming_int32[t_idx][r_i] and reg_is_int32[r_i];
+                                incoming_uint31[t_idx][r_i] = incoming_uint31[t_idx][r_i] and reg_is_uint31[r_i];
+                            }
+                        }
+                    }
+                },
+                .jeq_local_const_false,
+                .jlt_local_const_false,
+                .jle_local_const_false,
+                .jgt_local_const_false,
+                .jge_local_const_false,
+                => {
+                    const t = ip + @as(usize, op.c);
+                    if (t > ip and t <= end_ip) {
+                        const t_idx = t - start_ip;
+                        if (!incoming_has_edge[t_idx]) {
+                            incoming_has_edge[t_idx] = true;
+                            incoming_int32[t_idx] = reg_is_int32;
+                            incoming_uint31[t_idx] = reg_is_uint31;
+                        } else {
+                            for (0..64) |r_i| {
+                                incoming_int32[t_idx][r_i] = incoming_int32[t_idx][r_i] and reg_is_int32[r_i];
+                                incoming_uint31[t_idx][r_i] = incoming_uint31[t_idx][r_i] and reg_is_uint31[r_i];
+                            }
+                        }
+                    }
+                },
                 .load_const => {
                     if (op.a < 64) {
-                        known_f64[op.a] = switch (block.constants[op.b]) {
-                            .number => |n| n,
-                            else => null,
-                        };
+                        if (block.constants[op.b] == .number) {
+                            const n = block.constants[op.b].number;
+                            known_f64[op.a] = n;
+                            if (asExactInt32(n)) |i_val| {
+                                reg_is_int32[op.a] = (i_val != std.math.minInt(i32));
+                                reg_is_uint31[op.a] = (i_val >= 0);
+                            } else {
+                                reg_is_int32[op.a] = false;
+                                reg_is_uint31[op.a] = false;
+                            }
+                        } else {
+                            known_f64[op.a] = null;
+                            reg_is_int32[op.a] = false;
+                            reg_is_uint31[op.a] = false;
+                        }
+                    }
+                },
+                .move, .load_local, .store_local => {
+                    if (op.a < 64) {
+                        known_f64[op.a] = if (op.b < 64) known_f64[op.b] else null;
+                        reg_is_int32[op.a] = if (op.b < 64) reg_is_int32[op.b] else false;
+                        reg_is_uint31[op.a] = if (op.b < 64) reg_is_uint31[op.b] else false;
+                    }
+                },
+                .not_bits, .or_bits, .xor_bits, .shl, .shr => {
+                    if (op.a < 64) {
+                        known_f64[op.a] = null;
+                        reg_is_int32[op.a] = true;
+                        reg_is_uint31[op.a] = false;
+                    }
+                },
+                .and_bits => {
+                    if (op.a < 64) {
+                        const rhs_nonneg = if (op.c < 64 and known_f64[op.c] != null)
+                            (if (asExactInt32(known_f64[op.c].?)) |v| v >= 0 else false)
+                        else
+                            false;
+                        const is_u31 = rhs_nonneg or (op.b < 64 and reg_is_uint31[op.b]) or (op.c < 64 and reg_is_uint31[op.c]);
+                        known_f64[op.a] = null;
+                        reg_is_int32[op.a] = true;
+                        reg_is_uint31[op.a] = is_u31;
+                    }
+                },
+                .ushr => {
+                    if (op.a < 64) {
+                        const sh_gt0 = if (op.c < 64 and known_f64[op.c] != null) blk: {
+                            if (asExactInt32(known_f64[op.c].?)) |v| {
+                                break :blk ((@as(u32, @bitCast(v)) & 31) >= 1);
+                            }
+                            break :blk false;
+                        } else false;
+                        known_f64[op.a] = null;
+                        reg_is_int32[op.a] = sh_gt0;
+                        reg_is_uint31[op.a] = sh_gt0;
+                    }
+                },
+                .mod_num => {
+                    if (op.a < 64) {
+                        known_f64[op.a] = null;
+                        reg_is_int32[op.a] = true;
+                        reg_is_uint31[op.a] = true;
                     }
                 },
                 else => {
-                    if (op.a < 64) known_f64[op.a] = null;
+                    if (op.a < 64) {
+                        known_f64[op.a] = null;
+                        reg_is_int32[op.a] = false;
+                        reg_is_uint31[op.a] = false;
+                    }
                 },
             }
         }
@@ -2695,15 +2819,19 @@ fn compileOsrImpl(
                 // key = regs[op.c]; guard key < BASE_TAG and exact int32 >= 0
                 try emitLoadNumToXmm(&a, reg_to_xmm, op.c, .xmm0, bail_lbl);
                 try a.cvttsd2siReg32Xmm(.rcx, .xmm0);
-                try a.cvtsi2sdXmmReg32(.xmm1, .rcx);
-                try a.ucomisd(.xmm0, .xmm1);
-                try a.jcc(.p, bail_lbl);
-                try a.jcc(.ne, bail_lbl);
-                // sign check on 32-bit int: (rcx >> 31) == 0
-                try a.movRegReg(.rdx, .rcx);
-                try a.shrRegImm8(.rdx, 31);
-                try a.testRegReg(.rdx, .rdx);
-                try a.jcc(.ne, bail_lbl);
+                if (!(op.c < 64 and reg_is_int32[op.c])) {
+                    try a.cvtsi2sdXmmReg32(.xmm1, .rcx);
+                    try a.ucomisd(.xmm0, .xmm1);
+                    try a.jcc(.p, bail_lbl);
+                    try a.jcc(.ne, bail_lbl);
+                }
+                if (!(op.c < 64 and reg_is_uint31[op.c])) {
+                    // sign check on 32-bit int: (rcx >> 31) == 0
+                    try a.movRegReg(.rdx, .rcx);
+                    try a.shrRegImm8(.rdx, 31);
+                    try a.testRegReg(.rdx, .rdx);
+                    try a.jcc(.ne, bail_lbl);
+                }
 
                 // guard idx < box.items.len
                 try a.movRegMem(.rdx, .rax, arr_items_len_off);
@@ -2769,14 +2897,18 @@ fn compileOsrImpl(
                 // key = regs[op.b]; guard key < BASE_TAG and exact int32 >= 0
                 try emitLoadNumToXmm(&a, reg_to_xmm, op.b, .xmm0, bail_lbl);
                 try a.cvttsd2siReg32Xmm(.rcx, .xmm0);
-                try a.cvtsi2sdXmmReg32(.xmm1, .rcx);
-                try a.ucomisd(.xmm0, .xmm1);
-                try a.jcc(.p, bail_lbl);
-                try a.jcc(.ne, bail_lbl);
-                try a.movRegReg(.rdx, .rcx);
-                try a.shrRegImm8(.rdx, 31);
-                try a.testRegReg(.rdx, .rdx);
-                try a.jcc(.ne, bail_lbl);
+                if (!(op.b < 64 and reg_is_int32[op.b])) {
+                    try a.cvtsi2sdXmmReg32(.xmm1, .rcx);
+                    try a.ucomisd(.xmm0, .xmm1);
+                    try a.jcc(.p, bail_lbl);
+                    try a.jcc(.ne, bail_lbl);
+                }
+                if (!(op.b < 64 and reg_is_uint31[op.b])) {
+                    try a.movRegReg(.rdx, .rcx);
+                    try a.shrRegImm8(.rdx, 31);
+                    try a.testRegReg(.rdx, .rdx);
+                    try a.jcc(.ne, bail_lbl);
+                }
 
                 // len = box.items.len
                 try a.movRegMem(.rdx, .rax, arr_items_len_off);
@@ -2978,8 +3110,10 @@ fn compileOsrImpl(
                 const done_lbl = try a.createLabel();
                 try emitLoadNumToXmm(&a, reg_to_xmm, op.b, .xmm0, bail_lbl);
                 try a.cvttsd2siReg32Xmm(.rax, .xmm0);
-                try a.cmpReg32Imm32(.rax, -0x80000000);
-                try a.jcc(.e, slow_lbl);
+                if (!(op.b < 64 and reg_is_int32[op.b])) {
+                    try a.cmpReg32Imm32(.rax, -0x80000000);
+                    try a.jcc(.e, slow_lbl);
+                }
                 try a.notReg32(.rax);
                 try a.cvtsi2sdXmmReg32(.xmm0, .rax);
                 try emitStoreXmmToNum(&a, reg_to_xmm, cached_regs, cached_count, op.a, .xmm0, bail_lbl);
@@ -3022,8 +3156,10 @@ fn compileOsrImpl(
                     try emitLoadNumToXmm(&a, reg_to_xmm, op.c, .xmm1, bail_lbl);
                 }
                 try a.cvttsd2siReg32Xmm(.rax, .xmm0);
-                try a.cmpReg32Imm32(.rax, -0x80000000);
-                try a.jcc(.e, slow_lbl);
+                if (!(op.b < 64 and reg_is_int32[op.b])) {
+                    try a.cmpReg32Imm32(.rax, -0x80000000);
+                    try a.jcc(.e, slow_lbl);
+                }
 
                 if (maybe_rhs_i32) |rhs_i32| {
                     switch (op.opcode) {
@@ -3058,8 +3194,10 @@ fn compileOsrImpl(
                     }
                 } else {
                     try a.cvttsd2siReg32Xmm(.rcx, .xmm1);
-                    try a.cmpReg32Imm32(.rcx, -0x80000000);
-                    try a.jcc(.e, slow_lbl);
+                    if (!(op.c < 64 and reg_is_int32[op.c])) {
+                        try a.cmpReg32Imm32(.rcx, -0x80000000);
+                        try a.jcc(.e, slow_lbl);
+                    }
                     switch (op.opcode) {
                         .and_bits => {
                             try a.andReg32Reg32(.rax, .rcx);
