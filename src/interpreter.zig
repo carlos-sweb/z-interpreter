@@ -2394,6 +2394,27 @@ test "OSR inline set_prop_transition handles recycled objects with primitive and
     try testing.expect(result.isBool() and result.asBool());
 }
 
+test "emitter and OSR handle add_local_const/sub_local_const on general register operands" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+    const result = try interp.run(
+        \\function step(o) {
+        \\  for (var i = 0; i < 250; i++) {
+        \\    o.x = ((o.x + 3) - 2) + 1;
+        \\  }
+        \\  return o.x;
+        \\}
+        \\step({ x: 10 }) === 510;
+    );
+    defer result.deinit();
+    try testing.expect(result.isBool() and result.asBool());
+}
+
+
 
 
 

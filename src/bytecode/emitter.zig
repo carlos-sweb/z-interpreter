@@ -714,6 +714,18 @@ pub const BytecodeEmitter = struct {
                     return destination;
                 }
             }
+        } else if (binary.op == .add or binary.op == .sub) {
+            if (asConstant(binary.right)) |const_val| {
+                if (const_val == .number) {
+                    const left = try self.emitReadOperand(binary.left);
+                    const const_idx = try self.addConstant(const_val);
+                    const destination = try self.allocRegister();
+                    const opc: codeblock.Opcode = if (binary.op == .add) .add_local_const else .sub_local_const;
+                    try self.emitOp(.{ .opcode = opc, .a = destination, .b = left, .c = const_idx });
+                    self.freeRegister(left);
+                    return destination;
+                }
+            }
         }
 
         const opcode: codeblock.Opcode = switch (binary.op) {
