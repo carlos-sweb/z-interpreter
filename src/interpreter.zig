@@ -2505,6 +2505,33 @@ test "OSR scalar property promotion writes back on normal exit, mid-loop bailout
     try testing.expect(result.isBool() and result.asBool());
 }
 
+test "OSR bitwise and arithmetic constant specialization handles overflow, NaN, Infinity, and -0" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+    const result = try interp.run(
+        \\function runBitwiseEdgeCases() {
+        \\  var acc = 0;
+        \\  for (var i = 1; i <= 250; i++) {
+        \\    var v = i < 150 ? i : (i === 150 ? NaN : (i === 151 ? Infinity : (i === 152 ? -0.0 : 0x80000000 + i)));
+        \\    var idx = v & 7;
+        \\    var r = i % 7;
+        \\    var q = (v / 4) | 0;
+        \\    var b = ((q ^ idx) << 2) ^ (v >>> 1) ^ (v >> 3);
+        \\    acc = (acc + b + r) | 0;
+        \\  }
+        \\  return acc;
+        \\}
+        \\runBitwiseEdgeCases() === 1610644817;
+    );
+    defer result.deinit();
+    try testing.expect(result.isBool() and result.asBool());
+}
+
+
 
 
 

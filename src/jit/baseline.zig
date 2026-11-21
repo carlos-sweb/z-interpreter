@@ -2201,6 +2201,85 @@ fn emitReloadPromoted(a: *Assembler, promoted: PromotedPropsAnalysis) !void {
     }
 }
 
+fn asExactInt32(val: f64) ?i32 {
+    if (!std.math.isFinite(val)) return null;
+    if (val < @as(f64, std.math.minInt(i32)) or val > @as(f64, std.math.maxInt(i32))) return null;
+    const i: i32 = @intFromFloat(val);
+    if (@as(f64, @floatFromInt(i)) != val) return null;
+    if (i == 0 and (@as(u64, @bitCast(val)) >> 63) != 0) return null;
+    return i;
+}
+
+fn asPowerOfTwoReciprocal(val: f64) ?u64 {
+    if (!std.math.isFinite(val) or val == 0.0) return null;
+    const bits: u64 = @bitCast(val);
+    const mantissa = bits & 0x000F_FFFF_FFFF_FFFF;
+    const exp: i32 = @as(i32, @intCast((bits >> 52) & 0x7FF)) - 1023;
+    if (mantissa != 0) return null;
+    if (exp < -500 or exp > 500) return null;
+    const recip: f64 = 1.0 / val;
+    return @bitCast(recip);
+}
+
+fn canElideLoadConst(
+    block: *const codeblock.CodeBlock,
+    start_ip: usize,
+    end_ip: usize,
+    idx: usize,
+    is_jump_target: []const bool,
+) bool {
+    const loop_len = end_ip - start_ip + 1;
+    if (idx + 1 >= loop_len) return false;
+    if (is_jump_target[idx + 1]) return false;
+    const op = block.ops[start_ip + idx];
+    const reg = op.a;
+    if (reg < block.local_count or reg >= 64) return false;
+    const c = block.constants[op.b];
+    if (c != .number) return false;
+
+    const next_op = block.ops[start_ip + idx + 1];
+    switch (next_op.opcode) {
+        .and_bits, .or_bits, .xor_bits, .shl, .shr, .ushr => {
+            if (next_op.c != reg or next_op.b == reg) return false;
+            if (asExactInt32(c.number) == null) return false;
+        },
+        .mod_num => {
+            if (next_op.c != reg or next_op.b == reg) return false;
+            const rhs_i32 = asExactInt32(c.number) orelse return false;
+            if (rhs_i32 <= 0) return false;
+        },
+        .div_num => {
+            if (next_op.c != reg or next_op.b == reg) return false;
+            if (asPowerOfTwoReciprocal(c.number) == null) return false;
+        },
+        else => return false,
+    }
+
+    if (next_op.a == reg) return true;
+
+    var k = idx + 2;
+    while (k < loop_len) : (k += 1) {
+        if (is_jump_target[k]) return false;
+        const op_k = block.ops[start_ip + k];
+        switch (op_k.opcode) {
+            .nop => {},
+            .load_const, .load_undefined, .load_null, .load_true, .load_false, .new_object, .new_array => {
+                if (op_k.a == reg) return true;
+            },
+            .add, .add_num, .sub_num, .mul_num, .div_num, .mod_num, .and_bits, .or_bits, .xor_bits, .shl, .shr, .ushr, .lt_num, .gt_num, .le_num, .ge_num, .eq, .ne, .loose_eq, .loose_ne, .get_elem => {
+                if (op_k.b == reg or op_k.c == reg) return false;
+                if (op_k.a == reg) return true;
+            },
+            .add_local_const, .sub_local_const, .lt_local_const, .gt_local_const, .le_local_const, .ge_local_const, .eq_local_const, .neg, .not, .not_bits, .move, .load_local, .store_local, .get_prop, .get_elem_const => {
+                if (op_k.b == reg) return false;
+                if (op_k.a == reg) return true;
+            },
+            else => return false,
+        }
+    }
+    return false;
+}
+
 fn emitFlushCached(a: *Assembler, cached_regs: [12]u8, cached_count: usize) !void {
     for (0..cached_count) |k| {
         const r = cached_regs[k];
@@ -2328,9 +2407,35 @@ fn compileOsrImpl(
     defer allocator.free(op_labels);
     var bailout_labels = try allocator.alloc(Label, loop_len);
     defer allocator.free(bailout_labels);
+    var bailout_target_ips = try allocator.alloc(u32, loop_len);
+    defer allocator.free(bailout_target_ips);
+    var is_jump_target = try allocator.alloc(bool, loop_len);
+    defer allocator.free(is_jump_target);
+    @memset(is_jump_target, false);
+    is_jump_target[0] = true;
+
+    const ElidedConst = struct { reg: u8, bits: u64 };
+    var elided_consts = try allocator.alloc(?ElidedConst, loop_len);
+    defer allocator.free(elided_consts);
+    @memset(elided_consts, null);
+
     for (0..loop_len) |i| {
         op_labels[i] = try a.createLabel();
         bailout_labels[i] = try a.createLabel();
+        bailout_target_ips[i] = @intCast(start_ip + i);
+        const scan_ip = start_ip + i;
+        const scan_op = block.ops[scan_ip];
+        switch (scan_op.opcode) {
+            .jump, .jump_if_false, .jump_if_true => {
+                const t = (@as(usize, scan_op.b) << 8) | scan_op.c;
+                if (t >= start_ip and t <= end_ip) is_jump_target[t - start_ip] = true;
+            },
+            .jeq_local_const_false, .jlt_local_const_false, .jle_local_const_false, .jgt_local_const_false, .jge_local_const_false => {
+                const t = scan_ip + @as(usize, scan_op.c);
+                if (t >= start_ip and t <= end_ip) is_jump_target[t - start_ip] = true;
+            },
+            else => {},
+        }
     }
     const preheader_bailout = try a.createLabel();
     const flush_and_exit = try a.createLabel();
@@ -2433,11 +2538,45 @@ fn compileOsrImpl(
         }
     }
 
+    var known_f64: [64]?f64 = @splat(null);
+
     for (0..loop_len) |idx| {
         const ip = start_ip + idx;
         const op = block.ops[ip];
         const bail_lbl = bailout_labels[idx];
         a.bindLabel(op_labels[idx]);
+        if (is_jump_target[idx]) {
+            known_f64 = @splat(null);
+        }
+        defer {
+            switch (op.opcode) {
+                .nop,
+                .jump,
+                .jump_if_false,
+                .jump_if_true,
+                .jeq_local_const_false,
+                .jlt_local_const_false,
+                .jle_local_const_false,
+                .jgt_local_const_false,
+                .jge_local_const_false,
+                .set_elem,
+                .set_elem_const,
+                .set_prop,
+                .set_prop_transition,
+                => {},
+                .load_const => {
+                    if (op.a < 64) {
+                        known_f64[op.a] = switch (block.constants[op.b]) {
+                            .number => |n| n,
+                            else => null,
+                        };
+                    }
+                },
+                else => {
+                    if (op.a < 64) known_f64[op.a] = null;
+                },
+            }
+        }
 
         switch (op.opcode) {
             .nop => {},
@@ -2452,6 +2591,11 @@ fn compileOsrImpl(
                     .boolean => |b| JSValue.fromBool(b).bits,
                     else => unreachable,
                 };
+                if (canElideLoadConst(block, start_ip, end_ip, idx, is_jump_target)) {
+                    elided_consts[idx + 1] = .{ .reg = op.a, .bits = bits };
+                    bailout_target_ips[idx + 1] = @intCast(ip);
+                    continue;
+                }
                 if (op.a < 64 and reg_to_xmm[op.a] != null) {
                     const xmm_k = reg_to_xmm[op.a].?;
                     try a.movRegImm64(.rax, bits);
@@ -2757,13 +2901,31 @@ fn compileOsrImpl(
             },
             .div_num => {
                 try emitLoadNumToXmm(&a, reg_to_xmm, op.b, .xmm0, bail_lbl);
-                try emitLoadNumToXmm(&a, reg_to_xmm, op.c, .xmm1, bail_lbl);
-                try a.divsd(.xmm0, .xmm1);
+                const maybe_recip: ?u64 = if (op.c < 64 and known_f64[op.c] != null)
+                    asPowerOfTwoReciprocal(known_f64[op.c].?)
+                else
+                    null;
+                if (maybe_recip) |recip_bits| {
+                    try a.movRegImm64(.rcx, recip_bits);
+                    try a.movqXmmReg(.xmm1, .rcx);
+                    try a.mulsd(.xmm0, .xmm1);
+                } else {
+                    try emitLoadNumToXmm(&a, reg_to_xmm, op.c, .xmm1, bail_lbl);
+                    try a.divsd(.xmm0, .xmm1);
+                }
                 try emitStoreXmmToNum(&a, reg_to_xmm, cached_regs, cached_count, op.a, .xmm0, bail_lbl);
             },
             .mod_num => {
                 try emitLoadNumToXmm(&a, reg_to_xmm, op.b, .xmm0, bail_lbl);
-                try emitLoadNumToXmm(&a, reg_to_xmm, op.c, .xmm1, bail_lbl);
+                const maybe_rhs_i32: ?i32 = if (op.c < 64 and known_f64[op.c] != null) blk: {
+                    if (asExactInt32(known_f64[op.c].?)) |v| {
+                        if (v > 0) break :blk v;
+                    }
+                    break :blk null;
+                } else null;
+                if (maybe_rhs_i32 == null) {
+                    try emitLoadNumToXmm(&a, reg_to_xmm, op.c, .xmm1, bail_lbl);
+                }
                 // lhs: positive exact int32
                 try a.movqRegXmm(.rax, .xmm0);
                 try a.movRegReg(.rdx, .rax);
@@ -2777,21 +2939,26 @@ fn compileOsrImpl(
                 try a.ucomisd(.xmm0, .xmm2);
                 try a.jcc(.p, bail_lbl);
                 try a.jcc(.ne, bail_lbl);
-                // rhs: strictly positive exact int32 (> 0)
-                try a.movqRegXmm(.rcx, .xmm1);
-                try a.movRegReg(.rdx, .rcx);
-                try a.shrRegImm8(.rdx, 63);
-                try a.testRegReg(.rdx, .rdx);
-                try a.jcc(.ne, bail_lbl);
-                try a.cvttsd2siReg32Xmm(.rcx, .xmm1);
-                try a.cmpReg32Imm32(.rcx, -0x80000000);
-                try a.jcc(.e, bail_lbl);
-                try a.testReg32Reg32(.rcx, .rcx);
-                try a.jcc(.e, bail_lbl);
-                try a.cvtsi2sdXmmReg32(.xmm2, .rcx);
-                try a.ucomisd(.xmm1, .xmm2);
-                try a.jcc(.p, bail_lbl);
-                try a.jcc(.ne, bail_lbl);
+
+                if (maybe_rhs_i32) |rhs_i32| {
+                    try a.movRegImm32(.rcx, @bitCast(rhs_i32));
+                } else {
+                    // rhs: strictly positive exact int32 (> 0)
+                    try a.movqRegXmm(.rcx, .xmm1);
+                    try a.movRegReg(.rdx, .rcx);
+                    try a.shrRegImm8(.rdx, 63);
+                    try a.testRegReg(.rdx, .rdx);
+                    try a.jcc(.ne, bail_lbl);
+                    try a.cvttsd2siReg32Xmm(.rcx, .xmm1);
+                    try a.cmpReg32Imm32(.rcx, -0x80000000);
+                    try a.jcc(.e, bail_lbl);
+                    try a.testReg32Reg32(.rcx, .rcx);
+                    try a.jcc(.e, bail_lbl);
+                    try a.cvtsi2sdXmmReg32(.xmm2, .rcx);
+                    try a.ucomisd(.xmm1, .xmm2);
+                    try a.jcc(.p, bail_lbl);
+                    try a.jcc(.ne, bail_lbl);
+                }
 
                 try a.xorReg32Reg32(.rdx, .rdx);
                 try a.divReg32(.rcx);
@@ -2845,45 +3012,94 @@ fn compileOsrImpl(
             .and_bits, .or_bits, .xor_bits, .shl, .shr, .ushr => {
                 const slow_lbl = try a.createLabel();
                 const done_lbl = try a.createLabel();
+                const maybe_rhs_i32: ?i32 = if (op.c < 64 and known_f64[op.c] != null)
+                    asExactInt32(known_f64[op.c].?)
+                else
+                    null;
+
                 try emitLoadNumToXmm(&a, reg_to_xmm, op.b, .xmm0, bail_lbl);
-                try emitLoadNumToXmm(&a, reg_to_xmm, op.c, .xmm1, bail_lbl);
+                if (maybe_rhs_i32 == null) {
+                    try emitLoadNumToXmm(&a, reg_to_xmm, op.c, .xmm1, bail_lbl);
+                }
                 try a.cvttsd2siReg32Xmm(.rax, .xmm0);
                 try a.cmpReg32Imm32(.rax, -0x80000000);
                 try a.jcc(.e, slow_lbl);
-                try a.cvttsd2siReg32Xmm(.rcx, .xmm1);
-                try a.cmpReg32Imm32(.rcx, -0x80000000);
-                try a.jcc(.e, slow_lbl);
-                switch (op.opcode) {
-                    .and_bits => {
-                        try a.andReg32Reg32(.rax, .rcx);
-                        try a.cvtsi2sdXmmReg32(.xmm0, .rax);
-                    },
-                    .or_bits => {
-                        try a.orReg32Reg32(.rax, .rcx);
-                        try a.cvtsi2sdXmmReg32(.xmm0, .rax);
-                    },
-                    .xor_bits => {
-                        try a.xorReg32Reg32(.rax, .rcx);
-                        try a.cvtsi2sdXmmReg32(.xmm0, .rax);
-                    },
-                    .shl => {
-                        try a.shlReg32Cl(.rax);
-                        try a.cvtsi2sdXmmReg32(.xmm0, .rax);
-                    },
-                    .shr => {
-                        try a.sarReg32Cl(.rax);
-                        try a.cvtsi2sdXmmReg32(.xmm0, .rax);
-                    },
-                    .ushr => {
-                        try a.shrReg32Cl(.rax);
-                        try a.cvtsi2sdqXmmReg64(.xmm0, .rax);
-                    },
-                    else => unreachable,
+
+                if (maybe_rhs_i32) |rhs_i32| {
+                    switch (op.opcode) {
+                        .and_bits => {
+                            try a.andReg32Imm32(.rax, rhs_i32);
+                            try a.cvtsi2sdXmmReg32(.xmm0, .rax);
+                        },
+                        .or_bits => {
+                            if (rhs_i32 != 0) try a.orReg32Imm32(.rax, rhs_i32);
+                            try a.cvtsi2sdXmmReg32(.xmm0, .rax);
+                        },
+                        .xor_bits => {
+                            if (rhs_i32 != 0) try a.xorReg32Imm32(.rax, rhs_i32);
+                            try a.cvtsi2sdXmmReg32(.xmm0, .rax);
+                        },
+                        .shl => {
+                            const sh_amt: u8 = @intCast(@as(u32, @bitCast(rhs_i32)) & 31);
+                            if (sh_amt != 0) try a.shlReg32Imm8(.rax, sh_amt);
+                            try a.cvtsi2sdXmmReg32(.xmm0, .rax);
+                        },
+                        .shr => {
+                            const sh_amt: u8 = @intCast(@as(u32, @bitCast(rhs_i32)) & 31);
+                            if (sh_amt != 0) try a.sarReg32Imm8(.rax, sh_amt);
+                            try a.cvtsi2sdXmmReg32(.xmm0, .rax);
+                        },
+                        .ushr => {
+                            const sh_amt: u8 = @intCast(@as(u32, @bitCast(rhs_i32)) & 31);
+                            if (sh_amt != 0) try a.shrReg32Imm8(.rax, sh_amt);
+                            try a.cvtsi2sdqXmmReg64(.xmm0, .rax);
+                        },
+                        else => unreachable,
+                    }
+                } else {
+                    try a.cvttsd2siReg32Xmm(.rcx, .xmm1);
+                    try a.cmpReg32Imm32(.rcx, -0x80000000);
+                    try a.jcc(.e, slow_lbl);
+                    switch (op.opcode) {
+                        .and_bits => {
+                            try a.andReg32Reg32(.rax, .rcx);
+                            try a.cvtsi2sdXmmReg32(.xmm0, .rax);
+                        },
+                        .or_bits => {
+                            try a.orReg32Reg32(.rax, .rcx);
+                            try a.cvtsi2sdXmmReg32(.xmm0, .rax);
+                        },
+                        .xor_bits => {
+                            try a.xorReg32Reg32(.rax, .rcx);
+                            try a.cvtsi2sdXmmReg32(.xmm0, .rax);
+                        },
+                        .shl => {
+                            try a.shlReg32Cl(.rax);
+                            try a.cvtsi2sdXmmReg32(.xmm0, .rax);
+                        },
+                        .shr => {
+                            try a.sarReg32Cl(.rax);
+                            try a.cvtsi2sdXmmReg32(.xmm0, .rax);
+                        },
+                        .ushr => {
+                            try a.shrReg32Cl(.rax);
+                            try a.cvtsi2sdqXmmReg64(.xmm0, .rax);
+                        },
+                        else => unreachable,
+                    }
                 }
                 try emitStoreXmmToNum(&a, reg_to_xmm, cached_regs, cached_count, op.a, .xmm0, bail_lbl);
                 try a.jmp(done_lbl);
 
                 a.bindLabel(slow_lbl);
+                if (elided_consts[idx]) |ec| {
+                    try a.movRegImm64(.rax, ec.bits);
+                    if (ec.reg < 64 and reg_to_xmm[ec.reg] != null) {
+                        try a.movqXmmReg(reg_to_xmm[ec.reg].?, .rax);
+                    } else {
+                        try a.movMemReg(.r12, @intCast(@as(usize, ec.reg) * 8), .rax);
+                    }
+                }
                 if (cached_count > 0) {
                     try emitFlushCached(&a, cached_regs, cached_count);
                 }
@@ -3978,7 +4194,7 @@ fn compileOsrImpl(
 
     for (0..loop_len) |idx| {
         a.bindLabel(bailout_labels[idx]);
-        try a.movRegImm32(.rax, @intCast(start_ip + idx));
+        try a.movRegImm32(.rax, bailout_target_ips[idx]);
         if (has_flush) {
             try a.jmp(flush_and_exit);
         } else {

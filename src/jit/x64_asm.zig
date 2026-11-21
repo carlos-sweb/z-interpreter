@@ -365,6 +365,66 @@ pub const Assembler = struct {
         try self.emitByte(modRM(0b11, src.low3(), dst.low3()));
     }
 
+    pub fn andReg32Imm32(self: *Assembler, dst: Reg, imm: i32) !void {
+        try self.emitRex32(false, dst.isExt());
+        if (imm >= -128 and imm <= 127) {
+            try self.emitByte(0x83);
+            try self.emitByte(modRM(0b11, 4, dst.low3()));
+            try self.emitByte(@bitCast(@as(i8, @intCast(imm))));
+        } else {
+            try self.emitByte(0x81);
+            try self.emitByte(modRM(0b11, 4, dst.low3()));
+            try self.emitI32(imm);
+        }
+    }
+
+    pub fn orReg32Imm32(self: *Assembler, dst: Reg, imm: i32) !void {
+        try self.emitRex32(false, dst.isExt());
+        if (imm >= -128 and imm <= 127) {
+            try self.emitByte(0x83);
+            try self.emitByte(modRM(0b11, 1, dst.low3()));
+            try self.emitByte(@bitCast(@as(i8, @intCast(imm))));
+        } else {
+            try self.emitByte(0x81);
+            try self.emitByte(modRM(0b11, 1, dst.low3()));
+            try self.emitI32(imm);
+        }
+    }
+
+    pub fn xorReg32Imm32(self: *Assembler, dst: Reg, imm: i32) !void {
+        try self.emitRex32(false, dst.isExt());
+        if (imm >= -128 and imm <= 127) {
+            try self.emitByte(0x83);
+            try self.emitByte(modRM(0b11, 6, dst.low3()));
+            try self.emitByte(@bitCast(@as(i8, @intCast(imm))));
+        } else {
+            try self.emitByte(0x81);
+            try self.emitByte(modRM(0b11, 6, dst.low3()));
+            try self.emitI32(imm);
+        }
+    }
+
+    pub fn shlReg32Imm8(self: *Assembler, dst: Reg, count: u8) !void {
+        try self.emitRex32(false, dst.isExt());
+        try self.emitByte(0xC1);
+        try self.emitByte(modRM(0b11, 4, dst.low3()));
+        try self.emitByte(count);
+    }
+
+    pub fn shrReg32Imm8(self: *Assembler, dst: Reg, count: u8) !void {
+        try self.emitRex32(false, dst.isExt());
+        try self.emitByte(0xC1);
+        try self.emitByte(modRM(0b11, 5, dst.low3()));
+        try self.emitByte(count);
+    }
+
+    pub fn sarReg32Imm8(self: *Assembler, dst: Reg, count: u8) !void {
+        try self.emitRex32(false, dst.isExt());
+        try self.emitByte(0xC1);
+        try self.emitByte(modRM(0b11, 7, dst.low3()));
+        try self.emitByte(count);
+    }
+
     pub fn notReg32(self: *Assembler, dst: Reg) !void {
         try self.emitRex32(false, dst.isExt());
         try self.emitByte(0xF7);
