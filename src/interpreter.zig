@@ -2174,3 +2174,87 @@ test "hoisting of inner function called before declaration works in bytecode" {
     try testing.expect(result.isNumber());
     try testing.expectEqual(@as(f64, 42), result.asNumber());
 }
+
+test "G1: throw from bytecode function without local catch propagates pending_exception" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+    const result = try interp.run(
+        \\function thrower() { throw "err_payload"; }
+        \\var caught = null;
+        \\try { thrower(); } catch (e) { caught = e; }
+        \\caught === "err_payload";
+    );
+    defer result.deinit();
+    try testing.expect(result.isBool() and result.asBool());
+}
+
+test "G2: generator return() marks generator finished" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+    const result = try interp.run(
+        \\const iter = (function* () { yield 1; yield 2; })();
+        \\for (const [,] of [iter]) { break; }
+        \\iter.next().done === true;
+    );
+    defer result.deinit();
+    try testing.expect(result.isBool() and result.asBool());
+}
+
+test "G3: calling undefined global function throws ReferenceError" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+    const result = try interp.run(
+        \\var ok = false;
+        \\try { { noExiste(); } } catch (e) { ok = e instanceof ReferenceError; }
+        \\ok;
+    );
+    defer result.deinit();
+    try testing.expect(result.isBool() and result.asBool());
+}
+
+test "G4: TDZ on captured lexical variable throws ReferenceError before initialization" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+    const result = try interp.run(
+        \\(function() {
+        \\  function f() { return x + 1; }
+        \\  var threw = false;
+        \\  try { f(); } catch (e) { threw = e instanceof ReferenceError; }
+        \\  const x = 1;
+        \\  return threw && f() === 2;
+        \\})();
+    );
+    defer result.deinit();
+    try testing.expect(result.isBool() and result.asBool());
+}
+
+test "G6: object literal with __proto__ falls back cleanly to AST" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+    const result = try interp.run(
+        \\Reflect.setPrototypeOf(Object.prototype, { __proto__: null }) === false;
+    );
+    defer result.deinit();
+    try testing.expect(result.isBool() and result.asBool());
+}
+

@@ -263,6 +263,7 @@ fn getProp(frame: *CallFrame, allocator: Allocator, obj: JSValue, key: []const u
                 return rec.value.retain();
             }
         }
+        if (frame.interp) |it| return it.getProperty(obj, key);
         return JSValue.UNDEFINED;
     } else if (obj.isArray()) {
         const box = obj.asArray();
@@ -656,24 +657,36 @@ noinline fn resolveCallCache(cache: *codeblock.CallSiteCache, callee: JSValue) v
     }
 }
 
-noinline fn resolveCallGlobalCache(cache: *codeblock.CallSiteCache, env: *Environment, gname: []const u8) !void {
+noinline fn resolveCallGlobalCache(frame: *CallFrame, cache: *codeblock.CallSiteCache, env: *Environment, gname: []const u8) !void {
     @branchHint(.cold);
-    const callee = env.get(gname) orelse return error.UnsupportedOpcode;
-    if (cache.callee) |old| {
-        var v = old;
-        v.deinit();
+    var cur: ?*Environment = env;
+    while (cur) |e| : (cur = e.parent) {
+        if (e.tdz.contains(gname)) {
+            if (frame.interp) |it| return it.throwError(.reference_error, "Cannot access '{s}' before initialization", .{gname});
+            return error.UnsupportedOpcode;
+        }
+        if (e.bindingIndex(gname)) |idx| {
+            const callee = e.bindings.items[idx].value;
+            if (cache.callee) |old| {
+                var v = old;
+                v.deinit();
+            }
+            cache.callee = callee.retain();
+            cache.global_version = global_version;
+            if (getBytecodeTarget(callee)) |target| {
+                cache.target_block = target.block;
+                cache.closure_env = target.closure_env;
+                cache.interp = target.interp;
+            } else {
+                cache.target_block = null;
+                cache.closure_env = null;
+                cache.interp = null;
+            }
+            return;
+        }
     }
-    cache.callee = callee.retain();
-    cache.global_version = global_version;
-    if (getBytecodeTarget(callee)) |target| {
-        cache.target_block = target.block;
-        cache.closure_env = target.closure_env;
-        cache.interp = target.interp;
-    } else {
-        cache.target_block = null;
-        cache.closure_env = null;
-        cache.interp = null;
-    }
+    if (frame.interp) |it| return it.throwError(.reference_error, "{s} is not defined", .{gname});
+    return error.UnsupportedOpcode;
 }
 
 noinline fn callNativeFallback(allocator: Allocator, frame: *CallFrame, frame_regs: []JSValue, op_a: u8, callee: JSValue, this_value: JSValue, args_slice: []const JSValue) !void {
@@ -765,10 +778,16 @@ noinline fn handleJsThrow(
         try setRegTracked(cur_frame, hregs, handler.error_reg, thrown);
         return cur_frame;
     }
+    const interp_opt = if (frame_count.* > 0) frames[0].interp else null;
     for (registers[0..reg_top.*]) |*r| deinitSlot(r);
     reg_top.* = 0;
     frame_count.* = 0;
-    thrown.deinit();
+    if (interp_opt) |it| {
+        if (it.pending_exception) |old| old.deinit();
+        it.pending_exception = thrown;
+    } else {
+        thrown.deinit();
+    }
     return error.JsThrow;
 }
 
@@ -893,8 +912,13 @@ noinline fn allocCapturedEnv(interp_opt: ?*interpreter_mod.Interpreter, parent_o
     if (this_val_opt) |tv| {
         child_env.this_value = tv.retain();
     }
-    for (block.captured_names) |name| {
-        if (!child_env.containsBinding(name)) {
+    for (block.captured_names, 0..) |name, i| {
+        const is_lex = if (i < block.captured_is_lexical.len) block.captured_is_lexical[i] else false;
+        if (is_lex) {
+            if (!child_env.containsBinding(name)) {
+                try child_env.markTDZ(itp.gc_allocator, name);
+            }
+        } else if (!child_env.containsBinding(name)) {
             try child_env.define(itp.gc_allocator, name, JSValue.UNDEFINED);
         }
     }
@@ -1296,9 +1320,23 @@ noinline fn tryEnterOsr(
     return next_ip;
 }
 
+threadlocal var tl_registers: [MAX_REGISTERS]JSValue = undefined;
+threadlocal var tl_frames: [MAX_FRAMES]CallFrame = undefined;
+threadlocal var tl_prop_ic: [256]PropIC = @splat(.{});
+threadlocal var vm_buf_in_use: bool = false;
+
+pub fn clearPropIC() void {
+    @memset(&tl_prop_ic, .{});
+}
+
 pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_env: ?*Environment, this_value: JSValue, args: []const JSValue, interp: ?*interpreter_mod.Interpreter) !JSValue {
-    const registers = try allocator.alloc(JSValue, MAX_REGISTERS);
-    defer allocator.free(registers);
+    const use_tl = !vm_buf_in_use;
+    if (use_tl) vm_buf_in_use = true;
+    defer if (use_tl) {
+        vm_buf_in_use = false;
+    };
+    const registers: []JSValue = if (use_tl) &tl_registers else try allocator.alloc(JSValue, MAX_REGISTERS);
+    defer if (!use_tl) allocator.free(registers);
 
     if (!block.jit_failed) {
         const mut_cb = @constCast(block);
@@ -1313,8 +1351,8 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
     clearGlobalCache();
     defer clearGlobalCache();
 
-    const frames = try allocator.alloc(CallFrame, MAX_FRAMES);
-    defer allocator.free(frames);
+    const frames: []CallFrame = if (use_tl) &tl_frames else try allocator.alloc(CallFrame, MAX_FRAMES);
+    defer if (!use_tl) allocator.free(frames);
 
     var reg_top: usize = 0;
     const prev_obj_pool_len = obj_pool_len;
@@ -1337,7 +1375,7 @@ noinline fn vmCallDispatch(
 ) !JSValue {
     var catch_stack: [MAX_CATCH_HANDLERS]CatchHandler = undefined;
     var catch_top: usize = 0;
-    var prop_ic: [256]PropIC = @splat(.{});
+    const prop_ic: *[256]PropIC = &tl_prop_ic;
 
     var frame_count: usize = 0;
     var reg_top: usize = 0;
@@ -1393,7 +1431,7 @@ noinline fn vmCallDispatch(
             &max_reg_water_mark,
             &catch_stack,
             &catch_top,
-            &prop_ic,
+            prop_ic,
         ) catch |err| {
             if (err == error.JsThrow and catch_top > 0 and interp != null and interp.?.pending_exception != null) {
                 const thrown = interp.?.pending_exception.?;
@@ -1745,7 +1783,7 @@ noinline fn vmExecLoop(
             const val = try getRegister(frame_regs, op.b);
             const slot_idx = ((@intFromPtr(env) >> 4) +% (@intFromPtr(name.ptr) >> 3)) & 31;
             const entry = &global_cache[slot_idx];
-            if (entry.env == env and entry.name_ptr == name.ptr and entry.is_mutable and entry.binding_idx < entry.target_env.bindings.items.len) {
+            if (op.c == 0 and entry.env == env and entry.name_ptr == name.ptr and entry.is_mutable and entry.binding_idx < entry.target_env.bindings.items.len) {
                 global_version +%= 1;
                 const slot = &entry.target_env.bindings.items[entry.binding_idx].value;
                 if (!needsDeinit(slot.*) and !needsDeinit(val)) {
@@ -1756,7 +1794,7 @@ noinline fn vmExecLoop(
                     old.deinit();
                 }
             } else {
-                try storeGlobalSlow(frame, allocator, env, name, val, entry);
+                try storeGlobalSlow(frame, allocator, env, name, val, entry, op.c);
             }
             ip += 1;
             if (ip >= code.len) return error.MissingReturn;
@@ -2220,7 +2258,7 @@ noinline fn vmExecLoop(
             const gname = cache.global_name orelse return error.InvalidConstant;
             const env = frame.closure_env orelse return error.UnsupportedOpcode;
             if (cache.callee == null or cache.global_version != global_version) {
-                try resolveCallGlobalCache(cache, env, gname);
+                try resolveCallGlobalCache(frame, cache, env, gname);
             }
             const callee = cache.callee.?;
             if (cache.target_block) |callee_block| {
@@ -2822,15 +2860,17 @@ noinline fn storeGlobalSlow(
     name: []const u8,
     val: JSValue,
     entry: *GlobalCacheEntry,
+    init_mode: u8,
 ) !void {
     @branchHint(.cold);
     global_version +%= 1;
     var cur: ?*Environment = env;
     while (cur) |e| : (cur = e.parent) {
         if (e.tdz.contains(name)) {
-            if (e.bindingIndex(name) == null) {
+            if (init_mode != 0 and e.bindingIndex(name) == null) {
                 clearGlobalCache();
                 try e.define(allocator, name, val.retain());
+                if (init_mode == 2) try e.markConst(allocator, name);
                 entry.* = .{
                     .env = env,
                     .target_env = e,

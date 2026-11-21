@@ -162,6 +162,7 @@ pub const CodeBlock = struct {
     exception_table: []const ExceptionHandler = &.{},
     call_target_cache: []CallSiteCache = &.{},
     captured_names: []const []const u8 = &.{},
+    captured_is_lexical: []const bool = &.{},
     local_count: u16 = 0,
     register_count: u16 = 0,
     param_count: u16 = 0,

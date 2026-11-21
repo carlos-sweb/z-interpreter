@@ -114,6 +114,26 @@ fn generatorNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     return iterResult(self, c, true);
 }
 
+fn generatorReturn(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const fs: *FiberState = @ptrCast(@alignCast(ctx));
+    const self = fs.interp;
+    fs.fiber.finished = true;
+    const val = if (args.len > 0) args[0] else JSValue.UNDEFINED;
+    return iterResult(self, val, true);
+}
+
+fn asyncGeneratorReturn(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const fs: *FiberState = @ptrCast(@alignCast(ctx));
+    const self = fs.interp;
+    fs.fiber.finished = true;
+    const val = if (args.len > 0) args[0] else JSValue.UNDEFINED;
+    return self.fulfilledPromise(try iterResult(self, val, true));
+}
+
 /// `asyncGen.next(v)` -- native with ctx = *FiberState (is_generator AND
 /// is_async both true). Unlike the sync generatorNext, this must itself
 /// return a PROMISE synchronously: resumeFiber may settle it right away (a
@@ -523,6 +543,7 @@ pub fn makeGeneratorObject(self: *Interpreter, fnode: *zfunctions.FunctionNode, 
     var obj = try self.gcNewObject();
     if (self.iterator_prototype) |p| try obj.asObject().value.setPrototype(&p.asObject().value);
     try obj.asObject().value.set("next", try self.gcNewFunction(.{ .ctx = fs, .name = "next", .call = generatorNext }));
+    try obj.asObject().value.set("return", try self.gcNewFunction(.{ .ctx = fs, .name = "return", .call = generatorReturn }));
     // A generator IS its own iterable: `gen()[Symbol.iterator]()`
     // returns the generator itself (so `[...gen()]` works via the
     // Symbol.iterator path too, and `gen()[Symbol.iterator]() === gen()`).
@@ -590,6 +611,7 @@ pub fn makeAsyncGeneratorObject(self: *Interpreter, fnode: *zfunctions.FunctionN
     try self.gcTrackFiberState(fs);
     var obj = try self.gcNewObject();
     try obj.asObject().value.set("next", try self.gcNewFunction(.{ .ctx = fs, .name = "next", .call = asyncGeneratorNext }));
+    try obj.asObject().value.set("return", try self.gcNewFunction(.{ .ctx = fs, .name = "return", .call = asyncGeneratorReturn }));
     if (self.symbol_async_iterator) |sym| {
         const key = try self.encodeKey(sym);
         defer self.gc_allocator.free(key);

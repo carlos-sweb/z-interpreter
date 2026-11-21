@@ -19,6 +19,8 @@ pub const CompiledCodeBlock = struct {
             allocator.free(name);
         }
         allocator.free(self.block.captured_names);
+        allocator.free(self.block.captured_is_lexical);
+        @import("vm.zig").clearPropIC();
         for (self.block.call_target_cache) |*c| {
             if (c.callee) |v| {
                 var val = v;
@@ -86,17 +88,22 @@ pub const BytecodeEmitter = struct {
         errdefer allocator.free(call_target_cache);
         const captured_names = try allocator.alloc([]const u8, scope.captured_locals.len);
         errdefer allocator.free(captured_names);
+        const captured_is_lexical = try allocator.alloc(bool, scope.captured_locals.len);
+        errdefer allocator.free(captured_is_lexical);
         var duped_count: usize = 0;
         errdefer for (captured_names[0..duped_count]) |n| allocator.free(n);
         for (scope.captured_locals, 0..) |n, i| {
             captured_names[i] = try allocator.dupe(u8, n);
             duped_count += 1;
+            const kind = scope.localKind(n);
+            captured_is_lexical[i] = (kind == .let or kind == .@"const");
         }
         return .{ .block = .{
             .ops = ops,
             .constants = constants,
             .call_target_cache = call_target_cache,
             .captured_names = captured_names,
+            .captured_is_lexical = captured_is_lexical,
             .local_count = scope.local_count,
             .register_count = self.max_register,
             .param_count = scope.param_count,
@@ -237,10 +244,10 @@ pub const BytecodeEmitter = struct {
         if (self.scope.localKind(name)) |kind| {
             if (kind == .@"const") return error.UnsupportedSyntax;
         }
-        return self.emitStoreDirect(name, reg);
+        return self.emitStoreDirect(name, reg, 0);
     }
 
-    fn emitStoreDirect(self: *BytecodeEmitter, name: []const u8, reg: u8) !void {
+    fn emitStoreDirect(self: *BytecodeEmitter, name: []const u8, reg: u8, init_mode: u8) !void {
         if (std.mem.eql(u8, name, "arguments") and self.scope.localSlot("arguments") == null) {
             return error.UnsupportedSyntax;
         }
@@ -250,7 +257,7 @@ pub const BytecodeEmitter = struct {
             }
         }
         const constant = try self.addConstant(.{ .property_key = name });
-        return self.emitOp(.{ .opcode = .store_global, .a = constant, .b = reg });
+        return self.emitOp(.{ .opcode = .store_global, .a = constant, .b = reg, .c = init_mode });
     }
 
     fn emitVariable(self: *BytecodeEmitter, variable: anytype) !void {
@@ -277,7 +284,8 @@ pub const BytecodeEmitter = struct {
             if (self.scope.localSlot(name)) |slot| {
                 if (slot < 256) self.uninitialized_lexical[slot] = false;
             }
-            try self.emitStoreDirect(name, val_reg);
+            const init_mode: u8 = if (variable.kind == .@"const") 2 else if (variable.kind == .let) 1 else 0;
+            try self.emitStoreDirect(name, val_reg, init_mode);
             self.freeRegister(val_reg);
         }
     }
@@ -367,30 +375,10 @@ pub const BytecodeEmitter = struct {
     }
 
     fn emitForOf(self: *BytecodeEmitter, item: anytype, body: *const zstatements.Statement) anyerror!void {
-        if (item.is_await) return error.UnsupportedSyntax;
-        const name: []const u8 = switch (item.binding) {
-            .declared => |d| if (d.pattern.* == .identifier) d.pattern.identifier.name else return error.UnsupportedSyntax,
-            .existing => |n| n.name,
-            else => return error.UnsupportedSyntax,
-        };
-        const iter_obj_reg = try self.emitExpression(item.iterable);
-        const iter_reg = try self.allocRegister();
-        try self.emitOp(.{ .opcode = .iter_init, .a = iter_reg, .b = iter_obj_reg });
-        self.freeRegister(iter_obj_reg);
-        const loop_start = self.ops.items.len;
-        const val_reg = try self.allocRegister();
-        const done_reg = try self.allocRegister();
-        try self.emitOp(.{ .opcode = .iter_next, .a = val_reg, .b = done_reg, .c = iter_reg });
-        const exit_jump = try self.emitJump(.jump_if_true, done_reg);
-        try self.emitStore(name, val_reg);
-        try self.emitStatement(body);
-        const back_jump = try self.emitJump(.jump, 0);
-        try self.patchJump(back_jump, loop_start);
-        try self.patchJump(exit_jump, self.ops.items.len);
-        try self.emitOp(.{ .opcode = .iter_end, .a = iter_reg });
-        self.freeRegister(done_reg);
-        self.freeRegister(val_reg);
-        self.freeRegister(iter_reg);
+        _ = self;
+        _ = item;
+        _ = body;
+        return error.UnsupportedSyntax;
     }
 
     fn emitFunctionDeclaration(self: *BytecodeEmitter, ptr: anytype) anyerror!void {
@@ -927,6 +915,7 @@ pub const BytecodeEmitter = struct {
                         .string_literal => |s| s,
                         else => return error.UnsupportedSyntax,
                     };
+                    if (std.mem.eql(u8, key_name, "__proto__")) return error.UnsupportedSyntax;
                     const val_reg = try self.emitReadOperand(prop.value);
                     const key_const = try self.addConstant(.{ .property_key = key_name });
                     try self.emitOp(.{ .opcode = .set_prop, .a = dst, .b = key_const, .c = val_reg });
