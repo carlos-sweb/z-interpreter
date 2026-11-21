@@ -2731,6 +2731,64 @@ fn compileOsrImpl(
                 }
             },
             .new_array => {
+                const ArrayBox = zvalue.Rc(zvalue.ZArray(JSValue));
+                const ZArr = zvalue.ZArray(JSValue);
+                const ArrList = @FieldType(ZArr, "items");
+                const arr_rc_off: i32 = @intCast(@offsetOf(ArrayBox, "_count"));
+                const arr_val_off: i32 = @intCast(@offsetOf(ArrayBox, "value"));
+                const arr_holey_off: i32 = arr_val_off + @as(i32, @intCast(@offsetOf(ZArr, "holey")));
+                const arr_list_off: i32 = arr_val_off + @as(i32, @intCast(@offsetOf(ZArr, "items")));
+                const arr_items_ptr_off: i32 = arr_list_off + @as(i32, @intCast(@offsetOf(ArrList, "items")));
+                const arr_items_len_off: i32 = arr_items_ptr_off + 8;
+                const arr_items_cap_off: i32 = arr_list_off + @as(i32, @intCast(@offsetOf(ArrList, "capacity")));
+                const cap_min: i32 = @intCast(@max(@as(usize, op.b), 4));
+
+                const slow_lbl = try a.createLabel();
+                const loop_lbl = try a.createLabel();
+                const clear_len_lbl = try a.createLabel();
+                const done_lbl = try a.createLabel();
+
+                try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.a) * 8));
+                try a.movRegReg(.rcx, .rax);
+                try a.shrRegImm8(.rcx, 47);
+                try a.cmpRegImm32(.rcx, HEADER_ARRAY);
+                try a.jcc(.ne, slow_lbl);
+
+                try a.movRegImm64(.rcx, JSValue.PTR_MASK);
+                try a.andRegReg(.rax, .rcx);
+
+                try a.movRegMem(.rcx, .rax, arr_rc_off);
+                try a.cmpRegImm32(.rcx, 1);
+                try a.jcc(.ne, slow_lbl);
+
+                try a.movRegMem(.rcx, .rax, arr_holey_off);
+                try a.testRegReg(.rcx, .rcx);
+                try a.jcc(.ne, slow_lbl);
+
+                try a.movRegMem(.rcx, .rax, arr_items_cap_off);
+                try a.cmpRegImm32(.rcx, cap_min);
+                try a.jcc(.b, slow_lbl);
+                try a.cmpRegImm32(.rcx, 32);
+                try a.jcc(.a, slow_lbl);
+
+                try a.movRegMem(.rcx, .rax, arr_items_len_off);
+                try a.testRegReg(.rcx, .rcx);
+                try a.jcc(.e, clear_len_lbl);
+                try a.movRegMem(.rdx, .rax, arr_items_ptr_off);
+                a.bindLabel(loop_lbl);
+                try a.decReg64(.rcx);
+                try a.movRegMemIndexed8(.rsi, .rdx, .rcx, 0);
+                try a.cmpRegReg(.rsi, .r14);
+                try a.jcc(.ae, slow_lbl);
+                try a.testRegReg(.rcx, .rcx);
+                try a.jcc(.ne, loop_lbl);
+
+                a.bindLabel(clear_len_lbl);
+                try a.xorRegReg(.rcx, .rcx);
+                try a.movMemReg(.rax, arr_items_len_off, .rcx);
+                try a.jmp(done_lbl);
+
+                a.bindLabel(slow_lbl);
                 try a.movRegReg(.rdi, .r13);
                 try a.movRegReg(.rsi, .r12);
                 try a.movRegImm32(.rdx, op.a);
@@ -2739,6 +2797,7 @@ fn compileOsrImpl(
                 try a.callReg(.rax);
                 try a.testRegReg(.rax, .rax);
                 try a.jcc(.ne, bail_lbl);
+                a.bindLabel(done_lbl);
             },
             .set_elem_const => {
                 const ArrayBox = zvalue.Rc(zvalue.ZArray(JSValue));

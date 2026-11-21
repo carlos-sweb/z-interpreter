@@ -174,7 +174,7 @@ noinline fn deinitSlotSlow(v: *JSValue) void {
         v.* = JSValue.UNDEFINED;
     } else if (v.isArray()) {
         const box = v.asArray();
-        if (box._count == 1 and arr_pool_len < 32 and box.value.holey == null and box.value.items.capacity <= 16) {
+        if (box._count == 1 and arr_pool_len < 32 and box.value.holey == null and box.value.items.capacity <= 32) {
             for (box.value.items.items) |*el| {
                 if (el.needsDeinit()) el.deinit();
             }
@@ -1014,7 +1014,7 @@ pub fn jitNewArray(ctx: *codeblock.OsrContext, regs: [*]JSValue, dst: u32, len_h
     const cap = @max(@as(usize, len_hint), 4);
     if (slot.isArray()) {
         const box = slot.asArray();
-        if (box._count == 1 and box.value.holey == null and box.value.items.capacity >= cap and box.value.items.capacity <= 16) {
+        if (box._count == 1 and box.value.holey == null and box.value.items.capacity >= cap and box.value.items.capacity <= 32) {
             for (box.value.items.items) |*el| {
                 if (el.needsDeinit()) el.deinit();
             }

@@ -2414,6 +2414,33 @@ test "emitter and OSR handle add_local_const/sub_local_const on general register
     try testing.expect(result.isBool() and result.asBool());
 }
 
+test "OSR inline new_array recycles primitive arrays and falls back safely for heap elements" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+    const result = try interp.run(
+        \\function runArrLoops() {
+        \\  var sum = 0;
+        \\  for (var i = 0; i < 300; i++) {
+        \\    var a = [i, i + 1, i + 2];
+        \\    sum += a[0] + a[1] + a[2];
+        \\  }
+        \\  for (var j = 0; j < 200; j++) {
+        \\    var b = [{ v: j }, j + 1];
+        \\    sum += b[0].v + b[1];
+        \\  }
+        \\  return sum === 135450 + 40000;
+        \\}
+        \\runArrLoops();
+    );
+    defer result.deinit();
+    try testing.expect(result.isBool() and result.asBool());
+}
+
+
 
 
 
