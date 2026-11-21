@@ -60,6 +60,18 @@ fn fiberEntry(arg: *anyopaque) void {
     else
         invokeFunctionNode(self, fs.fnode, fs.closure_env, arena, fs.this_value, null, null, fs.private_ctx, fs.args, null);
     const result = res_or_err catch |err0| {
+        if (err0 == error.JsReturn) {
+            const rv = self.pending_return orelse JSValue.UNDEFINED;
+            self.pending_return = null;
+            if (fs.is_generator) {
+                fs.completion = rv;
+            } else {
+                self.resolvePromise(fs.promise.?, rv) catch |e2| {
+                    fs.fatal_error = e2;
+                };
+            }
+            return;
+        }
         const err = self.throwIfGap(err0);
         if (err == error.JsThrow) {
             const ex = self.pending_exception.?;
@@ -103,8 +115,10 @@ fn generatorNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     if (self.current_fiber == fs) return self.throwError(.type_error, "Generator is already running", .{});
     if (fs.fiber.finished) return iterResult(self, JSValue.UNDEFINED, true);
 
+    fs.has_started = true;
     fs.setResumeValue(if (args.len > 0) args[0].retain() else JSValue.UNDEFINED);
     fs.resume_is_throw = false;
+    fs.resume_is_return = false;
     fs.yielded = null;
     try self.resumeFiber(fs);
 
@@ -127,9 +141,58 @@ fn generatorReturn(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     const fs: *FiberState = @ptrCast(@alignCast(ctx));
     const self = fs.interp;
     if (self.current_fiber == fs) return self.throwError(.type_error, "Generator is already running", .{});
-    fs.fiber.finished = true;
     const val = if (args.len > 0) args[0] else JSValue.UNDEFINED;
-    return iterResult(self, val, true);
+    if (!fs.has_started or fs.fiber.finished) {
+        fs.fiber.finished = true;
+        return iterResult(self, val, true);
+    }
+    fs.setResumeValue(val.retain());
+    fs.resume_is_return = true;
+    fs.resume_is_throw = false;
+    fs.yielded = null;
+    try self.resumeFiber(fs);
+
+    if (fs.yielded) |y| {
+        fs.yielded = null;
+        return iterResult(self, y, false);
+    }
+    if (fs.completed_throw) |ex| {
+        fs.completed_throw = null;
+        return self.throwValue(ex);
+    }
+    const c = fs.completion orelse JSValue.UNDEFINED;
+    fs.completion = null;
+    return iterResult(self, c, true);
+}
+
+fn generatorThrow(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const fs: *FiberState = @ptrCast(@alignCast(ctx));
+    const self = fs.interp;
+    if (self.current_fiber == fs) return self.throwError(.type_error, "Generator is already running", .{});
+    const val = if (args.len > 0) args[0] else JSValue.UNDEFINED;
+    if (!fs.has_started or fs.fiber.finished) {
+        fs.fiber.finished = true;
+        return self.throwValue(val.retain());
+    }
+    fs.setResumeValue(val.retain());
+    fs.resume_is_throw = true;
+    fs.resume_is_return = false;
+    fs.yielded = null;
+    try self.resumeFiber(fs);
+
+    if (fs.yielded) |y| {
+        fs.yielded = null;
+        return iterResult(self, y, false);
+    }
+    if (fs.completed_throw) |ex| {
+        fs.completed_throw = null;
+        return self.throwValue(ex);
+    }
+    const c = fs.completion orelse JSValue.UNDEFINED;
+    fs.completion = null;
+    return iterResult(self, c, true);
 }
 
 fn asyncGeneratorReturn(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -138,9 +201,38 @@ fn asyncGeneratorReturn(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     const fs: *FiberState = @ptrCast(@alignCast(ctx));
     const self = fs.interp;
     if (self.current_fiber == fs) return self.throwError(.type_error, "Generator is already running", .{});
-    fs.fiber.finished = true;
     const val = if (args.len > 0) args[0] else JSValue.UNDEFINED;
-    return self.fulfilledPromise(try iterResult(self, val, true));
+    if (!fs.has_started or fs.fiber.finished) {
+        fs.fiber.finished = true;
+        return self.fulfilledPromise(try iterResult(self, val, true));
+    }
+    const p = try self.gcNewPromise();
+    fs.pending_result_promise = p.retain();
+    fs.setResumeValue(val.retain());
+    fs.resume_is_return = true;
+    fs.resume_is_throw = false;
+    try self.resumeFiber(fs);
+    return p;
+}
+
+fn asyncGeneratorThrow(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const fs: *FiberState = @ptrCast(@alignCast(ctx));
+    const self = fs.interp;
+    if (self.current_fiber == fs) return self.throwError(.type_error, "Generator is already running", .{});
+    const val = if (args.len > 0) args[0] else JSValue.UNDEFINED;
+    if (!fs.has_started or fs.fiber.finished) {
+        fs.fiber.finished = true;
+        return self.rejectedPromise(val.retain());
+    }
+    const p = try self.gcNewPromise();
+    fs.pending_result_promise = p.retain();
+    fs.setResumeValue(val.retain());
+    fs.resume_is_throw = true;
+    fs.resume_is_return = false;
+    try self.resumeFiber(fs);
+    return p;
 }
 
 /// `asyncGen.next(v)` -- native with ctx = *FiberState (is_generator AND
@@ -157,6 +249,7 @@ fn asyncGeneratorNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     const self = fs.interp;
     if (fs.fiber.finished) return self.fulfilledPromise(try iterResult(self, JSValue.UNDEFINED, true));
 
+    fs.has_started = true;
     const p = try self.gcNewPromise();
     // `fs` keeps its own reference (settled later from inside
     // resumeFiber) and this call ALSO returns `p` as its own owned
@@ -165,6 +258,7 @@ fn asyncGeneratorNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     fs.pending_result_promise = p.retain();
     fs.setResumeValue(if (args.len > 0) args[0].retain() else JSValue.UNDEFINED);
     fs.resume_is_throw = false;
+    fs.resume_is_return = false;
     try self.resumeFiber(fs);
     return p;
 }
@@ -629,6 +723,7 @@ pub fn makeGeneratorObject(
     if (self.iterator_prototype) |p| try obj.asObject().value.setPrototype(&p.asObject().value);
     try obj.asObject().value.set("next", try self.gcNewFunction(.{ .ctx = fs, .name = "next", .arity = 1, .call = generatorNext }));
     try obj.asObject().value.set("return", try self.gcNewFunction(.{ .ctx = fs, .name = "return", .arity = 1, .call = generatorReturn }));
+    try obj.asObject().value.set("throw", try self.gcNewFunction(.{ .ctx = fs, .name = "throw", .arity = 1, .call = generatorThrow }));
     // A generator IS its own iterable: `gen()[Symbol.iterator]()`
     // returns the generator itself (so `[...gen()]` works via the
     // Symbol.iterator path too, and `gen()[Symbol.iterator]() === gen()`).
@@ -707,6 +802,7 @@ pub fn makeAsyncGeneratorObject(
     var obj = try self.gcNewObject();
     try obj.asObject().value.set("next", try self.gcNewFunction(.{ .ctx = fs, .name = "next", .arity = 1, .call = asyncGeneratorNext }));
     try obj.asObject().value.set("return", try self.gcNewFunction(.{ .ctx = fs, .name = "return", .arity = 1, .call = asyncGeneratorReturn }));
+    try obj.asObject().value.set("throw", try self.gcNewFunction(.{ .ctx = fs, .name = "throw", .arity = 1, .call = asyncGeneratorThrow }));
     if (self.symbol_async_iterator) |sym| {
         const key = try self.encodeKey(sym);
         defer self.gc_allocator.free(key);

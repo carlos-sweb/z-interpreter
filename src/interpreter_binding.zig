@@ -13,12 +13,28 @@ const zstring = @import("zstring");
 
 const coercion = @import("coercion.zig");
 const builtins = @import("builtins.zig");
+const array_builtins = @import("array_builtins.zig");
 
 const interpreter_mod = @import("interpreter.zig");
 const Interpreter = interpreter_mod.Interpreter;
 const Environment = interpreter_mod.Environment;
 const Completion = interpreter_mod.Completion;
 const FiberState = interpreter_mod.FiberState;
+
+pub fn isIntactArrayIterator(self: *Interpreter, value: JSValue) bool {
+    if (!value.isArray()) return false;
+    const sym = self.symbol_iterator orelse return true;
+    var key_buf: [64]u8 = undefined;
+    const key = std.fmt.bufPrint(&key_buf, "\x00S{x}", .{@intFromPtr(sym.asSymbol())}) catch return false;
+    if (self.array_props.get(@intFromPtr(value.asArray()))) |bag| {
+        if (bag.asObject().value.getOwnRecord(key) != null) return false;
+    }
+    if (!self.protos.array.isObject()) return false;
+    const rec = self.protos.array.asObject().value.getOwnRecord(key) orelse return false;
+    if (rec.isAccessor()) return false;
+    if (!rec.value.isFunction()) return false;
+    return rec.value.asFunction().value.call == array_builtins.arrayValues;
+}
 
 /// The source side of array destructuring, shared by binding patterns
 /// and destructuring assignment: the same narrowed iterables as for-of
@@ -43,6 +59,9 @@ pub fn iterableItems(self: *Interpreter, value: JSValue) anyerror![]const JSValu
     const arena = self.gc_allocator;
     return switch (value.unpack()) {
         .array => |box| blk: {
+            if (!isIntactArrayIterator(self, value)) {
+                break :blk try self.drainIterator(try self.resolveIterator(value));
+            }
             const src = box.value.toSlice();
             const out = try arena.alloc(JSValue, src.len);
             @memcpy(out, src);
@@ -146,8 +165,11 @@ pub fn drainIterator(self: *Interpreter, iter: JSValue) anyerror![]const JSValue
     var out: std.ArrayList(JSValue) = .empty;
     while (true) {
         const step = try next_fn.asFunction().value.call(next_fn.asFunction().value.ctx, arena, iter, &.{});
+        defer step.deinit();
         if (!step.isObject()) return self.throwError(.type_error, "Iterator result {s} is not an object", .{step.typeOf()});
-        if (coercion.isTruthy(try self.getProperty(step, "done"))) break;
+        const done = try self.getProperty(step, "done");
+        defer done.deinit();
+        if (coercion.isTruthy(done)) break;
         try out.append(arena, try self.getProperty(step, "value"));
     }
     return out.toOwnedSlice(arena);
@@ -242,7 +264,7 @@ pub const DestructureResult = struct {
 };
 
 pub fn getDestructureItems(self: *Interpreter, arena: std.mem.Allocator, value: JSValue, count: usize, has_rest: bool) anyerror!DestructureResult {
-    if (value.isArray()) {
+    if (value.isArray() and isIntactArrayIterator(self, value)) {
         const src = value.asArray().value.toSlice();
         const out = try arena.alloc(JSValue, src.len);
         @memcpy(out, src);
@@ -252,7 +274,7 @@ pub fn getDestructureItems(self: *Interpreter, arena: std.mem.Allocator, value: 
         const out = try self.iterableItems(value);
         return .{ .items = out };
     }
-    if (value.isObject()) {
+    if (value.isObject() or value.isArray()) {
         const iter = try self.resolveIterator(value);
         const next_fn = try self.getProperty(iter, "next");
         if (!next_fn.isFunction()) return self.throwError(.type_error, "iterator.next is not a function", .{});
@@ -279,6 +301,53 @@ pub fn getDestructureItems(self: *Interpreter, arena: std.mem.Allocator, value: 
     return self.throwError(.type_error, "{s} is not iterable", .{value.typeOf()});
 }
 
+fn closeIteratorOnThrow(self: *Interpreter, iterator: JSValue) void {
+    const saved = self.pending_exception;
+    self.pending_exception = null;
+    defer self.pending_exception = saved;
+    closeIterator(self, iterator) catch {
+        if (self.pending_exception) |ie| ie.deinit();
+        self.pending_exception = null;
+    };
+}
+
+fn closeIteratorOnReturn(self: *Interpreter, iterator: JSValue) anyerror!void {
+    const saved_ret = self.pending_return;
+    self.pending_return = null;
+    closeIterator(self, iterator) catch |err| {
+        if (saved_ret) |sr| sr.deinit();
+        return err;
+    };
+    self.pending_return = saved_ret;
+}
+
+fn stepIteratorValue(self: *Interpreter, arena: std.mem.Allocator, iter: JSValue, next_fn: JSValue, iterator_done: *bool) anyerror!JSValue {
+    if (iterator_done.*) return JSValue.UNDEFINED;
+    const step = next_fn.asFunction().value.call(next_fn.asFunction().value.ctx, arena, iter, &.{}) catch |err| {
+        iterator_done.* = true;
+        return err;
+    };
+    defer step.deinit();
+    if (!@import("builtin_helpers.zig").isObjectLike(step)) {
+        iterator_done.* = true;
+        return self.throwError(.type_error, "Iterator result {s} is not an object", .{step.typeOf()});
+    }
+    const done_val = self.getProperty(step, "done") catch |err| {
+        iterator_done.* = true;
+        return err;
+    };
+    const is_done = coercion.isTruthy(done_val);
+    done_val.deinit();
+    if (is_done) {
+        iterator_done.* = true;
+        return JSValue.UNDEFINED;
+    }
+    return self.getProperty(step, "value") catch |err| {
+        iterator_done.* = true;
+        return err;
+    };
+}
+
 pub fn bindPattern(self: *Interpreter, env: *Environment, pattern: *const zstatements.BindingPattern, value: JSValue, mode: BindMode) anyerror!void {
 
     const arena = self.gc_allocator;
@@ -293,48 +362,100 @@ pub fn bindPattern(self: *Interpreter, env: *Environment, pattern: *const zstate
             }
         },
         .array => |arr_pat| {
-            const has_rest = arr_pat.rest != null;
-            const des = try self.getDestructureItems(arena, value, arr_pat.elements.len, has_rest);
-            const items = des.items;
-            defer arena.free(items);
-            var closed = false;
-            defer if (!closed) {
-                if (des.iter_to_close) |itc| closeIterator(self, itc) catch {};
-            };
-            for (arr_pat.elements, 0..) |maybe_el, i| {
-                const el = maybe_el orelse continue; // elision hole
-                var v = if (i < items.len) items[i] else JSValue.UNDEFINED;
-                // A default is owned (evalExpression's) and bindPattern
-                // retains what it binds: release only that case, never
-                // an item (see iterableItems' ownership note).
-                var from_default = false;
-                defer if (from_default) v.deinit();
+            if (isIntactArrayIterator(self, value) or value.isString() or value.isSet() or value.isMap() or value.isTypedArray()) {
+                const items = try self.iterableItems(value);
+                defer arena.free(items);
+                for (arr_pat.elements, 0..) |maybe_el, i| {
+                    const el = maybe_el orelse continue; // elision hole
+                    var v = if (i < items.len) items[i] else JSValue.UNDEFINED;
+                    var from_default = false;
+                    defer if (from_default) v.deinit();
+                    if (v.isUndefined()) {
+                        if (el.default) |def| {
+                            v = try self.evalExpression(env, def);
+                            from_default = true;
+                            if (el.pattern.* == .identifier) {
+                                try self.maybeNameAnonymousValue(def, v, el.pattern.identifier.name);
+                            }
+                        }
+                    }
+                    try self.bindPattern(env, el.pattern, v, mode);
+                }
+                if (arr_pat.rest) |rest_pat| {
+                    var rest_arr = try self.gcNewArray();
+                    defer rest_arr.deinit();
+                    if (arr_pat.elements.len < items.len) {
+                        for (items[arr_pat.elements.len..]) |item| {
+                            _ = try rest_arr.asArray().value.push(item.retain());
+                        }
+                    }
+                    try self.bindPattern(env, rest_pat, rest_arr, mode);
+                }
+                return;
+            }
+            if (!@import("builtin_helpers.zig").isObjectLike(value)) {
+                return self.throwError(.type_error, "{s} is not iterable", .{value.typeOf()});
+            }
+            const iter = try self.resolveIterator(value);
+            defer iter.deinit();
+            const next_fn = try self.getProperty(iter, "next");
+            defer next_fn.deinit();
+            if (!next_fn.isFunction()) return self.throwError(.type_error, "iterator.next is not a function", .{});
+            var iterator_done = false;
+            errdefer {
+                if (!iterator_done) {
+                    iterator_done = true;
+                    closeIteratorOnThrow(self, iter);
+                }
+            }
+            for (arr_pat.elements) |maybe_el| {
+                var v = try stepIteratorValue(self, arena, iter, next_fn, &iterator_done);
+                defer v.deinit();
+                const el = maybe_el orelse continue; // elision hole still steps iterator
                 if (v.isUndefined()) {
                     if (el.default) |def| {
-                        v = try self.evalExpression(env, def);
-                        from_default = true;
-                        // NamedEvaluation: `[a = AnonFn]` names it "a".
+                        v = self.evalExpression(env, def) catch |err| {
+                            if (err == error.JsReturn and !iterator_done) {
+                                iterator_done = true;
+                                try closeIteratorOnReturn(self, iter);
+                            }
+                            return err;
+                        };
                         if (el.pattern.* == .identifier) {
                             try self.maybeNameAnonymousValue(def, v, el.pattern.identifier.name);
                         }
                     }
                 }
-                try self.bindPattern(env, el.pattern, v, mode);
+                self.bindPattern(env, el.pattern, v, mode) catch |err| {
+                    if (err == error.JsReturn and !iterator_done) {
+                        iterator_done = true;
+                        try closeIteratorOnReturn(self, iter);
+                    }
+                    return err;
+                };
             }
             if (arr_pat.rest) |rest_pat| {
                 var rest_arr = try self.gcNewArray();
-                // bindPattern retains what it binds.
                 defer rest_arr.deinit();
-                if (arr_pat.elements.len < items.len) {
-                    for (items[arr_pat.elements.len..]) |item| {
-                        _ = try rest_arr.asArray().value.push(item.retain());
+                while (!iterator_done) {
+                    const item = try stepIteratorValue(self, arena, iter, next_fn, &iterator_done);
+                    if (iterator_done) {
+                        item.deinit();
+                        break;
                     }
+                    _ = try rest_arr.asArray().value.push(item);
                 }
-                try self.bindPattern(env, rest_pat, rest_arr, mode);
+                self.bindPattern(env, rest_pat, rest_arr, mode) catch |err| {
+                    if (err == error.JsReturn and !iterator_done) {
+                        iterator_done = true;
+                        try closeIteratorOnReturn(self, iter);
+                    }
+                    return err;
+                };
             }
-            if (des.iter_to_close) |itc| {
-                closed = true;
-                try closeIterator(self, itc);
+            if (!iterator_done) {
+                iterator_done = true;
+                try closeIterator(self, iter);
             }
         },
         .object => |obj_pat| {
@@ -408,57 +529,187 @@ pub fn bindPattern(self: *Interpreter, env: *Environment, pattern: *const zstate
 /// undefined), but every leaf goes through assignTo -- which is what
 /// makes member-expression targets (`[o.x] = [1]`) work, something
 /// BindingPattern can't even represent.
+const PreEvalMember = struct {
+    obj: JSValue,
+    pk: ?Interpreter.PropKey = null,
+    private_name: ?[]const u8 = null,
+
+    fn deinit(self: PreEvalMember, allocator: std.mem.Allocator) void {
+        self.obj.deinit();
+        if (self.pk) |pk| pk.free(allocator);
+    }
+};
+
+fn unwrapParenNode(node: *zparser.Node) *zparser.Node {
+    var cur = node;
+    while (cur.data == .paren) cur = cur.data.paren;
+    return cur;
+}
+
+fn preEvaluateMemberTarget(self: *Interpreter, env: *Environment, target_node: *zparser.Node) anyerror!?PreEvalMember {
+    const unwrapped = unwrapParenNode(target_node);
+    if (unwrapped.data != .member) return null;
+    const m = unwrapped.data.member;
+    const obj = try self.evalExpression(env, m.object);
+    errdefer obj.deinit();
+    if (!m.computed and m.property.data == .identifier) {
+        const id_name = m.property.data.identifier;
+        if (id_name.len > 0 and id_name[0] == '#') {
+            return .{ .obj = obj, .private_name = id_name };
+        }
+    }
+    const pk = try self.memberKeyString(env, m);
+    return .{ .obj = obj, .pk = pk };
+}
+
+fn assignToPreEvalMember(self: *Interpreter, env: *Environment, pre: PreEvalMember, value: JSValue) anyerror!void {
+    if (pre.private_name) |pn| {
+        return self.privateSet(env, pre.obj, pn, value);
+    }
+    return self.setPropertyOnValue(pre.obj, pre.pk.?.key, value);
+}
+
 pub fn destructuringAssign(self: *Interpreter, env: *Environment, target: *zparser.Node, value: JSValue) anyerror!void {
     const arena = self.gc_allocator;
     switch (target.data) {
         .array_literal => |elements| {
-            var has_spread = false;
-            for (elements) |maybe_el| {
-                if (maybe_el) |el| {
+            if (isIntactArrayIterator(self, value) or value.isString() or value.isSet() or value.isMap() or value.isTypedArray()) {
+                const items = try self.iterableItems(value);
+                defer arena.free(items);
+                for (elements, 0..) |maybe_el, i| {
+                    const el = maybe_el orelse continue; // hole still consumes its index
                     if (el.data == .spread) {
-                        has_spread = true;
+                        const rest_target = el.data.spread;
+                        const pre_member = try preEvaluateMemberTarget(self, env, rest_target);
+                        defer if (pre_member) |pm| pm.deinit(arena);
+                        var rest_arr = try self.gcNewArray();
+                        defer rest_arr.deinit();
+                        if (i < items.len) {
+                            for (items[i..]) |item| _ = try rest_arr.asArray().value.push(item.retain());
+                        }
+                        if (pre_member) |pm| {
+                            try assignToPreEvalMember(self, env, pm, rest_arr);
+                        } else {
+                            try self.destructuringAssignTarget(env, rest_target, rest_arr);
+                        }
                         break;
                     }
-                }
-            }
-            const des = try self.getDestructureItems(arena, value, elements.len, has_spread);
-            const items = des.items;
-            defer arena.free(items);
-            var closed = false;
-            defer if (!closed) {
-                if (des.iter_to_close) |itc| closeIterator(self, itc) catch {};
-            };
-            for (elements, 0..) |maybe_el, i| {
-                const el = maybe_el orelse continue; // hole still consumes its index
-                if (el.data == .spread) {
-                    // Parse-time validation guarantees this is last.
-                    var rest_arr = try self.gcNewArray();
-                    // assignTo retains what it stores.
-                    defer rest_arr.deinit();
-                    if (i < items.len) {
-                        for (items[i..]) |item| _ = try rest_arr.asArray().value.push(item.retain());
+                    var el_target = el;
+                    var default_node: ?*zparser.Node = null;
+                    if (el.data == .assignment and el.data.assignment.op == .assign) {
+                        default_node = el.data.assignment.value;
+                        el_target = el.data.assignment.target;
                     }
-                    try self.destructuringAssignTarget(env, el.data.spread, rest_arr);
+                    const pre_member = try preEvaluateMemberTarget(self, env, el_target);
+                    defer if (pre_member) |pm| pm.deinit(arena);
+                    var v = if (i < items.len) items[i] else JSValue.UNDEFINED;
+                    var from_default = false;
+                    defer if (from_default) v.deinit();
+                    if (v.isUndefined()) {
+                        if (default_node) |def| {
+                            v = try self.evalExpression(env, def);
+                            from_default = true;
+                        }
+                    }
+                    if (pre_member) |pm| {
+                        try assignToPreEvalMember(self, env, pm, v);
+                    } else {
+                        try self.destructuringAssignTarget(env, el_target, v);
+                    }
+                }
+                return;
+            }
+            if (!@import("builtin_helpers.zig").isObjectLike(value)) {
+                return self.throwError(.type_error, "{s} is not iterable", .{value.typeOf()});
+            }
+            const iter = try self.resolveIterator(value);
+            defer iter.deinit();
+            const next_fn = try self.getProperty(iter, "next");
+            defer next_fn.deinit();
+            if (!next_fn.isFunction()) return self.throwError(.type_error, "iterator.next is not a function", .{});
+            var iterator_done = false;
+            for (elements) |maybe_el| {
+                if (maybe_el == null) {
+                    const v = try stepIteratorValue(self, arena, iter, next_fn, &iterator_done);
+                    v.deinit();
+                    continue;
+                }
+                const el = maybe_el.?;
+                if (el.data == .spread) {
+                    const rest_target = el.data.spread;
+                    const pre_member = preEvaluateMemberTarget(self, env, rest_target) catch |err| {
+                        if (!iterator_done) {
+                            iterator_done = true;
+                            if (err == error.JsReturn) try closeIteratorOnReturn(self, iter) else closeIteratorOnThrow(self, iter);
+                        }
+                        return err;
+                    };
+                    defer if (pre_member) |pm| pm.deinit(arena);
+                    var rest_arr = try self.gcNewArray();
+                    defer rest_arr.deinit();
+                    while (!iterator_done) {
+                        const item = try stepIteratorValue(self, arena, iter, next_fn, &iterator_done);
+                        if (iterator_done) {
+                            item.deinit();
+                            break;
+                        }
+                        _ = try rest_arr.asArray().value.push(item);
+                    }
+                    if (pre_member) |pm| {
+                        try assignToPreEvalMember(self, env, pm, rest_arr);
+                    } else {
+                        try self.destructuringAssignTarget(env, rest_target, rest_arr);
+                    }
                     break;
                 }
-                var v = if (i < items.len) items[i] else JSValue.UNDEFINED;
                 var el_target = el;
-                // A default is owned (evalExpression's) and assignTo
-                // retains what it stores: release only that case.
-                var from_default = false;
-                defer if (from_default) v.deinit();
+                var default_node: ?*zparser.Node = null;
                 if (el.data == .assignment and el.data.assignment.op == .assign) {
-                    if (v.isUndefined()) {
-                        v = try self.evalExpression(env, el.data.assignment.value);
-                        from_default = true;
-                    }
+                    default_node = el.data.assignment.value;
                     el_target = el.data.assignment.target;
                 }
-                try self.destructuringAssignTarget(env, el_target, v);
+                const pre_member = preEvaluateMemberTarget(self, env, el_target) catch |err| {
+                    if (!iterator_done) {
+                        iterator_done = true;
+                        if (err == error.JsReturn) try closeIteratorOnReturn(self, iter) else closeIteratorOnThrow(self, iter);
+                    }
+                    return err;
+                };
+                defer if (pre_member) |pm| pm.deinit(arena);
+                var v = try stepIteratorValue(self, arena, iter, next_fn, &iterator_done);
+                defer v.deinit();
+                if (v.isUndefined()) {
+                    if (default_node) |def| {
+                        v = self.evalExpression(env, def) catch |err| {
+                            if (!iterator_done) {
+                                iterator_done = true;
+                                if (err == error.JsReturn) try closeIteratorOnReturn(self, iter) else closeIteratorOnThrow(self, iter);
+                            }
+                            return err;
+                        };
+                    }
+                }
+                if (pre_member) |pm| {
+                    assignToPreEvalMember(self, env, pm, v) catch |err| {
+                        if (!iterator_done) {
+                            iterator_done = true;
+                            if (err == error.JsReturn) try closeIteratorOnReturn(self, iter) else closeIteratorOnThrow(self, iter);
+                        }
+                        return err;
+                    };
+                } else {
+                    self.destructuringAssignTarget(env, el_target, v) catch |err| {
+                        if (!iterator_done) {
+                            iterator_done = true;
+                            if (err == error.JsReturn) try closeIteratorOnReturn(self, iter) else closeIteratorOnThrow(self, iter);
+                        }
+                        return err;
+                    };
+                }
             }
-            if (des.iter_to_close) |itc| {
-                closed = true;
-                try closeIterator(self, itc);
+            if (!iterator_done) {
+                iterator_done = true;
+                try closeIterator(self, iter);
             }
         },
         .object_literal => |elements| {
@@ -639,21 +890,52 @@ pub fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zs
     defer iterable.deinit();
     switch (iterable.unpack()) {
         .array => |box| {
-            // Live iteration (ArrayIterator semantics): re-read length
-            // each step and retain the element, so a body that mutates
-            // the array (`array.pop()`) is observed and never leaves a
-            // cached slice dangling.
-            var i: usize = 0;
-            while (i < box.value.length()) : (i += 1) {
-                var item = box.value.get(i).retain();
-                if (is_await) {
-                    const awaited = try self.awaitValue(fs.?, item);
+            if (isIntactArrayIterator(self, iterable)) {
+                var i: usize = 0;
+                while (i < box.value.length()) : (i += 1) {
+                    var item = box.value.get(i).retain();
+                    if (is_await) {
+                        const awaited = try self.awaitValue(fs.?, item);
+                        item.deinit();
+                        item = awaited;
+                    }
+                    const step = try self.forIterationStep(env, head.binding, item, body, labels);
                     item.deinit();
-                    item = awaited;
+                    if (step) |c| return c;
                 }
-                const step = try self.forIterationStep(env, head.binding, item, body, labels);
-                item.deinit();
-                if (step) |c| return c;
+                return .{};
+            }
+            const iter = if (is_await) try self.resolveAsyncIterator(iterable) else try self.resolveIterator(iterable);
+            defer iter.deinit();
+            const next_fn = try self.getProperty(iter, "next");
+            defer next_fn.deinit();
+            while (true) {
+                var step_result = try next_fn.asFunction().value.call(next_fn.asFunction().value.ctx, arena, iter, &.{});
+                if (is_await and step_result.isPromise()) {
+                    const awaited = try self.awaitValue(fs.?, step_result);
+                    step_result.deinit();
+                    step_result = awaited;
+                }
+                defer step_result.deinit();
+                if (!step_result.isObject()) {
+                    return self.throwError(.type_error, "Iterator result {s} is not an object", .{step_result.typeOf()});
+                }
+                const done = try self.getProperty(step_result, "done");
+                defer done.deinit();
+                if (coercion.isTruthy(done)) break;
+                var value = try self.getProperty(step_result, "value");
+                if (is_await) {
+                    const awaited = try self.awaitValue(fs.?, value);
+                    value.deinit();
+                    value = awaited;
+                }
+                const step = try self.forIterationStep(env, head.binding, value, body, labels);
+                value.deinit();
+                if (step) |c| {
+                    errdefer c.value.deinit();
+                    try closeIterator(self, iter);
+                    return c;
+                }
             }
         },
         .string => |box| {

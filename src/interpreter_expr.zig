@@ -305,6 +305,12 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
             fs.fiber.suspendSelf();
             // The resume value is the fiber's until taken: taking it
             // hands this expression the only reference.
+            if (fs.resume_is_return) {
+                fs.resume_is_return = false;
+                if (self.pending_return) |pr| pr.deinit();
+                self.pending_return = fs.takeResumeValue();
+                return error.JsReturn;
+            }
             if (fs.resume_is_throw) {
                 fs.resume_is_throw = false;
                 return self.throwValue(fs.takeResumeValue());
@@ -728,6 +734,7 @@ pub fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSV
 pub fn evalAssignment(self: *Interpreter, env: *Environment, a: anytype) anyerror!JSValue {
     if (a.op == .assign) {
         const value = try self.evalExpression(env, a.value);
+        errdefer value.deinit();
         switch (a.target.data) {
             // Cover-grammar reinterpretation: the literal IS the
             // pattern. The expression's own value stays the RHS

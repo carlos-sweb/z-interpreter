@@ -1502,7 +1502,7 @@ fn arrayKeys(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     return makeArrayIterator(interp(ctx), allocator, obj, .keys);
 }
 
-fn arrayValues(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+pub fn arrayValues(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
     const obj = try toArrayLikeObject(ctx, this_value, "values");
     defer obj.deinit();

@@ -363,6 +363,8 @@ pub const FiberState = struct {
     /// the suspension point takes it (takeResumeValue).
     resume_value: JSValue = JSValue.UNDEFINED,
     resume_is_throw: bool = false,
+    resume_is_return: bool = false,
+    has_started: bool = false,
     /// Fiber -> scheduler: the value a `yield` produced, if any.
     yielded: ?JSValue = null,
     /// Fiber -> scheduler on completion (any is_generator fiber, sync or
@@ -670,6 +672,7 @@ pub const Interpreter = struct {
     /// `error.UncaughtException` from run(), this field holds the
     /// uncaught value for the caller to inspect.
     pending_exception: ?JSValue = null,
+    pending_return: ?JSValue = null,
     /// Globals (console/Math/JSON/Object/...) are installed lazily on the
     /// first run() -- native functions carry `ctx = *Interpreter`, and
     /// init() returns by value, so `&self` is only stable once run() is
@@ -2735,6 +2738,50 @@ test "Promise.any on empty string rejects with AggregateError and await ignores 
     defer r2.deinit();
     try testing.expect(r2.isBool() and r2.asBool());
 }
+
+test "Phase 2.1: Array.prototype[Symbol.iterator] respected in destructuring and step-by-step IteratorClose" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    const res = try interp.run(
+        \\var origIter = Array.prototype[Symbol.iterator];
+        \\var protoCalls = 0;
+        \\Array.prototype[Symbol.iterator] = function() {
+        \\  protoCalls++;
+        \\  return origIter.call(this);
+        \\};
+        \\var [a, b] = [10, 20];
+        \\var x, y;
+        \\[x, y] = [30, 40];
+        \\delete Array.prototype[Symbol.iterator];
+        \\var threwOnDeleted = false;
+        \\try { var [c] = [1]; } catch (e) { threwOnDeleted = e instanceof TypeError; }
+        \\Array.prototype[Symbol.iterator] = origIter;
+        \\
+        \\var nextCount = 0;
+        \\var returnCount = 0;
+        \\var iter = {
+        \\  [Symbol.iterator]() { return this; },
+        \\  next() { nextCount++; return { value: 1, done: false }; },
+        \\  return() { returnCount++; throw new TypeError("close err"); }
+        \\};
+        \\function* g1() {
+        \\  [ {}[yield] ] = iter;
+        \\}
+        \\var gen = g1();
+        \\gen.next();
+        \\var nextBeforeClose = nextCount;
+        \\var closeThrew = false;
+        \\try { gen.return(); } catch (e) { closeThrew = e instanceof TypeError; }
+        \\protoCalls === 2 && a === 10 && b === 20 && x === 30 && y === 40 &&
+        \\  threwOnDeleted && nextBeforeClose === 0 && returnCount === 1 && closeThrew;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
 
 
 

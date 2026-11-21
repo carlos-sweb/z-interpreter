@@ -32,6 +32,11 @@ const Outcome = union(enum) {
 /// untouched.
 pub fn runCapturing(self: *Interpreter, env: *Environment, stmt: *zstatements.Statement) anyerror!Outcome {
     const c = self.evalStatement(env, stmt) catch |err0| {
+        if (err0 == error.JsReturn) {
+            const rv = self.pending_return orelse JSValue.UNDEFINED;
+            self.pending_return = null;
+            return Outcome{ .completion = .{ .type = .return_completion, .value = rv } };
+        }
         const err = self.throwIfGap(err0);
         if (err != error.JsThrow) return err;
         const ex = self.pending_exception orelse unreachable; // raiser invariant
@@ -66,7 +71,15 @@ fn deinitOutcome(outcome: Outcome) void {
 pub fn evalProgram(self: *Interpreter, env: *Environment, program: []const *zstatements.Statement) anyerror!Completion {
     var last_value: JSValue = JSValue.UNDEFINED;
     for (program) |stmt| {
-        const c = try self.evalStatement(env, stmt);
+        const c = self.evalStatement(env, stmt) catch |err0| {
+            if (err0 == error.JsReturn) {
+                last_value.deinit();
+                const rv = self.pending_return orelse JSValue.UNDEFINED;
+                self.pending_return = null;
+                return .{ .type = .return_completion, .value = rv };
+            }
+            return err0;
+        };
         if (c.type != .normal) return c;
         // Etapa 2 de uniform-ownership-contract.md: solo la última
         // sentencia sobrevive; cada valor anterior es una referencia
