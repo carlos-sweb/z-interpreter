@@ -2913,6 +2913,30 @@ test "Phase 2.3c: async yield* forwards .return() to sync and async iterators" {
     try testing.expect(r2.isBool() and r2.asBool());
 }
 
+test "Phase 2.3d: async yield* does not unwrap promise value from manual async iterator" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    const r1 = try interp.run(
+        \\var innerPromise = Promise.resolve("x");
+        \\var gotSame = false;
+        \\var asyncIter = {
+        \\  [Symbol.asyncIterator]() { return this; },
+        \\  next() { return { done: false, value: innerPromise }; }
+        \\};
+        \\async function* f() { yield* asyncIter; }
+        \\f().next().then(v => { gotSame = (v.value === innerPromise && v.done === false); });
+        \\true;
+    );
+    defer r1.deinit();
+    const r2 = try interp.run("gotSame;");
+    defer r2.deinit();
+    try testing.expect(r2.isBool() and r2.asBool());
+}
+
+
 
 
 

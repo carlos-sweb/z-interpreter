@@ -357,8 +357,6 @@ pub fn evalYieldDelegate(self: *Interpreter, env: *Environment, fs: *FiberState,
             };
             val.deinit();
             val = aw;
-        } else if (fs.is_async and is_async_iter) {
-            val = try awaitValueAndDeinit(self, fs, val);
         }
         fs.yielded = val;
         fs.fiber.suspendSelf();
