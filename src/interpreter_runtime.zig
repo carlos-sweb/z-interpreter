@@ -195,44 +195,51 @@ fn generatorThrow(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     return iterResult(self, c, true);
 }
 
+fn asyncGeneratorEnqueue(fs: *FiberState, kind: interpreter_mod.AsyncGenReqKind, val: JSValue) anyerror!JSValue {
+    const self = fs.interp;
+    const p = try self.gcNewPromise();
+    errdefer p.deinit();
+
+    if (fs.pending_result_promise != null or self.current_fiber == fs) {
+        try fs.async_queue.append(self.gc_allocator, .{
+            .promise = p.retain(),
+            .value = val.retain(),
+            .kind = kind,
+        });
+        return p;
+    }
+
+    if (fs.fiber.finished or (kind != .next and !fs.has_started)) {
+        fs.fiber.finished = true;
+        switch (kind) {
+            .next => try self.resolvePromise(p, try iterResult(self, JSValue.UNDEFINED, true)),
+            .ret => try self.resolvePromise(p, try iterResult(self, val, true)),
+            .throw => try self.rejectPromiseValue(p, val),
+        }
+        return p;
+    }
+
+    fs.has_started = true;
+    fs.pending_result_promise = p.retain();
+    fs.setResumeValue(val.retain());
+    fs.resume_is_return = (kind == .ret);
+    fs.resume_is_throw = (kind == .throw);
+    try self.resumeFiber(fs);
+    return p;
+}
+
 fn asyncGeneratorReturn(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     _ = this_value;
     const fs: *FiberState = @ptrCast(@alignCast(ctx));
-    const self = fs.interp;
-    if (self.current_fiber == fs) return self.throwError(.type_error, "Generator is already running", .{});
-    const val = if (args.len > 0) args[0] else JSValue.UNDEFINED;
-    if (!fs.has_started or fs.fiber.finished) {
-        fs.fiber.finished = true;
-        return self.fulfilledPromise(try iterResult(self, val, true));
-    }
-    const p = try self.gcNewPromise();
-    fs.pending_result_promise = p.retain();
-    fs.setResumeValue(val.retain());
-    fs.resume_is_return = true;
-    fs.resume_is_throw = false;
-    try self.resumeFiber(fs);
-    return p;
+    return asyncGeneratorEnqueue(fs, .ret, if (args.len > 0) args[0] else JSValue.UNDEFINED);
 }
 
 fn asyncGeneratorThrow(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     _ = this_value;
     const fs: *FiberState = @ptrCast(@alignCast(ctx));
-    const self = fs.interp;
-    if (self.current_fiber == fs) return self.throwError(.type_error, "Generator is already running", .{});
-    const val = if (args.len > 0) args[0] else JSValue.UNDEFINED;
-    if (!fs.has_started or fs.fiber.finished) {
-        fs.fiber.finished = true;
-        return self.rejectedPromise(val.retain());
-    }
-    const p = try self.gcNewPromise();
-    fs.pending_result_promise = p.retain();
-    fs.setResumeValue(val.retain());
-    fs.resume_is_throw = true;
-    fs.resume_is_return = false;
-    try self.resumeFiber(fs);
-    return p;
+    return asyncGeneratorEnqueue(fs, .throw, if (args.len > 0) args[0] else JSValue.UNDEFINED);
 }
 
 /// `asyncGen.next(v)` -- native with ctx = *FiberState (is_generator AND
@@ -246,21 +253,7 @@ fn asyncGeneratorNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     _ = allocator;
     _ = this_value;
     const fs: *FiberState = @ptrCast(@alignCast(ctx));
-    const self = fs.interp;
-    if (fs.fiber.finished) return self.fulfilledPromise(try iterResult(self, JSValue.UNDEFINED, true));
-
-    fs.has_started = true;
-    const p = try self.gcNewPromise();
-    // `fs` keeps its own reference (settled later from inside
-    // resumeFiber) and this call ALSO returns `p` as its own owned
-    // result -- same double-ownership shape as runAsyncFunction's
-    // `fs.promise`/promiseConstructor's `cap.promise`.
-    fs.pending_result_promise = p.retain();
-    fs.setResumeValue(if (args.len > 0) args[0].retain() else JSValue.UNDEFINED);
-    fs.resume_is_throw = false;
-    fs.resume_is_return = false;
-    try self.resumeFiber(fs);
-    return p;
+    return asyncGeneratorEnqueue(fs, .next, if (args.len > 0) args[0] else JSValue.UNDEFINED);
 }
 
 /// A `{ value, done }` iterator-result object, chained to Object.prototype
@@ -628,17 +621,44 @@ pub fn resumeFiber(self: *Interpreter, fs: *FiberState) anyerror!void {
                 fs.yielded = null;
                 fs.pending_result_promise = null;
                 try self.resolvePromise(p, try iterResult(self, y, false));
+                p.deinit();
             } else if (fs.completed_throw) |ex| {
                 fs.completed_throw = null;
                 fs.pending_result_promise = null;
                 try self.rejectPromiseValue(p, ex);
+                p.deinit();
             } else if (fs.completion) |c| {
                 fs.completion = null;
                 fs.pending_result_promise = null;
                 try self.resolvePromise(p, try iterResult(self, c, true));
+                p.deinit();
             }
             // Else: suspended at a plain await mid-body -- nothing to
             // settle yet, leave pending_result_promise as-is.
+        }
+        if (fs.pending_result_promise == null) {
+            while (fs.async_queue.items.len > 0) {
+                const req = fs.async_queue.orderedRemove(0);
+                if (fs.fiber.finished) {
+                    defer {
+                        req.promise.deinit();
+                        req.value.deinit();
+                    }
+                    switch (req.kind) {
+                        .next => try self.resolvePromise(req.promise, try iterResult(self, JSValue.UNDEFINED, true)),
+                        .ret => try self.resolvePromise(req.promise, try iterResult(self, req.value, true)),
+                        .throw => try self.rejectPromiseValue(req.promise, req.value),
+                    }
+                    continue;
+                }
+                fs.has_started = true;
+                fs.pending_result_promise = req.promise;
+                fs.setResumeValue(req.value);
+                fs.resume_is_return = (req.kind == .ret);
+                fs.resume_is_throw = (req.kind == .throw);
+                try self.resumeFiber(fs);
+                break;
+            }
         }
     }
     if (fs.fatal_error) |err| {

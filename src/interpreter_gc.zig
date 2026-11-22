@@ -1056,6 +1056,11 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
             if (fs.completed_throw) |v| sweeper.value(v);
             if (fs.promise) |v| sweeper.value(v);
             if (fs.pending_result_promise) |v| sweeper.value(v);
+            for (fs.async_queue.items) |req| {
+                sweeper.value(req.promise);
+                sweeper.value(req.value);
+            }
+            fs.async_queue.deinit(self.gc_allocator);
             self.gc_allocator.free(fs.args);
             fs.fiber.deinit(self.gc_allocator);
             self.gc_allocator.destroy(fs);

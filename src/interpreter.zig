@@ -437,6 +437,14 @@ pub const ModuleRecord = struct {
 // z-interpreter-refactor.md, Step 5 Phase C batch 1: `pub` here (struct +
 // traceChildren) -- same reason as ClosureCtx above: GcNode (now in
 // interpreter_gc.zig) holds a `*FiberState`.
+pub const AsyncGenReqKind = enum { next, ret, throw };
+
+pub const AsyncGenRequest = struct {
+    promise: JSValue,
+    value: JSValue,
+    kind: AsyncGenReqKind,
+};
+
 pub const FiberState = struct {
     /// Orthogonal: a plain generator has is_generator only, a plain async
     /// function has is_async only, and an async generator (`async
@@ -483,6 +491,7 @@ pub const FiberState = struct {
     /// request is in flight -- v1 doesn't support overlapping next() calls
     /// (the only real consumer, `for await`, never overlaps them).
     pending_result_promise: ?JSValue = null,
+    async_queue: std.ArrayListUnmanaged(AsyncGenRequest) = .empty,
 
     /// Stores `value` (an owned reference) as the resume value, releasing
     /// one left behind that no suspension point took (the first next(v),
@@ -517,6 +526,10 @@ pub const FiberState = struct {
         if (self.completed_throw) |v| visitor.value(v);
         if (self.promise) |v| visitor.value(v);
         if (self.pending_result_promise) |v| visitor.value(v);
+        for (self.async_queue.items) |req| {
+            visitor.value(req.promise);
+            visitor.value(req.value);
+        }
     }
 };
 
@@ -3396,6 +3409,35 @@ test "Phase 5.1a: Promise.allKeyed and Promise.allSettledKeyed" {
     const r5 = try interp.run("Object.getPrototypeOf(resSettled) === null && resSettled.ok.status === 'fulfilled' && resSettled.ok.value === 10 && resSettled.bad.status === 'rejected' && resSettled.bad.reason === 'err';");
     defer r5.deinit();
     try testing.expect(r5.isBool() and r5.asBool());
+}
+
+test "Phase 5.1b: AsyncGeneratorQueue handles re-entrant next() in FIFO order" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+
+    const r1 = try interp.run(
+        \\var iter;
+        \\var order = [];
+        \\async function* g() {
+        \\  iter.next().then(r => order.push("2:" + r.value + ":" + r.done));
+        \\  yield 1;
+        \\  yield 2;
+        \\}
+        \\iter = g();
+        \\iter.next().then(r => {
+        \\  order.push("1:" + r.value + ":" + r.done);
+        \\  iter.next().then(r2 => order.push("3:" + r2.value + ":" + r2.done));
+        \\});
+        \\true;
+    );
+    r1.deinit();
+
+    const r2 = try interp.run("order.join(',') === '1:1:false,2:2:false,3:undefined:true';");
+    defer r2.deinit();
+    try testing.expect(r2.isBool() and r2.asBool());
 }
 
 
