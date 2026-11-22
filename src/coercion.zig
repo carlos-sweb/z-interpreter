@@ -12,6 +12,66 @@ pub fn isTruthy(v: JSValue) bool {
     return v.isTruthy();
 }
 
+fn isJsWhitespaceCp(cp: u21) bool {
+    return switch (cp) {
+        0x0009, 0x000A, 0x000B, 0x000C, 0x000D, 0x0020, 0x00A0, 0x1680, 0x2000...0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF => true,
+        else => false,
+    };
+}
+
+fn trimJsWhitespace(s: []const u8) []const u8 {
+    var start: usize = 0;
+    while (start < s.len) {
+        if (s[start] < 0x80) {
+            if (!isJsWhitespaceCp(s[start])) break;
+            start += 1;
+        } else {
+            const n = std.unicode.utf8ByteSequenceLength(s[start]) catch break;
+            if (start + n > s.len) break;
+            const cp = std.unicode.utf8Decode(s[start .. start + n]) catch break;
+            if (!isJsWhitespaceCp(cp)) break;
+            start += n;
+        }
+    }
+    var end: usize = s.len;
+    while (end > start) {
+        if (s[end - 1] < 0x80) {
+            if (!isJsWhitespaceCp(s[end - 1])) break;
+            end -= 1;
+        } else {
+            var k: usize = end - 1;
+            while (k > start and (s[k] & 0xC0) == 0x80) k -= 1;
+            const cp = std.unicode.utf8Decode(s[k..end]) catch break;
+            if (!isJsWhitespaceCp(cp)) break;
+            end = k;
+        }
+    }
+    return s[start..end];
+}
+
+fn isValidStrDecimalLiteral(s: []const u8) bool {
+    if (s.len == 0) return false;
+    var i: usize = 0;
+    if (s[i] == '+' or s[i] == '-') i += 1;
+    if (i >= s.len) return false;
+    if (std.mem.eql(u8, s[i..], "Infinity")) return true;
+    var has_digits = false;
+    while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) has_digits = true;
+    if (i < s.len and s[i] == '.') {
+        i += 1;
+        while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) has_digits = true;
+    }
+    if (!has_digits) return false;
+    if (i < s.len and (s[i] == 'e' or s[i] == 'E')) {
+        i += 1;
+        if (i < s.len and (s[i] == '+' or s[i] == '-')) i += 1;
+        var has_exp = false;
+        while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) has_exp = true;
+        if (!has_exp) return false;
+    }
+    return i == s.len;
+}
+
 fn parseRadixLiteral(digits: []const u8, base: u8) f64 {
     if (digits.len == 0) return std.math.nan(f64);
     var acc: f64 = 0;
@@ -54,7 +114,7 @@ pub fn toNumber(v: JSValue) !f64 {
         // special case belongs only to ToNumber, not to znumber's shared
         // parser.
         .string => |box| blk: {
-            const trimmed = std.mem.trim(u8, box.value.data, " \t\n\r\x0b\x0c");
+            const trimmed = trimJsWhitespace(box.value.data);
             if (trimmed.len == 0) break :blk 0;
             if (trimmed.len >= 3 and (trimmed[0] == '+' or trimmed[0] == '-') and trimmed[1] == '0') {
                 const p = trimmed[2];
@@ -67,7 +127,8 @@ pub fn toNumber(v: JSValue) !f64 {
                 if (trimmed[1] == 'b' or trimmed[1] == 'B') break :blk parseRadixLiteral(trimmed[2..], 2);
                 if (trimmed[1] == 'o' or trimmed[1] == 'O') break :blk parseRadixLiteral(trimmed[2..], 8);
             }
-            break :blk znumber.ParsingMethods.parseFloat(box.value.data);
+            if (!isValidStrDecimalLiteral(trimmed)) break :blk std.math.nan(f64);
+            break :blk znumber.ParsingMethods.parseFloat(trimmed);
         },
         // Number(date) is its millisecond timestamp (real ToPrimitive
         // "number" hint behavior for Dates).

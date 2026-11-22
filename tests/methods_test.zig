@@ -59,8 +59,8 @@ test "for-in sees accessor keys" {
     try helpers.expectStdout("const keys = []; for (const k in { get a() {}, b: 1 }) keys.push(k); console.log(keys.join(','));", "a,b\n");
 }
 
-test "JSON.stringify omits accessors (documented narrowing -- real JS invokes getters)" {
-    try helpers.expectStdout("console.log(JSON.stringify({ get a() { return 1; }, b: 2 }));", "{\"b\":2}\n");
+test "JSON.stringify invokes getters per spec" {
+    try helpers.expectStdout("console.log(JSON.stringify({ get a() { return 1; }, b: 2 }));", "{\"a\":1,\"b\":2}\n");
 }
 
 test "methods calling sibling methods through this" {

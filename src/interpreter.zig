@@ -3580,6 +3580,35 @@ test "Phase 5.3 fix: Object.keys skips array holes and Function.prototype instan
     try testing.expect(res.isBool() and res.asBool());
 }
 
+test "Phase 6.1: JSON reviver/replacer/space/toJSON, toLocaleString, strict toNumber" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\var parsed = JSON.parse('{"a":1,"b":2,"c":3}', function(k, v) {
+        \\  if (k === "b") return undefined;
+        \\  return typeof v === "number" ? v * 10 : v;
+        \\});
+        \\var revOk = parsed.a === 10 && !("b" in parsed) && parsed.c === 30;
+        \\var sFn = JSON.stringify({ a: 1, b: 2 }, function(k, v) { return k === "b" ? undefined : v; });
+        \\var sArr = JSON.stringify({ a: 1, b: 2, c: 3 }, ["c", "a"], 2);
+        \\var sToJson = JSON.stringify({ toJSON() { return { ok: true }; } });
+        \\var circ = {}; circ.self = circ;
+        \\var circThrew = false;
+        \\try { JSON.stringify(circ); } catch (e) { circThrew = e instanceof TypeError; }
+        \\var jsonOk = revOk && sFn === '{"a":1}' && sArr === '{\n  "c": 3,\n  "a": 1\n}' && sToJson === '{"ok":true}' && circThrew;
+        \\var objLoc = ({ toString() { return "hi"; } }).toLocaleString() === "hi";
+        \\var arrLoc = [1, null, undefined, { toLocaleString() { return "x"; } }].toLocaleString() === "1,,,x";
+        \\var numStrict = Number.isNaN(Number("1_0")) && Number.isNaN(Number("123abc")) && parseFloat("1_0") === 1 && parseFloat("123abc") === 123;
+        \\jsonOk && objLoc && arrLoc && numStrict;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
 
 
 

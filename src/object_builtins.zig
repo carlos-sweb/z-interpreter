@@ -49,6 +49,7 @@ pub const object_methods = std.StaticStringMap(MethodSpec).initComptime(.{
     .{ "hasOwnProperty", MethodSpec{ .call = objHasOwnProperty, .arity = 1 } },
     .{ "propertyIsEnumerable", MethodSpec{ .call = objPropertyIsEnumerable, .arity = 1 } },
     .{ "toString", MethodSpec{ .call = objToString, .arity = 0 } },
+    .{ "toLocaleString", MethodSpec{ .call = objToLocaleString, .arity = 0 } },
     .{ "valueOf", MethodSpec{ .call = objValueOf, .arity = 0 } },
     .{ "isPrototypeOf", MethodSpec{ .call = objIsPrototypeOf, .arity = 1 } },
     .{ "__defineGetter__", MethodSpec{ .call = objDefineGetter, .arity = 2 } },
@@ -58,6 +59,18 @@ pub const object_methods = std.StaticStringMap(MethodSpec).initComptime(.{
 });
 
 // ===== Object statics =====
+
+fn objToLocaleString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = args;
+    const self = interp(ctx);
+    if (this_value.isNull() or this_value.isUndefined()) {
+        return self.throwError(.type_error, "Cannot convert undefined or null to object", .{});
+    }
+    const to_str = try self.getProperty(this_value, "toString");
+    defer to_str.deinit();
+    return self.callValue(to_str, this_value, &.{}, "toString");
+}
 
 fn requireObject(ctx: *anyopaque, v: JSValue, what: []const u8) anyerror!JSValue {
     if (!v.isObject()) return interp(ctx).throwError(.type_error, "{s} called on a non-object", .{what});

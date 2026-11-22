@@ -82,6 +82,7 @@ pub const array_methods = std.StaticStringMap(MethodSpec).initComptime(.{
     .{ "splice", MethodSpec{ .call = arraySplice, .arity = 2 } },
     .{ "sort", MethodSpec{ .call = arraySort, .arity = 1 } },
     .{ "toString", MethodSpec{ .call = arrayToStringMethod, .arity = 0 } },
+    .{ "toLocaleString", MethodSpec{ .call = arrayToLocaleString, .arity = 0 } },
     .{ "toReversed", MethodSpec{ .call = arrayToReversed, .arity = 0 } },
     .{ "toSorted", MethodSpec{ .call = arrayToSorted, .arity = 1 } },
     .{ "toSpliced", MethodSpec{ .call = arrayToSpliced, .arity = 2 } },
@@ -92,6 +93,32 @@ pub const array_methods = std.StaticStringMap(MethodSpec).initComptime(.{
 });
 
 // ===== Array.prototype =====
+
+fn arrayToLocaleString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const obj = try toArrayLikeObject(ctx, this_value, "toLocaleString");
+    defer obj.deinit();
+    const self = interp(ctx);
+    const len = try arrayLikeLength(ctx, obj);
+    if (len == 0) return self.gcNewString("");
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        if (i > 0) try buf.append(allocator, ',');
+        const elem = (try arrayLikeElem(ctx, allocator, obj, i)) orelse JSValue.UNDEFINED;
+        defer elem.deinit();
+        if (elem.isUndefined() or elem.isNull()) continue;
+        const tl = try self.getProperty(elem, "toLocaleString");
+        defer tl.deinit();
+        const res = try self.callValue(tl, elem, &.{}, "toLocaleString");
+        defer res.deinit();
+        const s = try self.toDisplayStringJS(allocator, res);
+        defer allocator.free(s);
+        try appendWtf8Merged(&buf, allocator, s);
+    }
+    return self.gcNewString(buf.items);
+}
 
 fn requireArray(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!void {
     _ = try requireTag(ctx, this_value, .array, "Array.prototype.{s} called on a non-array", method);
