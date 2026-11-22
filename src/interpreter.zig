@@ -163,12 +163,22 @@ pub const ConcatItem = struct {
     open_method: JSValue,
 };
 
+pub const ZipMode = enum { shortest, longest, strict };
+
+pub const ZipItem = struct {
+    iterator: JSValue,
+    next: JSValue,
+    padding: JSValue = JSValue.UNDEFINED,
+    key: []const u8 = "",
+    open: bool = true,
+};
+
 /// An Iterator helper's state (iterator_builtins.zig): the underlying
 /// iterator record, the callback, and the generator-like run state.
 /// Heap-allocated so a pointer to it survives `object_slots` rehashing
 /// while the callback runs.
 pub const IteratorHelper = struct {
-    kind: enum { map, filter, take, drop, flat_map, concat },
+    kind: enum { map, filter, take, drop, flat_map, concat, zip, zip_keyed },
     state: enum { suspended_start, suspended_yield, executing, completed } = .suspended_start,
     iterator: JSValue,
     next: JSValue,
@@ -182,6 +192,8 @@ pub const IteratorHelper = struct {
     inner_alive: bool = false,
     concat_items: std.ArrayListUnmanaged(ConcatItem) = .empty,
     concat_idx: usize = 0,
+    zip_mode: ZipMode = .shortest,
+    zip_items: std.ArrayListUnmanaged(ZipItem) = .empty,
 };
 
 /// The internal slots of an `.object` that is a builtin instance with no
@@ -251,6 +263,11 @@ pub const ObjectSlots = union(enum) {
                     f(ctx, it.iterable);
                     f(ctx, it.open_method);
                 }
+                for (h.zip_items.items) |it| {
+                    f(ctx, it.iterator);
+                    f(ctx, it.next);
+                    f(ctx, it.padding);
+                }
             },
             .wrapped_iterator => |w| {
                 f(ctx, w.iterator);
@@ -288,6 +305,10 @@ pub const ObjectSlots = union(enum) {
             .finalization_registry => |*r| r.cells.deinit(allocator),
             .iterator_helper => |h| {
                 h.concat_items.deinit(allocator);
+                for (h.zip_items.items) |it| {
+                    if (it.key.len > 0) allocator.free(it.key);
+                }
+                h.zip_items.deinit(allocator);
                 allocator.destroy(h);
             },
             .disposable_stack, .async_disposable_stack => |ds| {
@@ -3257,6 +3278,38 @@ test "Phase 4.2a: Iterator.concat and ArrayIteratorPrototype -> Iterator.prototy
         \\arrIter[Symbol.dispose]();
         \\strErr && notOpenedYet && notOpenedOnReturn && first === 1 && closedActive &&
         \\  allVals === "10,20,30" && protoOk && disposed;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
+test "Phase 4.2b: Iterator.zip and Iterator.zipKeyed" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\var s = [...Iterator.zip([[1, 2, 3], [4, 5]])].map(a => a.join(":")).join(",");
+        \\var l = [...Iterator.zip([[1], [2, 3]], { mode: "longest", padding: ["p1"] })].map(a => String(a[0]) + ":" + String(a[1])).join(",");
+        \\var strictErr = false;
+        \\var closed = [];
+        \\var it1 = { next() { return { value: 1, done: false }; }, return() { closed.push(1); return { done: true }; } };
+        \\var it2 = { next() { return { value: undefined, done: true }; }, return() { closed.push(2); return { done: true }; } };
+        \\var zStrict = Iterator.zip([it1, it2], { mode: "strict" });
+        \\try { zStrict.next(); } catch (e) { strictErr = e instanceof TypeError; }
+        \\var zk = [...Iterator.zipKeyed({ a: [1], b: [2, 3], skip: undefined }, { mode: "longest", padding: { a: 99 } })];
+        \\var zkOk = zk.length === 2 && Object.getPrototypeOf(zk[0]) === null &&
+        \\  zk[0].a === 1 && zk[0].b === 2 && !("skip" in zk[0]) && zk[1].a === 99 && zk[1].b === 3;
+        \\var retClosed = [];
+        \\var r1 = { next() { return { value: 1, done: false }; }, return() { retClosed.push("r1"); return { done: true }; } };
+        \\var r2 = { next() { return { value: 2, done: false }; }, return() { retClosed.push("r2"); return { done: true }; } };
+        \\var zRet = Iterator.zip([r1, r2]);
+        \\zRet.next();
+        \\zRet.return();
+        \\s === "1:4,2:5" && l === "1:2,p1:3" && strictErr && closed.join(",") === "1" &&
+        \\  zkOk && retClosed.join(",") === "r2,r1";
     );
     defer res.deinit();
     try testing.expect(res.isBool() and res.asBool());

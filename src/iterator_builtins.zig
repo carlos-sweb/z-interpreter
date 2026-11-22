@@ -18,11 +18,14 @@ const JSValue = zvalue.JSValue;
 const interpreter_mod = @import("interpreter.zig");
 const Interpreter = interpreter_mod.Interpreter;
 const IteratorHelper = interpreter_mod.IteratorHelper;
+const ZipMode = interpreter_mod.ZipMode;
+const ZipItem = interpreter_mod.ZipItem;
 const coercion = @import("coercion.zig");
 const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
 const regex_builtins = @import("regex_builtins.zig");
 const promise_builtins = @import("promise_builtins.zig");
+const object_builtins = @import("object_builtins.zig");
 
 const NativeFn = native_helpers.NativeFn;
 const interp = native_helpers.interp;
@@ -371,7 +374,116 @@ fn helperStep(self: *Interpreter, h: *IteratorHelper) anyerror!?JSValue {
             h.inner_next = rec.next;
             h.inner_alive = true;
         },
+        .zip, .zip_keyed => return zipStep(self, h),
     }
+}
+
+fn iteratorCloseAllThrow(self: *Interpreter, items: []ZipItem, err: anyerror) anyerror {
+    const saved = self.pending_exception;
+    self.pending_exception = null;
+    defer {
+        if (self.pending_exception) |v| v.deinit();
+        self.pending_exception = saved;
+    }
+    var i = items.len;
+    while (i > 0) {
+        i -= 1;
+        if (!items[i].open) continue;
+        items[i].open = false;
+        _ = closeOnThrow(self, items[i].iterator, err) catch {};
+    }
+    return err;
+}
+
+fn iteratorCloseAllNormal(self: *Interpreter, items: []ZipItem) anyerror!void {
+    var i = items.len;
+    while (i > 0) {
+        i -= 1;
+        if (!items[i].open) continue;
+        items[i].open = false;
+        closeNormal(self, items[i].iterator) catch |err| {
+            return iteratorCloseAllThrow(self, items[0..i], err);
+        };
+    }
+}
+
+fn zipStep(self: *Interpreter, h: *IteratorHelper) anyerror!?JSValue {
+    const items = h.zip_items.items;
+    if (items.len == 0) return null;
+
+    const results = try self.gc_allocator.alloc(JSValue, items.len);
+    var filled: usize = 0;
+    defer {
+        for (results[0..filled]) |v| v.deinit();
+        self.gc_allocator.free(results);
+    }
+
+    var any_yielded = false;
+    for (items, 0..) |*it, i| {
+        if (!it.open) {
+            results[i] = it.padding.retain();
+            filled = i + 1;
+            continue;
+        }
+        const val = stepValue(self, it.iterator, it.next) catch |err| {
+            it.open = false;
+            return iteratorCloseAllThrow(self, items, err);
+        };
+        if (val) |v| {
+            results[i] = v;
+            filled = i + 1;
+            any_yielded = true;
+        } else {
+            it.open = false;
+            switch (h.zip_mode) {
+                .shortest => {
+                    try iteratorCloseAllNormal(self, items);
+                    return null;
+                },
+                .longest => {
+                    results[i] = it.padding.retain();
+                    filled = i + 1;
+                },
+                .strict => {
+                    if (i == 0) {
+                        for (items[1..]) |*other| {
+                            if (!other.open) continue;
+                            const ov = stepValue(self, other.iterator, other.next) catch |err| {
+                                other.open = false;
+                                return iteratorCloseAllThrow(self, items, err);
+                            };
+                            if (ov) |v| {
+                                v.deinit();
+                                const te = self.throwError(.type_error, "Iterator.zip strict mode length mismatch", .{});
+                                return iteratorCloseAllThrow(self, items, te);
+                            }
+                            other.open = false;
+                        }
+                        return null;
+                    }
+                    const te = self.throwError(.type_error, "Iterator.zip strict mode length mismatch", .{});
+                    return iteratorCloseAllThrow(self, items, te);
+                },
+            }
+        }
+    }
+
+    if (!any_yielded) return null;
+
+    if (h.kind == .zip) {
+        var arr = try self.gcNewArray();
+        errdefer arr.deinit();
+        for (results[0..filled]) |v| _ = try arr.asArray().value.push(v.retain());
+        return arr;
+    }
+
+    var obj = try self.gcNewObject();
+    errdefer obj.deinit();
+    const attrs = zvalue.PropertyDescriptor{ .writable = true, .enumerable = true, .configurable = true };
+    for (items, 0..) |it, i| {
+        try obj.asObject().value.defineProperty(it.key, results[i].retain(), attrs);
+    }
+    return obj;
 }
 
 fn helperNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -407,14 +519,20 @@ fn helperReturn(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
         .completed => return iterResult(self, JSValue.UNDEFINED, true),
         .suspended_start => {
             h.state = .completed;
-            if (h.kind != .concat) try closeNormal(self, h.iterator);
+            if (h.kind == .zip or h.kind == .zip_keyed) {
+                try iteratorCloseAllNormal(self, h.zip_items.items);
+            } else if (h.kind != .concat) {
+                try closeNormal(self, h.iterator);
+            }
         },
         .suspended_yield => {
             // A return completion at the Yield: flatMap closes its inner
             // iterator first (its failure closes the outer one as a throw).
             h.state = .executing;
             defer h.state = .completed;
-            if (h.kind == .concat) {
+            if (h.kind == .zip or h.kind == .zip_keyed) {
+                try iteratorCloseAllNormal(self, h.zip_items.items);
+            } else if (h.kind == .concat) {
                 if (h.inner_alive) {
                     h.inner_alive = false;
                     try closeNormal(self, h.inner_iterator);
@@ -711,11 +829,193 @@ fn iteratorConcat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     return o;
 }
 
+fn getIteratorSync(self: *Interpreter, obj: JSValue) anyerror!Record {
+    const sym = self.symbol_iterator orelse return self.throwError(.type_error, "Symbol.iterator is not defined", .{});
+    const key = try self.encodeKey(sym);
+    defer self.gc_allocator.free(key);
+    const method = try self.getProperty(obj, key);
+    defer method.deinit();
+    if (method.isUndefined() or method.isNull() or !isCallable(method)) {
+        return self.throwError(.type_error, "{s} is not iterable", .{obj.typeOf()});
+    }
+    const iter = try self.callValue(method, obj, &.{}, "[Symbol.iterator]");
+    defer iter.deinit();
+    if (!isObjectLike(iter)) return self.throwError(.type_error, "Iterator result is not an object", .{});
+    return getIteratorDirect(self, iter);
+}
+
+fn parseZipOptions(self: *Interpreter, options_val: JSValue) anyerror!struct { mode: ZipMode, padding: JSValue } {
+    if (options_val.isUndefined()) return .{ .mode = .shortest, .padding = JSValue.UNDEFINED };
+    if (!isObjectLike(options_val)) return self.throwError(.type_error, "Options must be an object", .{});
+    const mode_val = try self.getProperty(options_val, "mode");
+    defer mode_val.deinit();
+    const mode: ZipMode = if (mode_val.isUndefined())
+        .shortest
+    else if (mode_val.isString()) blk: {
+        const s = mode_val.asString().value.data;
+        if (std.mem.eql(u8, s, "shortest")) break :blk .shortest;
+        if (std.mem.eql(u8, s, "longest")) break :blk .longest;
+        if (std.mem.eql(u8, s, "strict")) break :blk .strict;
+        return self.throwError(.type_error, "Invalid zip mode", .{});
+    } else return self.throwError(.type_error, "Invalid zip mode", .{});
+
+    var padding = JSValue.UNDEFINED;
+    if (mode == .longest) {
+        const pad_val = try self.getProperty(options_val, "padding");
+        errdefer pad_val.deinit();
+        if (!pad_val.isUndefined() and !isObjectLike(pad_val)) {
+            return self.throwError(.type_error, "padding must be an object", .{});
+        }
+        padding = pad_val;
+    }
+    return .{ .mode = mode, .padding = padding };
+}
+
+fn deinitZipItems(allocator: Allocator, items: *std.ArrayListUnmanaged(ZipItem)) void {
+    for (items.items) |it| {
+        it.iterator.deinit();
+        it.next.deinit();
+        it.padding.deinit();
+        if (it.key.len > 0) allocator.free(it.key);
+    }
+    items.deinit(allocator);
+}
+
+fn buildZipHelper(self: *Interpreter, kind: @FieldType(IteratorHelper, "kind"), mode: ZipMode, items: std.ArrayListUnmanaged(ZipItem)) anyerror!JSValue {
+    const h = try self.gc_allocator.create(IteratorHelper);
+    h.* = .{
+        .kind = kind,
+        .iterator = JSValue.UNDEFINED,
+        .next = JSValue.UNDEFINED,
+        .zip_mode = mode,
+        .zip_items = items,
+    };
+    var o = try self.gcNewObject();
+    try o.asObject().value.setPrototype(&self.iterator_helper_proto.?.asObject().value);
+    self.object_slots.put(self.gc_allocator, @intFromPtr(o.asObject()), .{ .iterator_helper = h }) catch |err| {
+        o.deinit();
+        return err;
+    };
+    return o;
+}
+
+fn iteratorZip(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const self = interp(ctx);
+    const iterables = arg(args, 0);
+    if (!isObjectLike(iterables)) return self.throwError(.type_error, "Iterator.zip requires an object", .{});
+    const opts = try parseZipOptions(self, arg(args, 1));
+    defer opts.padding.deinit();
+
+    const input_rec = try getIteratorSync(self, iterables);
+    defer input_rec.deinit();
+
+    var items: std.ArrayListUnmanaged(ZipItem) = .empty;
+    errdefer deinitZipItems(self.gc_allocator, &items);
+
+    while (true) {
+        const elem = stepValue(self, input_rec.iterator, input_rec.next) catch |err| {
+            return iteratorCloseAllThrow(self, items.items, err);
+        } orelse break;
+        defer elem.deinit();
+        const rec = getIteratorFlattenable(self, elem, false) catch |err| {
+            _ = closeOnThrow(self, input_rec.iterator, err) catch {};
+            return iteratorCloseAllThrow(self, items.items, err);
+        };
+        items.append(self.gc_allocator, .{ .iterator = rec.iterator, .next = rec.next }) catch |err| {
+            rec.deinit();
+            _ = closeOnThrow(self, input_rec.iterator, err) catch {};
+            return iteratorCloseAllThrow(self, items.items, err);
+        };
+    }
+
+    if (opts.mode == .longest and !opts.padding.isUndefined()) {
+        const pad_rec = getIteratorSync(self, opts.padding) catch |err| {
+            return iteratorCloseAllThrow(self, items.items, err);
+        };
+        defer pad_rec.deinit();
+        var pad_exhausted = false;
+        for (items.items) |*it| {
+            const pv = stepValue(self, pad_rec.iterator, pad_rec.next) catch |err| {
+                return iteratorCloseAllThrow(self, items.items, err);
+            };
+            if (pv) |v| {
+                it.padding = v;
+            } else {
+                pad_exhausted = true;
+                break;
+            }
+        }
+        if (!pad_exhausted) {
+            closeNormal(self, pad_rec.iterator) catch |err| {
+                return iteratorCloseAllThrow(self, items.items, err);
+            };
+        }
+    }
+
+    return buildZipHelper(self, .zip, opts.mode, items);
+}
+
+fn iteratorZipKeyed(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const iterables = arg(args, 0);
+    if (!isObjectLike(iterables)) return self.throwError(.type_error, "Iterator.zipKeyed requires an object", .{});
+    const opts = try parseZipOptions(self, arg(args, 1));
+    defer opts.padding.deinit();
+
+    const keys = try object_builtins.ownPropertyKeyList(self, allocator, iterables);
+    defer object_builtins.freeOwnedKeys(allocator, keys);
+
+    var items: std.ArrayListUnmanaged(ZipItem) = .empty;
+    errdefer deinitZipItems(self.gc_allocator, &items);
+
+    for (keys) |k| {
+        const is_enum = (object_builtins.ownPropertyEnumerable(self, iterables, k) catch |err| {
+            return iteratorCloseAllThrow(self, items.items, err);
+        }) orelse continue;
+        if (!is_enum) continue;
+
+        const val = self.getProperty(iterables, k) catch |err| {
+            return iteratorCloseAllThrow(self, items.items, err);
+        };
+        defer val.deinit();
+        if (val.isUndefined()) continue;
+
+        const rec = getIteratorFlattenable(self, val, false) catch |err| {
+            return iteratorCloseAllThrow(self, items.items, err);
+        };
+        const duped_key = self.gc_allocator.dupe(u8, k) catch |err| {
+            rec.deinit();
+            return iteratorCloseAllThrow(self, items.items, err);
+        };
+        items.append(self.gc_allocator, .{ .iterator = rec.iterator, .next = rec.next, .key = duped_key }) catch |err| {
+            rec.deinit();
+            self.gc_allocator.free(duped_key);
+            return iteratorCloseAllThrow(self, items.items, err);
+        };
+    }
+
+    if (opts.mode == .longest and !opts.padding.isUndefined()) {
+        for (items.items) |*it| {
+            const pv = self.getProperty(opts.padding, it.key) catch |err| {
+                return iteratorCloseAllThrow(self, items.items, err);
+            };
+            it.padding = pv;
+        }
+    }
+
+    return buildZipHelper(self, .zip_keyed, opts.mode, items);
+}
+
 pub fn install(self: *Interpreter) !void {
     const proto = self.iterator_prototype.?;
     const ctor = try builtin_helpers.installBuiltin(self, .{ .name = "Iterator", .ctor = .{ .arity = 0, .call = iteratorConstructor, .constructable = true }, .statics = &.{
         .{ .name = "from", .value = .{ .method = .{ .call = iteratorFrom, .arity = 1 } } },
         .{ .name = "concat", .value = .{ .method = .{ .call = iteratorConcat, .arity = 0 } } },
+        .{ .name = "zip", .value = .{ .method = .{ .call = iteratorZip, .arity = 1 } } },
+        .{ .name = "zipKeyed", .value = .{ .method = .{ .call = iteratorZipKeyed, .arity = 1 } } },
     } });
     ctor.asFunction().value.prototype = proto.retain();
     self.iterator_ctor = ctor.retain();
