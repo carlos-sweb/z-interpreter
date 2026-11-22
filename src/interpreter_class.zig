@@ -339,7 +339,7 @@ pub fn makeClosure(self: *Interpreter, env: *Environment, fnode: *zfunctions.Fun
     try self.gcTrackEnvironment(closure_env);
 
     const ctx = try arena.create(ClosureCtx);
-    ctx.* = .{ .interp = self, .function_node = fnode, .closure_env = closure_env };
+    ctx.* = .{ .interp = self, .function_node = fnode, .closure_env = closure_env, .source_full = self.current_source };
     try self.gcTrackClosureCtx(ctx);
     const name: []const u8 = switch (fnode.kind) {
         .function_decl => |d| d.name,
@@ -812,6 +812,10 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
     }
 
     const cctx = try arena.create(ClassCtx);
+    const class_src_text: ?[]const u8 = if (self.current_source) |s|
+        if (cnode.end <= s.len and cnode.start <= cnode.end) s[cnode.start..cnode.end] else null
+    else
+        null;
     cctx.* = .{
         .interp = self,
         .ctor_fnode = ctor_fnode,
@@ -822,6 +826,7 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
         // same reasoning as ClosureCtx/Environment's fields above.
         .super_ctor = if (super_ctor) |sc| sc.retain() else null,
         .super_proto = if (super_proto) |sp| sp.retain() else null,
+        .source_text = class_src_text,
     };
     try self.gcTrackClassCtx(cctx);
     const class_fn = try self.gcNewFunction(.{
@@ -1123,6 +1128,9 @@ pub fn invokeFunctionNode(
 
 pub fn closureCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const closure_ctx: *ClosureCtx = @ptrCast(@alignCast(ctx));
+    const prev_source = closure_ctx.interp.current_source;
+    if (closure_ctx.source_full) |sf| closure_ctx.interp.current_source = sf;
+    defer closure_ctx.interp.current_source = prev_source;
     const fnode = closure_ctx.function_node;
     // Arrows have no own `this` binding -- passing null makes
     // `resolveThis()` walk up to closure_env's, matching real lexical
@@ -1140,7 +1148,7 @@ pub fn closureCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     return invokeFunctionNode(closure_ctx.interp, fnode, closure_ctx.closure_env, allocator, this, closure_ctx.super_proto, null, closure_ctx.private_ctx, args, closure_ctx.home_object);
 }
 
-fn classConstructorCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+pub fn classConstructorCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const cctx: *ClassCtx = @ptrCast(@alignCast(ctx));
     const self = cctx.interp;
     if (self.construct_target != ctx) {

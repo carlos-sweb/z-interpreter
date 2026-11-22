@@ -315,6 +315,9 @@ pub fn run(self: *Interpreter, source: []const u8) anyerror!JSValue {
     // whole run -- never GC-tracked); everything else this function
     // creates goes through gc_allocator.
     const ast_arena = self.arena_state.allocator();
+    const prev_source = self.current_source;
+    self.current_source = source;
+    defer self.current_source = prev_source;
     const parser = try zfunctions.Parser.init(ast_arena, source);
     parser.setStackLimit(self.stack_limit);
     const program = try parser.parseProgram();
@@ -376,6 +379,9 @@ pub fn evalSource(self: *Interpreter, scope: *Environment, src: []const u8) anye
     // eval() returns -- while functions defined in the code live on. The
     // arena copy lives as long as the AST.
     const owned_src = try ast_arena.dupe(u8, src);
+    const prev_source = self.current_source;
+    self.current_source = owned_src;
+    defer self.current_source = prev_source;
     const parser = zfunctions.Parser.init(ast_arena, owned_src) catch
         return self.throwError(.syntax_error, "Invalid or unexpected token in eval", .{});
     // Reuse whatever budget is already active for the current

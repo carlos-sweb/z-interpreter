@@ -152,6 +152,9 @@ pub fn loadModule(self: *Interpreter, specifier: []const u8, referrer: ?[]const 
         }
     }
 
+    const prev_source = self.current_source;
+    self.current_source = loaded.source;
+    defer self.current_source = prev_source;
     try self.evalModuleBody(module_env, program, rec);
     rec.state = .evaluated;
     return rec;

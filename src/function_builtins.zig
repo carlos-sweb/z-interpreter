@@ -11,6 +11,7 @@ const JSValue = zvalue.JSValue;
 
 const interpreter_mod = @import("interpreter.zig");
 const Interpreter = interpreter_mod.Interpreter;
+const interpreter_class = @import("interpreter_class.zig");
 const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
 
@@ -28,7 +29,53 @@ pub const function_methods = std.StaticStringMap(MethodSpec).initComptime(.{
     .{ "call", MethodSpec{ .call = fnCall, .arity = 1 } },
     .{ "apply", MethodSpec{ .call = fnApply, .arity = 2 } },
     .{ "bind", MethodSpec{ .call = fnBind, .arity = 1 } },
+    .{ "toString", MethodSpec{ .call = fnToString, .arity = 0 } },
 });
+
+fn isValidNativeFnName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name, 0..) |c, i| {
+        const is_alpha = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_' or c == '$';
+        const is_digit = c >= '0' and c <= '9';
+        if (i == 0) {
+            if (!is_alpha) return false;
+        } else {
+            if (!is_alpha and !is_digit) return false;
+        }
+    }
+    return true;
+}
+
+fn formatNativeFn(self: *Interpreter, allocator: Allocator, name: []const u8) anyerror!JSValue {
+    if (isValidNativeFnName(name)) {
+        const formatted = try std.fmt.allocPrint(allocator, "function {s}() {{ [native code] }}", .{name});
+        defer allocator.free(formatted);
+        return self.gcNewString(formatted);
+    }
+    return self.gcNewString("function () { [native code] }");
+}
+
+fn fnToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    if (!this_value.isFunction()) {
+        return self.throwError(.type_error, "Function.prototype.toString requires that 'this' be a Function", .{});
+    }
+    const fn_val = this_value.asFunction().value;
+    if (fn_val.call == interpreter_class.closureCall) {
+        const cc: *const interpreter_mod.ClosureCtx = @ptrCast(@alignCast(fn_val.ctx));
+        if (cc.source_full) |src| {
+            if (cc.function_node.end <= src.len and cc.function_node.start <= cc.function_node.end) {
+                return self.gcNewString(src[cc.function_node.start..cc.function_node.end]);
+            }
+        }
+    } else if (fn_val.call == interpreter_class.classConstructorCall) {
+        const cctx: *const interpreter_mod.ClassCtx = @ptrCast(@alignCast(fn_val.ctx));
+        if (cctx.source_text) |st| return self.gcNewString(st);
+    }
+    const name = if (fn_val.call == boundCall) "" else fn_val.name;
+    return formatNativeFn(self, allocator, name);
+}
 
 fn requireFunction(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {
     return requireTag(ctx, this_value, .function, "Function.prototype.{s} called on a non-function", method);
@@ -160,6 +207,9 @@ fn functionConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
         },
         else => return self.throwError(.syntax_error, "Invalid function source", .{}),
     };
+    const prev_source = self.current_source;
+    self.current_source = src.items;
+    defer self.current_source = prev_source;
     return self.makeClosure(self.global_env, zfunctions.asFunctionNode(fnode_ptr));
 }
 

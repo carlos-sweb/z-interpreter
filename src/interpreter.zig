@@ -358,6 +358,8 @@ pub const ClosureCtx = struct {
     /// identity (its *ClassCtx), so `this.#x` inside the body resolves
     /// private names against the right class (copied onto the call env).
     private_ctx: ?*anyopaque = null,
+    /// Full source text from which `function_node` was parsed (for Function.prototype.toString).
+    source_full: ?[]const u8 = null,
 
     /// GC prep (roadmap item 15, phase 2): see Environment.traceChildren
     /// for the visitor contract. private_ctx is downcast back to *ClassCtx
@@ -554,6 +556,8 @@ pub const ClassCtx = struct {
     /// encodePrivateKey mixes into `#name` storage keys (brand checks fall
     /// out of key mismatch).
     instance_fields: []const FieldDef = &.{},
+    /// Exact class source slice (for Function.prototype.toString).
+    source_text: ?[]const u8 = null,
 
     /// GC prep (roadmap item 15, phase 2): see Environment.traceChildren
     /// for the visitor contract. `instance_fields[i].value` is an AST
@@ -991,6 +995,8 @@ pub const Interpreter = struct {
     /// function dies (gcOnBoxDestroyed), like those two tables' entries,
     /// so a function later allocated at the same address doesn't inherit it.
     deleted_fn_props: std.AutoHashMapUnmanaged(usize, DeletedFnProps) = .empty,
+    /// Active source text being parsed/executed so closures/classes can slice `start..end`.
+    current_source: ?[]const u8 = null,
     /// The stack-depth guard: recursing below this native stack address
     /// raises the real `RangeError: Maximum call stack size exceeded`
     /// instead of segfaulting (Test262's tco-* tests found this). Set
@@ -3491,6 +3497,30 @@ test "Phase 5.2b: elision/Array(len) holes, Array proto indices in hasProperty, 
         \\var numOk = Number("0x0002") === 2 && Number("0b101") === 5 && Number("0o77") === 63 &&
         \\  Number.isNaN(Number("-0x1")) && Number.isNaN(Number("+0x1")) && Number.isNaN(Number("0x"));
         \\elisionOk && newArrOk && reduceThrew && protoOk && numOk;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
+test "Phase 5.3a: Function.prototype.toString" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\var nativeOk = Function.prototype.toString.call(Math.sin) === "function sin() { [native code] }";
+        \\var boundOk = (() => {}).bind().toString() === "function () { [native code] }";
+        \\function /* c */ foo(a, b) { return a + b; }
+        \\var jsOk = foo.toString() === "function /* c */ foo(a, b) { return a + b; }";
+        \\class /* c2 */ Bar { m() {} }
+        \\var classOk = Bar.toString() === "class /* c2 */ Bar { m() {} }";
+        \\var nonFnThrew = false;
+        \\try { Function.prototype.toString.call({}); } catch (e) { nonFnThrew = e instanceof TypeError; }
+        \\var proxyThrew = false;
+        \\try { Function.prototype.toString.call(new Proxy(() => {}, {})); } catch (e) { proxyThrew = e instanceof TypeError; }
+        \\nativeOk && boundOk && jsOk && classOk && nonFnThrew && proxyThrew;
     );
     defer res.deinit();
     try testing.expect(res.isBool() and res.asBool());
