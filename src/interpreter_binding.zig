@@ -115,58 +115,86 @@ pub fn iterableItems(self: *Interpreter, value: JSValue) anyerror![]const JSValu
     };
 }
 
-/// The iterator object for a `.object`: its `[Symbol.iterator]()`
-/// result if it has one, else the object itself if it's already an
-/// iterator (callable `next`). TypeError otherwise (not iterable).
-pub fn resolveIterator(self: *Interpreter, obj: JSValue) anyerror!JSValue {
-    const arena = self.gc_allocator;
-    if (self.symbol_iterator) |sym| {
-        const key = try self.encodeKey(sym);
-        defer self.gc_allocator.free(key);
-        const method = try self.getProperty(obj, key);
-        if (method.isFunction()) {
-            const iter = try method.asFunction().value.call(method.asFunction().value.ctx, arena, obj, &.{});
-            if (!iter.isObject()) return self.throwError(.type_error, "Result of the Symbol.iterator method is not an object", .{});
-            return iter;
-        }
-    }
-    // Fallback: the object is itself an iterator (generator objects,
-    // hand-written `{ next() {} }`).
-    if ((try self.getProperty(obj, "next")).isFunction()) return obj;
-    return self.throwError(.type_error, "{s} is not iterable", .{obj.typeOf()});
+fn isCallableVal(v: JSValue) bool {
+    return switch (v.unpack()) {
+        .function => true,
+        .proxy => |box| isCallableVal(box.value.target),
+        else => false,
+    };
 }
 
-/// Like resolveIterator, but for `for await`: tries `[Symbol.
-/// asyncIterator]()` first (a real async iterator, e.g. an async
-/// generator object); falls back to the ordinary sync-iterator
-/// resolution (AsyncFromSyncIterator wrapping -- the caller Awaits
-/// each produced value either way, which is what actually makes a
-/// plain Symbol.iterator object work under `for await`).
-pub fn resolveAsyncIterator(self: *Interpreter, obj: JSValue) anyerror!JSValue {
-    const arena = self.gc_allocator;
+pub const ResolvedAsyncIter = struct {
+    iter: JSValue,
+    is_async: bool,
+};
+
+/// ECMA-262 GetIterator(obj, sync): strictly calls GetMethod(obj, @@iterator).
+/// Throws TypeError if @@iterator is neither undefined/null nor callable, or
+/// if undefined/null (no `.next` duck-typing fallback).
+pub fn resolveIterator(self: *Interpreter, obj: JSValue) anyerror!JSValue {
+    const sym = self.symbol_iterator orelse return self.throwError(.type_error, "{s} is not iterable", .{obj.typeOf()});
+    const key = try self.encodeKey(sym);
+    defer self.gc_allocator.free(key);
+    const method = try self.getProperty(obj, key);
+    defer method.deinit();
+    if (method.isUndefined() or method.isNull()) {
+        return self.throwError(.type_error, "{s} is not iterable", .{obj.typeOf()});
+    }
+    if (!isCallableVal(method)) {
+        return self.throwError(.type_error, "Symbol.iterator is not a function", .{});
+    }
+    const iter = try self.callValue(method, obj, &.{}, "[Symbol.iterator]");
+    errdefer iter.deinit();
+    if (!@import("builtin_helpers.zig").isObjectLike(iter)) {
+        return self.throwError(.type_error, "Result of the Symbol.iterator method is not an object", .{});
+    }
+    return iter;
+}
+
+/// ECMA-262 GetIterator(obj, async): checks GetMethod(obj, @@asyncIterator)
+/// strictly (throwing TypeError if non-nullish and non-callable without
+/// falling back to @@iterator), and falls back to resolveIterator only when
+/// @@asyncIterator is undefined or null.
+pub fn resolveAsyncIteratorDetail(self: *Interpreter, obj: JSValue) anyerror!ResolvedAsyncIter {
     if (self.symbol_async_iterator) |sym| {
         const key = try self.encodeKey(sym);
         defer self.gc_allocator.free(key);
         const method = try self.getProperty(obj, key);
-        if (method.isFunction()) {
-            const iter = try method.asFunction().value.call(method.asFunction().value.ctx, arena, obj, &.{});
-            if (!iter.isObject()) return self.throwError(.type_error, "Result of the Symbol.asyncIterator method is not an object", .{});
-            return iter;
+        defer method.deinit();
+        if (!method.isUndefined() and !method.isNull()) {
+            if (!isCallableVal(method)) {
+                return self.throwError(.type_error, "Symbol.asyncIterator is not a function", .{});
+            }
+            const iter = try self.callValue(method, obj, &.{}, "[Symbol.asyncIterator]");
+            errdefer iter.deinit();
+            if (!@import("builtin_helpers.zig").isObjectLike(iter)) {
+                return self.throwError(.type_error, "Result of the Symbol.asyncIterator method is not an object", .{});
+            }
+            return .{ .iter = iter, .is_async = true };
         }
     }
-    return self.resolveIterator(obj);
+    return .{ .iter = try self.resolveIterator(obj), .is_async = false };
+}
+
+pub fn resolveAsyncIterator(self: *Interpreter, obj: JSValue) anyerror!JSValue {
+    return (try self.resolveAsyncIteratorDetail(obj)).iter;
 }
 
 /// Runs an iterator object to completion, collecting its values.
 pub fn drainIterator(self: *Interpreter, iter: JSValue) anyerror![]const JSValue {
     const arena = self.gc_allocator;
     const next_fn = try self.getProperty(iter, "next");
-    if (!next_fn.isFunction()) return self.throwError(.type_error, "iterator.next is not a function", .{});
+    defer next_fn.deinit();
+    if (!isCallableVal(next_fn)) return self.throwError(.type_error, "iterator.next is not a function", .{});
     var out: std.ArrayList(JSValue) = .empty;
+    errdefer {
+        for (out.items) |it| it.deinit();
+        out.deinit(arena);
+    }
     while (true) {
-        const step = try next_fn.asFunction().value.call(next_fn.asFunction().value.ctx, arena, iter, &.{});
+        const step = try self.callValue(next_fn, iter, &.{}, "next");
         defer step.deinit();
-        if (!step.isObject()) return self.throwError(.type_error, "Iterator result {s} is not an object", .{step.typeOf()});
+        if (!@import("builtin_helpers.zig").isObjectLike(step)) return self.throwError(.type_error, "Iterator result {s} is not an object", .{step.typeOf()});
         const done = try self.getProperty(step, "done");
         defer done.deinit();
         if (coercion.isTruthy(done)) break;
@@ -866,9 +894,130 @@ pub fn closeIterator(self: *Interpreter, iterator: JSValue) anyerror!void {
     const ret = try self.getProperty(iterator, "return");
     defer ret.deinit();
     if (ret.isUndefined() or ret.isNull()) return;
+    if (!isCallableVal(ret)) return self.throwError(.type_error, "iterator.return is not a function", .{});
     const r = try self.callValue(ret, iterator, &.{}, "return");
     defer r.deinit();
     if (!@import("builtin_helpers.zig").isObjectLike(r)) return self.throwError(.type_error, "Iterator result {s} is not an object", .{r.typeOf()});
+}
+
+pub fn closeAsyncIteratorNormal(self: *Interpreter, fs: *FiberState, iterator: JSValue) anyerror!void {
+    const ret = try self.getProperty(iterator, "return");
+    defer ret.deinit();
+    if (ret.isUndefined() or ret.isNull()) return;
+    if (!isCallableVal(ret)) return self.throwError(.type_error, "iterator.return is not a function", .{});
+    const raw = try self.callValue(ret, iterator, &.{}, "return");
+    const r = self.awaitValue(fs, raw) catch |err| {
+        raw.deinit();
+        return err;
+    };
+    raw.deinit();
+    defer r.deinit();
+    if (!@import("builtin_helpers.zig").isObjectLike(r)) {
+        return self.throwError(.type_error, "Iterator result {s} is not an object", .{r.typeOf()});
+    }
+}
+
+fn closeAsyncIteratorOnThrow(self: *Interpreter, fs: *FiberState, iterator: JSValue) void {
+    const saved = self.pending_exception;
+    self.pending_exception = null;
+    defer self.pending_exception = saved;
+    closeAsyncIteratorNormal(self, fs, iterator) catch {
+        if (self.pending_exception) |ie| ie.deinit();
+        self.pending_exception = null;
+    };
+}
+
+fn closeAsyncIteratorOnReturn(self: *Interpreter, fs: *FiberState, iterator: JSValue) anyerror!void {
+    const saved_ret = self.pending_return;
+    self.pending_return = null;
+    closeAsyncIteratorNormal(self, fs, iterator) catch |err| {
+        if (saved_ret) |sr| sr.deinit();
+        return err;
+    };
+    self.pending_return = saved_ret;
+}
+
+fn evalForOfIterator(
+    self: *Interpreter,
+    env: *Environment,
+    fs: ?*FiberState,
+    is_await: bool,
+    iterable: JSValue,
+    binding: zstatements.ForBinding,
+    body: *zstatements.Statement,
+    labels: []const []const u8,
+) anyerror!Completion {
+    const resolved = if (is_await)
+        try resolveAsyncIteratorDetail(self, iterable)
+    else
+        ResolvedAsyncIter{ .iter = try self.resolveIterator(iterable), .is_async = false };
+    const iter = resolved.iter;
+    defer iter.deinit();
+    const next_fn = try self.getProperty(iter, "next");
+    defer next_fn.deinit();
+    if (!isCallableVal(next_fn)) {
+        return self.throwError(.type_error, "iterator.next is not a function", .{});
+    }
+    while (true) {
+        var step_result = try self.callValue(next_fn, iter, &.{}, "next");
+        if (is_await and resolved.is_async) {
+            const awaited = self.awaitValue(fs.?, step_result) catch |err| {
+                step_result.deinit();
+                return err;
+            };
+            step_result.deinit();
+            step_result = awaited;
+        }
+        defer step_result.deinit();
+        if (!@import("builtin_helpers.zig").isObjectLike(step_result)) {
+            return self.throwError(.type_error, "Iterator result {s} is not an object", .{step_result.typeOf()});
+        }
+        const done = try self.getProperty(step_result, "done");
+        defer done.deinit();
+        if (coercion.isTruthy(done)) break;
+        var value = try self.getProperty(step_result, "value");
+        if (is_await and !resolved.is_async) {
+            const awaited = self.awaitValue(fs.?, value) catch |err| {
+                value.deinit();
+                if (err == error.JsReturn) {
+                    try closeIteratorOnReturn(self, iter);
+                } else {
+                    closeIteratorOnThrow(self, iter);
+                }
+                return err;
+            };
+            value.deinit();
+            value = awaited;
+        }
+        const step = self.forIterationStep(env, binding, value, body, labels) catch |err| {
+            value.deinit();
+            if (err == error.JsReturn) {
+                if (is_await and resolved.is_async) {
+                    try closeAsyncIteratorOnReturn(self, fs.?, iter);
+                } else {
+                    try closeIteratorOnReturn(self, iter);
+                }
+            } else {
+                if (is_await and resolved.is_async) {
+                    closeAsyncIteratorOnThrow(self, fs.?, iter);
+                } else {
+                    closeIteratorOnThrow(self, iter);
+                }
+            }
+            return err;
+        };
+        value.deinit();
+        if (step) |c| {
+            errdefer c.value.deinit();
+            if (is_await and resolved.is_async) {
+                try closeAsyncIteratorNormal(self, fs.?, iter);
+            } else {
+                try closeIterator(self, iter);
+            }
+            return c;
+        }
+    }
+    return .{};
 }
 
 /// for-of over the built-in iterables, natively: arrays (elements),
@@ -879,7 +1028,6 @@ pub fn closeIterator(self: *Interpreter, iterator: JSValue) anyerror!void {
 /// either). The one genuine gap vs. spec: user-defined iterables via
 /// Symbol.iterator, impossible until ZObject supports symbol keys.
 pub fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zstatements.Statement, labels: []const []const u8) anyerror!Completion {
-    const arena = self.gc_allocator;
     const is_await = head.is_await;
     // The parser only ever sets is_await inside an async function/async
     // generator body (await_allowed-gated), so a live fiber always
@@ -905,38 +1053,7 @@ pub fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zs
                 }
                 return .{};
             }
-            const iter = if (is_await) try self.resolveAsyncIterator(iterable) else try self.resolveIterator(iterable);
-            defer iter.deinit();
-            const next_fn = try self.getProperty(iter, "next");
-            defer next_fn.deinit();
-            while (true) {
-                var step_result = try next_fn.asFunction().value.call(next_fn.asFunction().value.ctx, arena, iter, &.{});
-                if (is_await and step_result.isPromise()) {
-                    const awaited = try self.awaitValue(fs.?, step_result);
-                    step_result.deinit();
-                    step_result = awaited;
-                }
-                defer step_result.deinit();
-                if (!step_result.isObject()) {
-                    return self.throwError(.type_error, "Iterator result {s} is not an object", .{step_result.typeOf()});
-                }
-                const done = try self.getProperty(step_result, "done");
-                defer done.deinit();
-                if (coercion.isTruthy(done)) break;
-                var value = try self.getProperty(step_result, "value");
-                if (is_await) {
-                    const awaited = try self.awaitValue(fs.?, value);
-                    value.deinit();
-                    value = awaited;
-                }
-                const step = try self.forIterationStep(env, head.binding, value, body, labels);
-                value.deinit();
-                if (step) |c| {
-                    errdefer c.value.deinit();
-                    try closeIterator(self, iter);
-                    return c;
-                }
-            }
+            return evalForOfIterator(self, env, fs, is_await, iterable, head.binding, body, labels);
         },
         .string => |box| {
             var it = std.unicode.Utf8Iterator{ .bytes = box.value.data, .i = 0 };
@@ -1002,50 +1119,7 @@ pub fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zs
         // IS an iterator (duck-typed `next` -- generator objects,
         // hand-written iterators). The completion value (`done: true`'s
         // value) is excluded, per spec.
-        .object => {
-            const iter = if (is_await) try self.resolveAsyncIterator(iterable) else try self.resolveIterator(iterable);
-            const next_fn = try self.getProperty(iter, "next");
-            while (true) {
-                var step_result = try next_fn.asFunction().value.call(next_fn.asFunction().value.ctx, arena, iter, &.{});
-                // A real async iterator's next() returns a PROMISE of
-                // {value,done}; the AsyncFromSyncIterator fallback
-                // (plain Symbol.iterator) returns the {value,done}
-                // object directly -- either way, awaiting a non-promise
-                // is a harmless one-tick round trip, so this one check
-                // handles both without needing to track which case
-                // resolveAsyncIterator picked.
-                if (is_await and step_result.isPromise()) {
-                    const awaited = try self.awaitValue(fs.?, step_result);
-                    step_result.deinit();
-                    step_result = awaited;
-                }
-                defer step_result.deinit();
-                if (!step_result.isObject()) {
-                    return self.throwError(.type_error, "Iterator result {s} is not an object", .{step_result.typeOf()});
-                }
-                const done = try self.getProperty(step_result, "done");
-                defer done.deinit();
-                if (coercion.isTruthy(done)) break;
-                var value = try self.getProperty(step_result, "value");
-                // Spec: for-await-of also Awaits the extracted VALUE
-                // itself (AsyncFromSyncIteratorContinuation, for the
-                // sync-fallback case). Awaiting an already-resolved
-                // value from a genuine async iterator is a no-op
-                // extra tick -- documented, narrowed simplification.
-                if (is_await) {
-                    const awaited = try self.awaitValue(fs.?, value);
-                    value.deinit();
-                    value = awaited;
-                }
-                const step = try self.forIterationStep(env, head.binding, value, body, labels);
-                value.deinit();
-                if (step) |c| {
-                    errdefer c.value.deinit();
-                    try closeIterator(self, iter);
-                    return c;
-                }
-            }
-        },
+        .object => return evalForOfIterator(self, env, fs, is_await, iterable, head.binding, body, labels),
         else => return self.throwError(.type_error, "{s} is not iterable", .{iterable.typeOf()}),
     }
     return .{};

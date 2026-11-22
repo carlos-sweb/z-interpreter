@@ -2782,6 +2782,54 @@ test "Phase 2.1: Array.prototype[Symbol.iterator] respected in destructuring and
     try testing.expect(res.isBool() and res.asBool());
 }
 
+test "Phase 2.2: strict GetMethod in resolveIterator/resolveAsyncIterator and AsyncFromSyncIterator close on poisoned wrapper" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    const r1 = try interp.run(
+        \\var duckThrew = false;
+        \\try { for (const x of { next() { return { done: true }; } }) {} } catch (e) { duckThrew = e instanceof TypeError; }
+        \\var syncGetCalled = false;
+        \\var asyncFalseThrew = false;
+        \\var badAsync = {
+        \\  get [Symbol.iterator]() { syncGetCalled = true; return () => ({ next() { return { done: true }; } }); },
+        \\  [Symbol.asyncIterator]: false
+        \\};
+        \\async function testAsyncFalse() {
+        \\  try { for await (const x of badAsync) {} } catch (e) { asyncFalseThrew = e instanceof TypeError; }
+        \\}
+        \\testAsyncFalse();
+        \\var returnClosed = 0;
+        \\var poisonedClosed = false;
+        \\var poisonedObj = {
+        \\  [Symbol.iterator]() {
+        \\    return {
+        \\      next() {
+        \\        const p = Promise.resolve("FAIL");
+        \\        Object.defineProperty(p, "constructor", { get() { throw new Error("poison"); } });
+        \\        return { value: p, done: false };
+        \\      },
+        \\      return() { returnClosed++; return { done: true }; }
+        \\    };
+        \\  }
+        \\};
+        \\async function testPoisoned() {
+        \\  try { for await (const x of poisonedObj) {} } catch (e) { poisonedClosed = e.message === "poison"; }
+        \\}
+        \\testPoisoned();
+        \\true;
+    );
+    defer r1.deinit();
+    const r2 = try interp.run(
+        \\duckThrew && !syncGetCalled && asyncFalseThrew && poisonedClosed && returnClosed === 1;
+    );
+    defer r2.deinit();
+    try testing.expect(r2.isBool() and r2.asBool());
+}
+
+
 
 
 

@@ -99,6 +99,7 @@ pub const function_methods = function_builtins.function_methods;
 pub const symbol_methods = symbol_builtins.symbol_methods;
 pub const regex_methods = regex_builtins.regex_methods;
 pub const PromiseCapCtx = promise_builtins.PromiseCapCtx;
+pub const isPromiseConstructor = promise_builtins.isPromiseConstructor;
 pub const FinallyCtx = promise_builtins.FinallyCtx;
 pub const AllCtx = promise_builtins.AllCtx;
 pub const AllElemCtx = promise_builtins.AllElemCtx;

@@ -657,7 +657,11 @@ pub fn resumeFiber(self: *Interpreter, fs: *FiberState) anyerror!void {
 pub fn awaitValue(self: *Interpreter, fs: *FiberState, operand: JSValue) anyerror!JSValue {
     const is_native_promise = if (operand.isPromise()) blk: {
         if (self.extraProps(operand)) |bag| {
-            break :blk bag.asObject().value.getOwnRecord("constructor") == null;
+            if (bag.asObject().value.getOwnRecord("constructor") != null) {
+                const ctor_prop = try self.getProperty(operand, "constructor");
+                defer ctor_prop.deinit();
+                break :blk builtins.isPromiseConstructor(ctor_prop);
+            }
         }
         break :blk true;
     } else false;

@@ -72,9 +72,9 @@ test "a throw inside the generator body surfaces from next() and finishes it" {
     , "atrapado: gen boom\ntrue\n");
 }
 
-test "hand-written iterator objects work in for-of via the same protocol" {
+test "hand-written iterator objects work in for-of via Symbol.iterator" {
     try helpers.expectStdout(
-        \\const iter = { n: 0, next() { this.n = this.n + 1; return { value: this.n, done: this.n > 3 }; } };
+        \\const iter = { n: 0, [Symbol.iterator]() { return this; }, next() { this.n = this.n + 1; return { value: this.n, done: this.n > 3 }; } };
         \\for (const x of iter) console.log(x);
     , "1\n2\n3\n");
 }
