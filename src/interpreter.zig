@@ -3365,6 +3365,39 @@ test "Phase 4.3b: TypedArray entries/keys/values inherit from ArrayIteratorProto
     try testing.expect(res.isBool() and res.asBool());
 }
 
+test "Phase 5.1a: Promise.allKeyed and Promise.allSettledKeyed" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+
+    const r1 = try interp.run(
+        \\var sym = Symbol("k");
+        \\var resAll = null, resEmpty = null, resRej = null, resSettled = null, primRej = false;
+        \\Promise.allKeyed({ a: Promise.resolve(1), b: 2, [sym]: Promise.resolve(3) }).then(r => { resAll = r; });
+        \\Promise.allKeyed({}).then(r => { resEmpty = r; });
+        \\Promise.allKeyed({ a: Promise.resolve(1), b: Promise.reject("boom") }).catch(e => { resRej = e; });
+        \\Promise.allSettledKeyed({ ok: Promise.resolve(10), bad: Promise.reject("err") }).then(r => { resSettled = r; });
+        \\Promise.allKeyed(42).catch(e => { primRej = e instanceof TypeError; });
+        \\true;
+    );
+    r1.deinit();
+
+    const r2 = try interp.run("Object.getPrototypeOf(resAll) === null && resAll.a === 1 && resAll.b === 2 && resAll[sym] === 3;");
+    defer r2.deinit();
+    try testing.expect(r2.isBool() and r2.asBool());
+    const r3 = try interp.run("Object.getPrototypeOf(resEmpty) === null && Reflect.ownKeys(resEmpty).length === 0;");
+    defer r3.deinit();
+    try testing.expect(r3.isBool() and r3.asBool());
+    const r4 = try interp.run("resRej === 'boom' && primRej === true;");
+    defer r4.deinit();
+    try testing.expect(r4.isBool() and r4.asBool());
+    const r5 = try interp.run("Object.getPrototypeOf(resSettled) === null && resSettled.ok.status === 'fulfilled' && resSettled.ok.value === 10 && resSettled.bad.status === 'rejected' && resSettled.bad.reason === 'err';");
+    defer r5.deinit();
+    try testing.expect(r5.isBool() and r5.asBool());
+}
+
 
 
 

@@ -1089,6 +1089,8 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
             sweeper.value(c.resolve_fn);
             sweeper.value(c.reject_fn);
             self.gc_allocator.free(c.results);
+            for (c.keys) |k| self.gc_allocator.free(k);
+            if (c.keys.len > 0) self.gc_allocator.free(c.keys);
             self.gc_allocator.destroy(c);
         },
         // AllElemCtx doesn't own `all` (see traceValueChildren) --

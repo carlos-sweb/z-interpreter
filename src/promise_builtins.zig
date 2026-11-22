@@ -15,6 +15,8 @@ const coercion = @import("coercion.zig");
 const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
 const error_builtins = @import("error_builtins.zig");
+const object_builtins = @import("object_builtins.zig");
+const property_desc = @import("property_desc.zig");
 
 pub const NativeFn = native_helpers.NativeFn;
 const MethodSpec = native_helpers.MethodSpec;
@@ -306,11 +308,12 @@ pub const AllCtx = struct {
     /// Fulfillment values (all), settlement records (allSettled) or
     /// rejection reasons (any), by index.
     results: []JSValue,
+    keys: [][]const u8 = &.{},
     derived: JSValue,
     resolve_fn: JSValue = JSValue.UNDEFINED,
     reject_fn: JSValue = JSValue.UNDEFINED,
     settled: bool = false,
-    mode: enum { all, all_settled, any } = .all,
+    mode: enum { all, all_settled, any, all_keyed, all_settled_keyed } = .all,
 
     fn completeIfDone(c: *AllCtx) anyerror!void {
         if (c.remaining != 0 or c.settled) return;
@@ -326,14 +329,25 @@ pub const AllCtx = struct {
             }
             return;
         }
-        var array = try c.interp.gcNewArray();
-        for (c.results) |r| _ = try array.asArray().value.push(r.retain());
+        const out_val: JSValue = if (c.mode == .all_keyed or c.mode == .all_settled_keyed) blk: {
+            var obj = try c.interp.gcNewObject();
+            errdefer obj.deinit();
+            const attrs = zvalue.PropertyDescriptor{ .writable = true, .enumerable = true, .configurable = true };
+            for (c.keys, c.results) |k, r| {
+                try obj.asObject().value.defineProperty(k, r.retain(), attrs);
+            }
+            break :blk obj;
+        } else blk: {
+            var array = try c.interp.gcNewArray();
+            for (c.results) |r| _ = try array.asArray().value.push(r.retain());
+            break :blk array;
+        };
         if (c.resolve_fn.isFunction()) {
-            defer array.deinit();
-            const r = try c.resolve_fn.asFunction().value.call(c.resolve_fn.asFunction().value.ctx, c.interp.gc_allocator, JSValue.UNDEFINED, &.{array});
+            defer out_val.deinit();
+            const r = try c.resolve_fn.asFunction().value.call(c.resolve_fn.asFunction().value.ctx, c.interp.gc_allocator, JSValue.UNDEFINED, &.{out_val});
             r.deinit();
         } else {
-            try c.interp.resolvePromise(c.derived, array);
+            try c.interp.resolvePromise(c.derived, out_val);
         }
     }
 };
@@ -391,7 +405,7 @@ fn settleElem(comptime fulfilled: bool) NativeFn {
             if (c.called) return JSValue.UNDEFINED;
             c.called = true;
             const all = c.all;
-            all.results[c.index] = if (all.mode == .all_settled)
+            all.results[c.index] = if (all.mode == .all_settled or all.mode == .all_settled_keyed)
                 try settledRecord(all.interp, fulfilled, arg(args, 0))
             else
                 arg(args, 0).retain();
@@ -671,6 +685,118 @@ fn promiseCombinator(comptime mode: CombinatorMode) NativeFn {
     }.call;
 }
 
+fn performKeyedCombinatorInner(
+    self: *Interpreter,
+    allocator: Allocator,
+    ctor: JSValue,
+    promises: JSValue,
+    cap: Capability,
+    comptime all_mode: @TypeOf(@as(AllCtx, undefined).mode),
+) anyerror!void {
+    const promise_resolve = try self.getProperty(ctor, "resolve");
+    defer promise_resolve.deinit();
+    if (!property_desc.isCallable(promise_resolve)) {
+        return self.throwError(.type_error, "Promise.resolve is not callable", .{});
+    }
+    if (!builtin_helpers.isObjectLike(promises)) {
+        return self.throwError(.type_error, "Promise keyed combinator requires an object", .{});
+    }
+
+    const raw_keys = try object_builtins.ownPropertyKeyList(self, allocator, promises);
+    defer object_builtins.freeOwnedKeys(allocator, raw_keys);
+
+    const all = try self.gc_allocator.create(AllCtx);
+    all.* = .{
+        .interp = self,
+        .remaining = 1,
+        .results = try self.gc_allocator.alloc(JSValue, 0),
+        .keys = try self.gc_allocator.alloc([]const u8, 0),
+        .derived = cap.promise.retain(),
+        .resolve_fn = cap.resolve.retain(),
+        .reject_fn = cap.reject.retain(),
+        .mode = all_mode,
+    };
+    try self.gcTrackAllCtx(all);
+
+    const shared_on_r: ?JSValue = if (all_mode == .all_keyed)
+        (if (cap.is_native) try self.gcNewFunction(.{ .ctx = all, .name = "", .arity = 1, .call = allRejected }) else cap.reject)
+    else
+        null;
+
+    for (raw_keys) |k| {
+        const is_enum = (try object_builtins.ownPropertyEnumerable(self, promises, k)) orelse continue;
+        if (!is_enum) continue;
+        const val = try self.getProperty(promises, k);
+        defer val.deinit();
+
+        const index = all.results.len;
+        const k_dup = try self.gc_allocator.dupe(u8, k);
+        errdefer self.gc_allocator.free(k_dup);
+
+        const new_res = try self.gc_allocator.alloc(JSValue, index + 1);
+        @memcpy(new_res[0..index], all.results);
+        new_res[index] = JSValue.UNDEFINED;
+        self.gc_allocator.free(all.results);
+        all.results = new_res;
+
+        const new_keys = try self.gc_allocator.alloc([]const u8, index + 1);
+        @memcpy(new_keys[0..index], all.keys);
+        new_keys[index] = k_dup;
+        self.gc_allocator.free(all.keys);
+        all.keys = new_keys;
+
+        all.remaining += 1;
+        const elem = try self.gc_allocator.create(AllElemCtx);
+        elem.* = .{ .all = all, .index = index };
+        try self.gcTrackAllElemCtx(elem);
+
+        const on_f = try self.gcNewFunction(.{
+            .ctx = elem,
+            .name = "",
+            .arity = 1,
+            .call = if (all_mode == .all_keyed) allElemFulfilled else settleElem(true),
+        });
+        const on_r = shared_on_r orelse try self.gcNewFunction(.{
+            .ctx = elem,
+            .name = "",
+            .arity = 1,
+            .call = settleElem(false),
+        });
+
+        const next_promise = try self.callValue(promise_resolve, ctor, &.{val}, "Promise.resolve");
+        defer next_promise.deinit();
+        const then_fn = try self.getProperty(next_promise, "then");
+        defer then_fn.deinit();
+        if (!property_desc.isCallable(then_fn)) {
+            return self.throwError(.type_error, "then is not a function", .{});
+        }
+        const then_res = try self.callValue(then_fn, next_promise, &.{ on_f, on_r }, "then");
+        then_res.deinit();
+    }
+
+    all.remaining -= 1;
+    try all.completeIfDone();
+}
+
+fn promiseKeyedCombinator(comptime all_mode: @TypeOf(@as(AllCtx, undefined).mode)) NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+            const self = interp(ctx);
+            const cap = try newPromiseCapability(self, allocator, this_value);
+            performKeyedCombinatorInner(self, allocator, this_value, arg(args, 0), cap, all_mode) catch |err0| {
+                const err = self.throwIfGap(err0);
+                if (err != error.JsThrow) return err;
+                const ex = self.pending_exception.?;
+                self.pending_exception = null;
+                defer ex.deinit();
+                const r = try cap.reject.asFunction().value.call(cap.reject.asFunction().value.ctx, allocator, JSValue.UNDEFINED, &.{ex});
+                r.deinit();
+            };
+            return cap.promise;
+        }
+    }.call;
+}
+
 fn globalSetTimeout(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     _ = this_value;
@@ -701,6 +827,8 @@ pub fn install(self: *Interpreter) !void {
         .{ .name = "all", .value = .{ .method = .{ .call = promiseCombinator(.all), .arity = 1 } } },
         .{ .name = "race", .value = .{ .method = .{ .call = promiseCombinator(.race), .arity = 1 } } },
         .{ .name = "allSettled", .value = .{ .method = .{ .call = promiseCombinator(.all_settled), .arity = 1 } } },
+        .{ .name = "allKeyed", .value = .{ .method = .{ .call = promiseKeyedCombinator(.all_keyed), .arity = 1 } } },
+        .{ .name = "allSettledKeyed", .value = .{ .method = .{ .call = promiseKeyedCombinator(.all_settled_keyed), .arity = 1 } } },
         .{ .name = "any", .value = .{ .method = .{ .call = promiseCombinator(.any), .arity = 1 } } },
         .{ .name = "withResolvers", .value = .{ .method = .{ .call = promiseWithResolvers, .arity = 0 } } },
         .{ .name = "try", .value = .{ .method = .{ .call = promiseTryStatic, .arity = 1 } } },
