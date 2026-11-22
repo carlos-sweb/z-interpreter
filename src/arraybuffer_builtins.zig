@@ -24,6 +24,7 @@ const coercion = @import("coercion.zig");
 const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
 const builtins = @import("builtins.zig");
+const uint8_encoding = @import("uint8_encoding.zig");
 
 pub const NativeFn = native_helpers.NativeFn;
 const MethodSpec = native_helpers.MethodSpec;
@@ -1467,8 +1468,173 @@ pub fn installHierarchy(self: *Interpreter) !JSValue {
         const ctor_statics = try self.functionStatics(ctor);
         try builtin_helpers.dneConst(ctor_statics, "prototype", proto.retain());
         try ctor_statics.asObject().value.setPrototype(&ta_statics.asObject().value);
+        if (comptime std.mem.eql(u8, name, "Uint8Array")) {
+            try builtin_helpers.dneMethod(ctor_statics, "fromBase64", try native(self, "fromBase64", 1, uint8FromBase64));
+            try builtin_helpers.dneMethod(ctor_statics, "fromHex", try native(self, "fromHex", 1, uint8FromHex));
+            try builtin_helpers.dneMethod(proto, "toBase64", try native(self, "toBase64", 0, uint8ToBase64));
+            try builtin_helpers.dneMethod(proto, "toHex", try native(self, "toHex", 0, uint8ToHex));
+            try builtin_helpers.dneMethod(proto, "setFromBase64", try native(self, "setFromBase64", 1, uint8SetFromBase64));
+            try builtin_helpers.dneMethod(proto, "setFromHex", try native(self, "setFromHex", 1, uint8SetFromHex));
+        }
     }
     return ta_statics;
+}
+
+fn requireUint8Array(self: *Interpreter, this_value: JSValue, method: []const u8) anyerror!*zvalue.Rc(zvalue.TypedArrayBox) {
+    if (this_value.tag() != .typed_array or this_value.asTypedArray().value.kind != .u8) {
+        return self.throwError(.type_error, "Uint8Array.prototype.{s} requires a Uint8Array receiver", .{method});
+    }
+    return this_value.asTypedArray();
+}
+
+fn uint8ValidateOptionsObj(self: *Interpreter, opts: JSValue) anyerror!bool {
+    if (opts.tag() == .undefined) return false;
+    if (!builtin_helpers.isObjectLike(opts)) {
+        return self.throwError(.type_error, "Options argument must be an object", .{});
+    }
+    return true;
+}
+
+fn readAlphabetOption(self: *Interpreter, opts: JSValue) anyerror!uint8_encoding.Alphabet {
+    const v = try self.getProperty(opts, "alphabet");
+    defer v.deinit();
+    if (v.tag() == .undefined) return .base64;
+    if (v.tag() != .string) return self.throwError(.type_error, "alphabet option must be a string", .{});
+    const s = v.asString().value.data;
+    if (std.mem.eql(u8, s, "base64")) return .base64;
+    if (std.mem.eql(u8, s, "base64url")) return .base64url;
+    return self.throwError(.type_error, "Invalid base64 alphabet: {s}", .{s});
+}
+
+fn readLastChunkOption(self: *Interpreter, opts: JSValue) anyerror!uint8_encoding.LastChunkHandling {
+    const v = try self.getProperty(opts, "lastChunkHandling");
+    defer v.deinit();
+    if (v.tag() == .undefined) return .loose;
+    if (v.tag() != .string) return self.throwError(.type_error, "lastChunkHandling option must be a string", .{});
+    const s = v.asString().value.data;
+    if (std.mem.eql(u8, s, "loose")) return .loose;
+    if (std.mem.eql(u8, s, "strict")) return .strict;
+    if (std.mem.eql(u8, s, "stop-before-partial")) return .stop_before_partial;
+    return self.throwError(.type_error, "Invalid lastChunkHandling: {s}", .{s});
+}
+
+fn readOmitPaddingOption(self: *Interpreter, opts: JSValue) anyerror!bool {
+    const v = try self.getProperty(opts, "omitPadding");
+    defer v.deinit();
+    return coercion.isTruthy(v);
+}
+
+fn makeUint8ArrayFromBytes(self: *Interpreter, bytes: []const u8) anyerror!JSValue {
+    const ab = try self.gcNewArrayBuffer(bytes.len);
+    errdefer ab.deinit();
+    @memcpy(ab.asArrayBuffer().value.bytes[0..bytes.len], bytes);
+    const ta = self.gcNewTypedArray(ab.retain(), 0, bytes.len, .u8) catch |e| return self.bufferErr(e);
+    ab.deinit();
+    return ta;
+}
+
+fn uint8FromBase64(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const str_arg = arg(args, 0);
+    if (str_arg.tag() != .string) return self.throwError(.type_error, "Uint8Array.fromBase64 requires a string", .{});
+    const has_opts = try uint8ValidateOptionsObj(self, arg(args, 1));
+    const alphabet = if (has_opts) try readAlphabetOption(self, arg(args, 1)) else uint8_encoding.Alphabet.base64;
+    const last_chunk = if (has_opts) try readLastChunkOption(self, arg(args, 1)) else uint8_encoding.LastChunkHandling.loose;
+    const decoded = uint8_encoding.decodeBase64Alloc(allocator, str_arg.asString().value.data, alphabet, last_chunk) catch |err| switch (err) {
+        error.SyntaxError => return self.throwError(.syntax_error, "Invalid base64 string", .{}),
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    defer allocator.free(decoded);
+    return makeUint8ArrayFromBytes(self, decoded);
+}
+
+fn uint8FromHex(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const str_arg = arg(args, 0);
+    if (str_arg.tag() != .string) return self.throwError(.type_error, "Uint8Array.fromHex requires a string", .{});
+    const decoded = uint8_encoding.decodeHexAlloc(allocator, str_arg.asString().value.data) catch |err| switch (err) {
+        error.SyntaxError => return self.throwError(.syntax_error, "Invalid hex string", .{}),
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    defer allocator.free(decoded);
+    return makeUint8ArrayFromBytes(self, decoded);
+}
+
+fn uint8ToBase64(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self = interp(ctx);
+    const ta = try requireUint8Array(self, this_value, "toBase64");
+    const has_opts = try uint8ValidateOptionsObj(self, arg(args, 0));
+    const alphabet = if (has_opts) try readAlphabetOption(self, arg(args, 0)) else uint8_encoding.Alphabet.base64;
+    const omit_padding = if (has_opts) try readOmitPaddingOption(self, arg(args, 0)) else false;
+    if (builtin_helpers.isTypedArrayDetached(&ta.value)) {
+        return self.throwError(.type_error, "Cannot perform Uint8Array.prototype.toBase64 on a detached ArrayBuffer", .{});
+    }
+    const ab = &ta.value.owner.asArrayBuffer().value;
+    const slice = ab.bytes[ta.value.byte_offset .. ta.value.byte_offset + ta.value.len];
+    const encoded = try uint8_encoding.encodeBase64(allocator, slice, alphabet, omit_padding);
+    defer allocator.free(encoded);
+    return self.gcNewString(encoded);
+}
+
+fn uint8ToHex(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    const ta = try requireUint8Array(self, this_value, "toHex");
+    if (builtin_helpers.isTypedArrayDetached(&ta.value)) {
+        return self.throwError(.type_error, "Cannot perform Uint8Array.prototype.toHex on a detached ArrayBuffer", .{});
+    }
+    const ab = &ta.value.owner.asArrayBuffer().value;
+    const slice = ab.bytes[ta.value.byte_offset .. ta.value.byte_offset + ta.value.len];
+    const encoded = try uint8_encoding.encodeHex(allocator, slice);
+    defer allocator.free(encoded);
+    return self.gcNewString(encoded);
+}
+
+fn makeReadWrittenObj(self: *Interpreter, res: uint8_encoding.DecodeResult) anyerror!JSValue {
+    var obj = try self.ordinaryObject();
+    errdefer obj.deinit();
+    try obj.asObject().value.set("read", JSValue.fromNumber(@floatFromInt(res.read)));
+    try obj.asObject().value.set("written", JSValue.fromNumber(@floatFromInt(res.written)));
+    return obj;
+}
+
+fn uint8SetFromBase64(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const ta = try requireUint8Array(self, this_value, "setFromBase64");
+    const str_arg = arg(args, 0);
+    if (str_arg.tag() != .string) return self.throwError(.type_error, "Uint8Array.prototype.setFromBase64 requires a string", .{});
+    const has_opts = try uint8ValidateOptionsObj(self, arg(args, 1));
+    const alphabet = if (has_opts) try readAlphabetOption(self, arg(args, 1)) else uint8_encoding.Alphabet.base64;
+    const last_chunk = if (has_opts) try readLastChunkOption(self, arg(args, 1)) else uint8_encoding.LastChunkHandling.loose;
+    if (builtin_helpers.isTypedArrayDetached(&ta.value)) {
+        return self.throwError(.type_error, "Cannot perform Uint8Array.prototype.setFromBase64 on a detached ArrayBuffer", .{});
+    }
+    const ab = &ta.value.owner.asArrayBuffer().value;
+    const dst = ab.bytes[ta.value.byte_offset .. ta.value.byte_offset + ta.value.len];
+    const res = uint8_encoding.decodeBase64Into(str_arg.asString().value.data, alphabet, last_chunk, dst) catch |err| switch (err) {
+        error.SyntaxError => return self.throwError(.syntax_error, "Invalid base64 string", .{}),
+    };
+    return makeReadWrittenObj(self, res);
+}
+
+fn uint8SetFromHex(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const ta = try requireUint8Array(self, this_value, "setFromHex");
+    const str_arg = arg(args, 0);
+    if (str_arg.tag() != .string) return self.throwError(.type_error, "Uint8Array.prototype.setFromHex requires a string", .{});
+    if (builtin_helpers.isTypedArrayDetached(&ta.value)) {
+        return self.throwError(.type_error, "Cannot perform Uint8Array.prototype.setFromHex on a detached ArrayBuffer", .{});
+    }
+    const ab = &ta.value.owner.asArrayBuffer().value;
+    const dst = ab.bytes[ta.value.byte_offset .. ta.value.byte_offset + ta.value.len];
+    const res = uint8_encoding.decodeHexInto(str_arg.asString().value.data, dst) catch |err| switch (err) {
+        error.SyntaxError => return self.throwError(.syntax_error, "Invalid hex string", .{}),
+    };
+    return makeReadWrittenObj(self, res);
 }
 
 fn hostDetachArrayBuffer(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {

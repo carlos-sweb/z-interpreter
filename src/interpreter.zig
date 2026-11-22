@@ -2974,6 +2974,48 @@ test "Phase 3.1: DataView getFloat16/setFloat16 and detached buffer checks" {
     try testing.expect(res.isBool() and res.asBool());
 }
 
+test "Phase 3.2: Uint8Array Base64 and Hex methods" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    const res = try interp.run(
+        \\var a1 = Uint8Array.fromBase64("Zm9vYmFy");
+        \\var s1 = a1.toBase64();
+        \\var a2 = Uint8Array.fromBase64("x-_y", { alphabet: "base64url" });
+        \\var s2 = a2.toBase64({ alphabet: "base64url", omitPadding: true });
+        \\var strictErr = false;
+        \\try { Uint8Array.fromBase64("Zg", { lastChunkHandling: "strict" }); } catch (e) { strictErr = e instanceof SyntaxError; }
+        \\var sbp = Uint8Array.fromBase64("ABCDAA=", { lastChunkHandling: "stop-before-partial" });
+        \\var target = new Uint8Array([255, 255, 255, 255, 255]);
+        \\var errUpTo = false;
+        \\try { target.setFromBase64("MjYyZm.9v"); } catch (e) { errUpTo = e instanceof SyntaxError; }
+        \\var sub = new Uint8Array(6);
+        \\sub.fill(9);
+        \\var subView = sub.subarray(1, 4);
+        \\var rw = subView.setFromHex("0a0b0c");
+        \\var hexOut = subView.toHex();
+        \\var fromHexArr = Uint8Array.fromHex("deadbeef");
+        \\var detachErr = false;
+        \\var ab = new ArrayBuffer(4);
+        \\var u8 = new Uint8Array(ab);
+        \\try {
+        \\  u8.toBase64({ get alphabet() { $262.detachArrayBuffer(ab); return "base64"; } });
+        \\} catch (e) { detachErr = e instanceof TypeError; }
+        \\var notOnInt8 = typeof Int8Array.fromBase64 === "undefined" && typeof Int8Array.prototype.toHex === "undefined";
+        \\s1 === "Zm9vYmFy" && a2[0] === 199 && a2[1] === 239 && a2[2] === 242 &&
+        \\  s2 === "x-_y" && strictErr && sbp.length === 3 &&
+        \\  errUpTo && target[0] === 50 && target[1] === 54 && target[2] === 50 && target[3] === 255 &&
+        \\  rw.read === 6 && rw.written === 3 && hexOut === "0a0b0c" &&
+        \\  sub[0] === 9 && sub[1] === 10 && sub[4] === 9 &&
+        \\  fromHexArr[0] === 0xde && fromHexArr[3] === 0xef &&
+        \\  detachErr && notOnInt8;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
 
 
 
