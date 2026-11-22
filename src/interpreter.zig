@@ -3559,6 +3559,27 @@ test "Phase 5.3b: apply array-like, bind length/proto, Symbol.hasInstance" {
     try testing.expect(res.isBool() and res.asBool());
 }
 
+test "Phase 5.3 fix: Object.keys skips array holes and Function.prototype instanceof throws TypeError" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\var sparse = [1, 2, , 4, , 6];
+        \\var k = Object.keys(sparse);
+        \\var keysOk = k.length === 4 && k[0] === "0" && k[1] === "1" && k[2] === "3" && k[3] === "5";
+        \\Function.prototype.prototype = "";
+        \\var instThrew = false;
+        \\try { [] instanceof Function.prototype; } catch (e) { instThrew = e instanceof TypeError; }
+        \\delete Function.prototype.prototype;
+        \\keysOk && instThrew;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
 
 
 

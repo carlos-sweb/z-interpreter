@@ -221,7 +221,8 @@ fn fnBind(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
 }
 
 pub fn ordinaryHasInstance(self: *Interpreter, allocator: Allocator, ctor: JSValue, obj: JSValue) anyerror!bool {
-    if (!property_desc.isCallable(ctor)) return false;
+    const is_callable = property_desc.isCallable(ctor) or zvalue.equality.strictEquals(ctor, self.protos.function);
+    if (!is_callable) return false;
     if (boundContext(ctor)) |bc| {
         return ordinaryHasInstance(self, allocator, bc.target, obj);
     }

@@ -125,6 +125,7 @@ pub fn ownEnumerableKeys(ctx: *anyopaque, allocator: Allocator, v: JSValue) anye
             defer keys.deinit(allocator);
             var i: usize = 0;
             while (i < box.value.length()) : (i += 1) {
+                if (box.value.isHole(i)) continue;
                 try keys.append(allocator, try std.fmt.allocPrint(allocator, "{d}", .{i}));
             }
             return keys.toOwnedSlice(allocator);
