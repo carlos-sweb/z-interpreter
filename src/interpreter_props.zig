@@ -1122,6 +1122,15 @@ pub fn functionPrototype(self: *Interpreter, fn_val: JSValue) anyerror!JSValue {
         return self.protos.object;
     }
     var proto = try self.gcNewObject();
+    const iclass = @import("interpreter_class.zig");
+    if (fn_val.asFunction().value.call == iclass.closureCall and self.protos.async_generator_proto.isObject()) {
+        const cctx: *interpreter_mod.ClosureCtx = @ptrCast(@alignCast(fn_val.asFunction().value.ctx));
+        if (cctx.function_node.is_generator and cctx.function_node.is_async) {
+            try proto.asObject().value.setPrototype(&self.protos.async_generator_proto.asObject().value);
+            fn_val.asFunction().value.prototype = proto;
+            return proto;
+        }
+    }
     if (self.protos.object.isObject()) try proto.asObject().value.setPrototype(&self.protos.object.asObject().value);
     try proto.asObject().value.set("constructor", fn_val.retain());
     fn_val.asFunction().value.prototype = proto;

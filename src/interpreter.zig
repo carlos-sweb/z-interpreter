@@ -46,6 +46,9 @@ pub const Protos = struct {
     aggregate_error: JSValue = JSValue.UNDEFINED,
     suppressed_error: JSValue = JSValue.UNDEFINED,
     disposable_stack: JSValue = JSValue.UNDEFINED,
+    async_disposable_stack: JSValue = JSValue.UNDEFINED,
+    async_iterator_proto: JSValue = JSValue.UNDEFINED,
+    async_generator_proto: JSValue = JSValue.UNDEFINED,
     map: JSValue = JSValue.UNDEFINED,
     set: JSValue = JSValue.UNDEFINED,
     symbol: JSValue = JSValue.UNDEFINED,
@@ -174,15 +177,34 @@ pub const IteratorHelper = struct {
 };
 
 /// The internal slots of an `.object` that is a builtin instance with no
+pub const DisposableMode = enum {
+    sync,
+    async_method,
+    sync_fallback,
+    dummy,
+};
+
 pub const DisposableEntry = struct {
     value: JSValue,
     method: JSValue,
     has_arg: bool,
+    mode: DisposableMode = .sync,
 };
 
 pub const DisposableStackState = struct {
     disposed: bool = false,
     stack: std.ArrayListUnmanaged(DisposableEntry) = .empty,
+};
+
+pub const AsyncDisposeRunner = struct {
+    entries: std.ArrayListUnmanaged(DisposableEntry) = .empty,
+    idx: usize = 0,
+    has_err: bool = false,
+    current_err: JSValue = JSValue.UNDEFINED,
+    result_promise: JSValue = JSValue.UNDEFINED,
+    needs_await: bool = false,
+    has_awaited: bool = false,
+    did_final_await: bool = false,
 };
 
 /// JSValue tag of its own (WeakMap, WeakSet, WeakRef,
@@ -197,6 +219,8 @@ pub const ObjectSlots = union(enum) {
     /// %WrapForValidIteratorPrototype%'s [[Iterated]] record.
     wrapped_iterator: struct { iterator: JSValue, next: JSValue },
     disposable_stack: *DisposableStackState,
+    async_disposable_stack: *DisposableStackState,
+    async_dispose_runner: *AsyncDisposeRunner,
 
     /// Every JSValue the slots hold (GC marking and release).
     pub fn eachValue(self: *const ObjectSlots, ctx: anytype, comptime f: fn (@TypeOf(ctx), JSValue) void) void {
@@ -220,11 +244,19 @@ pub const ObjectSlots = union(enum) {
                 f(ctx, w.iterator);
                 f(ctx, w.next);
             },
-            .disposable_stack => |ds| {
+            .disposable_stack, .async_disposable_stack => |ds| {
                 for (ds.stack.items) |entry| {
                     f(ctx, entry.value);
                     f(ctx, entry.method);
                 }
+            },
+            .async_dispose_runner => |r| {
+                for (r.entries.items) |entry| {
+                    f(ctx, entry.value);
+                    f(ctx, entry.method);
+                }
+                f(ctx, r.current_err);
+                f(ctx, r.result_promise);
             },
             .finalization_registry => |r| {
                 f(ctx, r.cleanup);
@@ -243,9 +275,13 @@ pub const ObjectSlots = union(enum) {
             .weak_map, .weak_set => |*t| t.deinit(allocator),
             .finalization_registry => |*r| r.cells.deinit(allocator),
             .iterator_helper => |h| allocator.destroy(h),
-            .disposable_stack => |ds| {
+            .disposable_stack, .async_disposable_stack => |ds| {
                 ds.stack.deinit(allocator);
                 allocator.destroy(ds);
+            },
+            .async_dispose_runner => |r| {
+                r.entries.deinit(allocator);
+                allocator.destroy(r);
             },
             .weak_ref, .wrapped_iterator => {},
         }
@@ -3120,6 +3156,49 @@ test "Phase 4.1a: SuppressedError, DisposableStack and Iterator.prototype[Symbol
     );
     defer res.deinit();
     try testing.expect(res.isBool() and res.asBool());
+}
+
+test "Phase 4.1b: AsyncDisposableStack and AsyncIteratorPrototype[Symbol.asyncDispose]" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+
+    const r1 = try interp.run(
+        \\var log = [];
+        \\var stack = new AsyncDisposableStack();
+        \\stack.use(null);
+        \\stack.use({ async [Symbol.asyncDispose]() { log.push("async1"); throw "e1"; } });
+        \\stack.use({ [Symbol.dispose]() { log.push("syncFallback"); } });
+        \\stack.adopt("v", async (x) => { log.push("adopt:" + x); return Promise.reject("e2"); });
+        \\stack.defer(() => { log.push("defer"); });
+        \\var sameFn = stack[Symbol.asyncDispose] === AsyncDisposableStack.prototype.disposeAsync;
+        \\var tagOk = Object.prototype.toString.call(stack) === "[object AsyncDisposableStack]";
+        \\var moved = stack.move();
+        \\var origDisposed = stack.disposed === true && moved.disposed === false;
+        \\var invalidRejected = false;
+        \\AsyncDisposableStack.prototype.disposeAsync.call({}).catch((e) => { invalidRejected = e instanceof TypeError; });
+        \\var caught = null;
+        \\moved.disposeAsync().catch((e) => { caught = e; });
+        \\var asyncIterClosed = false;
+        \\async function* gen() {}
+        \\var AIP = Object.getPrototypeOf(Object.getPrototypeOf(gen.prototype));
+        \\var it = Object.create(AIP);
+        \\it.return = async () => { asyncIterClosed = true; return { done: true }; };
+        \\var iterDisposeOk = false;
+        \\it[Symbol.asyncDispose]().then((v) => { iterDisposeOk = v === undefined && asyncIterClosed; });
+        \\true;
+    );
+    r1.deinit();
+
+    const r2 = try interp.run(
+        \\sameFn && tagOk && origDisposed && invalidRejected && iterDisposeOk &&
+        \\  log.join(",") === "defer,adopt:v,syncFallback,async1" &&
+        \\  (caught instanceof SuppressedError) && caught.error === "e1" && caught.suppressed === "e2";
+    );
+    defer r2.deinit();
+    try testing.expect(r2.isBool() and r2.asBool());
 }
 
 

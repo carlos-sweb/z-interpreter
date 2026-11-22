@@ -804,6 +804,9 @@ pub fn makeAsyncGeneratorObject(
     fs.fiber = try fiber_mod.Fiber.init(arena, fiberEntry, fs);
     try self.gcTrackFiberState(fs);
     var obj = try self.gcNewObject();
+    if (self.protos.async_generator_proto.isObject()) {
+        try obj.asObject().value.setPrototype(&self.protos.async_generator_proto.asObject().value);
+    }
     try obj.asObject().value.set("next", try self.gcNewFunction(.{ .ctx = fs, .name = "next", .arity = 1, .call = asyncGeneratorNext }));
     try obj.asObject().value.set("return", try self.gcNewFunction(.{ .ctx = fs, .name = "return", .arity = 1, .call = asyncGeneratorReturn }));
     try obj.asObject().value.set("throw", try self.gcNewFunction(.{ .ctx = fs, .name = "throw", .arity = 1, .call = asyncGeneratorThrow }));

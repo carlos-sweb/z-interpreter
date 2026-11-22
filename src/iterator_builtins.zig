@@ -22,6 +22,7 @@ const coercion = @import("coercion.zig");
 const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
 const regex_builtins = @import("regex_builtins.zig");
+const promise_builtins = @import("promise_builtins.zig");
 
 const NativeFn = native_helpers.NativeFn;
 const interp = native_helpers.interp;
@@ -554,6 +555,77 @@ fn iteratorSymbolDispose(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
     return JSValue.UNDEFINED;
 }
 
+fn asyncIterDisposeFulfill(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    _ = args;
+    const c: *promise_builtins.FinallyCtx = @ptrCast(@alignCast(ctx));
+    try c.interp.resolvePromise(c.handler, JSValue.UNDEFINED);
+    return JSValue.UNDEFINED;
+}
+
+fn asyncIterDisposeReject(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const c: *promise_builtins.FinallyCtx = @ptrCast(@alignCast(ctx));
+    try c.interp.rejectPromiseValue(c.handler, arg(args, 0));
+    return JSValue.UNDEFINED;
+}
+
+fn asyncIteratorSymbolDispose(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = args;
+    const self = interp(ctx);
+    const p = try self.gcNewPromise();
+    errdefer p.deinit();
+
+    const ret = self.getProperty(this_value, "return") catch |err0| {
+        const err = self.throwIfGap(err0);
+        if (err != error.JsThrow) return err;
+        const ex = self.pending_exception orelse JSValue.UNDEFINED;
+        self.pending_exception = null;
+        defer ex.deinit();
+        try self.rejectPromiseValue(p, ex);
+        return p;
+    };
+    defer ret.deinit();
+
+    if (ret.isUndefined() or ret.isNull()) {
+        try self.resolvePromise(p, JSValue.UNDEFINED);
+        return p;
+    }
+    if (!isCallable(ret)) {
+        const te = try self.gcNewError(.type_error, "iterator.return is not a function");
+        defer te.deinit();
+        try self.rejectPromiseValue(p, te);
+        return p;
+    }
+    const call_res = self.callValue(ret, this_value, &.{}, "iterator.return") catch |err0| {
+        const err = self.throwIfGap(err0);
+        if (err != error.JsThrow) return err;
+        const ex = self.pending_exception orelse JSValue.UNDEFINED;
+        self.pending_exception = null;
+        defer ex.deinit();
+        try self.rejectPromiseValue(p, ex);
+        return p;
+    };
+    defer call_res.deinit();
+
+    const val_p = try self.gcNewPromise();
+    defer val_p.deinit();
+    try self.resolvePromise(val_p, call_res);
+
+    const c = try self.gc_allocator.create(promise_builtins.FinallyCtx);
+    c.* = .{ .interp = self, .handler = p.retain() };
+    try self.gcTrackFinallyCtx(c);
+    const on_f = try self.gcNewFunction(.{ .ctx = c, .name = "", .arity = 1, .call = asyncIterDisposeFulfill });
+    defer on_f.deinit();
+    const on_r = try self.gcNewFunction(.{ .ctx = c, .name = "", .arity = 1, .call = asyncIterDisposeReject });
+    defer on_r.deinit();
+    try self.subscribePromise(val_p, on_f, on_r, null);
+    return p;
+}
+
 /// Installs `Iterator`, makes %IteratorPrototype% its `.prototype` with
 /// the helpers, and creates %IteratorHelperPrototype% and
 /// %WrapForValidIteratorPrototype%. Runs at the end of materializeProtos
@@ -610,4 +682,21 @@ pub fn install(self: *Interpreter) !void {
     try helper_proto.asObject().value.defineProperty(tag_key, try self.gcNewString("Iterator Helper"), .{ .writable = false, .enumerable = false, .configurable = true });
     self.iterator_helper_proto = helper_proto;
     self.wrap_for_valid_iterator_proto = try subProto(self, wrapNext, wrapReturn);
+
+    var async_iter_proto = try self.ordinaryObject();
+    if (self.symbol_async_iterator) |asym| {
+        const akey = try self.encodeKey(asym);
+        defer self.gc_allocator.free(akey);
+        try async_iter_proto.asObject().value.defineProperty(akey, try native(self, "[Symbol.asyncIterator]", 0, builtin_helpers.iteratorSelfBuiltin), method_attrs);
+    }
+    if (self.symbol_async_dispose) |dsym| {
+        const dkey = try self.encodeKey(dsym);
+        defer self.gc_allocator.free(dkey);
+        try async_iter_proto.asObject().value.defineProperty(dkey, try native(self, "[Symbol.asyncDispose]", 0, asyncIteratorSymbolDispose), method_attrs);
+    }
+    self.protos.async_iterator_proto = async_iter_proto;
+
+    var async_gen_proto = try self.gcNewObject();
+    try async_gen_proto.asObject().value.setPrototype(&async_iter_proto.asObject().value);
+    self.protos.async_generator_proto = async_gen_proto;
 }
