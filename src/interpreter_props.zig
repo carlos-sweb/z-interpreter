@@ -14,6 +14,7 @@ const zvalue = @import("zvalue");
 const zstring = @import("zstring");
 const zarray = @import("zarray");
 const property_desc = @import("property_desc.zig");
+const object_builtins = @import("object_builtins.zig");
 const JSValue = zvalue.JSValue;
 
 const coercion = @import("coercion.zig");
@@ -295,11 +296,36 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
         // Reflect.get, once it exists, ignores the receiver arg like
         // getFromProto already does elsewhere).
         .proxy => |box| blk: {
+            try self.checkStack();
             if (try self.proxyTrap(box, "get")) |trap_fn| {
                 defer trap_fn.deinit();
-                const key_val = try self.gcNewString(key);
+                const key_val = try property_desc.keyToValue(self, key);
                 defer key_val.deinit();
-                break :blk try trap_fn.asFunction().value.call(trap_fn.asFunction().value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, key_val, obj });
+                const trap_result = try self.callValue(trap_fn, box.value.handler, &.{ box.value.target, key_val, obj }, "get");
+                errdefer trap_result.deinit();
+                const target_desc = try object_builtins.objectGetOwnPropertyDescriptor(self, self.gc_allocator, JSValue.UNDEFINED, &.{ box.value.target, key_val });
+                defer target_desc.deinit();
+                if (target_desc.isObject()) {
+                    const td_obj = &target_desc.asObject().value;
+                    const cfg = if (td_obj.get("configurable")) |c| coercion.isTruthy(c) else false;
+                    if (!cfg) {
+                        if (td_obj.hasOwnProperty("value")) {
+                            const w = if (td_obj.get("writable")) |wv| coercion.isTruthy(wv) else false;
+                            if (!w) {
+                                const tv = td_obj.get("value") orelse JSValue.UNDEFINED;
+                                if (!property_desc.sameValue(trap_result, tv)) {
+                                    return self.throwError(.type_error, "'get' on proxy: property '{s}' is a read-only and non-configurable data property on the proxy target but the proxy did not return its actual value", .{property_desc.displayKey(key)});
+                                }
+                            }
+                        } else if (td_obj.hasOwnProperty("get")) {
+                            const gv = td_obj.get("get") orelse JSValue.UNDEFINED;
+                            if (gv.isUndefined() and !trap_result.isUndefined()) {
+                                return self.throwError(.type_error, "'get' on proxy: property '{s}' is a non-configurable accessor property on the proxy target and does not have a getter function, but the trap did not return 'undefined'", .{property_desc.displayKey(key)});
+                            }
+                        }
+                    }
+                }
+                break :blk trap_result;
             }
             break :blk try self.getProperty(box.value.target, key);
         },
@@ -697,13 +723,16 @@ pub fn setPropertyWithReceiver(self: *Interpreter, obj: JSValue, key: []const u8
             return setOnReceiver(self, receiver, key, value);
         },
         .proxy => |box| {
+            try self.checkStack();
             if (try self.proxyTrap(box, "set")) |trap_fn| {
                 defer trap_fn.deinit();
                 const key_val = try property_desc.keyToValue(self, key);
                 defer key_val.deinit();
-                const result = try trap_fn.asFunction().value.call(trap_fn.asFunction().value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, key_val, value, receiver });
+                const result = try self.callValue(trap_fn, box.value.handler, &.{ box.value.target, key_val, value, receiver }, "set");
                 defer result.deinit();
-                return coercion.isTruthy(result);
+                if (!coercion.isTruthy(result)) return false;
+                try validateProxySetInvariant(self, box.value.target, key, key_val, value);
+                return true;
             }
             return self.setPropertyWithReceiver(box.value.target, key, value, receiver);
         },
@@ -714,6 +743,29 @@ pub fn setPropertyWithReceiver(self: *Interpreter, obj: JSValue, key: []const u8
             }
             return setOnReceiver(self, receiver, key, value);
         },
+    }
+}
+
+fn validateProxySetInvariant(self: *Interpreter, target: JSValue, key: []const u8, key_val: JSValue, value: JSValue) anyerror!void {
+    const target_desc = try object_builtins.objectGetOwnPropertyDescriptor(self, self.gc_allocator, JSValue.UNDEFINED, &.{ target, key_val });
+    defer target_desc.deinit();
+    if (!target_desc.isObject()) return;
+    const td_obj = &target_desc.asObject().value;
+    const cfg = if (td_obj.get("configurable")) |c| coercion.isTruthy(c) else false;
+    if (cfg) return;
+    if (td_obj.hasOwnProperty("value")) {
+        const w = if (td_obj.get("writable")) |wv| coercion.isTruthy(wv) else false;
+        if (!w) {
+            const tv = td_obj.get("value") orelse JSValue.UNDEFINED;
+            if (!property_desc.sameValue(value, tv)) {
+                return self.throwError(.type_error, "'set' on proxy: trap returned truish for property '{s}' which exists in the proxy target as a non-configurable and non-writable data property with a different value", .{property_desc.displayKey(key)});
+            }
+        }
+    } else if (td_obj.hasOwnProperty("set")) {
+        const sv = td_obj.get("set") orelse JSValue.UNDEFINED;
+        if (sv.isUndefined()) {
+            return self.throwError(.type_error, "'set' on proxy: trap returned truish for property '{s}' which exists in the proxy target as a non-configurable and non-writable accessor property without a setter", .{property_desc.displayKey(key)});
+        }
     }
 }
 
@@ -912,25 +964,22 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
         return self.setObjectProperty(try self.regexPropsObject(obj), key, value);
     }
     if (obj.isProxy()) {
+        try self.checkStack();
         const box = obj.asProxy();
         if (try self.proxyTrap(box, "set")) |trap_fn| {
             defer trap_fn.deinit();
-            const key_val = try self.gcNewString(key);
+            const key_val = try property_desc.keyToValue(self, key);
             defer key_val.deinit();
-            const result = try trap_fn.asFunction().value.call(trap_fn.asFunction().value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, key_val, value, obj });
+            const result = try self.callValue(trap_fn, box.value.handler, &.{ box.value.target, key_val, value, obj }, "set");
             defer result.deinit();
-            // Always-strict engine: a falsy trap result is a real
-            // TypeError, not a silent no-op.
             if (!coercion.isTruthy(result)) {
-                return self.throwError(.type_error, "'set' on proxy: trap returned falsish for property '{s}'", .{key});
+                return self.throwError(.type_error, "'set' on proxy: trap returned falsish for property '{s}'", .{property_desc.displayKey(key)});
             }
+            try validateProxySetInvariant(self, box.value.target, key, key_val, value);
             return;
         }
-        // No trap: set directly on target, matching the narrow set
-        // of receiver kinds this function already special-cases
-        // above (function/array/regex/object).
         if (!try self.setPropertyWithReceiver(box.value.target, key, value, obj)) {
-            return self.throwError(.type_error, "Cannot set property '{s}' on proxy target", .{key});
+            return self.throwError(.type_error, "Cannot set property '{s}' on proxy target", .{property_desc.displayKey(key)});
         }
         return;
     }
@@ -975,17 +1024,29 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
 /// `Reflect.deleteProperty` can reuse the exact same logic.
 pub fn deletePropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!bool {
     if (obj.isProxy()) {
+        try self.checkStack();
         const box = obj.asProxy();
         if (try self.proxyTrap(box, "deleteProperty")) |trap_fn| {
             defer trap_fn.deinit();
-            const key_val = try self.gcNewString(key);
+            const key_val = try property_desc.keyToValue(self, key);
             defer key_val.deinit();
-            const result = try trap_fn.asFunction().value.call(trap_fn.asFunction().value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, key_val });
+            const result = try self.callValue(trap_fn, box.value.handler, &.{ box.value.target, key_val }, "deleteProperty");
             defer result.deinit();
-            return coercion.isTruthy(result);
+            if (!coercion.isTruthy(result)) return false;
+            const target_desc = try object_builtins.objectGetOwnPropertyDescriptor(self, self.gc_allocator, JSValue.UNDEFINED, &.{ box.value.target, key_val });
+            defer target_desc.deinit();
+            if (target_desc.isObject()) {
+                const cfg = if (target_desc.asObject().value.get("configurable")) |c| coercion.isTruthy(c) else false;
+                if (!cfg) {
+                    return self.throwError(.type_error, "'deleteProperty' on proxy: trap returned truish for property '{s}' which is non-configurable in the proxy target", .{property_desc.displayKey(key)});
+                }
+                if (!try object_builtins.isExtensibleInternal(self, box.value.target)) {
+                    return self.throwError(.type_error, "'deleteProperty' on proxy: trap returned truish for property '{s}' but the proxy target is not extensible", .{property_desc.displayKey(key)});
+                }
+            }
+            return true;
         }
-        if (box.value.target.isObject()) return self.deleteObjectProperty(box.value.target, key);
-        return true;
+        return self.deletePropertyOnValue(box.value.target, key);
     }
     if (obj.tag() == .temporal) {
         if (self.temporalProps(obj)) |bag| return self.deleteObjectProperty(bag, key);

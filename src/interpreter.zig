@@ -1007,6 +1007,12 @@ pub const Interpreter = struct {
     /// embedder calls that never went through run()).
     stack_limit: usize = 0,
 
+    pub fn checkStack(self: *Interpreter) anyerror!void {
+        if (self.stack_limit != 0 and @frameAddress() < self.stack_limit) {
+            return self.throwError(.range_error, "Maximum call stack size exceeded", .{});
+        }
+    }
+
     /// Native-stack budget assumed for the main thread (typical ulimit
     /// is 8 MiB; leave headroom for panic handling and the host below
     /// run()'s frame).
@@ -3604,6 +3610,40 @@ test "Phase 6.1: JSON reviver/replacer/space/toJSON, toLocaleString, strict toNu
         \\var arrLoc = [1, null, undefined, { toLocaleString() { return "x"; } }].toLocaleString() === "1,,,x";
         \\var numStrict = Number.isNaN(Number("1_0")) && Number.isNaN(Number("123abc")) && parseFloat("1_0") === 1 && parseFloat("123abc") === 123;
         \\jsonOk && objLoc && arrLoc && numStrict;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
+test "Phase 6.2: Proxy construct invariants, callable proxy call/apply/bind, nested proxy, ownKeys/delete/get/set" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\var primConstructThrew = false;
+        \\var pPrim = new Proxy(function() {}, { construct() { return 42; } });
+        \\try { new pPrim(); } catch (e) { primConstructThrew = e instanceof TypeError; }
+        \\var nonCtorThrew = false;
+        \\try { new (new Proxy({}, {}))(); } catch (e) { nonCtorThrew = e instanceof TypeError; }
+        \\var pFn = new Proxy(function(a, b) { return a + b; }, {
+        \\  apply(t, thisArg, args) { return t(args[0] * 2, args[1] * 2); }
+        \\});
+        \\var callOk = Function.prototype.call.call(pFn, null, 3, 4) === 14 &&
+        \\  Function.prototype.apply.call(pFn, null, [3, 4]) === 14 &&
+        \\  Function.prototype.bind.call(pFn, null, 3)(4) === 14;
+        \\var inner = { a: 1, b: 2 };
+        \\var p1 = new Proxy(inner, {});
+        \\var p2 = new Proxy(p1, {});
+        \\delete p2.a;
+        \\var nestedOk = !("a" in inner) && p2.b === 2;
+        \\var frozen = Object.preventExtensions({ x: 1, y: 2 });
+        \\var pOwn = new Proxy(frozen, { ownKeys() { return ["x"]; } });
+        \\var ownKeysThrew = false;
+        \\try { Object.keys(pOwn); } catch (e) { ownKeysThrew = e instanceof TypeError; }
+        \\primConstructThrew && nonCtorThrew && callOk && nestedOk && ownKeysThrew;
     );
     defer res.deinit();
     try testing.expect(res.isBool() and res.asBool());

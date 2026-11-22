@@ -495,11 +495,26 @@ pub fn evalIn(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
         .proxy => |box| blk: {
             if (try self.proxyTrap(box, "has")) |trap_fn| {
                 defer trap_fn.deinit();
-                const key_val = try self.gcNewString(key);
+                const key_val = try property_desc.keyToValue(self, key);
                 defer key_val.deinit();
-                const result = try trap_fn.asFunction().value.call(trap_fn.asFunction().value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, key_val });
+                const result = try self.callValue(trap_fn, box.value.handler, &.{ box.value.target, key_val }, "has");
                 defer result.deinit();
-                break :blk JSValue.fromBool(coercion.isTruthy(result));
+                const has_res = coercion.isTruthy(result);
+                if (!has_res) {
+                    const object_builtins = @import("object_builtins.zig");
+                    const target_desc = try object_builtins.objectGetOwnPropertyDescriptor(self, self.gc_allocator, JSValue.UNDEFINED, &.{ box.value.target, key_val });
+                    defer target_desc.deinit();
+                    if (target_desc.isObject()) {
+                        const target_cfg = if (target_desc.asObject().value.get("configurable")) |c| coercion.isTruthy(c) else false;
+                        if (!target_cfg) {
+                            return self.throwError(.type_error, "'has' on proxy: trap returned falsish for property '{s}' which exists in the proxy target as non-configurable", .{property_desc.displayKey(key)});
+                        }
+                        if (!try object_builtins.isExtensibleInternal(self, box.value.target)) {
+                            return self.throwError(.type_error, "'has' on proxy: trap returned falsish for property '{s}' but the proxy target is not extensible", .{property_desc.displayKey(key)});
+                        }
+                    }
+                }
+                break :blk JSValue.fromBool(has_res);
             }
             break :blk try self.evalIn(l, box.value.target);
         },
@@ -971,13 +986,20 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
 /// no-trap proxy chain can still hit if its target (transitively)
 /// isn't callable -- e.g. `(new Proxy({}, {}))()`.
 pub fn callValue(self: *Interpreter, callee: JSValue, this_value: JSValue, args: []const JSValue, callee_name: []const u8) anyerror!JSValue {
+    try self.checkStack();
     if (callee.isProxy()) {
         const box = callee.asProxy();
+        if (box.value.handler.isNull()) {
+            return self.throwError(.type_error, "Cannot perform 'apply' on a proxy that has been revoked", .{});
+        }
+        if (!property_desc.isCallable(box.value.target)) {
+            return self.throwError(.type_error, "{s} is not a function", .{callee_name});
+        }
         if (try self.proxyTrap(box, "apply")) |trap_fn| {
             defer trap_fn.deinit();
             const args_array = try self.argsToArray(args);
             defer args_array.deinit();
-            return try trap_fn.asFunction().value.call(trap_fn.asFunction().value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, this_value, args_array });
+            return try self.callValue(trap_fn, box.value.handler, &.{ box.value.target, this_value, args_array }, "apply");
         }
         return self.callValue(box.value.target, this_value, args, callee_name);
     }
@@ -1088,11 +1110,14 @@ pub fn evalNew(self: *Interpreter, env: *Environment, n: anytype) anyerror!JSVal
 /// proxies to their target (a Proxy is a constructor iff its target
 /// is, regardless of whether a `construct` trap is present).
 pub fn isConstructor(self: *Interpreter, v: JSValue) bool {
-    return switch (v.unpack()) {
-        .function => |f| f.value.constructable,
-        .proxy => |p| self.isConstructor(p.value.target),
-        else => false,
-    };
+    _ = self;
+    var cur = v;
+    var depth: usize = 0;
+    while (cur.isProxy() and depth < 256) : (depth += 1) {
+        if (cur.asProxy().value.handler.isNull()) return false;
+        cur = cur.asProxy().value.target;
+    }
+    return cur.isFunction() and cur.asFunction().value.constructable;
 }
 
 pub fn constructValue(self: *Interpreter, callee: JSValue, args: []const JSValue, callee_name: []const u8) anyerror!JSValue {
@@ -1104,13 +1129,25 @@ pub fn constructValue(self: *Interpreter, callee: JSValue, args: []const JSValue
 /// construction context so native constructors can create branded exotics with
 /// the caller-selected prototype.
 pub fn constructValueWithNewTarget(self: *Interpreter, target: JSValue, args: []const JSValue, new_target: JSValue, callee_name: []const u8) anyerror!JSValue {
+    try self.checkStack();
     if (target.isProxy()) {
         const box = target.asProxy();
+        if (box.value.handler.isNull()) {
+            return self.throwError(.type_error, "Cannot perform 'construct' on a proxy that has been revoked", .{});
+        }
+        if (!self.isConstructor(box.value.target)) {
+            return self.throwError(.type_error, "{s} is not a constructor", .{callee_name});
+        }
         if (try self.proxyTrap(box, "construct")) |trap_fn| {
             defer trap_fn.deinit();
             const args_array = try self.argsToArray(args);
             defer args_array.deinit();
-            return try trap_fn.asFunction().value.call(trap_fn.asFunction().value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, args_array, new_target });
+            const res = try self.callValue(trap_fn, box.value.handler, &.{ box.value.target, args_array, new_target }, "construct");
+            if (!@import("builtin_helpers.zig").isObjectLike(res)) {
+                res.deinit();
+                return self.throwError(.type_error, "'construct' on proxy: trap returned non-object", .{});
+            }
+            return res;
         }
         return self.constructValueWithNewTarget(box.value.target, args, new_target, callee_name);
     }

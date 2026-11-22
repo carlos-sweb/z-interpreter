@@ -79,42 +79,48 @@ fn fnToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     return formatNativeFn(self, allocator, name);
 }
 
-fn requireFunction(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {
-    return requireTag(ctx, this_value, .function, "Function.prototype.{s} called on a non-function", method);
+fn requireCallable(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {
+    const self = interp(ctx);
+    if (!property_desc.isCallable(this_value)) {
+        return self.throwError(.type_error, "Function.prototype.{s} called on a non-function", .{method});
+    }
+    return this_value;
 }
 
 fn fnCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    const target = try requireFunction(ctx, this_value, "call");
+    _ = allocator;
+    const target = try requireCallable(ctx, this_value, "call");
     const this_arg = arg(args, 0);
     const rest = if (args.len > 1) args[1..] else &[_]JSValue{};
-    return target.asFunction().value.call(target.asFunction().value.ctx, allocator, this_arg, rest);
+    return interp(ctx).callValue(target, this_arg, rest, "call");
 }
 
 fn fnApply(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    const target = try requireFunction(ctx, this_value, "apply");
+    const target = try requireCallable(ctx, this_value, "apply");
     const this_arg = arg(args, 0);
     const arg_list = arg(args, 1);
     const self = interp(ctx);
     if (arg_list.isUndefined() or arg_list.isNull()) {
-        return target.asFunction().value.call(target.asFunction().value.ctx, allocator, this_arg, &.{});
+        return self.callValue(target, this_arg, &.{}, "apply");
     }
     if (!builtin_helpers.isObjectLike(arg_list)) {
         return self.throwError(.type_error, "CreateListFromArrayLike called on non-object", .{});
     }
     if (arg_list.tag() == .array and !arg_list.asArray().value.isHoley() and !arg_list.asArray().value.isSparse() and !arg_list.asArray().value.hasElementDescriptors()) {
-        return target.asFunction().value.call(target.asFunction().value.ctx, allocator, this_arg, arg_list.asArray().value.toSlice());
+        return self.callValue(target, this_arg, arg_list.asArray().value.toSlice(), "apply");
     }
     const items = try builtin_helpers.arrayLikeToList(self, allocator, arg_list);
     defer {
         for (items) |it| it.deinit();
         allocator.free(items);
     }
-    return target.asFunction().value.call(target.asFunction().value.ctx, allocator, this_arg, items);
+    return self.callValue(target, this_arg, items, "apply");
 }
 
 /// ctx for one bound function: the target, the fixed this, and any
 /// pre-applied arguments.
 pub const BoundCtx = struct {
+    interp: *Interpreter,
     target: JSValue,
     bound_this: JSValue,
     pre_args: []const JSValue,
@@ -133,7 +139,7 @@ fn boundCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     defer allocator.free(total);
     @memcpy(total[0..bc.pre_args.len], bc.pre_args);
     @memcpy(total[bc.pre_args.len..], args);
-    return bc.target.asFunction().value.call(bc.target.asFunction().value.ctx, allocator, bc.bound_this, total);
+    return bc.interp.callValue(bc.target, bc.bound_this, total, bc.name);
 }
 
 /// Internal bound-function identity used by [[Construct]] dispatch. This is
@@ -149,7 +155,7 @@ pub fn boundContext(value: JSValue) ?*BoundCtx {
 /// [[Bind]] preserves [[Construct]] exactly when the target has it.
 fn fnBind(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const self = interp(ctx);
-    const target = try requireFunction(ctx, this_value, "bind");
+    const target = try requireCallable(ctx, this_value, "bind");
     const bc = try allocator.create(BoundCtx);
     const pre = if (args.len > 1) args[1..] else &[_]JSValue{};
     const pre_copy = try allocator.alloc(JSValue, pre.len);
@@ -179,6 +185,7 @@ fn fnBind(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     const target_name_str = if (target_name.isString()) target_name.asString().value.data else "";
     const name = try std.fmt.allocPrint(allocator, "bound {s}", .{target_name_str});
     bc.* = .{
+        .interp = self,
         .target = target.retain(),
         .bound_this = arg(args, 0).retain(),
         .pre_args = pre_copy,

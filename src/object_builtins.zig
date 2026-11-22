@@ -178,20 +178,27 @@ pub fn ownEnumerableKeys(ctx: *anyopaque, allocator: Allocator, v: JSValue) anye
         // getOwnPropertyDescriptor call per key), matching this
         // engine's already-established "no invariant checking" scope
         // boundary for Proxy.
-        .proxy => |box| {
-            if (try interp(ctx).proxyTrap(box, "ownKeys")) |trap_fn| {
-                defer trap_fn.deinit();
-                const trap_result = try trap_fn.asFunction().value.call(trap_fn.asFunction().value.ctx, allocator, box.value.handler, &.{box.value.target});
-                defer trap_result.deinit();
-                if (!trap_result.isArray()) return &.{};
-                var keys: std.ArrayList([]const u8) = .empty;
-                defer keys.deinit(allocator);
-                for (trap_result.asArray().value.toSlice()) |item| {
-                    if (item.isString()) try keys.append(allocator, try allocator.dupe(u8, item.asString().value.data));
-                }
-                return keys.toOwnedSlice(allocator);
+        .proxy => {
+            const all_keys = try proxyOwnPropertyKeys(self, allocator, v);
+            defer all_keys.deinit();
+            var keys: std.ArrayList([]const u8) = .empty;
+            errdefer {
+                for (keys.items) |k| allocator.free(k);
+                keys.deinit(allocator);
             }
-            return ownEnumerableKeys(ctx, allocator, box.value.target);
+            for (all_keys.asArray().value.toSlice()) |item| {
+                if (!item.isString()) continue;
+                const desc = try objectGetOwnPropertyDescriptor(ctx, allocator, JSValue.UNDEFINED, &.{ v, item });
+                defer desc.deinit();
+                if (desc.isObject()) {
+                    if (desc.asObject().value.get("enumerable")) |en| {
+                        if (coercion.isTruthy(en)) {
+                            try keys.append(allocator, try allocator.dupe(u8, item.asString().value.data));
+                        }
+                    }
+                }
+            }
+            return keys.toOwnedSlice(allocator);
         },
         else => try allocator.alloc([]const u8, 0),
     };
@@ -787,9 +794,16 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, thi
                         return self.throwError(.type_error, "'getOwnPropertyDescriptor' on proxy: trap returned non-configurable descriptor for property '{s}' that does not exist in the proxy target", .{property_desc.displayKey(key)});
                     }
                 } else if (target_desc.isObject()) {
-                    const target_cfg = if (target_desc.asObject().value.get("configurable")) |c| coercion.isTruthy(c) else false;
+                    const td_obj = &target_desc.asObject().value;
+                    const target_cfg = if (td_obj.get("configurable")) |c| coercion.isTruthy(c) else false;
                     if (target_cfg and !result_desc.configurable) {
                         return self.throwError(.type_error, "'getOwnPropertyDescriptor' on proxy: trap reported non-configurability for property '{s}' which is configurable in the proxy target", .{property_desc.displayKey(key)});
+                    }
+                    if (!result_desc.configurable and result_desc.has_writable and !result_desc.writable) {
+                        const target_w = if (td_obj.get("writable")) |wv| coercion.isTruthy(wv) else false;
+                        if (target_w) {
+                            return self.throwError(.type_error, "'getOwnPropertyDescriptor' on proxy: trap reported non-configurable and non-writable for property '{s}' which is writable in the proxy target", .{property_desc.displayKey(key)});
+                        }
                     }
                 }
                 return trap_result;
@@ -829,12 +843,17 @@ pub fn proxyOwnPropertyKeys(self: *Interpreter, allocator: Allocator, proxy_val:
         return names;
     };
     defer trap_fn.deinit();
-    const trap_result = try trap_fn.asFunction().value.call(trap_fn.asFunction().value.ctx, allocator, box.value.handler, &.{box.value.target});
+    const trap_result = try self.callValue(trap_fn, box.value.handler, &.{box.value.target}, "ownKeys");
     defer trap_result.deinit();
-    if (!trap_result.isArray()) {
-        return self.throwError(.type_error, "'ownKeys' on proxy: trap must return an array", .{});
+    if (!builtin_helpers.isObjectLike(trap_result)) {
+        return self.throwError(.type_error, "'ownKeys' on proxy: trap must return an object", .{});
     }
-    const items = trap_result.asArray().value.toSlice();
+    const items_owned = try builtin_helpers.arrayLikeToList(self, allocator, trap_result);
+    defer {
+        for (items_owned) |it| it.deinit();
+        allocator.free(items_owned);
+    }
+    const items = items_owned;
     var seen = std.StringHashMapUnmanaged(void).empty;
     defer {
         var it = seen.keyIterator();
@@ -893,7 +912,9 @@ pub fn proxyOwnPropertyKeys(self: *Interpreter, allocator: Allocator, proxy_val:
         }
     }
 
-    return trap_result.retain();
+    var out_arr = try self.gcNewArray();
+    for (items) |it| _ = try out_arr.asArray().value.push(it.retain());
+    return out_arr;
 }
 
 pub fn objectGetOwnPropertyNames(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
