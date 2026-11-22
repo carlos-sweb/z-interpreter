@@ -898,6 +898,7 @@ pub const Interpreter = struct {
     /// The well-known `Symbol.toPrimitive` -- the first thing
     /// `toPrimitive` looks up on an object operand. Set in setupGlobals.
     symbol_to_primitive: ?JSValue = null,
+    symbol_has_instance: ?JSValue = null,
     symbol_dispose: ?JSValue = null,
     symbol_async_dispose: ?JSValue = null,
     /// The real builtin prototype objects (`Object.prototype`,
@@ -3521,6 +3522,38 @@ test "Phase 5.3a: Function.prototype.toString" {
         \\var proxyThrew = false;
         \\try { Function.prototype.toString.call(new Proxy(() => {}, {})); } catch (e) { proxyThrew = e instanceof TypeError; }
         \\nativeOk && boundOk && jsOk && classOk && nonFnThrew && proxyThrew;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
+test "Phase 5.3b: apply array-like, bind length/proto, Symbol.hasInstance" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\function add(a, b) { return a + b; }
+        \\var applyOk = add.apply(null, { length: 2, 0: 10, 1: 20 }) === 30;
+        \\function target(a, b, c) {}
+        \\Object.defineProperty(target, "length", { value: 10, configurable: true });
+        \\var customProto = { tag: 42 };
+        \\Object.setPrototypeOf(target, customProto);
+        \\var bf = Function.prototype.bind.call(target, null, 1, 2);
+        \\var bindOk = bf.length === 8 && bf.name === "bound target" && Object.getPrototypeOf(bf) === customProto && bf.tag === 42;
+        \\var customHas = { [Symbol.hasInstance](x) { return x === 123; } };
+        \\var hiCustomOk = (123 instanceof customHas) && !(456 instanceof customHas);
+        \\function Ctor() {}
+        \\var bCtor = Ctor.bind(null);
+        \\var inst = new Ctor();
+        \\var hiBoundOk = (inst instanceof bCtor) && Ctor[Symbol.hasInstance](inst);
+        \\var nonObjProtoThrew = false;
+        \\function BadProto() {}
+        \\BadProto.prototype = 123;
+        \\try { ({}) instanceof BadProto; } catch (e) { nonObjProtoThrew = e instanceof TypeError; }
+        \\applyOk && bindOk && hiCustomOk && hiBoundOk && nonObjProtoThrew;
     );
     defer res.deinit();
     try testing.expect(res.isBool() and res.asBool());

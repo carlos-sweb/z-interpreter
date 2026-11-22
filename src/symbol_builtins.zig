@@ -116,6 +116,7 @@ pub fn install(self: *Interpreter) !void {
         if (comptime std.mem.eql(u8, wk, "asyncIterator")) self.symbol_async_iterator = sym.retain();
         if (comptime std.mem.eql(u8, wk, "toStringTag")) self.symbol_to_string_tag = sym.retain();
         if (comptime std.mem.eql(u8, wk, "toPrimitive")) self.symbol_to_primitive = sym.retain();
+        if (comptime std.mem.eql(u8, wk, "hasInstance")) self.symbol_has_instance = sym.retain();
         if (comptime std.mem.eql(u8, wk, "dispose")) self.symbol_dispose = sym.retain();
         if (comptime std.mem.eql(u8, wk, "asyncDispose")) self.symbol_async_dispose = sym.retain();
     }

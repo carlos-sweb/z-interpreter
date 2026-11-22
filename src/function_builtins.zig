@@ -14,6 +14,8 @@ const Interpreter = interpreter_mod.Interpreter;
 const interpreter_class = @import("interpreter_class.zig");
 const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
+const property_desc = @import("property_desc.zig");
+const object_builtins = @import("object_builtins.zig");
 
 pub const NativeFn = native_helpers.NativeFn;
 const MethodSpec = native_helpers.MethodSpec;
@@ -92,12 +94,22 @@ fn fnApply(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     const target = try requireFunction(ctx, this_value, "apply");
     const this_arg = arg(args, 0);
     const arg_list = arg(args, 1);
-    const call_args: []const JSValue = switch (arg_list.unpack()) {
-        .undefined, .null => &.{},
-        .array => |box| box.value.toSlice(),
-        else => return interp(ctx).throwError(.type_error, "CreateListFromArrayLike called on non-object", .{}),
-    };
-    return target.asFunction().value.call(target.asFunction().value.ctx, allocator, this_arg, call_args);
+    const self = interp(ctx);
+    if (arg_list.isUndefined() or arg_list.isNull()) {
+        return target.asFunction().value.call(target.asFunction().value.ctx, allocator, this_arg, &.{});
+    }
+    if (!builtin_helpers.isObjectLike(arg_list)) {
+        return self.throwError(.type_error, "CreateListFromArrayLike called on non-object", .{});
+    }
+    if (arg_list.tag() == .array and !arg_list.asArray().value.isHoley() and !arg_list.asArray().value.isSparse() and !arg_list.asArray().value.hasElementDescriptors()) {
+        return target.asFunction().value.call(target.asFunction().value.ctx, allocator, this_arg, arg_list.asArray().value.toSlice());
+    }
+    const items = try builtin_helpers.arrayLikeToList(self, allocator, arg_list);
+    defer {
+        for (items) |it| it.deinit();
+        allocator.free(items);
+    }
+    return target.asFunction().value.call(target.asFunction().value.ctx, allocator, this_arg, items);
 }
 
 /// ctx for one bound function: the target, the fixed this, and any
@@ -136,18 +148,33 @@ pub fn boundContext(value: JSValue) ?*BoundCtx {
 
 /// [[Bind]] preserves [[Construct]] exactly when the target has it.
 fn fnBind(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self = interp(ctx);
     const target = try requireFunction(ctx, this_value, "bind");
     const bc = try allocator.create(BoundCtx);
     const pre = if (args.len > 1) args[1..] else &[_]JSValue{};
     const pre_copy = try allocator.alloc(JSValue, pre.len);
     for (pre, 0..) |a, i| pre_copy[i] = a.retain();
-    // Real spec (19.2.3.2 [[Call]] step 12-14): the bound name is
-    // built from `Get(Target, "name")` -- the real, JS-visible `.name`
-    // property (which may have been redefined via
-    // `Object.defineProperty`, going through the statics bag), not
-    // the raw Callable.name field. Falls back to "" if that property
-    // isn't a string (e.g. deleted, or overwritten with a non-string).
-    const target_name = try interp(ctx).getProperty(target, "name");
+    const len_key = try self.gcNewString("length");
+    defer len_key.deinit();
+    const has_len_val = try object_builtins.objHasOwnProperty(ctx, allocator, target, &.{len_key});
+    defer has_len_val.deinit();
+    const target_has_len = has_len_val.isBool() and has_len_val.asBool();
+    var bound_len_f: f64 = 0;
+    if (target_has_len) {
+        const target_len_v = try self.getProperty(target, "length");
+        defer target_len_v.deinit();
+        if (target_len_v.isNumber()) {
+            const n = target_len_v.asNumber();
+            const int_len: f64 = if (std.math.isNan(n) or n == 0)
+                0
+            else if (std.math.isInf(n))
+                n
+            else
+                @trunc(n);
+            bound_len_f = @max(0.0, int_len - @as(f64, @floatFromInt(pre.len)));
+        }
+    }
+    const target_name = try self.getProperty(target, "name");
     defer target_name.deinit();
     const target_name_str = if (target_name.isString()) target_name.asString().value.data else "";
     const name = try std.fmt.allocPrint(allocator, "bound {s}", .{target_name_str});
@@ -157,16 +184,72 @@ fn fnBind(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
         .pre_args = pre_copy,
         .name = name,
     };
-    try interp(ctx).gcTrackBoundCtx(bc);
-    const target_arity = target.asFunction().value.arity;
-    const bound_arity = if (target_arity > pre.len) target_arity - pre.len else 0;
-    return interp(ctx).gcNewFunction(.{
+    try self.gcTrackBoundCtx(bc);
+    const bound_arity: usize = if (std.math.isInf(bound_len_f))
+        std.math.maxInt(usize)
+    else
+        @intFromFloat(@min(bound_len_f, @as(f64, @floatFromInt(std.math.maxInt(usize)))));
+    const bound_fn = try self.gcNewFunction(.{
         .ctx = bc,
         .name = name,
         .arity = bound_arity,
         .call = boundCall,
-        .constructable = interp(ctx).isConstructor(target),
+        .constructable = self.isConstructor(target),
     });
+    errdefer bound_fn.deinit();
+
+    if (std.math.isInf(bound_len_f)) {
+        var len_desc = property_desc.ParsedDesc{
+            .has_value = true,
+            .value = JSValue.fromNumber(bound_len_f),
+            .has_writable = true,
+            .writable = false,
+            .has_enumerable = true,
+            .enumerable = false,
+            .has_configurable = true,
+            .configurable = true,
+        };
+        _ = try property_desc.defineOwnProperty(self, bound_fn, "length", &len_desc);
+    }
+
+    const target_proto = try object_builtins.objectGetPrototypeOf(ctx, allocator, JSValue.UNDEFINED, &.{target});
+    defer target_proto.deinit();
+    if (!zvalue.equality.strictEquals(target_proto, self.protos.function)) {
+        try self.setOwnedPrototype(bound_fn, target_proto);
+    }
+    return bound_fn;
+}
+
+pub fn ordinaryHasInstance(self: *Interpreter, allocator: Allocator, ctor: JSValue, obj: JSValue) anyerror!bool {
+    if (!property_desc.isCallable(ctor)) return false;
+    if (boundContext(ctor)) |bc| {
+        return ordinaryHasInstance(self, allocator, bc.target, obj);
+    }
+    if (!builtin_helpers.isObjectLike(obj)) return false;
+    if (obj.isError()) {
+        if (self.global_env.get(obj.asError().value.kind.name())) |own_ctor| {
+            if (zvalue.equality.strictEquals(own_ctor, ctor)) return true;
+        }
+    }
+    const proto = try self.getProperty(ctor, "prototype");
+    defer proto.deinit();
+    if (!builtin_helpers.isObjectLike(proto)) {
+        return self.throwError(.type_error, "Function has non-object prototype in instanceof check", .{});
+    }
+    var cur = try object_builtins.objectGetPrototypeOf(@ptrCast(self), allocator, JSValue.UNDEFINED, &.{obj});
+    defer cur.deinit();
+    while (!cur.isNull()) {
+        if (zvalue.equality.strictEquals(cur, proto)) return true;
+        const next = try object_builtins.objectGetPrototypeOf(@ptrCast(self), allocator, JSValue.UNDEFINED, &.{cur});
+        cur.deinit();
+        cur = next;
+    }
+    return false;
+}
+
+pub fn fnSymbolHasInstance(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const obj = arg(args, 0);
+    return JSValue.fromBool(try ordinaryHasInstance(interp(ctx), allocator, this_value, obj));
 }
 
 /// `new Function('a', 'b', 'return a + b')` -- compose, parse with the

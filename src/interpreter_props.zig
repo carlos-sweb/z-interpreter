@@ -255,7 +255,10 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             }
             if (std.mem.eql(u8, key, "name")) break :blk try self.gcNewString(box.value.name);
             if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.arity));
-            if (try self.getFromProto(obj, self.protos.function, key)) |m| break :blk m;
+            const fn_proto = self.proto_refs.get(@intFromPtr(box)) orelse self.protos.function;
+            if (!fn_proto.isNull()) {
+                if (try self.getFromProto(obj, fn_proto, key)) |m| break :blk m;
+            }
             break :blk JSValue.UNDEFINED;
         },
         .number => blk: {
@@ -1295,6 +1298,12 @@ pub fn materializeProtos(self: *Interpreter) !void {
         defer self.gc_allocator.free(tp_key);
         const tp_fn = try native_helpers.native(self, "[Symbol.toPrimitive]", 1, date_builtins.dateToPrimitive);
         try self.protos.date.asObject().value.defineProperty(tp_key, tp_fn, .{ .writable = false, .enumerable = false, .configurable = true });
+    }
+    if (self.symbol_has_instance) |hi_sym| {
+        const hi_key = try self.encodeKey(hi_sym);
+        defer self.gc_allocator.free(hi_key);
+        const hi_fn = try native_helpers.native(self, "[Symbol.hasInstance]", 1, function_builtins.fnSymbolHasInstance);
+        try self.protos.function.asObject().value.defineProperty(hi_key, hi_fn, .{ .writable = false, .enumerable = false, .configurable = false });
     }
     try regex_builtins.installProtoExtras(self);
     if (self.symbol_to_string_tag) |tag_sym| {

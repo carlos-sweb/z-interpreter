@@ -280,7 +280,7 @@ fn isProxyConstructor(self: *Interpreter, v: JSValue) bool {
     return zvalue.equality.strictEquals(v, proxy_ctor);
 }
 
-fn objHasOwnProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+pub fn objHasOwnProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const self = interp(ctx);
     const key = try self.encodeKey(arg(args, 0));
     defer allocator.free(key);

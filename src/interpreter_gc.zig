@@ -857,6 +857,7 @@ pub fn markRoots(self: *Interpreter, marker: *Marker) void {
     }
     if (self.symbol_async_iterator) |v| marker.value(v);
     if (self.symbol_to_primitive) |v| marker.value(v);
+    if (self.symbol_has_instance) |v| marker.value(v);
     if (self.symbol_dispose) |v| marker.value(v);
     if (self.symbol_async_dispose) |v| marker.value(v);
     inline for (@typeInfo(Protos).@"struct".field_names) |name| marker.value(@field(self.protos, name));
@@ -1254,6 +1255,7 @@ pub fn freeAllGcNodes(self: *Interpreter) void {
     if (self.wrap_for_valid_iterator_proto) |v| sweeper.value(v);
     if (self.symbol_async_iterator) |v| sweeper.value(v);
     if (self.symbol_to_primitive) |v| sweeper.value(v);
+    if (self.symbol_has_instance) |v| sweeper.value(v);
     if (self.symbol_dispose) |v| sweeper.value(v);
     if (self.symbol_async_dispose) |v| sweeper.value(v);
     inline for (@typeInfo(Protos).@"struct".field_names) |name| sweeper.value(@field(self.protos, name));

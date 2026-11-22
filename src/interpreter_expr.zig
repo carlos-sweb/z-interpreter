@@ -419,79 +419,29 @@ pub fn propertyKeyString(self: *Interpreter, env: *Environment, computed: bool, 
     };
 }
 
-/// ECMA-262 13.10.2 InstanceofOperator, narrowed (no
-/// Symbol.hasInstance): walk the LHS object's prototype chain looking
-/// for the RHS function's prototype object, by pointer identity.
+/// ECMA-262 13.10.2 InstanceofOperator(V, target).
 pub fn evalInstanceof(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
-    // Best-effort unwrap, not a real Symbol.hasInstance trap dispatch
-    // (that protocol doesn't exist in this engine at all yet, for
-    // plain functions either -- pre-existing narrowing, not new).
-    if (r.isProxy()) return self.evalInstanceof(l, r.asProxy().value.target);
-    if (!r.isFunction()) {
-        return self.throwError(.type_error, "Right-hand side of 'instanceof' is not callable", .{});
+    if (!@import("builtin_helpers.zig").isObjectLike(r)) {
+        return self.throwError(.type_error, "Right-hand side of 'instanceof' is not an object", .{});
     }
-
-    // Every error kind (TypeError/RangeError/.../URIError) shares ONE
-    // prototype object (self.protos.@"error") -- each kind's OWN
-    // `X.prototype` is still a real, separate, lazily-materialized
-    // object (for property-descriptor purposes), but it's chained to
-    // Object.prototype, not to self.protos.@"error". So the generic
-    // chain walk below can only ever prove "instanceof Error", never
-    // "instanceof TypeError" specifically -- checked here instead, by
-    // identity against the value's own kind's global constructor (the
-    // same trick getProperty's `.constructor` resolution already uses).
-    // Falls through to the walk below for the generic Error case.
-    if (l.isError()) {
-        if (self.global_env.get(l.asError().value.kind.name())) |own_ctor| {
-            if (zvalue.equality.strictEquals(own_ctor, r)) return JSValue.fromBool(true);
+    if (self.symbol_has_instance) |hi_sym| {
+        const hi_key = try self.encodeKey(hi_sym);
+        defer self.gc_allocator.free(hi_key);
+        const handler = try self.getProperty(r, hi_key);
+        defer handler.deinit();
+        if (!handler.isUndefined() and !handler.isNull()) {
+            if (!property_desc.isCallable(handler)) {
+                return self.throwError(.type_error, "Symbol.hasInstance property is not callable", .{});
+            }
+            const res = try handler.asFunction().value.call(handler.asFunction().value.ctx, self.gc_allocator, r, &.{l});
+            defer res.deinit();
+            return JSValue.fromBool(coercion.isTruthy(res));
         }
     }
-
-    // A never-touched prototype slot means this function never
-    // constructed anything -- nothing can be an instance of it.
-    const proto = r.asFunction().value.prototype orelse return JSValue.fromBool(false);
-    if (!proto.isObject()) return JSValue.fromBool(false);
-    // These boxed kinds have exactly one shared method-table prototype
-    // each (no user-settable [[Prototype]] chain of their own, no
-    // subclassing) -- the chain walk starts directly at the kind's
-    // shared prototype object (materializeProtos already wires each of
-    // these to be the SAME object as the matching global constructor's
-    // `.prototype`) instead of "the instance's own prototype" like the
-    // `.object` case below.
-    var current: ?*const zobject.ZObject(JSValue) = switch (l.tag()) {
-        .object => l.asObject().value.getPrototype(),
-        .typed_array => blk: {
-            const tp = @import("interpreter_props.zig").typedArrayInstanceProto(self, l);
-            break :blk if (tp.isObject()) &tp.asObject().value else null;
-        },
-        .array => &self.protos.array.asObject().value,
-        .date => &self.protos.date.asObject().value,
-        .regex => &self.protos.regex.asObject().value,
-        .function => &self.protos.function.asObject().value,
-        .map => &self.protos.map.asObject().value,
-        .set => &self.protos.set.asObject().value,
-        .promise => &self.protos.promise.asObject().value,
-        .array_buffer => blk: {
-            const box = l.asArrayBuffer();
-            const p = self.proto_refs.get(@intFromPtr(box)) orelse self.arrayBufferProto(box.value.is_shared);
-            break :blk if (p.isObject()) &p.asObject().value else null;
-        },
-        .data_view => blk: {
-            const box = l.asDataView();
-            const p = self.proto_refs.get(@intFromPtr(box)) orelse self.protos.data_view;
-            break :blk if (p.isObject()) &p.asObject().value else null;
-        },
-        .@"error" => &self.protos.@"error".asObject().value,
-        .temporal => blk: {
-            const temporal_proto = self.temporalPrototype(l);
-            break :blk if (temporal_proto.isObject()) &temporal_proto.asObject().value else null;
-        },
-        else => return JSValue.fromBool(false), // primitives are never instances
-    };
-    while (current) |p| : (current = p.getPrototype()) {
-        if (p == &proto.asObject().value) return JSValue.fromBool(true);
+    if (!property_desc.isCallable(r)) {
+        return self.throwError(.type_error, "Right-hand side of 'instanceof' is not callable", .{});
     }
-    return JSValue.fromBool(false);
+    return JSValue.fromBool(try @import("function_builtins.zig").ordinaryHasInstance(self, self.gc_allocator, r, l));
 }
 
 /// The `in` operator: property existence including the prototype chain
