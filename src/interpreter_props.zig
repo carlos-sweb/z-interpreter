@@ -17,6 +17,7 @@ const JSValue = zvalue.JSValue;
 
 const coercion = @import("coercion.zig");
 const builtins = @import("builtins.zig");
+const builtin_helpers = @import("builtin_helpers.zig");
 const native_helpers = @import("native_helpers.zig");
 const date_builtins = @import("date_builtins.zig");
 const function_builtins = @import("function_builtins.zig");
@@ -560,6 +561,158 @@ pub fn deleteObjectProperty(self: *Interpreter, obj: JSValue, key: []const u8) a
     return true;
 }
 
+fn setOnReceiver(self: *Interpreter, receiver: JSValue, key: []const u8, value: JSValue) anyerror!bool {
+    if (!builtin_helpers.isObjectLike(receiver)) return false;
+    var has_existing = false;
+    switch (receiver.unpack()) {
+        .object => |box| {
+            if (box.value.getOwnRecord(key)) |rec| {
+                if (rec.isAccessor() or !rec.descriptor.writable) return false;
+                has_existing = true;
+            }
+        },
+        .typed_array => |box| {
+            switch (canonicalNumericIndex(self.gc_allocator, key, box.value.len)) {
+                .valid_index => {
+                    if (builtin_helpers.isTypedArrayDetached(&box.value)) return false;
+                    has_existing = true;
+                },
+                .invalid_index => return false,
+                .not_numeric => {
+                    if (self.extraProps(receiver)) |bag| {
+                        if (bag.asObject().value.getOwnRecord(key)) |rec| {
+                            if (rec.isAccessor() or !rec.descriptor.writable) return false;
+                            has_existing = true;
+                        }
+                    }
+                },
+            }
+        },
+        else => {},
+    }
+    if (has_existing) {
+        const d: property_desc.ParsedDesc = .{
+            .has_value = true,
+            .value = value,
+        };
+        return property_desc.defineOwnProperty(self, receiver, key, &d);
+    }
+    const d: property_desc.ParsedDesc = .{
+        .has_value = true,
+        .value = value,
+        .has_writable = true,
+        .writable = true,
+        .has_enumerable = true,
+        .enumerable = true,
+        .has_configurable = true,
+        .configurable = true,
+    };
+    return property_desc.defineOwnProperty(self, receiver, key, &d);
+}
+
+/// ECMA-262 [[Set]](O, P, V, Receiver) returning `bool` (for `Reflect.set`
+/// and Proxy prototype chains), without throwing TypeError on non-writable /
+/// non-extensible / getter-only failures.
+pub fn setPropertyWithReceiver(self: *Interpreter, obj: JSValue, key: []const u8, value: JSValue, receiver: JSValue) anyerror!bool {
+    switch (obj.unpack()) {
+        .typed_array => |box| {
+            switch (canonicalNumericIndex(self.gc_allocator, key, box.value.len)) {
+                .valid_index => |idx| {
+                    if (property_desc.sameValue(obj, receiver)) {
+                        try builtins.typedElemSet(self, box.value.kind, &box.value.owner.asArrayBuffer().value, box.value.byte_offset, box.value.len, idx, value);
+                        return true;
+                    }
+                    if (builtin_helpers.isTypedArrayDetached(&box.value)) return true;
+                    return setOnReceiver(self, receiver, key, value);
+                },
+                .invalid_index => {
+                    if (property_desc.sameValue(obj, receiver)) {
+                        try builtins.typedElemSet(self, box.value.kind, &box.value.owner.asArrayBuffer().value, box.value.byte_offset, box.value.len, box.value.len, value);
+                        return true;
+                    }
+                    return true;
+                },
+                .not_numeric => {
+                    if (self.extraProps(obj)) |bag| {
+                        if (bag.asObject().value.getOwnRecord(key)) |rec| {
+                            if (rec.isAccessor()) {
+                                const setter = rec.setter orelse return false;
+                                const res = try setter.asFunction().value.call(setter.asFunction().value.ctx, self.gc_allocator, receiver, &.{value});
+                                res.deinit();
+                                return true;
+                            }
+                            if (!rec.descriptor.writable) return false;
+                            return setOnReceiver(self, receiver, key, value);
+                        }
+                    }
+                    const proto = typedArrayInstanceProto(self, obj);
+                    if (proto.isObject()) {
+                        var current: ?*const @TypeOf(proto.asObject().value) = &proto.asObject().value;
+                        while (current) |o| : (current = o.getPrototype()) {
+                            const rec = o.getOwnRecord(key) orelse continue;
+                            if (rec.isAccessor()) {
+                                const setter = rec.setter orelse return false;
+                                const res = try setter.asFunction().value.call(setter.asFunction().value.ctx, self.gc_allocator, receiver, &.{value});
+                                res.deinit();
+                                return true;
+                            }
+                            if (!rec.descriptor.writable) return false;
+                            break;
+                        }
+                    }
+                    return setOnReceiver(self, receiver, key, value);
+                },
+            }
+        },
+        .object => |box| {
+            var last_obj: *const @TypeOf(box.value) = &box.value;
+            var current: ?*const @TypeOf(box.value) = &box.value;
+            var found = false;
+            while (current) |o| : (current = o.getPrototype()) {
+                last_obj = o;
+                const rec = o.getOwnRecord(key) orelse continue;
+                found = true;
+                if (rec.isAccessor()) {
+                    const s = rec.setter orelse return false;
+                    const res = try s.asFunction().value.call(s.asFunction().value.ctx, self.gc_allocator, receiver, &.{value});
+                    res.deinit();
+                    return true;
+                }
+                if (!rec.descriptor.writable) return false;
+                break;
+            }
+            if (!found) {
+                const Box = @TypeOf(obj.asObject().*);
+                const last_box: *const Box = @fieldParentPtr("value", last_obj);
+                if (self.proto_refs.get(@intFromPtr(last_box))) |ext_proto| {
+                    if (!ext_proto.isObject() and !ext_proto.isNull()) {
+                        return self.setPropertyWithReceiver(ext_proto, key, value, receiver);
+                    }
+                }
+            }
+            return setOnReceiver(self, receiver, key, value);
+        },
+        .proxy => |box| {
+            if (try self.proxyTrap(box, "set")) |trap_fn| {
+                defer trap_fn.deinit();
+                const key_val = try property_desc.keyToValue(self, key);
+                defer key_val.deinit();
+                const result = try trap_fn.asFunction().value.call(trap_fn.asFunction().value.ctx, self.gc_allocator, box.value.handler, &.{ box.value.target, key_val, value, receiver });
+                defer result.deinit();
+                return coercion.isTruthy(result);
+            }
+            return self.setPropertyWithReceiver(box.value.target, key, value, receiver);
+        },
+        else => {
+            if (property_desc.sameValue(obj, receiver)) {
+                try self.setPropertyOnValue(obj, key, value);
+                return true;
+            }
+            return setOnReceiver(self, receiver, key, value);
+        },
+    }
+}
+
 /// Full `obj[key] = value` dispatch by receiver type -- factored out
 /// of `assignTo`'s `.member` case (which now just resolves `obj`/
 /// `key` from the AST and delegates here) so `Reflect.set` can reuse
@@ -772,7 +925,10 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
         // No trap: set directly on target, matching the narrow set
         // of receiver kinds this function already special-cases
         // above (function/array/regex/object).
-        return self.setPropertyOnValue(box.value.target, key, value);
+        if (!try self.setPropertyWithReceiver(box.value.target, key, value, obj)) {
+            return self.throwError(.type_error, "Cannot set property '{s}' on proxy target", .{key});
+        }
+        return;
     }
     if (!obj.isObject()) return self.throwError(.type_error, "Cannot add property {s} to a {s}: not supported yet", .{ key, @tagName(obj.tag()) });
     // Writing a property on `globalThis` creates/updates a global
@@ -932,8 +1088,9 @@ pub fn deletePropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8) 
         return true;
     }
     if (obj.isTypedArray()) {
-        return switch (canonicalNumericIndex(self.gc_allocator, key, obj.asTypedArray().value.len)) {
-            .valid_index => false,
+        const box = obj.asTypedArray();
+        return switch (canonicalNumericIndex(self.gc_allocator, key, box.value.len)) {
+            .valid_index => builtin_helpers.isTypedArrayDetached(&box.value),
             .invalid_index => true,
             .not_numeric => if (self.extraProps(obj)) |bag| try self.deleteObjectProperty(bag, key) else true,
         };

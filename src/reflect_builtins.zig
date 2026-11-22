@@ -57,8 +57,9 @@ fn reflectSet(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     const target = try reflectRequireObject(ctx, "set", arg(args, 0));
     const key = try self.encodeKey(arg(args, 1));
     defer allocator.free(key);
-    try self.setPropertyOnValue(target, key, arg(args, 2));
-    return JSValue.fromBool(true);
+    const receiver = if (args.len >= 4) args[3] else target;
+    const ok = try self.setPropertyWithReceiver(target, key, arg(args, 2), receiver);
+    return JSValue.fromBool(ok);
 }
 
 fn reflectHas(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {

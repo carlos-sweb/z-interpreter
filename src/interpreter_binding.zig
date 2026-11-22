@@ -1393,6 +1393,17 @@ pub fn evalForIn(self: *Interpreter, env: *Environment, head: anytype, body: *zs
                 if (step) |c| return c;
             }
         },
+        .typed_array => {
+            const ks = try builtins.ownEnumerableKeys(self, arena, target);
+            defer builtins.freeOwnedKeys(arena, ks);
+            for (ks) |k| {
+                if (Interpreter.isSymbolKey(k)) continue;
+                const kv = try self.gcNewString(k);
+                const step = try self.forIterationStep(env, head.binding, kv, body, labels);
+                kv.deinit();
+                if (step) |c| return c;
+            }
+        },
         else => {}, // incl. null/undefined: zero iterations, no error (spec)
     }
     return .{};

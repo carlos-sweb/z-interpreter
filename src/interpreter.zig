@@ -1122,6 +1122,7 @@ pub const Interpreter = struct {
     pub const setObjectProperty = interpreter_props.setObjectProperty;
     pub const deleteObjectProperty = interpreter_props.deleteObjectProperty;
     pub const setPropertyOnValue = interpreter_props.setPropertyOnValue;
+    pub const setPropertyWithReceiver = interpreter_props.setPropertyWithReceiver;
     pub const deletePropertyOnValue = interpreter_props.deletePropertyOnValue;
     pub const functionStatics = interpreter_props.functionStatics;
     pub const functionPrototype = interpreter_props.functionPrototype;
@@ -3011,6 +3012,43 @@ test "Phase 3.2: Uint8Array Base64 and Hex methods" {
         \\  sub[0] === 9 && sub[1] === 10 && sub[4] === 9 &&
         \\  fromHexArr[0] === 0xde && fromHexArr[3] === 0xef &&
         \\  detachErr && notOnInt8;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
+test "Phase 3.3: TypedArray exotic [[Set]], [[DefineOwnProperty]], [[Delete]] and Reflect.set" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\var ta = new Int32Array([10, 20]);
+        \\var calls = 0;
+        \\var badVal = { valueOf() { calls++; throw new Error("coerced"); } };
+        \\var other = {};
+        \\var r1 = Reflect.set(ta, "-1", badVal, other);
+        \\var r1NoCoerce = calls === 0;
+        \\var directCoerced = false;
+        \\try { ta["-1"] = badVal; } catch (e) { directCoerced = e.message === "coerced" && calls === 1; }
+        \\var r2 = Reflect.set(ta, "0", 99, other);
+        \\var r2Ok = r2 === true && ta[0] === 10 && other[0] === 99;
+        \\Object.defineProperty(ta, "foo", { value: 1, writable: false });
+        \\var r3 = Reflect.set(ta, "foo", 2) === false && ta.foo === 1;
+        \\var ab = new ArrayBuffer(8);
+        \\var dta = new Int32Array(ab);
+        \\$262.detachArrayBuffer(ab);
+        \\var delDetached = (delete dta[0]) === true;
+        \\var defDetached = Reflect.defineProperty(dta, "0", { value: 1, writable: true, enumerable: true, configurable: true }) === false;
+        \\var forInKeys = [];
+        \\ta.bar = 7;
+        \\Object.preventExtensions(ta);
+        \\Reflect.defineProperty(ta, "bar", { value: 8 });
+        \\for (var k in ta) forInKeys.push(k);
+        \\r1 === true && r1NoCoerce && directCoerced && r2Ok && r3 && delDetached && defDetached &&
+        \\  forInKeys.join(",") === "0,1,bar";
     );
     defer res.deinit();
     try testing.expect(res.isBool() and res.asBool());

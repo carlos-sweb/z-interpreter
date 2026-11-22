@@ -576,6 +576,7 @@ pub fn typedArrayDefineOwnProperty(self: *Interpreter, obj: JSValue, key: []cons
     const box = obj.asTypedArray();
     switch (@import("interpreter_props.zig").canonicalNumericIndex(self.gc_allocator, key, box.value.len)) {
         .valid_index => |idx| {
+            if (builtin_helpers.isTypedArrayDetached(&box.value)) return false;
             if (d.has_configurable and !d.configurable) return false;
             if (d.has_enumerable and !d.enumerable) return false;
             if (d.isAccessor()) return false;
