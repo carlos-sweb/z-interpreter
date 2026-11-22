@@ -1664,7 +1664,7 @@ test "a throw delivered at yield or yield* takes the resume value" {
     // would, to a fiber suspended at each kind of yield.
     const sources = [_][]const u8{
         "function* g() { yield 1; } var it = g(); it.next();",
-        "function* g() { yield* [1, 2]; } var it = g(); it.next();",
+        "function* g() { yield* { [Symbol.iterator]() { return { next() { return { value: 1, done: false }; }, throw(e) { throw e; } }; } }; } var it = g(); it.next();",
         "function* inner() { yield 1; } function* g() { yield* inner(); } var it = g(); it.next();",
     };
     for (sources) |src| {
@@ -2828,6 +2828,91 @@ test "Phase 2.2: strict GetMethod in resolveIterator/resolveAsyncIterator and As
     defer r2.deinit();
     try testing.expect(r2.isBool() and r2.asBool());
 }
+
+test "Phase 2.3a: sync yield* forwards .throw() and .return()" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    const res = try interp.run(
+        \\var log = [];
+        \\var inner = {
+        \\  [Symbol.iterator]() { return this; },
+        \\  next(v) { log.push("next:" + v); return { value: 1, done: false }; },
+        \\  throw(e) { log.push("throw:" + e); return { value: 2, done: false }; },
+        \\  return(v) { log.push("return:" + v); return { value: "ret:" + v, done: true }; }
+        \\};
+        \\function* g() { return yield* inner; }
+        \\var it = g();
+        \\var r1 = it.next("a");
+        \\var r2 = it.throw("err1");
+        \\var r3 = it.return("end");
+        \\log.join(",") === "next:undefined,throw:err1,return:end" &&
+        \\  r1.value === 1 && !r1.done &&
+        \\  r2.value === 2 && !r2.done &&
+        \\  r3.value === "ret:end" && r3.done;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
+test "Phase 2.3b: sync yield* without .throw() closes iterator and throws TypeError" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    const res = try interp.run(
+        \\var closed = 0;
+        \\var inner = {
+        \\  [Symbol.iterator]() { return this; },
+        \\  next() { return { value: 1, done: false }; },
+        \\  return() { closed++; return { done: true }; }
+        \\};
+        \\function* g() { yield* inner; }
+        \\var it = g();
+        \\it.next();
+        \\var threwTypeError = false;
+        \\try { it.throw("boom"); } catch (e) { threwTypeError = e instanceof TypeError; }
+        \\closed === 1 && threwTypeError && it.next().done;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
+test "Phase 2.3c: async yield* forwards .return() to sync and async iterators" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    const r1 = try interp.run(
+        \\var syncRetVal = null;
+        \\var syncFinal = null;
+        \\var syncIter = {
+        \\  [Symbol.iterator]() { return this; },
+        \\  next() { return { value: 10, done: false }; },
+        \\  return(v) { return { value: "sync:" + v, done: true }; }
+        \\};
+        \\async function* agSync() { yield* syncIter; }
+        \\async function runTest() {
+        \\  var it = agSync();
+        \\  await it.next();
+        \\  syncRetVal = await it.return(42);
+        \\  syncFinal = await it.next();
+        \\}
+        \\runTest();
+        \\true;
+    );
+    defer r1.deinit();
+    const r2 = try interp.run(
+        \\syncRetVal !== null && syncRetVal.value === "sync:42" && syncRetVal.done === true && syncFinal.done === true;
+    );
+    defer r2.deinit();
+    try testing.expect(r2.isBool() and r2.asBool());
+}
+
 
 
 

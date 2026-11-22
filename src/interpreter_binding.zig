@@ -203,65 +203,177 @@ pub fn drainIterator(self: *Interpreter, iter: JSValue) anyerror![]const JSValue
     return out.toOwnedSlice(arena);
 }
 
-/// `yield* iterable`: drives an inner iterable, re-yielding each of
-/// its values from the current (outer) generator and forwarding the
-/// outer's resume value into the inner. Narrowed to iterator-protocol
-/// objects (callable `next`), arrays, and strings -- no arbitrary
-/// Symbol.iterator. The expression's own value is the inner
-/// iterator's return value (arrays/strings: undefined).
+fn iteratorComplete(self: *Interpreter, step: JSValue) anyerror!bool {
+    const done = try self.getProperty(step, "done");
+    defer done.deinit();
+    return coercion.isTruthy(done);
+}
+
+fn awaitValueAndDeinit(self: *Interpreter, fs: *FiberState, val: JSValue) anyerror!JSValue {
+    const aw = self.awaitValue(fs, val) catch |err| {
+        val.deinit();
+        return err;
+    };
+    val.deinit();
+    return aw;
+}
+
+/// `yield* iterable`: ECMA-262 15.5.5 spec-compliant delegation for both sync
+/// and async generators, forwarding `.next(v)`, `.throw(e)` (closing the
+/// inner iterator and raising TypeError if `.throw` is missing), and
+/// `.return(v)`.
 pub fn evalYieldDelegate(self: *Interpreter, env: *Environment, fs: *FiberState, arg_node: *zparser.Node) anyerror!JSValue {
     const arena = self.gc_allocator;
     const iterable = try self.evalExpression(env, arg_node);
     defer iterable.deinit();
 
-    // Iterator-protocol object: forward next(resume), return the
-    // completion value.
-    if (iterable.isObject()) {
-        const next_fn = try self.getProperty(iterable, "next");
-        defer next_fn.deinit();
-        if (next_fn.isFunction()) {
-            var resume_value = JSValue.UNDEFINED;
-            while (true) {
-                const step = try next_fn.asFunction().value.call(next_fn.asFunction().value.ctx, arena, iterable, &.{resume_value});
-                defer step.deinit();
-                if (!step.isObject()) return self.throwError(.type_error, "Iterator result {s} is not an object", .{step.typeOf()});
-                const done = try self.getProperty(step, "done");
-                defer done.deinit();
-                if (coercion.isTruthy(done)) {
-                    return self.getProperty(step, "value");
-                }
-                // fs.yielded's own disposal contract is shared with the
-                // plain `yield expr` path (interpreter_expr.zig's
-                // `.yield_expr` case) and the resumeFiber/generatorNext
-                // consumers that read it back out -- not touched here,
-                // see statement-completion-value-leak.md-adjacent note
-                // in this session's plan docs.
-                fs.yielded = try self.getProperty(step, "value");
-                fs.fiber.suspendSelf();
-                if (fs.resume_is_throw) {
-                    fs.resume_is_throw = false;
-                    return self.throwValue(fs.takeResumeValue());
-                }
-                // Borrowed: the slot keeps owning it until the next
-                // resume replaces it (setResumeValue), after it is used.
-                resume_value = fs.resume_value;
+    // Fast path for built-in non-object iterables (strings, sets, maps,
+    // typed arrays, and intact arrays in sync generators).
+    const use_builtin_fast = !fs.is_async and (isIntactArrayIterator(self, iterable) or iterable.isString() or iterable.isSet() or iterable.isMap() or iterable.isTypedArray());
+    if (use_builtin_fast or (!iterable.isObject() and !iterable.isArray() and (iterable.isString() or iterable.isSet() or iterable.isMap() or iterable.isTypedArray()))) {
+        const items = try self.iterableItems(iterable);
+        defer arena.free(items);
+        for (items) |item| {
+            var v = item.retain();
+            if (fs.is_async) v = try awaitValueAndDeinit(self, fs, v);
+            fs.yielded = v;
+            fs.fiber.suspendSelf();
+            if (fs.resume_is_return) {
+                fs.resume_is_return = false;
+                if (self.pending_return) |pr| pr.deinit();
+                var rv = fs.takeResumeValue();
+                if (fs.is_async) rv = try awaitValueAndDeinit(self, fs, rv);
+                self.pending_return = rv;
+                return error.JsReturn;
             }
+            if (fs.resume_is_throw) {
+                fs.resume_is_throw = false;
+                fs.takeResumeValue().deinit();
+                return self.throwError(.type_error, "The iterator does not provide a 'throw' method", .{});
+            }
+            fs.takeResumeValue().deinit();
         }
+        return JSValue.UNDEFINED;
     }
 
-    // Arrays and strings: re-yield each element (resume value is not
-    // fed anywhere -- they aren't real iterators).
-    const items = try self.iterableItems(iterable);
-    defer arena.free(items);
-    for (items) |item| {
-        fs.yielded = item;
-        fs.fiber.suspendSelf();
-        if (fs.resume_is_throw) {
-            fs.resume_is_throw = false;
-            return self.throwValue(fs.takeResumeValue());
-        }
+    if (!@import("builtin_helpers.zig").isObjectLike(iterable)) {
+        return self.throwError(.type_error, "{s} is not iterable", .{iterable.typeOf()});
     }
-    return JSValue.UNDEFINED;
+
+    const resolved = if (fs.is_async)
+        try resolveAsyncIteratorDetail(self, iterable)
+    else
+        ResolvedAsyncIter{ .iter = try self.resolveIterator(iterable), .is_async = false };
+    const iter = resolved.iter;
+    defer iter.deinit();
+    const is_async_iter = resolved.is_async;
+
+    const next_fn = try self.getProperty(iter, "next");
+    defer next_fn.deinit();
+
+    const ResumeKind = enum { normal, throw, @"return" };
+    var resume_kind: ResumeKind = .normal;
+    var resume_val: JSValue = JSValue.UNDEFINED;
+    defer resume_val.deinit();
+
+    while (true) {
+        var inner_result: JSValue = undefined;
+        var close_on_sync_reject = false;
+        switch (resume_kind) {
+            .normal => {
+                if (!isCallableVal(next_fn)) {
+                    return self.throwError(.type_error, "iterator.next is not a function", .{});
+                }
+                inner_result = try self.callValue(next_fn, iter, &.{resume_val}, "next");
+                close_on_sync_reject = true;
+            },
+            .throw => {
+                const throw_fn = try self.getProperty(iter, "throw");
+                defer throw_fn.deinit();
+                if (throw_fn.isUndefined() or throw_fn.isNull()) {
+                    if (fs.is_async and is_async_iter) {
+                        try closeAsyncIteratorNormal(self, fs, iter);
+                    } else {
+                        try closeIterator(self, iter);
+                    }
+                    return self.throwError(.type_error, "The iterator does not provide a 'throw' method", .{});
+                }
+                if (!isCallableVal(throw_fn)) {
+                    return self.throwError(.type_error, "iterator.throw is not a function", .{});
+                }
+                inner_result = try self.callValue(throw_fn, iter, &.{resume_val}, "throw");
+                close_on_sync_reject = true;
+            },
+            .@"return" => {
+                const return_fn = try self.getProperty(iter, "return");
+                defer return_fn.deinit();
+                if (return_fn.isUndefined() or return_fn.isNull()) {
+                    if (fs.is_async) {
+                        resume_val = try awaitValueAndDeinit(self, fs, resume_val);
+                    }
+                    if (self.pending_return) |pr| pr.deinit();
+                    self.pending_return = resume_val;
+                    resume_val = JSValue.UNDEFINED;
+                    return error.JsReturn;
+                }
+                if (!isCallableVal(return_fn)) {
+                    return self.throwError(.type_error, "iterator.return is not a function", .{});
+                }
+                inner_result = try self.callValue(return_fn, iter, &.{resume_val}, "return");
+                close_on_sync_reject = false;
+            },
+        }
+        if (fs.is_async and is_async_iter) {
+            inner_result = try awaitValueAndDeinit(self, fs, inner_result);
+        }
+        defer inner_result.deinit();
+        if (!@import("builtin_helpers.zig").isObjectLike(inner_result)) {
+            return self.throwError(.type_error, "Iterator result {s} is not an object", .{inner_result.typeOf()});
+        }
+        const done = try iteratorComplete(self, inner_result);
+        var val = try self.getProperty(inner_result, "value");
+        if (done) {
+            if (fs.is_async and !is_async_iter) {
+                val = try awaitValueAndDeinit(self, fs, val);
+            }
+            if (resume_kind == .@"return") {
+                if (self.pending_return) |pr| pr.deinit();
+                self.pending_return = val;
+                return error.JsReturn;
+            }
+            return val;
+        }
+        if (fs.is_async and !is_async_iter) {
+            const aw = self.awaitValue(fs, val) catch |err| {
+                val.deinit();
+                if (close_on_sync_reject) {
+                    if (err == error.JsReturn) {
+                        try closeIteratorOnReturn(self, iter);
+                    } else {
+                        closeIteratorOnThrow(self, iter);
+                    }
+                }
+                return err;
+            };
+            val.deinit();
+            val = aw;
+        } else if (fs.is_async and is_async_iter) {
+            val = try awaitValueAndDeinit(self, fs, val);
+        }
+        fs.yielded = val;
+        fs.fiber.suspendSelf();
+        if (fs.resume_is_return) {
+            fs.resume_is_return = false;
+            resume_kind = .@"return";
+        } else if (fs.resume_is_throw) {
+            fs.resume_is_throw = false;
+            resume_kind = .throw;
+        } else {
+            resume_kind = .normal;
+        }
+        resume_val.deinit();
+        resume_val = fs.takeResumeValue();
+    }
 }
 
 /// How bindPattern lands a name: `.define` creates the binding in
