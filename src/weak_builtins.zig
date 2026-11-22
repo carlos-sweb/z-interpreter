@@ -78,29 +78,7 @@ fn weakCollectionConstructor(comptime is_map: bool) NativeFn {
             const o = try newInstance(self, ctx, this_value, name);
             const empty: interpreter_mod.WeakTable = .empty;
             try self.object_slots.put(self.gc_allocator, @intFromPtr(o.asObject()), if (is_map) .{ .weak_map = empty } else .{ .weak_set = empty });
-            const iterable = arg(args, 0);
-            if (iterable.tag() == .undefined or iterable.tag() == .null) return o.retain();
-            // AddEntriesFromIterable / the WeakSet loop: the adder is looked
-            // up once, on the new object, and called per element.
-            const adder = try self.getProperty(o, if (is_map) "set" else "add");
-            defer adder.deinit();
-            if (adder.tag() != .function) return self.throwError(.type_error, "'" ++ (if (is_map) "set" else "add") ++ "' returned for " ++ name ++ " is not a function", .{});
-            const items = try self.iterableItems(iterable);
-            defer self.gc_allocator.free(items);
-            for (items) |item| {
-                if (is_map) {
-                    if (!isObjectLike(item)) return self.throwError(.type_error, "Iterator value is not an entry object", .{});
-                    const k = try self.getProperty(item, "0");
-                    defer k.deinit();
-                    const v = try self.getProperty(item, "1");
-                    defer v.deinit();
-                    const r = try self.callValue(adder, o, &.{ k, v }, "set");
-                    r.deinit();
-                } else {
-                    const r = try self.callValue(adder, o, &.{item}, "add");
-                    r.deinit();
-                }
-            }
+            try @import("iterator_builtins.zig").addEntriesFromIterable(self, o, arg(args, 0), is_map, name);
             return o.retain();
         }
     }.call;

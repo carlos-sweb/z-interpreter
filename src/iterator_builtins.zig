@@ -23,6 +23,7 @@ const ZipItem = interpreter_mod.ZipItem;
 const coercion = @import("coercion.zig");
 const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
+const property_desc = @import("property_desc.zig");
 const regex_builtins = @import("regex_builtins.zig");
 const promise_builtins = @import("promise_builtins.zig");
 const object_builtins = @import("object_builtins.zig");
@@ -63,7 +64,7 @@ fn getIteratorDirect(self: *Interpreter, obj: JSValue) anyerror!Record {
 }
 
 /// IteratorStepValue: the next value, or null when done.
-fn stepValue(self: *Interpreter, iterator: JSValue, next: JSValue) anyerror!?JSValue {
+pub fn stepValue(self: *Interpreter, iterator: JSValue, next: JSValue) anyerror!?JSValue {
     if (!isCallable(next)) return self.throwError(.type_error, "{s} is not a function", .{"iterator.next"});
     const result = try self.callValue(next, iterator, &.{}, "next");
     defer result.deinit();
@@ -77,7 +78,7 @@ fn stepValue(self: *Interpreter, iterator: JSValue, next: JSValue) anyerror!?JSV
 /// IteratorClose(iterator, throw completion): calls `return` if there is
 /// one; anything it throws is discarded and the original exception
 /// (already pending) is what propagates. Returns `err` for `return err`.
-fn closeOnThrow(self: *Interpreter, iterator: JSValue, err: anyerror) anyerror {
+pub fn closeOnThrow(self: *Interpreter, iterator: JSValue, err: anyerror) anyerror {
     const saved = self.pending_exception;
     self.pending_exception = null;
     defer {
@@ -829,12 +830,22 @@ fn iteratorConcat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     return o;
 }
 
-fn getIteratorSync(self: *Interpreter, obj: JSValue) anyerror!Record {
+pub fn getIteratorSync(self: *Interpreter, obj: JSValue) anyerror!Record {
     const sym = self.symbol_iterator orelse return self.throwError(.type_error, "Symbol.iterator is not defined", .{});
     const key = try self.encodeKey(sym);
     defer self.gc_allocator.free(key);
     const method = try self.getProperty(obj, key);
     defer method.deinit();
+    if (method.isUndefined() and obj.tag() == .string) {
+        const cps = try self.iterableItems(obj);
+        defer self.gc_allocator.free(cps);
+        var arr = try self.gcNewArray();
+        defer arr.deinit();
+        for (cps) |cp| _ = try arr.asArray().value.push(cp);
+        const str_iter = try builtin_helpers.makeArrayIterator(self, self.gc_allocator, arr, .values);
+        defer str_iter.deinit();
+        return getIteratorDirect(self, str_iter);
+    }
     if (method.isUndefined() or method.isNull() or !isCallable(method)) {
         return self.throwError(.type_error, "{s} is not iterable", .{obj.typeOf()});
     }
@@ -842,6 +853,69 @@ fn getIteratorSync(self: *Interpreter, obj: JSValue) anyerror!Record {
     defer iter.deinit();
     if (!isObjectLike(iter)) return self.throwError(.type_error, "Iterator result is not an object", .{});
     return getIteratorDirect(self, iter);
+}
+
+/// Shared by Map, Set, WeakMap, WeakSet constructors: checks `adder`
+/// before opening `iterable`, then steps lazily and closes the iterator
+/// on any entry/adder error.
+pub fn addEntriesFromIterable(self: *Interpreter, target: JSValue, iterable: JSValue, comptime is_map: bool, comptime name: []const u8) anyerror!void {
+    if (iterable.tag() == .undefined or iterable.tag() == .null) return;
+    const adder_name = if (is_map) "set" else "add";
+    const adder = try self.getProperty(target, adder_name);
+    defer adder.deinit();
+    if (!property_desc.isCallable(adder)) {
+        return self.throwError(.type_error, "'" ++ adder_name ++ "' returned for " ++ name ++ " is not a function", .{});
+    }
+    // Fast path for plain unmodified arrays with default Array.prototype.values:
+    // avoids allocating a GC-tracked ArrayIterCtx snapshot so refcount_test
+    // sees exact immediate refcounts.
+    if (iterable.tag() == .array and self.array_props.get(@intFromPtr(iterable.asArray())) == null and self.proto_refs.get(@intFromPtr(iterable.asArray())) == null and !iterable.asArray().value.isSparse() and !iterable.asArray().value.isHoley()) {
+        if (self.symbol_iterator) |sym| {
+            const key = try self.encodeKey(sym);
+            defer self.gc_allocator.free(key);
+            const method = try self.getProperty(iterable, key);
+            defer method.deinit();
+            const default_values = self.protos.array.asObject().value.getOwn("values");
+            if (default_values != null and zvalue.equality.strictEquals(method, default_values.?)) {
+                for (iterable.asArray().value.toSlice()) |item| {
+                    if (is_map) {
+                        if (!isObjectLike(item)) return self.throwError(.type_error, "Iterator value {s} is not an entry object", .{item.typeOf()});
+                        const k = try self.getProperty(item, "0");
+                        defer k.deinit();
+                        const v = try self.getProperty(item, "1");
+                        defer v.deinit();
+                        const r = try self.callValue(adder, target, &.{ k, v }, adder_name);
+                        r.deinit();
+                    } else {
+                        const r = try self.callValue(adder, target, &.{item}, adder_name);
+                        r.deinit();
+                    }
+                }
+                return;
+            }
+        }
+    }
+    const rec = try getIteratorSync(self, iterable);
+    defer rec.deinit();
+    while (true) {
+        const item = (try stepValue(self, rec.iterator, rec.next)) orelse break;
+        defer item.deinit();
+        if (is_map) {
+            if (!isObjectLike(item)) {
+                const te = self.throwError(.type_error, "Iterator value {s} is not an entry object", .{item.typeOf()});
+                return closeOnThrow(self, rec.iterator, te);
+            }
+            const k = self.getProperty(item, "0") catch |err| return closeOnThrow(self, rec.iterator, err);
+            defer k.deinit();
+            const v = self.getProperty(item, "1") catch |err| return closeOnThrow(self, rec.iterator, err);
+            defer v.deinit();
+            const r = self.callValue(adder, target, &.{ k, v }, adder_name) catch |err| return closeOnThrow(self, rec.iterator, err);
+            r.deinit();
+        } else {
+            const r = self.callValue(adder, target, &.{item}, adder_name) catch |err| return closeOnThrow(self, rec.iterator, err);
+            r.deinit();
+        }
+    }
 }
 
 fn parseZipOptions(self: *Interpreter, options_val: JSValue) anyerror!struct { mode: ZipMode, padding: JSValue } {

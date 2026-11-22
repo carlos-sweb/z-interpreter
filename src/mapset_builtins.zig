@@ -12,6 +12,7 @@ const Interpreter = interpreter_mod.Interpreter;
 const coercion = @import("coercion.zig");
 const native_helpers = @import("native_helpers.zig");
 const builtin_helpers = @import("builtin_helpers.zig");
+const iterator_builtins = @import("iterator_builtins.zig");
 
 pub const NativeFn = native_helpers.NativeFn;
 const MethodSpec = native_helpers.MethodSpec;
@@ -68,23 +69,9 @@ fn mapConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     _ = this_value;
     const self = interp(ctx);
     if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor Map requires 'new'", .{});
-    var m = try interp(ctx).gcNewMap();
-    const init = arg(args, 0);
-    if (init.tag() != .undefined and init.tag() != .null) {
-        const items = try self.iterableItems(init);
-        defer self.gc_allocator.free(items);
-        for (items) |entry| {
-            if (entry.tag() != .array and entry.tag() != .object) return self.throwError(.type_error, "Iterator value {s} is not an entry object", .{entry.typeOf()});
-            // getProperty hands back owned references: they move into
-            // the map (mapSet consumes both, also on error).
-            const k = try self.getProperty(entry, "0");
-            const v = self.getProperty(entry, "1") catch |err| {
-                k.deinit();
-                return err;
-            };
-            try m.mapSet(k, v);
-        }
-    }
+    var m = try self.gcNewMap();
+    errdefer m.deinit();
+    try iterator_builtins.addEntriesFromIterable(self, m, arg(args, 0), true, "Map");
     return m;
 }
 
@@ -93,16 +80,9 @@ fn setConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     _ = this_value;
     const self = interp(ctx);
     if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor Set requires 'new'", .{});
-    var s = try interp(ctx).gcNewSet();
-    const init = arg(args, 0);
-    if (init.tag() != .undefined and init.tag() != .null) {
-        const items = try self.iterableItems(init);
-        defer self.gc_allocator.free(items);
-        // iterableItems' ownership is mixed (borrowed for array/set
-        // sources, owned for string/iterator ones); this retain is right
-        // for the borrowed case only. Pre-existing, left as is.
-        for (items) |v| try s.setAdd(v.retain());
-    }
+    var s = try self.gcNewSet();
+    errdefer s.deinit();
+    try iterator_builtins.addEntriesFromIterable(self, s, arg(args, 0), false, "Set");
     return s;
 }
 

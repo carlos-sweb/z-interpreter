@@ -225,6 +225,7 @@ fn arraySpeciesCreate(self: *Interpreter, allocator: Allocator, original: JSValu
         }
     }
     if (!try isArrayValue(self, original)) {
+        if (len > 4_294_967_295) return self.throwError(.range_error, "Invalid array length", .{});
         return .{ .arr = try self.gcNewArray(), .is_default = true };
     }
     var ctor = try self.getProperty(original, "constructor");
@@ -241,6 +242,7 @@ fn arraySpeciesCreate(self: *Interpreter, allocator: Allocator, original: JSValu
         }
     }
     if (ctor.tag() == .undefined) {
+        if (len > 4_294_967_295) return self.throwError(.range_error, "Invalid array length", .{});
         return .{ .arr = try self.gcNewArray(), .is_default = true };
     }
     if (!self.isConstructor(ctor)) {
@@ -248,6 +250,7 @@ fn arraySpeciesCreate(self: *Interpreter, allocator: Allocator, original: JSValu
     }
     if (self.global_env.get("Array")) |array_ctor| {
         if (zvalue.equality.strictEquals(ctor, array_ctor)) {
+            if (len > 4_294_967_295) return self.throwError(.range_error, "Invalid array length", .{});
             return .{ .arr = try self.gcNewArray(), .is_default = true };
         }
     }
@@ -1283,6 +1286,7 @@ fn arrayWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
         if (actual_index >= len) return interp(ctx).throwError(.range_error, "Invalid index", .{});
         break :blk @intCast(actual_index);
     };
+    if (len > 4_294_967_295) return interp(ctx).throwError(.range_error, "Invalid array length", .{});
     const value = arg(args, 1);
     var result = try interp(ctx).gcNewArray();
     var i: usize = 0;
@@ -1351,14 +1355,24 @@ fn arraySplice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     if (len - actual_delete_count > MAX_ARRAY_LIKE_LEN - items.len) {
         return self.throwError(.type_error, "Invalid array length", .{});
     }
-    var removed = try self.gcNewArray();
+    const sp = try arraySpeciesCreate(self, allocator, obj, actual_delete_count);
+    var removed = sp.arr;
+    errdefer removed.deinit();
     var k: usize = 0;
     while (k < actual_delete_count) : (k += 1) {
         if (try arrayLikeElem(ctx, allocator, obj, actual_start + k)) |v| {
-            _ = try removed.asArray().value.push(v);
-        } else {
+            if (sp.is_default) {
+                _ = try removed.asArray().value.push(v);
+            } else {
+                defer v.deinit();
+                try createDataPropertyOrThrow(self, removed, k, v);
+            }
+        } else if (sp.is_default) {
             try removed.asArray().value.appendHole();
         }
+    }
+    if (!sp.is_default) {
+        try setArrayLikeLength(self, removed, actual_delete_count);
     }
     if (items.len < actual_delete_count) {
         var from = actual_start + actual_delete_count;

@@ -3315,6 +3315,38 @@ test "Phase 4.2b: Iterator.zip and Iterator.zipKeyed" {
     try testing.expect(res.isBool() and res.asBool());
 }
 
+test "Phase 4.3: lazy Map/WeakMap/Set/WeakSet iterator close and Array splice/with limits" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\var closes = 0;
+        \\var infBadEntry = { [Symbol.iterator]() { return { next() { return { value: 123, done: false }; }, return() { closes++; return {}; } }; } };
+        \\var mapErr = false;
+        \\try { new Map(infBadEntry); } catch (e) { mapErr = e instanceof TypeError; }
+        \\var wmapErr = false;
+        \\try { new WeakMap(infBadEntry); } catch (e) { wmapErr = e instanceof TypeError; }
+        \\var infPrim = { [Symbol.iterator]() { return { next() { return { value: 1, done: false }; }, return() { closes++; return {}; } }; } };
+        \\var wsetErr = false;
+        \\try { new WeakSet(infPrim); } catch (e) { wsetErr = e instanceof TypeError; }
+        \\var setErr = false;
+        \\var origAdd = Set.prototype.add;
+        \\Set.prototype.add = function() { throw new RangeError("boom"); };
+        \\try { new Set(infPrim); } catch (e) { setErr = e instanceof RangeError; }
+        \\Set.prototype.add = origAdd;
+        \\var spliceRange = false;
+        \\try { Array.prototype.splice.call({ length: 2 ** 32 }, 0); } catch (e) { spliceRange = e instanceof RangeError; }
+        \\var withRange = false;
+        \\try { Array.prototype.with.call({ length: 2 ** 32 }, 0, 1); } catch (e) { withRange = e instanceof RangeError; }
+        \\mapErr && wmapErr && wsetErr && setErr && closes === 4 && spliceRange && withRange;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
 
 
 
