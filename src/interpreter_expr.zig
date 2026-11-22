@@ -112,7 +112,7 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
             var arr = try self.gcNewArray();
             for (elements) |maybe_el| {
                 const el = maybe_el orelse {
-                    _ = try arr.asArray().value.push(JSValue.UNDEFINED);
+                    try arr.asArray().value.appendHole();
                     continue;
                 };
                 if (el.data == .spread) {

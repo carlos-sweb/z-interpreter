@@ -83,7 +83,15 @@ pub fn hasProperty(self: *Interpreter, v: JSValue, key: []const u8) anyerror!boo
                     if (self.global_var_names.contains(key) or self.global_env.declaresLocally(key) or box.value.hasOwnProperty(key)) return true;
                 }
             }
-            return box.value.has(key);
+            if (box.value.has(key)) return true;
+            var last_obj: *const @TypeOf(box.value) = &box.value;
+            while (last_obj.getPrototype()) |p| last_obj = p;
+            const Box = @TypeOf(v.asObject().*);
+            const last_box: *const Box = @fieldParentPtr("value", last_obj);
+            if (self.proto_refs.get(@intFromPtr(last_box))) |ext_proto| {
+                if (!ext_proto.isNull()) return try hasProperty(self, ext_proto, key);
+            }
+            return false;
         },
         .proxy => {
             const k = try self.gcNewString(key);
@@ -99,7 +107,12 @@ pub fn hasProperty(self: *Interpreter, v: JSValue, key: []const u8) anyerror!boo
         switch (cur.unpack()) {
             .object => |box| {
                 if (box.value.hasOwnProperty(key)) return true;
-                const p = box.value.getPrototype() orelse return false;
+                const p = box.value.getPrototype() orelse {
+                    if (self.proto_refs.get(@intFromPtr(box))) |ext_proto| {
+                        if (!ext_proto.isNull()) return try hasProperty(self, ext_proto, key);
+                    }
+                    return false;
+                };
                 const Box = @TypeOf(box.*);
                 const p_box: *Box = @fieldParentPtr("value", p);
                 const next = (JSValue.fromObject(p_box)).retain();

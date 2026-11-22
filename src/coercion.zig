@@ -12,6 +12,23 @@ pub fn isTruthy(v: JSValue) bool {
     return v.isTruthy();
 }
 
+fn parseRadixLiteral(digits: []const u8, base: u8) f64 {
+    if (digits.len == 0) return std.math.nan(f64);
+    var acc: f64 = 0;
+    const fbase: f64 = @floatFromInt(base);
+    for (digits) |c| {
+        const d: u8 = switch (c) {
+            '0'...'9' => c - '0',
+            'a'...'f' => c - 'a' + 10,
+            'A'...'F' => c - 'A' + 10,
+            else => return std.math.nan(f64),
+        };
+        if (d >= base) return std.math.nan(f64);
+        acc = acc * fbase + @as(f64, @floatFromInt(d));
+    }
+    return acc;
+}
+
 /// ECMA-262 ToNumber, narrowed to the primitives this phase's operators
 /// need. Real ToPrimitive (valueOf/Symbol.toPrimitive) doesn't exist in
 /// this ecosystem yet, so object-shaped values are `error.NotImplemented`.
@@ -39,6 +56,17 @@ pub fn toNumber(v: JSValue) !f64 {
         .string => |box| blk: {
             const trimmed = std.mem.trim(u8, box.value.data, " \t\n\r\x0b\x0c");
             if (trimmed.len == 0) break :blk 0;
+            if (trimmed.len >= 3 and (trimmed[0] == '+' or trimmed[0] == '-') and trimmed[1] == '0') {
+                const p = trimmed[2];
+                if (p == 'x' or p == 'X' or p == 'b' or p == 'B' or p == 'o' or p == 'O') {
+                    break :blk std.math.nan(f64);
+                }
+            }
+            if (trimmed.len >= 2 and trimmed[0] == '0') {
+                if (trimmed[1] == 'x' or trimmed[1] == 'X') break :blk parseRadixLiteral(trimmed[2..], 16);
+                if (trimmed[1] == 'b' or trimmed[1] == 'B') break :blk parseRadixLiteral(trimmed[2..], 2);
+                if (trimmed[1] == 'o' or trimmed[1] == 'O') break :blk parseRadixLiteral(trimmed[2..], 8);
+            }
             break :blk znumber.ParsingMethods.parseFloat(box.value.data);
         },
         // Number(date) is its millisecond timestamp (real ToPrimitive

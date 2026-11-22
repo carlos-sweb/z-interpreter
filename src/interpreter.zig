@@ -3470,6 +3470,32 @@ test "Phase 5.2a: liveElem prototype holes and Array.prototype.indexOf/lastIndex
     try testing.expect(res.isBool() and res.asBool());
 }
 
+test "Phase 5.2b: elision/Array(len) holes, Array proto indices in hasProperty, 0x/0b/0o toNumber" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\var e = [, 1];
+        \\var elisionOk = !(0 in e) && (1 in e) && e.length === 2 && e[0] === undefined;
+        \\var a = new Array(3);
+        \\var newArrOk = !(0 in a) && a.length === 3;
+        \\var reduceThrew = false;
+        \\try { a.reduce(function(x, y) { return x + y; }); } catch (err) { reduceThrew = err instanceof TypeError; }
+        \\var sub = Object.create([10, 20]);
+        \\var sum = 0;
+        \\Array.prototype.forEach.call(sub, function(v) { sum += v; });
+        \\var protoOk = (0 in sub) && !(2 in sub) && sum === 30;
+        \\var numOk = Number("0x0002") === 2 && Number("0b101") === 5 && Number("0o77") === 63 &&
+        \\  Number.isNaN(Number("-0x1")) && Number.isNaN(Number("+0x1")) && Number.isNaN(Number("0x"));
+        \\elisionOk && newArrOk && reduceThrew && protoOk && numOk;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
 
 
 

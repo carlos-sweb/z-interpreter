@@ -814,9 +814,8 @@ fn arrayConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
         if (n < 0 or n != @trunc(n) or n > 4294967294.0) {
             return self.throwError(.range_error, "Invalid array length", .{});
         }
-        var i: usize = 0;
-        const len: usize = @intFromFloat(n);
-        while (i < len) : (i += 1) _ = try result.asArray().value.push(JSValue.UNDEFINED);
+        const len: u32 = @intFromFloat(n);
+        try result.asArray().value.setLength(len);
         return result;
     }
     for (args) |a| _ = try result.asArray().value.push(a.retain());
