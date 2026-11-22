@@ -191,6 +191,40 @@ fn aggregateErrorConstructor(ctx: *anyopaque, allocator: Allocator, this_value: 
     return o;
 }
 
+pub fn newSuppressedError(self: *Interpreter, err_val: JSValue, suppressed_val: JSValue, message: ?[]const u8) !JSValue {
+    var o = try self.gcNewObject();
+    errdefer o.deinit();
+    o.asObject().value.is_error_data = true;
+    try o.asObject().value.setPrototype(&self.protos.suppressed_error.asObject().value);
+    if (message) |m| try o.asObject().value.defineProperty("message", try self.gcNewString(m), hidden);
+    try o.asObject().value.defineProperty("error", err_val.retain(), hidden);
+    try o.asObject().value.defineProperty("suppressed", suppressed_val.retain(), hidden);
+    return o;
+}
+
+/// SuppressedError(error, suppressed, message), with or without `new`:
+/// message first, then `error` and `suppressed` own properties.
+fn suppressedErrorConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self = interp(ctx);
+    const o: JSValue = if (self.construct_target == ctx and this_value.tag() == .object) this_value.retain() else blk: {
+        var fresh = try self.gcNewObject();
+        try fresh.asObject().value.setPrototype(&self.protos.suppressed_error.asObject().value);
+        break :blk fresh;
+    };
+    errdefer o.deinit();
+    o.asObject().value.is_error_data = true;
+    const msg_v = arg(args, 2);
+    if (msg_v.tag() != .undefined) {
+        if (msg_v.tag() == .symbol) return self.throwError(.type_error, "Cannot convert a Symbol value to a string", .{});
+        const m = try self.toDisplayStringJS(allocator, msg_v);
+        defer allocator.free(m);
+        try o.asObject().value.defineProperty("message", try self.gcNewString(m), hidden);
+    }
+    try o.asObject().value.defineProperty("error", arg(args, 0).retain(), hidden);
+    try o.asObject().value.defineProperty("suppressed", arg(args, 1).retain(), hidden);
+    return o;
+}
+
 /// The `AggregateError` global and its prototype, and NativeError
 /// prototypes chained to Error.prototype. Runs from materializeProtos,
 /// once Error.prototype exists.
@@ -224,4 +258,12 @@ pub fn installAggregate(self: *Interpreter) !void {
     try proto.asObject().value.defineProperty("name", try self.gcNewString("AggregateError"), hidden);
     try proto.asObject().value.defineProperty("message", try self.gcNewString(""), hidden);
     self.protos.aggregate_error = proto;
+
+    const sctor = try builtin_helpers.installBuiltin(self, .{ .name = "SuppressedError", .ctor = .{ .arity = 3, .call = suppressedErrorConstructor, .constructable = true } });
+    const sproto = try self.functionPrototype(sctor);
+    try sproto.asObject().value.setPrototype(&self.protos.@"error".asObject().value);
+    try sproto.asObject().value.defineProperty("constructor", sctor.retain(), hidden);
+    try sproto.asObject().value.defineProperty("name", try self.gcNewString("SuppressedError"), hidden);
+    try sproto.asObject().value.defineProperty("message", try self.gcNewString(""), hidden);
+    self.protos.suppressed_error = sproto;
 }

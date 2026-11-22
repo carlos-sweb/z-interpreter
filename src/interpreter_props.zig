@@ -7,6 +7,7 @@ const std = @import("std");
 const regex_builtins = @import("regex_builtins.zig");
 const accessor_builtins = @import("accessor_builtins.zig");
 const weak_builtins = @import("weak_builtins.zig");
+const disposable_builtins = @import("disposable_builtins.zig");
 const error_builtins = @import("error_builtins.zig");
 const iterator_builtins = @import("iterator_builtins.zig");
 const zvalue = @import("zvalue");
@@ -1403,4 +1404,5 @@ pub fn materializeProtos(self: *Interpreter) !void {
     try error_builtins.installAggregate(self);
     try weak_builtins.install(self);
     try iterator_builtins.install(self);
+    try disposable_builtins.install(self);
 }

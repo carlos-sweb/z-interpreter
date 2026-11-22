@@ -540,6 +540,20 @@ fn subProto(self: *Interpreter, next: NativeFn, ret: NativeFn) !JSValue {
     return proto;
 }
 
+fn iteratorSymbolDispose(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = args;
+    const self = interp(ctx);
+    const ret = try self.getProperty(this_value, "return");
+    defer ret.deinit();
+    if (!ret.isUndefined() and !ret.isNull()) {
+        if (!isCallable(ret)) return self.throwError(.type_error, "iterator.return is not a function", .{});
+        const res = try self.callValue(ret, this_value, &.{}, "iterator.return");
+        res.deinit();
+    }
+    return JSValue.UNDEFINED;
+}
+
 /// Installs `Iterator`, makes %IteratorPrototype% its `.prototype` with
 /// the helpers, and creates %IteratorHelperPrototype% and
 /// %WrapForValidIteratorPrototype%. Runs at the end of materializeProtos
@@ -572,6 +586,13 @@ pub fn install(self: *Interpreter) !void {
     defer self.gc_allocator.free(iter_key);
     if (proto.asObject().value.getOwnRecordMut(iter_key) == null)
         try proto.asObject().value.defineProperty(iter_key, try native(self, "[Symbol.iterator]", 0, builtin_helpers.iteratorSelfBuiltin), method_attrs);
+
+    if (self.symbol_dispose) |disp_sym| {
+        const disp_key = try self.encodeKey(disp_sym);
+        defer self.gc_allocator.free(disp_key);
+        if (proto.asObject().value.getOwnRecordMut(disp_key) == null)
+            try proto.asObject().value.defineProperty(disp_key, try native(self, "[Symbol.dispose]", 0, iteratorSymbolDispose), method_attrs);
+    }
 
     try defineMethod(self, proto, "map", 1, callbackHelper(.map, "Iterator.prototype.map"));
     try defineMethod(self, proto, "filter", 1, callbackHelper(.filter, "Iterator.prototype.filter"));

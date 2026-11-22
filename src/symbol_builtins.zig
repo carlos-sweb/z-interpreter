@@ -116,6 +116,8 @@ pub fn install(self: *Interpreter) !void {
         if (comptime std.mem.eql(u8, wk, "asyncIterator")) self.symbol_async_iterator = sym.retain();
         if (comptime std.mem.eql(u8, wk, "toStringTag")) self.symbol_to_string_tag = sym.retain();
         if (comptime std.mem.eql(u8, wk, "toPrimitive")) self.symbol_to_primitive = sym.retain();
+        if (comptime std.mem.eql(u8, wk, "dispose")) self.symbol_dispose = sym.retain();
+        if (comptime std.mem.eql(u8, wk, "asyncDispose")) self.symbol_async_dispose = sym.retain();
     }
     try dneMethod(symbol_statics, "for", try native(self, "for", 1, symbolFor));
     try dneMethod(symbol_statics, "keyFor", try native(self, "keyFor", 1, symbolKeyFor));

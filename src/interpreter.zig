@@ -44,6 +44,8 @@ pub const Protos = struct {
     /// AggregateError.prototype (its instances are `.object`s chained
     /// to it, and it to Error.prototype -- see error_builtins).
     aggregate_error: JSValue = JSValue.UNDEFINED,
+    suppressed_error: JSValue = JSValue.UNDEFINED,
+    disposable_stack: JSValue = JSValue.UNDEFINED,
     map: JSValue = JSValue.UNDEFINED,
     set: JSValue = JSValue.UNDEFINED,
     symbol: JSValue = JSValue.UNDEFINED,
@@ -172,6 +174,17 @@ pub const IteratorHelper = struct {
 };
 
 /// The internal slots of an `.object` that is a builtin instance with no
+pub const DisposableEntry = struct {
+    value: JSValue,
+    method: JSValue,
+    has_arg: bool,
+};
+
+pub const DisposableStackState = struct {
+    disposed: bool = false,
+    stack: std.ArrayListUnmanaged(DisposableEntry) = .empty,
+};
+
 /// JSValue tag of its own (WeakMap, WeakSet, WeakRef,
 /// FinalizationRegistry, Iterator helpers, Iterator.from's wrappers);
 /// keyed by the box address in `object_slots`.
@@ -183,6 +196,7 @@ pub const ObjectSlots = union(enum) {
     iterator_helper: *IteratorHelper,
     /// %WrapForValidIteratorPrototype%'s [[Iterated]] record.
     wrapped_iterator: struct { iterator: JSValue, next: JSValue },
+    disposable_stack: *DisposableStackState,
 
     /// Every JSValue the slots hold (GC marking and release).
     pub fn eachValue(self: *const ObjectSlots, ctx: anytype, comptime f: fn (@TypeOf(ctx), JSValue) void) void {
@@ -206,6 +220,12 @@ pub const ObjectSlots = union(enum) {
                 f(ctx, w.iterator);
                 f(ctx, w.next);
             },
+            .disposable_stack => |ds| {
+                for (ds.stack.items) |entry| {
+                    f(ctx, entry.value);
+                    f(ctx, entry.method);
+                }
+            },
             .finalization_registry => |r| {
                 f(ctx, r.cleanup);
                 for (r.cells.items) |c| {
@@ -223,6 +243,10 @@ pub const ObjectSlots = union(enum) {
             .weak_map, .weak_set => |*t| t.deinit(allocator),
             .finalization_registry => |*r| r.cells.deinit(allocator),
             .iterator_helper => |h| allocator.destroy(h),
+            .disposable_stack => |ds| {
+                ds.stack.deinit(allocator);
+                allocator.destroy(ds);
+            },
             .weak_ref, .wrapped_iterator => {},
         }
     }
@@ -785,6 +809,8 @@ pub const Interpreter = struct {
     /// The well-known `Symbol.toPrimitive` -- the first thing
     /// `toPrimitive` looks up on an object operand. Set in setupGlobals.
     symbol_to_primitive: ?JSValue = null,
+    symbol_dispose: ?JSValue = null,
+    symbol_async_dispose: ?JSValue = null,
     /// The real builtin prototype objects (`Object.prototype`,
     /// `Array.prototype`, ...), materialized once in setupGlobals and alive
     /// for the whole run (arena). Each holds its type's methods as real own
@@ -3049,6 +3075,48 @@ test "Phase 3.3: TypedArray exotic [[Set]], [[DefineOwnProperty]], [[Delete]] an
         \\for (var k in ta) forInKeys.push(k);
         \\r1 === true && r1NoCoerce && directCoerced && r2Ok && r3 && delDetached && defDetached &&
         \\  forInKeys.join(",") === "0,1,bar";
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
+test "Phase 4.1a: SuppressedError, DisposableStack and Iterator.prototype[Symbol.dispose]" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\var se = new SuppressedError("e1", "e0", "msg");
+        \\var seCall = SuppressedError("a", "b");
+        \\var seOk = (se instanceof Error) && (se instanceof SuppressedError) &&
+        \\  se.name === "SuppressedError" && se.message === "msg" &&
+        \\  se.error === "e1" && se.suppressed === "e0" &&
+        \\  seCall.error === "a" && seCall.suppressed === "b" && seCall.message === "";
+        \\var log = [];
+        \\var stack = new DisposableStack();
+        \\stack.use(null);
+        \\stack.use(undefined);
+        \\var r1 = stack.use({ [Symbol.dispose]() { log.push("use1"); throw "err1"; } });
+        \\var r2 = stack.adopt("val", (v) => { log.push("adopt:" + v); throw "err2"; });
+        \\stack.defer(() => { log.push("defer"); });
+        \\var sameFn = stack[Symbol.dispose] === DisposableStack.prototype.dispose;
+        \\var tagOk = Object.prototype.toString.call(stack) === "[object DisposableStack]";
+        \\var moved = stack.move();
+        \\var origDisposed = stack.disposed === true && moved.disposed === false;
+        \\var reenterErr = false;
+        \\try { stack.defer(() => {}); } catch (e) { reenterErr = e instanceof ReferenceError; }
+        \\var caught = null;
+        \\try { moved.dispose(); } catch (e) { caught = e; }
+        \\moved.dispose();
+        \\var lifoOk = log.join(",") === "defer,adopt:val,use1" && r2 === "val";
+        \\var chainOk = (caught instanceof SuppressedError) && caught.error === "err1" && caught.suppressed === "err2";
+        \\var closed = false;
+        \\var it = Object.create(Iterator.prototype);
+        \\it.return = () => { closed = true; return { done: true }; };
+        \\it[Symbol.dispose]();
+        \\seOk && sameFn && tagOk && origDisposed && reenterErr && lifoOk && chainOk && closed;
     );
     defer res.deinit();
     try testing.expect(res.isBool() and res.asBool());
