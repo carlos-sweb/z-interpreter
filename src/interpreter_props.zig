@@ -330,8 +330,8 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             break :blk try self.getProperty(box.value.target, key);
         },
         .promise => try self.getExtraPropsOrProto(obj, self.protos.promise, key),
-        .map => try self.getExtraPropsOrProto(obj, self.protos.map, key),
-        .set => try self.getExtraPropsOrProto(obj, self.protos.set, key),
+        .map => |box| try self.getExtraPropsOrProto(obj, self.proto_refs.get(@intFromPtr(box)) orelse self.protos.map, key),
+        .set => |box| try self.getExtraPropsOrProto(obj, self.proto_refs.get(@intFromPtr(box)) orelse self.protos.set, key),
         // `.byteLength` is a real spec ACCESSOR property (no parens),
         // computed here rather than stored -- same category as
         // array/string's own special-cased `.length`.

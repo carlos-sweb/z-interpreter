@@ -1573,7 +1573,15 @@ pub fn objectGetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: J
         .function => self.protos.function.retain(),
         .date => self.protos.date.retain(),
         .regex => self.protos.regex.retain(),
-        .@"error" => self.protos.@"error".retain(),
+        .@"error" => blk: {
+            const kind_name = obj.asError().value.kind.name();
+            if (!std.mem.eql(u8, kind_name, "Error")) {
+                if (self.global_env.get(kind_name)) |ctor| {
+                    if (self.functionPrototype(ctor)) |ep| break :blk ep.retain() else |_| {}
+                }
+            }
+            break :blk self.protos.@"error".retain();
+        },
         .map => self.protos.map.retain(),
         .set => self.protos.set.retain(),
         .symbol => self.protos.symbol.retain(),

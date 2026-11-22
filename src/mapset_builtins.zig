@@ -71,6 +71,11 @@ fn mapConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor Map requires 'new'", .{});
     var m = try self.gcNewMap();
     errdefer m.deinit();
+    if (self.construct_proto) |proto| {
+        if (!zvalue.equality.strictEquals(proto, self.protos.map)) {
+            try self.setOwnedPrototype(m, proto);
+        }
+    }
     try iterator_builtins.addEntriesFromIterable(self, m, arg(args, 0), true, "Map");
     return m;
 }
@@ -82,6 +87,11 @@ fn setConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor Set requires 'new'", .{});
     var s = try self.gcNewSet();
     errdefer s.deinit();
+    if (self.construct_proto) |proto| {
+        if (!zvalue.equality.strictEquals(proto, self.protos.set)) {
+            try self.setOwnedPrototype(s, proto);
+        }
+    }
     try iterator_builtins.addEntriesFromIterable(self, s, arg(args, 0), false, "Set");
     return s;
 }
@@ -240,7 +250,7 @@ fn getSetRecord(self: *Interpreter, obj: JSValue) anyerror!SetRecord {
     }
     const raw_size = try self.getProperty(obj, "size");
     defer raw_size.deinit();
-    const num_size = try self.toNumberJS(raw_size);
+    const num_size = try builtin_helpers.toNumberStrict(self, raw_size);
     if (std.math.isNan(num_size)) {
         return self.throwError(.type_error, "Set-like size is NaN", .{});
     }
@@ -250,12 +260,12 @@ fn getSetRecord(self: *Interpreter, obj: JSValue) anyerror!SetRecord {
     }
     const has_fn = try self.getProperty(obj, "has");
     errdefer has_fn.deinit();
-    if (!has_fn.isFunction()) {
+    if (!@import("property_desc.zig").isCallable(has_fn)) {
         return self.throwError(.type_error, "Set-like .has is not a function", .{});
     }
     const keys_fn = try self.getProperty(obj, "keys");
     errdefer keys_fn.deinit();
-    if (!keys_fn.isFunction()) {
+    if (!@import("property_desc.zig").isCallable(keys_fn)) {
         return self.throwError(.type_error, "Set-like .keys is not a function", .{});
     }
     return .{
@@ -573,8 +583,86 @@ fn setEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     return iteratorFromValues(interp(ctx), allocator, pairs.items);
 }
 
-/// Installs the `Map` and `Set` constructors (no statics on either).
+fn mapGroupBy(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const items_val = arg(args, 0);
+    if (items_val.isUndefined() or items_val.isNull()) {
+        return self.throwError(.type_error, "Map.groupBy called on null or undefined", .{});
+    }
+    const cb = arg(args, 1);
+    if (!@import("property_desc.zig").isCallable(cb)) {
+        return self.throwError(.type_error, "Map.groupBy callback is not a function", .{});
+    }
+    const sym = self.symbol_iterator orelse return self.throwError(.type_error, "Symbol.iterator is not defined", .{});
+    const iter_key = try self.encodeKey(sym);
+    defer self.gc_allocator.free(iter_key);
+    const iter_method = try self.getProperty(items_val, iter_key);
+    defer iter_method.deinit();
+    var iter: JSValue = undefined;
+    if (iter_method.isUndefined() and items_val.isString()) {
+        const cps = try self.iterableItems(items_val);
+        defer self.gc_allocator.free(cps);
+        var arr = try self.gcNewArray();
+        defer arr.deinit();
+        for (cps) |cp| _ = try arr.asArray().value.push(cp);
+        iter = try builtin_helpers.makeArrayIterator(self, allocator, arr, .values);
+    } else {
+        if (!@import("property_desc.zig").isCallable(iter_method)) {
+            return self.throwError(.type_error, "Map.groupBy items is not iterable", .{});
+        }
+        iter = try self.callValue(iter_method, items_val, &.{}, "Symbol.iterator");
+        if (!builtin_helpers.isObjectLike(iter)) {
+            iter.deinit();
+            return self.throwError(.type_error, "Iterator is not an object", .{});
+        }
+    }
+    defer iter.deinit();
+    const next_fn = try self.getProperty(iter, "next");
+    defer next_fn.deinit();
+    var result = try self.gcNewMap();
+    errdefer result.deinit();
+    var k: usize = 0;
+    while (true) : (k += 1) {
+        const step = try self.callValue(next_fn, iter, &.{}, "next");
+        defer step.deinit();
+        if (!builtin_helpers.isObjectLike(step)) {
+            return self.throwError(.type_error, "Iterator result is not an object", .{});
+        }
+        const done_v = try self.getProperty(step, "done");
+        const done = coercion.isTruthy(done_v);
+        done_v.deinit();
+        if (done) break;
+        const elem = try self.getProperty(step, "value");
+        defer elem.deinit();
+        const raw_key = self.callValue(cb, JSValue.UNDEFINED, &.{ elem, JSValue.fromNumber(@floatFromInt(k)) }, "callback") catch |err| {
+            const saved = self.pending_exception;
+            self.pending_exception = null;
+            self.closeIterator(iter) catch {
+                if (self.pending_exception) |ie| ie.deinit();
+                self.pending_exception = null;
+            };
+            self.pending_exception = saved;
+            return err;
+        };
+        defer raw_key.deinit();
+        const group_key = canonicalizeKey(raw_key);
+        if (result.asMap().value.get(group_key)) |bucket| {
+            _ = try bucket.asArray().value.push(elem.retain());
+        } else {
+            var bucket = try self.gcNewArray();
+            errdefer bucket.deinit();
+            _ = try bucket.asArray().value.push(elem.retain());
+            _ = try result.asMap().value.set(group_key.retain(), bucket);
+        }
+    }
+    return result;
+}
+
+/// Installs the `Map` (with `Map.groupBy`) and `Set` constructors.
 pub fn install(self: *Interpreter) !void {
-    _ = try installBuiltin(self, .{ .name = "Map", .ctor = .{ .call = mapConstructor, .constructable = true } });
+    _ = try installBuiltin(self, .{ .name = "Map", .ctor = .{ .call = mapConstructor, .constructable = true }, .statics = &.{
+        .{ .name = "groupBy", .value = .{ .method = .{ .call = mapGroupBy, .arity = 2 } } },
+    } });
     _ = try installBuiltin(self, .{ .name = "Set", .ctor = .{ .call = setConstructor, .constructable = true } });
 }

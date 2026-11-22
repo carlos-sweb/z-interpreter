@@ -3649,6 +3649,39 @@ test "Phase 6.2: Proxy construct invariants, callable proxy call/apply/bind, nes
     try testing.expect(res.isBool() and res.asBool());
 }
 
+test "Phase 6.3: generic Promise catch/finally, Array.fromAsync, Map.groupBy, Set GetSetRecord" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\var catchThenCalled = false;
+        \\Promise.prototype.catch.call({ then(f, r) { catchThenCalled = (f === undefined && typeof r === "function"); return 77; } }, () => {});
+        \\var finThenCalled = false;
+        \\Promise.prototype.finally.call({ then(f, r) { finThenCalled = (typeof f === "function" && typeof r === "function"); return 88; } }, () => {});
+        \\var g = Map.groupBy([1, 2, 3, 4], x => x % 2 === 0 ? "even" : "odd");
+        \\var groupOk = g.get("odd").length === 2 && g.get("even").length === 2;
+        \\var s1 = new Set([1, 2, 3]);
+        \\var diff = s1.difference({ size: 1, has(x) { return x === 2; }, keys() { return [2][Symbol.iterator](); } });
+        \\var setOk = diff.size === 2 && diff.has(1) && diff.has(3);
+        \\var bigIntSizeThrew = false;
+        \\try { s1.difference({ size: 1n, has() { return false; }, keys() { return [][Symbol.iterator](); } }); } catch (e) { bigIntSizeThrew = e instanceof TypeError; }
+        \\class SubSet extends Set {}
+        \\var subDiff = (new SubSet([1, 2])).difference(new Set([2]));
+        \\var subOk = subDiff.size === 1 && subDiff.has(1);
+        \\var asyncRes = null;
+        \\Array.fromAsync({ length: 2, 0: Promise.resolve(10), 1: 20 }, x => x + 1).then(a => { asyncRes = a; });
+        \\catchThenCalled && finThenCalled && groupOk && setOk && bigIntSizeThrew && subOk;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+    const r2 = try interp.run("asyncRes !== null && asyncRes.length === 2 && asyncRes[0] === 11 && asyncRes[1] === 21;");
+    defer r2.deinit();
+    try testing.expect(r2.isBool() and r2.asBool());
+}
+
 
 
 

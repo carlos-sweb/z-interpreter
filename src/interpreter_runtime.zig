@@ -883,26 +883,26 @@ fn syncCloseOnError(self: *Interpreter, iter: JSValue) void {
 fn createDataPropOnFromAsyncTarget(self: *Interpreter, target: JSValue, index: usize, value: JSValue) anyerror!void {
     if (target.isArray()) {
         var arr = &target.asArray().value;
-        if (index == arr.toSlice().len) {
+        if (index == arr.length() and !arr.isHoley() and !arr.isSparse() and !arr.hasElementDescriptors()) {
             _ = try arr.push(value.retain());
             return;
         }
     }
     var buf: [32]u8 = undefined;
     const pk = std.fmt.bufPrint(&buf, "{d}", .{index}) catch unreachable;
-    if (target.isObject()) {
-        var obj = &target.asObject().value;
-        if (obj.getOwnRecord(pk)) |rec| {
-            if (!rec.descriptor.configurable) {
-                return self.throwError(.type_error, "Cannot redefine property: {s}", .{pk});
-            }
-        } else if (!obj.is_extensible) {
-            return self.throwError(.type_error, "Cannot add property {s}, object is not extensible", .{pk});
-        }
-        try obj.defineProperty(pk, value.retain(), .{ .writable = true, .enumerable = true, .configurable = true });
-        return;
+    var d = @import("property_desc.zig").ParsedDesc{
+        .has_value = true,
+        .value = value,
+        .has_writable = true,
+        .writable = true,
+        .has_enumerable = true,
+        .enumerable = true,
+        .has_configurable = true,
+        .configurable = true,
+    };
+    if (!try @import("property_desc.zig").defineOwnProperty(self, target, pk, &d)) {
+        return self.throwError(.type_error, "Cannot define property {s}", .{pk});
     }
-    try self.setPropertyOnValue(target, pk, value);
 }
 
 fn fromAsyncBody(self: *Interpreter, fs: *FiberState) anyerror!JSValue {

@@ -1199,7 +1199,7 @@ pub fn classConstructorCall(ctx: *anyopaque, allocator: Allocator, this_value: J
         self.construct_target = parent.asFunction().value.ctx;
         defer self.construct_target = null;
         const parent_result = try parent.asFunction().value.call(parent.asFunction().value.ctx, allocator, this_value, args);
-        if ((parent_result.isTemporal() and self.temporal_protos.contains(@intFromPtr(parent_result.asTemporal()))) or parent_result.isTypedArray() or parent_result.isArrayBuffer() or parent_result.isDataView()) {
+        if ((parent_result.isTemporal() and self.temporal_protos.contains(@intFromPtr(parent_result.asTemporal()))) or parent_result.isTypedArray() or parent_result.isArrayBuffer() or parent_result.isDataView() or parent_result.isSet() or parent_result.isMap()) {
             errdefer parent_result.deinit();
             try self.runInstanceFields(cctx, parent_result);
             return parent_result;

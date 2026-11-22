@@ -861,7 +861,7 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
         // Adopt it as the derived constructor's this only when commit 2 gave
         // it an explicit newTarget prototype; ordinary super() returns keep
         // the provisional ordinary instance.
-        if ((result.isTemporal() and self.temporal_protos.contains(@intFromPtr(result.asTemporal()))) or result.isTypedArray() or result.isArrayBuffer() or result.isDataView()) {
+        if ((result.isTemporal() and self.temporal_protos.contains(@intFromPtr(result.asTemporal()))) or result.isTypedArray() or result.isArrayBuffer() or result.isDataView() or result.isSet() or result.isMap()) {
             if (env.this_value) |previous| previous.deinit();
             env.this_value = result.retain();
             if (self.adopted_super_this) |previous| previous.deinit();

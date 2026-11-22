@@ -122,15 +122,14 @@ fn promiseThen(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
 
 fn promiseCatch(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
-    const p = try requirePromise(ctx, this_value, "catch");
-    return interp(ctx).promiseThen(p, null, handlerOrNull(arg(args, 0)));
+    const self = interp(ctx);
+    const then_fn = try self.getProperty(this_value, "then");
+    defer then_fn.deinit();
+    return self.callValue(then_fn, this_value, &.{ JSValue.UNDEFINED, arg(args, 0) }, "then");
 }
 
-/// finally(f) = then(wrapper, wrapper) where each wrapper calls f() with
-/// no arguments and passes the original settlement through -- the
-/// rejection side by re-throwing the original reason. f's own throw
-/// replaces the settlement (both spec behaviors), for free, because the
-/// job runner already turns a handler throw into a derived rejection.
+/// finally(f) = then(thenFinally, catchFinally) using SpeciesConstructor
+/// and PromiseResolve per ECMA-262 27.2.5.3.
 pub const FinallyCtx = struct {
     interp: *Interpreter,
     handler: JSValue,
@@ -141,20 +140,92 @@ fn finallyCtx(ctx: *anyopaque) *FinallyCtx {
     return @ptrCast(@alignCast(ctx));
 }
 
+fn finallyValueThunk(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    _ = args;
+    return finallyCtx(ctx).handler.retain();
+}
+
+fn finallyThrower(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    _ = args;
+    const c = finallyCtx(ctx);
+    return c.interp.throwValue(c.handler.retain());
+}
+
+fn promiseResolveWithCtor(self: *Interpreter, allocator: Allocator, ctor: JSValue, x: JSValue) anyerror!JSValue {
+    if (x.isPromise()) {
+        const x_ctor = try self.getProperty(x, "constructor");
+        defer x_ctor.deinit();
+        if (zvalue.equality.strictEquals(x_ctor, ctor)) return x.retain();
+    }
+    const cap = try newPromiseCapability(self, allocator, ctor);
+    errdefer cap.promise.deinit();
+    defer cap.resolve.deinit();
+    defer cap.reject.deinit();
+    const r = try self.callValue(cap.resolve, JSValue.UNDEFINED, &.{x}, "resolve");
+    r.deinit();
+    return cap.promise;
+}
+
 fn finallyOnFulfilled(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
     const c = finallyCtx(ctx);
-    const res = try c.handler.asFunction().value.call(c.handler.asFunction().value.ctx, allocator, JSValue.UNDEFINED, &.{});
+    const self = c.interp;
+    const res = try self.callValue(c.handler, JSValue.UNDEFINED, &.{}, "onFinally");
     defer res.deinit();
-    return arg(args, 0).retain();
+    const p = try promiseResolveWithCtor(self, allocator, c.aux, res);
+    defer p.deinit();
+    const tc = try allocator.create(FinallyCtx);
+    tc.* = .{ .interp = self, .handler = arg(args, 0).retain() };
+    try self.gcTrackFinallyCtx(tc);
+    const thunk = try self.gcNewFunction(.{ .ctx = tc, .name = "", .arity = 0, .call = finallyValueThunk });
+    defer thunk.deinit();
+    const then_fn = try self.getProperty(p, "then");
+    defer then_fn.deinit();
+    return self.callValue(then_fn, p, &.{thunk}, "then");
 }
 
 fn finallyOnRejected(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
     const c = finallyCtx(ctx);
-    const res = try c.handler.asFunction().value.call(c.handler.asFunction().value.ctx, allocator, JSValue.UNDEFINED, &.{});
+    const self = c.interp;
+    const res = try self.callValue(c.handler, JSValue.UNDEFINED, &.{}, "onFinally");
     defer res.deinit();
-    return c.interp.throwValue(arg(args, 0).retain());
+    const p = try promiseResolveWithCtor(self, allocator, c.aux, res);
+    defer p.deinit();
+    const tc = try allocator.create(FinallyCtx);
+    tc.* = .{ .interp = self, .handler = arg(args, 0).retain() };
+    try self.gcTrackFinallyCtx(tc);
+    const thrower = try self.gcNewFunction(.{ .ctx = tc, .name = "", .arity = 0, .call = finallyThrower });
+    defer thrower.deinit();
+    const then_fn = try self.getProperty(p, "then");
+    defer then_fn.deinit();
+    return self.callValue(then_fn, p, &.{thrower}, "then");
+}
+
+fn speciesPromiseConstructor(self: *Interpreter, obj: JSValue) anyerror!JSValue {
+    const default_ctor = self.global_env.get("Promise") orelse return self.throwError(.type_error, "Promise is not defined", .{});
+    const ctor = try self.getProperty(obj, "constructor");
+    defer ctor.deinit();
+    if (ctor.isUndefined()) return default_ctor.retain();
+    if (!builtin_helpers.isObjectLike(ctor)) {
+        return self.throwError(.type_error, "Promise constructor is not an object", .{});
+    }
+    const key = try @import("regex_builtins.zig").wellKnownKey(self, "species");
+    defer self.gc_allocator.free(key);
+    const s = try self.getProperty(ctor, key);
+    errdefer s.deinit();
+    if (s.isUndefined() or s.isNull()) {
+        s.deinit();
+        return default_ctor.retain();
+    }
+    if (!self.isConstructor(s)) {
+        return self.throwError(.type_error, "Promise species is not a constructor", .{});
+    }
+    return s;
 }
 
 fn promiseFinally(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -162,15 +233,22 @@ fn promiseFinally(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     if (!builtin_helpers.isObjectLike(this_value)) {
         return self.throwError(.type_error, "Promise.prototype.finally called on non-object", .{});
     }
-    const p = try requirePromise(ctx, this_value, "finally");
-    const handler = handlerOrNull(arg(args, 0)) orelse return self.promiseThen(p, null, null);
-
+    const ctor = try speciesPromiseConstructor(self, this_value);
+    defer ctor.deinit();
+    const on_finally = arg(args, 0);
+    const then_fn = try self.getProperty(this_value, "then");
+    defer then_fn.deinit();
+    if (!property_desc.isCallable(on_finally)) {
+        return self.callValue(then_fn, this_value, &.{ on_finally, on_finally }, "then");
+    }
     const c = try allocator.create(FinallyCtx);
-    c.* = .{ .interp = self, .handler = handler.retain() };
+    c.* = .{ .interp = self, .handler = on_finally.retain(), .aux = ctor.retain() };
     try self.gcTrackFinallyCtx(c);
-    const on_f = try interp(ctx).gcNewFunction(.{ .ctx = c, .name = "", .arity = 1, .call = finallyOnFulfilled });
-    const on_r = try interp(ctx).gcNewFunction(.{ .ctx = c, .name = "", .arity = 1, .call = finallyOnRejected });
-    return self.promiseThen(p, on_f, on_r);
+    const on_f = try self.gcNewFunction(.{ .ctx = c, .name = "", .arity = 1, .call = finallyOnFulfilled });
+    defer on_f.deinit();
+    const on_r = try self.gcNewFunction(.{ .ctx = c, .name = "", .arity = 1, .call = finallyOnRejected });
+    defer on_r.deinit();
+    return self.callValue(then_fn, this_value, &.{ on_f, on_r }, "then");
 }
 
 const Capability = struct {
