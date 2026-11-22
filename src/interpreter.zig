@@ -3440,6 +3440,36 @@ test "Phase 5.1b: AsyncGeneratorQueue handles re-entrant next() in FIFO order" {
     try testing.expect(r2.isBool() and r2.asBool());
 }
 
+test "Phase 5.2a: liveElem prototype holes and Array.prototype.indexOf/lastIndexOf" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\var i1 = [1, 2, 1].indexOf(1, 1) === 2;
+        \\var i2 = [1, 2, 1].indexOf(1, -1) === 2;
+        \\var i3 = [1, 2, 1].indexOf(1, 10) === -1;
+        \\var emptyCalls = 0;
+        \\var iEmpty = [].indexOf(1, { valueOf() { emptyCalls++; return 0; } }) === -1 && emptyCalls === 0;
+        \\var mutArr = [10, 20, 30];
+        \\var iMut = mutArr.indexOf(99, { valueOf() { mutArr[2] = 99; return 0; } }) === 2;
+        \\var lUndef = [1, 2, 1].lastIndexOf(1, undefined) === 0 && [1, 2, 1].lastIndexOf(1) === 2;
+        \\var holeArr = [0, 111, 2];
+        \\Object.defineProperty(holeArr, "0", { get() { delete holeArr[1]; return 0; }, configurable: true });
+        \\Array.prototype[1] = 777;
+        \\var protoHit = holeArr.indexOf(777) === 1;
+        \\delete Array.prototype[1];
+        \\Object.defineProperty(Object.prototype, "1", { get() { return this.length * 10; }, configurable: true });
+        \\var getProtoHit = holeArr.lastIndexOf(30) === 1;
+        \\delete Object.prototype[1];
+        \\i1 && i2 && i3 && iEmpty && iMut && lUndef && protoHit && getProtoHit;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
 
 
 

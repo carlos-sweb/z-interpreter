@@ -381,14 +381,31 @@ fn arrayIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     const obj = try toArrayLikeObject(ctx, this_value, "indexOf");
     defer obj.deinit();
     const target = arg(args, 0);
-    if (obj.tag() == .array and !obj.asArray().value.isHoley() and !obj.asArray().value.isSparse()) {
-        const idx = obj.asArray().value.indexOf(target, null) orelse return JSValue.fromNumber(-1);
-        return JSValue.fromNumber(@floatFromInt(idx));
-    }
     const len = try arrayLikeLength(ctx, obj);
-    var i: usize = if (arg(args, 1).tag() == .undefined) 0 else normIndex(try interp(ctx).toNumberJS(arg(args, 1)), len);
+    if (len == 0) return JSValue.fromNumber(-1);
+    const self = interp(ctx);
+    const n: f64 = if (args.len > 1) blk: {
+        const raw = try self.toNumberJS(args[1]);
+        if (std.math.isNan(raw) or raw == 0) break :blk 0;
+        break :blk @trunc(raw);
+    } else 0;
+    if (n >= @as(f64, @floatFromInt(len))) return JSValue.fromNumber(-1);
+    const k: usize = if (n >= 0) @intFromFloat(n) else blk: {
+        const kf = @as(f64, @floatFromInt(len)) + n;
+        break :blk if (kf < 0) 0 else @intFromFloat(kf);
+    };
+    if (obj.tag() == .array and !obj.asArray().value.isHoley() and !obj.asArray().value.isSparse() and !obj.asArray().value.hasElementDescriptors()) {
+        const slice = obj.asArray().value.toSlice();
+        var i = k;
+        while (i < slice.len) : (i += 1) {
+            if (zvalue.equality.strictEquals(slice[i], target)) return JSValue.fromNumber(@floatFromInt(i));
+        }
+        return JSValue.fromNumber(-1);
+    }
+    var i = k;
     while (i < len) : (i += 1) {
-        const item = try arrayLikeElem(ctx, allocator, obj, i) orelse continue;
+        const item = (try arrayLikeElem(ctx, allocator, obj, i)) orelse continue;
+        defer item.deinit();
         if (zvalue.equality.strictEquals(item, target)) return JSValue.fromNumber(@floatFromInt(i));
     }
     return JSValue.fromNumber(-1);
@@ -611,14 +628,14 @@ fn arrayReverse(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 fn liveElem(ctx: *anyopaque, allocator: Allocator, array: JSValue, i: usize) anyerror!?JSValue {
     _ = allocator;
     const arr = &array.asArray().value;
-    if (i >= arr.length()) return null;
-    if (!arr.isHole(i) and !arr.hasElementDescriptors()) {
+    const in_bounds = i < arr.length();
+    if (in_bounds and !arr.isHole(i) and !arr.hasElementDescriptors()) {
         return arr.get(i).retain();
     }
     const self = interp(ctx);
     var buf: [32]u8 = undefined;
     const key = std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
-    if (arr.hasElementDescriptors()) {
+    if (in_bounds and arr.hasElementDescriptors()) {
         if (self.array_props.get(@intFromPtr(array.asArray()))) |bag| {
             if (bag.asObject().value.getOwnRecord(key)) |rec| {
                 if (!rec.isAccessor()) return rec.value.retain();
@@ -627,7 +644,18 @@ fn liveElem(ctx: *anyopaque, allocator: Allocator, array: JSValue, i: usize) any
             }
         }
     }
-    if (arr.isHole(i)) {
+    if (!in_bounds or arr.isHole(i)) {
+        if (self.proto_refs.get(@intFromPtr(array.asArray()))) |ext_proto| {
+            if (ext_proto.isNull()) return null;
+            if (ext_proto.isObject()) {
+                if (try self.getFromProto(array, ext_proto, key)) |v| return v;
+                return null;
+            }
+            if (try property_desc.hasProperty(self, ext_proto, key)) {
+                return try self.getProperty(ext_proto, key);
+            }
+            return null;
+        }
         if (try self.getFromProto(array, self.protos.array, key)) |v| return v;
         return null;
     }
@@ -1032,7 +1060,7 @@ fn arrayLastIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
         if (kf < 0) return JSValue.fromNumber(-1);
         break :blk @intFromFloat(kf);
     };
-    if (obj.tag() == .array and !obj.asArray().value.isHoley() and !obj.asArray().value.isSparse()) {
+    if (obj.tag() == .array and !obj.asArray().value.isHoley() and !obj.asArray().value.isSparse() and !obj.asArray().value.hasElementDescriptors()) {
         const slice = obj.asArray().value.toSlice();
         var i = @min(k + 1, slice.len);
         while (i > 0) {
@@ -1044,7 +1072,8 @@ fn arrayLastIndexOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     var i = k + 1;
     while (i > 0) {
         i -= 1;
-        const item = try arrayLikeElem(ctx, allocator, obj, i) orelse continue;
+        const item = (try arrayLikeElem(ctx, allocator, obj, i)) orelse continue;
+        defer item.deinit();
         if (zvalue.equality.strictEquals(item, target)) return JSValue.fromNumber(@floatFromInt(i));
     }
     return JSValue.fromNumber(-1);
