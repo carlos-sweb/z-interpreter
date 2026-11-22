@@ -100,8 +100,14 @@ fn dataViewGetter(comptime field: enum { buffer, byte_length, byte_offset }, com
             const dv = &this_value.asDataView().value;
             return switch (field) {
                 .buffer => dv.owner.retain(),
-                .byte_length => num(dv.view.byte_length),
-                .byte_offset => num(dv.view.byte_offset),
+                .byte_length => blk: {
+                    if (dv.view.buffer.isDetached()) return interp(ctx).throwError(.type_error, "Cannot access byteLength on a detached ArrayBuffer", .{});
+                    break :blk num(dv.view.byte_length);
+                },
+                .byte_offset => blk: {
+                    if (dv.view.buffer.isDetached()) return interp(ctx).throwError(.type_error, "Cannot access byteOffset on a detached ArrayBuffer", .{});
+                    break :blk num(dv.view.byte_offset);
+                },
             };
         }
     }.call;

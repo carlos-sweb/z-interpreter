@@ -2936,6 +2936,45 @@ test "Phase 2.3d: async yield* does not unwrap promise value from manual async i
     try testing.expect(r2.isBool() and r2.asBool());
 }
 
+test "Phase 3.1: DataView getFloat16/setFloat16 and detached buffer checks" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+    const res = try interp.run(
+        \\var ab = new ArrayBuffer(8);
+        \\var dv = new DataView(ab);
+        \\dv.setFloat16(0, 1.5, false);
+        \\var beBytes = [dv.getUint8(0), dv.getUint8(1)];
+        \\dv.setFloat16(2, -0, true);
+        \\var negZero = Object.is(dv.getFloat16(2, true), -0);
+        \\dv.setFloat16(4, Infinity, true);
+        \\dv.setFloat16(6, NaN, false);
+        \\var got15 = dv.getFloat16(0, false);
+        \\var gotInf = dv.getFloat16(4, true);
+        \\var gotNaN = Number.isNaN(dv.getFloat16(6, false));
+        \\var buf2 = new ArrayBuffer(8);
+        \\var dv2 = new DataView(buf2);
+        \\var threwDetachValueOf = false;
+        \\try {
+        \\  dv2.setFloat16(0, { valueOf() { $262.detachArrayBuffer(buf2); return 1; } });
+        \\} catch (e) { threwDetachValueOf = e instanceof TypeError; }
+        \\var threwGetDetached = false;
+        \\try { dv2.getFloat16(0); } catch (e) { threwGetDetached = e instanceof TypeError; }
+        \\var threwByteLen = false;
+        \\try { dv2.byteLength; } catch (e) { threwByteLen = e instanceof TypeError; }
+        \\var threwByteOff = false;
+        \\try { dv2.byteOffset; } catch (e) { threwByteOff = e instanceof TypeError; }
+        \\beBytes[0] === 0x3e && beBytes[1] === 0x00 && got15 === 1.5 && negZero &&
+        \\  gotInf === Infinity && gotNaN && threwDetachValueOf && threwGetDetached &&
+        \\  threwByteLen && threwByteOff;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
+
 
 
 

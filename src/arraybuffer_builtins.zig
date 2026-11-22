@@ -76,6 +76,8 @@ pub const dataview_methods = std.StaticStringMap(MethodSpec).initComptime(.{
     .{ "setUint32", MethodSpec{ .call = dataViewSetUint32, .arity = 2 } },
     .{ "getFloat32", MethodSpec{ .call = dataViewGetFloat32, .arity = 1 } },
     .{ "setFloat32", MethodSpec{ .call = dataViewSetFloat32, .arity = 2 } },
+    .{ "getFloat16", MethodSpec{ .call = dataViewGetFloat16, .arity = 1 } },
+    .{ "setFloat16", MethodSpec{ .call = dataViewSetFloat16, .arity = 2 } },
     .{ "getFloat64", MethodSpec{ .call = dataViewGetFloat64, .arity = 1 } },
     .{ "setFloat64", MethodSpec{ .call = dataViewSetFloat64, .arity = 2 } },
     .{ "getBigInt64", MethodSpec{ .call = dataViewGetBigInt64, .arity = 1 } },
@@ -238,12 +240,20 @@ fn dataViewSetUint8(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     return JSValue.UNDEFINED;
 }
 
+fn requireNotDetached(self: *Interpreter, dv: zbuffer.DataView) anyerror!void {
+    if (dv.buffer.isDetached()) {
+        return self.throwError(.type_error, "Cannot perform DataView operation on a detached ArrayBuffer", .{});
+    }
+}
+
 fn dataViewGetInt16(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const self = interp(ctx);
     const dv = try requireDataView(self, this_value, "getInt16");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
-    const v = dv.getInt16(offset, coercion.isTruthy(arg(args, 1))) catch |e| return self.bufferErr(e);
+    const little_endian = coercion.isTruthy(arg(args, 1));
+    try requireNotDetached(self, dv);
+    const v = dv.getInt16(offset, little_endian) catch |e| return self.bufferErr(e);
     return JSValue.fromNumber(@floatFromInt(v));
 }
 fn dataViewGetUint16(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -251,7 +261,9 @@ fn dataViewGetUint16(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     const self = interp(ctx);
     const dv = try requireDataView(self, this_value, "getUint16");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
-    const v = dv.getUint16(offset, coercion.isTruthy(arg(args, 1))) catch |e| return self.bufferErr(e);
+    const little_endian = coercion.isTruthy(arg(args, 1));
+    try requireNotDetached(self, dv);
+    const v = dv.getUint16(offset, little_endian) catch |e| return self.bufferErr(e);
     return JSValue.fromNumber(@floatFromInt(v));
 }
 fn dataViewSetInt16(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -260,7 +272,9 @@ fn dataViewSetInt16(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     const dv = try requireDataView(self, this_value, "setInt16");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
     const value = try toInt16Wrap(self, arg(args, 1));
-    dv.setInt16(offset, value, coercion.isTruthy(arg(args, 2))) catch |e| return self.bufferErr(e);
+    const little_endian = coercion.isTruthy(arg(args, 2));
+    try requireNotDetached(self, dv);
+    dv.setInt16(offset, value, little_endian) catch |e| return self.bufferErr(e);
     return JSValue.UNDEFINED;
 }
 fn dataViewSetUint16(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -269,7 +283,9 @@ fn dataViewSetUint16(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     const dv = try requireDataView(self, this_value, "setUint16");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
     const value = try toUint16Wrap(self, arg(args, 1));
-    dv.setUint16(offset, value, coercion.isTruthy(arg(args, 2))) catch |e| return self.bufferErr(e);
+    const little_endian = coercion.isTruthy(arg(args, 2));
+    try requireNotDetached(self, dv);
+    dv.setUint16(offset, value, little_endian) catch |e| return self.bufferErr(e);
     return JSValue.UNDEFINED;
 }
 
@@ -278,7 +294,9 @@ fn dataViewGetInt32(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     const self = interp(ctx);
     const dv = try requireDataView(self, this_value, "getInt32");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
-    const v = dv.getInt32(offset, coercion.isTruthy(arg(args, 1))) catch |e| return self.bufferErr(e);
+    const little_endian = coercion.isTruthy(arg(args, 1));
+    try requireNotDetached(self, dv);
+    const v = dv.getInt32(offset, little_endian) catch |e| return self.bufferErr(e);
     return JSValue.fromNumber(@floatFromInt(v));
 }
 fn dataViewGetUint32(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -286,7 +304,9 @@ fn dataViewGetUint32(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     const self = interp(ctx);
     const dv = try requireDataView(self, this_value, "getUint32");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
-    const v = dv.getUint32(offset, coercion.isTruthy(arg(args, 1))) catch |e| return self.bufferErr(e);
+    const little_endian = coercion.isTruthy(arg(args, 1));
+    try requireNotDetached(self, dv);
+    const v = dv.getUint32(offset, little_endian) catch |e| return self.bufferErr(e);
     return JSValue.fromNumber(@floatFromInt(v));
 }
 fn dataViewSetInt32(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -295,7 +315,9 @@ fn dataViewSetInt32(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     const dv = try requireDataView(self, this_value, "setInt32");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
     const value: i32 = try self.toInt32JS(arg(args, 1));
-    dv.setInt32(offset, value, coercion.isTruthy(arg(args, 2))) catch |e| return self.bufferErr(e);
+    const little_endian = coercion.isTruthy(arg(args, 2));
+    try requireNotDetached(self, dv);
+    dv.setInt32(offset, value, little_endian) catch |e| return self.bufferErr(e);
     return JSValue.UNDEFINED;
 }
 fn dataViewSetUint32(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -304,7 +326,35 @@ fn dataViewSetUint32(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     const dv = try requireDataView(self, this_value, "setUint32");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
     const value: u32 = try self.toUint32JS(arg(args, 1));
-    dv.setUint32(offset, value, coercion.isTruthy(arg(args, 2))) catch |e| return self.bufferErr(e);
+    const little_endian = coercion.isTruthy(arg(args, 2));
+    try requireNotDetached(self, dv);
+    dv.setUint32(offset, value, little_endian) catch |e| return self.bufferErr(e);
+    return JSValue.UNDEFINED;
+}
+
+fn dataViewGetFloat16(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const dv = try requireDataView(self, this_value, "getFloat16");
+    const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
+    const little_endian = coercion.isTruthy(arg(args, 1));
+    try requireNotDetached(self, dv);
+    const bits = dv.getUint16(offset, little_endian) catch |e| return self.bufferErr(e);
+    const f: f16 = @bitCast(bits);
+    const v: f64 = @floatCast(f);
+    return JSValue.fromNumber(if (std.math.isNan(v)) std.math.nan(f64) else v);
+}
+fn dataViewSetFloat16(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const dv = try requireDataView(self, this_value, "setFloat16");
+    const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
+    const num = try self.toNumberJS(arg(args, 1));
+    const little_endian = coercion.isTruthy(arg(args, 2));
+    try requireNotDetached(self, dv);
+    const f: f16 = @floatCast(num);
+    const bits: u16 = @bitCast(f);
+    dv.setUint16(offset, bits, little_endian) catch |e| return self.bufferErr(e);
     return JSValue.UNDEFINED;
 }
 
@@ -313,7 +363,9 @@ fn dataViewGetFloat32(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     const self = interp(ctx);
     const dv = try requireDataView(self, this_value, "getFloat32");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
-    const v = dv.getFloat32(offset, coercion.isTruthy(arg(args, 1))) catch |e| return self.bufferErr(e);
+    const little_endian = coercion.isTruthy(arg(args, 1));
+    try requireNotDetached(self, dv);
+    const v = dv.getFloat32(offset, little_endian) catch |e| return self.bufferErr(e);
     return JSValue.fromNumber(v);
 }
 fn dataViewSetFloat32(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -322,7 +374,9 @@ fn dataViewSetFloat32(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     const dv = try requireDataView(self, this_value, "setFloat32");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
     const value: f32 = @floatCast(try self.toNumberJS(arg(args, 1)));
-    dv.setFloat32(offset, value, coercion.isTruthy(arg(args, 2))) catch |e| return self.bufferErr(e);
+    const little_endian = coercion.isTruthy(arg(args, 2));
+    try requireNotDetached(self, dv);
+    dv.setFloat32(offset, value, little_endian) catch |e| return self.bufferErr(e);
     return JSValue.UNDEFINED;
 }
 
@@ -331,7 +385,9 @@ fn dataViewGetFloat64(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     const self = interp(ctx);
     const dv = try requireDataView(self, this_value, "getFloat64");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
-    const v = dv.getFloat64(offset, coercion.isTruthy(arg(args, 1))) catch |e| return self.bufferErr(e);
+    const little_endian = coercion.isTruthy(arg(args, 1));
+    try requireNotDetached(self, dv);
+    const v = dv.getFloat64(offset, little_endian) catch |e| return self.bufferErr(e);
     return JSValue.fromNumber(v);
 }
 fn dataViewSetFloat64(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -340,7 +396,9 @@ fn dataViewSetFloat64(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     const dv = try requireDataView(self, this_value, "setFloat64");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
     const value: f64 = try self.toNumberJS(arg(args, 1));
-    dv.setFloat64(offset, value, coercion.isTruthy(arg(args, 2))) catch |e| return self.bufferErr(e);
+    const little_endian = coercion.isTruthy(arg(args, 2));
+    try requireNotDetached(self, dv);
+    dv.setFloat64(offset, value, little_endian) catch |e| return self.bufferErr(e);
     return JSValue.UNDEFINED;
 }
 
@@ -349,7 +407,9 @@ fn dataViewGetBigInt64(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
     const self = interp(ctx);
     const dv = try requireDataView(self, this_value, "getBigInt64");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
-    const v = dv.getBigInt64(offset, coercion.isTruthy(arg(args, 1))) catch |e| return self.bufferErr(e);
+    const little_endian = coercion.isTruthy(arg(args, 1));
+    try requireNotDetached(self, dv);
+    const v = dv.getBigInt64(offset, little_endian) catch |e| return self.bufferErr(e);
     return self.gcNewBigIntValue(try zbigint.ZBigInt.fromInt(self.gc_allocator, v));
 }
 
@@ -358,7 +418,9 @@ fn dataViewGetBigUint64(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     const self = interp(ctx);
     const dv = try requireDataView(self, this_value, "getBigUint64");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
-    const v = dv.getBigUint64(offset, coercion.isTruthy(arg(args, 1))) catch |e| return self.bufferErr(e);
+    const little_endian = coercion.isTruthy(arg(args, 1));
+    try requireNotDetached(self, dv);
+    const v = dv.getBigUint64(offset, little_endian) catch |e| return self.bufferErr(e);
     return bigIntFromU64(self, v);
 }
 fn dataViewSetBigInt64(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -369,7 +431,9 @@ fn dataViewSetBigInt64(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
     const x = try toBigIntValue(self, self.gc_allocator, arg(args, 1));
     defer x.deinit();
     const value = try toI64Wrapped(self, x.asBigInt().value);
-    dv.setBigInt64(offset, value, coercion.isTruthy(arg(args, 2))) catch |e| return self.bufferErr(e);
+    const little_endian = coercion.isTruthy(arg(args, 2));
+    try requireNotDetached(self, dv);
+    dv.setBigInt64(offset, value, little_endian) catch |e| return self.bufferErr(e);
     return JSValue.UNDEFINED;
 }
 fn dataViewSetBigUint64(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -380,7 +444,9 @@ fn dataViewSetBigUint64(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     const x = try toBigIntValue(self, self.gc_allocator, arg(args, 1));
     defer x.deinit();
     const value = try toU64Wrapped(self, x.asBigInt().value);
-    dv.setBigUint64(offset, value, coercion.isTruthy(arg(args, 2))) catch |e| return self.bufferErr(e);
+    const little_endian = coercion.isTruthy(arg(args, 2));
+    try requireNotDetached(self, dv);
+    dv.setBigUint64(offset, value, little_endian) catch |e| return self.bufferErr(e);
     return JSValue.UNDEFINED;
 }
 
