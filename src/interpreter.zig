@@ -3347,6 +3347,24 @@ test "Phase 4.3: lazy Map/WeakMap/Set/WeakSet iterator close and Array splice/wi
     try testing.expect(res.isBool() and res.asBool());
 }
 
+test "Phase 4.3b: TypedArray entries/keys/values inherit from ArrayIteratorPrototype" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\var arrProto = Object.getPrototypeOf([][Symbol.iterator]());
+        \\var ta = new Int8Array();
+        \\Object.getPrototypeOf(ta.entries()) === arrProto &&
+        \\  Object.getPrototypeOf(ta.keys()) === arrProto &&
+        \\  Object.getPrototypeOf(ta.values()) === arrProto;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
 
 
 
