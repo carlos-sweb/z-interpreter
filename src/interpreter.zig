@@ -49,6 +49,7 @@ pub const Protos = struct {
     async_disposable_stack: JSValue = JSValue.UNDEFINED,
     async_iterator_proto: JSValue = JSValue.UNDEFINED,
     async_generator_proto: JSValue = JSValue.UNDEFINED,
+    array_iterator_proto: JSValue = JSValue.UNDEFINED,
     map: JSValue = JSValue.UNDEFINED,
     set: JSValue = JSValue.UNDEFINED,
     symbol: JSValue = JSValue.UNDEFINED,
@@ -157,12 +158,17 @@ pub const WeakTable = std.AutoHashMapUnmanaged(usize, WeakEntry);
 /// A FinalizationRegistry registration ([[Cells]] element).
 pub const FinRegCell = struct { target: JSValue, held: JSValue, token: JSValue };
 
+pub const ConcatItem = struct {
+    iterable: JSValue,
+    open_method: JSValue,
+};
+
 /// An Iterator helper's state (iterator_builtins.zig): the underlying
 /// iterator record, the callback, and the generator-like run state.
 /// Heap-allocated so a pointer to it survives `object_slots` rehashing
 /// while the callback runs.
 pub const IteratorHelper = struct {
-    kind: enum { map, filter, take, drop, flat_map },
+    kind: enum { map, filter, take, drop, flat_map, concat },
     state: enum { suspended_start, suspended_yield, executing, completed } = .suspended_start,
     iterator: JSValue,
     next: JSValue,
@@ -170,10 +176,12 @@ pub const IteratorHelper = struct {
     counter: f64 = 0,
     /// take/drop's remaining count (+Infinity allowed).
     remaining: f64 = 0,
-    /// flatMap's current inner iterator record.
+    /// flatMap's/concat's current inner iterator record.
     inner_iterator: JSValue = JSValue.UNDEFINED,
     inner_next: JSValue = JSValue.UNDEFINED,
     inner_alive: bool = false,
+    concat_items: std.ArrayListUnmanaged(ConcatItem) = .empty,
+    concat_idx: usize = 0,
 };
 
 /// The internal slots of an `.object` that is a builtin instance with no
@@ -239,6 +247,10 @@ pub const ObjectSlots = union(enum) {
                 f(ctx, h.func);
                 f(ctx, h.inner_iterator);
                 f(ctx, h.inner_next);
+                for (h.concat_items.items) |it| {
+                    f(ctx, it.iterable);
+                    f(ctx, it.open_method);
+                }
             },
             .wrapped_iterator => |w| {
                 f(ctx, w.iterator);
@@ -274,7 +286,10 @@ pub const ObjectSlots = union(enum) {
         switch (self.*) {
             .weak_map, .weak_set => |*t| t.deinit(allocator),
             .finalization_registry => |*r| r.cells.deinit(allocator),
-            .iterator_helper => |h| allocator.destroy(h),
+            .iterator_helper => |h| {
+                h.concat_items.deinit(allocator);
+                allocator.destroy(h);
+            },
             .disposable_stack, .async_disposable_stack => |ds| {
                 ds.stack.deinit(allocator);
                 allocator.destroy(ds);
@@ -3199,6 +3214,52 @@ test "Phase 4.1b: AsyncDisposableStack and AsyncIteratorPrototype[Symbol.asyncDi
     );
     defer r2.deinit();
     try testing.expect(r2.isBool() and r2.asBool());
+}
+
+test "Phase 4.2a: Iterator.concat and ArrayIteratorPrototype -> Iterator.prototype" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\var strErr = false;
+        \\try { Iterator.concat("abc"); } catch (e) { strErr = e instanceof TypeError; }
+        \\var opened = 0;
+        \\var closed = 0;
+        \\var lazy1 = {
+        \\  [Symbol.iterator]() {
+        \\    opened++;
+        \\    var i = 0;
+        \\    return {
+        \\      next() { return i < 2 ? { value: ++i, done: false } : { value: undefined, done: true }; },
+        \\      return() { closed++; return { done: true }; }
+        \\    };
+        \\  }
+        \\};
+        \\var lazy2 = {
+        \\  [Symbol.iterator]() { opened++; return [3, 4][Symbol.iterator](); }
+        \\};
+        \\var c1 = Iterator.concat(lazy1, lazy2);
+        \\var notOpenedYet = opened === 0;
+        \\var cEarly = Iterator.concat(lazy1);
+        \\cEarly.return();
+        \\var notOpenedOnReturn = opened === 0 && closed === 0;
+        \\var first = c1.next().value;
+        \\c1.return();
+        \\var closedActive = opened === 1 && closed === 1 && c1.next().done === true;
+        \\var allVals = [...Iterator.concat([10, 20], [30])].join(",");
+        \\var arrIter = [1, 2][Symbol.iterator]();
+        \\var protoOk = Object.getPrototypeOf(Object.getPrototypeOf(arrIter)) === Iterator.prototype;
+        \\var disposed = false;
+        \\arrIter.return = () => { disposed = true; return { done: true }; };
+        \\arrIter[Symbol.dispose]();
+        \\strErr && notOpenedYet && notOpenedOnReturn && first === 1 && closedActive &&
+        \\  allVals === "10,20,30" && protoOk && disposed;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
 }
 
 

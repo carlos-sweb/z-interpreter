@@ -553,7 +553,11 @@ pub fn makeArrayIterator(self: *Interpreter, allocator: Allocator, this_value: J
     ic.* = .{ .interp = self, .items = snapshot, .kind = kind };
     try self.gcTrackArrayIterCtx(ic);
     var obj = try self.gcNewObject();
-    if (self.iterator_prototype) |p| try obj.asObject().value.setPrototype(&p.asObject().value);
+    const iter_proto = if (self.protos.array_iterator_proto.isObject())
+        self.protos.array_iterator_proto
+    else
+        (self.iterator_prototype orelse JSValue.UNDEFINED);
+    if (iter_proto.isObject()) try obj.asObject().value.setPrototype(&iter_proto.asObject().value);
     try obj.asObject().value.set("next", try self.gcNewFunction(.{ .ctx = ic, .name = "next", .call = arrayIterNext }));
     if (self.symbol_iterator) |sym| {
         const key = try self.encodeKey(sym);

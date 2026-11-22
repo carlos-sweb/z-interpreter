@@ -344,6 +344,33 @@ fn helperStep(self: *Interpreter, h: *IteratorHelper) anyerror!?JSValue {
             h.inner_next = rec.next;
             h.inner_alive = true;
         },
+        .concat => while (true) {
+            if (h.inner_alive) {
+                const inner = stepValue(self, h.inner_iterator, h.inner_next) catch |err| {
+                    h.inner_alive = false;
+                    return err;
+                };
+                if (inner) |v| return v;
+                h.inner_alive = false;
+                h.inner_iterator.deinit();
+                h.inner_next.deinit();
+                h.inner_iterator = JSValue.UNDEFINED;
+                h.inner_next = JSValue.UNDEFINED;
+            }
+            if (h.concat_idx >= h.concat_items.items.len) return null;
+            const item = h.concat_items.items[h.concat_idx];
+            h.concat_idx += 1;
+            const iter = try self.callValue(item.open_method, item.iterable, &.{}, "Symbol.iterator");
+            errdefer iter.deinit();
+            if (!isObjectLike(iter)) return self.throwError(.type_error, "Iterator result is not an object", .{});
+            const rec = try getIteratorDirect(self, iter);
+            iter.deinit();
+            h.inner_iterator.deinit();
+            h.inner_next.deinit();
+            h.inner_iterator = rec.iterator;
+            h.inner_next = rec.next;
+            h.inner_alive = true;
+        },
     }
 }
 
@@ -380,18 +407,25 @@ fn helperReturn(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
         .completed => return iterResult(self, JSValue.UNDEFINED, true),
         .suspended_start => {
             h.state = .completed;
-            try closeNormal(self, h.iterator);
+            if (h.kind != .concat) try closeNormal(self, h.iterator);
         },
         .suspended_yield => {
             // A return completion at the Yield: flatMap closes its inner
             // iterator first (its failure closes the outer one as a throw).
             h.state = .executing;
             defer h.state = .completed;
-            if (h.kind == .flat_map and h.inner_alive) {
-                h.inner_alive = false;
-                closeNormal(self, h.inner_iterator) catch |err| return closeOnThrow(self, h.iterator, err);
+            if (h.kind == .concat) {
+                if (h.inner_alive) {
+                    h.inner_alive = false;
+                    try closeNormal(self, h.inner_iterator);
+                }
+            } else {
+                if (h.kind == .flat_map and h.inner_alive) {
+                    h.inner_alive = false;
+                    closeNormal(self, h.inner_iterator) catch |err| return closeOnThrow(self, h.iterator, err);
+                }
+                try closeNormal(self, h.iterator);
             }
-            try closeNormal(self, h.iterator);
         },
     }
     return iterResult(self, JSValue.UNDEFINED, true);
@@ -630,10 +664,58 @@ fn asyncIteratorSymbolDispose(ctx: *anyopaque, allocator: Allocator, this_value:
 /// the helpers, and creates %IteratorHelperPrototype% and
 /// %WrapForValidIteratorPrototype%. Runs at the end of materializeProtos
 /// (after RegExp created %IteratorPrototype%).
+fn iteratorConcat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const sym = self.symbol_iterator orelse return self.throwError(.type_error, "Symbol.iterator is not defined", .{});
+    const key = try self.encodeKey(sym);
+    defer allocator.free(key);
+
+    var items: std.ArrayListUnmanaged(interpreter_mod.ConcatItem) = .empty;
+    errdefer {
+        for (items.items) |it| {
+            it.iterable.deinit();
+            it.open_method.deinit();
+        }
+        items.deinit(self.gc_allocator);
+    }
+
+    for (args) |item| {
+        if (!isObjectLike(item)) {
+            return self.throwError(.type_error, "Iterator.concat requires object arguments", .{});
+        }
+        const method = try self.getProperty(item, key);
+        errdefer method.deinit();
+        if (method.isUndefined() or method.isNull() or !isCallable(method)) {
+            return self.throwError(.type_error, "Argument is not iterable", .{});
+        }
+        try items.append(self.gc_allocator, .{
+            .iterable = item.retain(),
+            .open_method = method,
+        });
+    }
+
+    const h = try self.gc_allocator.create(IteratorHelper);
+    h.* = .{
+        .kind = .concat,
+        .iterator = JSValue.UNDEFINED,
+        .next = JSValue.UNDEFINED,
+        .concat_items = items,
+    };
+    var o = try self.gcNewObject();
+    try o.asObject().value.setPrototype(&self.iterator_helper_proto.?.asObject().value);
+    self.object_slots.put(self.gc_allocator, @intFromPtr(o.asObject()), .{ .iterator_helper = h }) catch |err| {
+        o.deinit();
+        return err;
+    };
+    return o;
+}
+
 pub fn install(self: *Interpreter) !void {
     const proto = self.iterator_prototype.?;
     const ctor = try builtin_helpers.installBuiltin(self, .{ .name = "Iterator", .ctor = .{ .arity = 0, .call = iteratorConstructor, .constructable = true }, .statics = &.{
         .{ .name = "from", .value = .{ .method = .{ .call = iteratorFrom, .arity = 1 } } },
+        .{ .name = "concat", .value = .{ .method = .{ .call = iteratorConcat, .arity = 0 } } },
     } });
     ctor.asFunction().value.prototype = proto.retain();
     self.iterator_ctor = ctor.retain();
@@ -699,4 +781,13 @@ pub fn install(self: *Interpreter) !void {
     var async_gen_proto = try self.gcNewObject();
     try async_gen_proto.asObject().value.setPrototype(&async_iter_proto.asObject().value);
     self.protos.async_generator_proto = async_gen_proto;
+
+    var arr_iter_proto = try self.gcNewObject();
+    try arr_iter_proto.asObject().value.setPrototype(&proto.asObject().value);
+    if (self.symbol_to_string_tag) |tsym| {
+        const tkey = try self.encodeKey(tsym);
+        defer self.gc_allocator.free(tkey);
+        try arr_iter_proto.asObject().value.defineProperty(tkey, try self.gcNewString("Array Iterator"), .{ .writable = false, .enumerable = false, .configurable = true });
+    }
+    self.protos.array_iterator_proto = arr_iter_proto;
 }
