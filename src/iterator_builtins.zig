@@ -1174,6 +1174,7 @@ pub fn install(self: *Interpreter) !void {
         .call = fn_builtins.generatorFunctionConstructor,
         .constructable = true,
     });
+    gen_fn_ctor.asFunction().value.prototype = gen_fn_proto.retain();
     try gen_fn_proto.asObject().value.defineProperty("constructor", gen_fn_ctor, ro_cfg);
     try gen_fn_proto.asObject().value.defineProperty("prototype", gen_proto.retain(), ro_cfg);
     try gen_fn_proto.asObject().value.defineProperty(tag_key, try self.gcNewString("GeneratorFunction"), ro_cfg);
@@ -1198,6 +1199,7 @@ pub fn install(self: *Interpreter) !void {
         .call = fn_builtins.asyncGeneratorFunctionConstructor,
         .constructable = true,
     });
+    async_gen_fn_ctor.asFunction().value.prototype = async_gen_fn_proto.retain();
     try async_gen_fn_proto.asObject().value.defineProperty("constructor", async_gen_fn_ctor, ro_cfg);
     try async_gen_fn_proto.asObject().value.defineProperty("prototype", async_gen_proto.retain(), ro_cfg);
     try async_gen_fn_proto.asObject().value.defineProperty(tag_key, try self.gcNewString("AsyncGeneratorFunction"), ro_cfg);
@@ -1215,6 +1217,7 @@ pub fn install(self: *Interpreter) !void {
         .call = fn_builtins.asyncFunctionConstructor,
         .constructable = true,
     });
+    async_fn_ctor.asFunction().value.prototype = async_fn_proto.retain();
     try async_fn_proto.asObject().value.defineProperty("constructor", async_fn_ctor, ro_cfg);
     try async_fn_proto.asObject().value.defineProperty(tag_key, try self.gcNewString("AsyncFunction"), ro_cfg);
     self.protos.async_function_proto = async_fn_proto;

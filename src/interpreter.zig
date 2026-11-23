@@ -4134,6 +4134,29 @@ test "Object.prototype.toString, valueOf, isPrototypeOf, hasOwnProperty, propert
     try testing.expect(res.isBool() and res.asBool());
 }
 
+test "GeneratorFunction, AsyncGeneratorFunction, and AsyncFunction intrinsic prototypes" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\var GF = Object.getPrototypeOf(function*(){}).constructor;
+        \\var AGF = Object.getPrototypeOf(async function*(){}).constructor;
+        \\var AF = Object.getPrototypeOf(async function(){}).constructor;
+        \\function* gDecl() {}
+        \\async function* agDecl() {}
+        \\var aArrow = async () => {};
+        \\var gfOk = (gDecl instanceof GF) && (new GF() instanceof GF) && (GF() instanceof GF) && GF[Symbol.hasInstance](gDecl);
+        \\var agfOk = (agDecl instanceof AGF) && (new AGF() instanceof AGF) && (AGF() instanceof AGF) && AGF[Symbol.hasInstance](agDecl);
+        \\var afOk = Object.getPrototypeOf(aArrow) === AF.prototype && aArrow.prototype === undefined && !aArrow.hasOwnProperty("prototype");
+        \\gfOk && agfOk && afOk;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
 
 
 
