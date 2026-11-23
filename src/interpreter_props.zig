@@ -1478,6 +1478,7 @@ pub fn materializeProtos(self: *Interpreter) !void {
     // The builtin accessor properties (Map/Set size, buffer/view
     // lengths, Symbol description, species, __proto__).
     try accessor_builtins.install(self);
+    try function_builtins.installThrowTypeError(self);
     // Globals that need the prototypes above: AggregateError (chained to
     // Error.prototype) and WeakMap/WeakSet/WeakRef/FinalizationRegistry.
     try error_builtins.installAggregate(self);

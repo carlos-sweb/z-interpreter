@@ -982,15 +982,20 @@ pub fn objectGetOwnPropertyNames(ctx: *anyopaque, allocator: Allocator, this_val
             }
         },
         .function => |box| {
-            _ = try result.asArray().value.push(try interp(ctx).gcNewString("length"));
-            _ = try result.asArray().value.push(try interp(ctx).gcNewString("name"));
-            if (!isProxyConstructor(self, o) and function_builtins.boundContext(o) == null and (box.value.prototype != null or box.value.constructable))
+            const deleted = self.deletedFnProps(o);
+            if (!deleted.length) _ = try result.asArray().value.push(try interp(ctx).gcNewString("length"));
+            if (!deleted.name) _ = try result.asArray().value.push(try interp(ctx).gcNewString("name"));
+            const has_proto = !isProxyConstructor(self, o) and function_builtins.boundContext(o) == null and (box.value.prototype != null or box.value.constructable);
+            if (has_proto)
                 _ = try result.asArray().value.push(try interp(ctx).gcNewString("prototype"));
             if (box.value.statics) |bag| {
                 const names = try bag.asObject().value.getOwnPropertyNames(allocator);
                 defer allocator.free(names);
                 for (names) |n| {
                     if (isSymbolKey(n)) continue;
+                    if (!deleted.length and std.mem.eql(u8, n, "length")) continue;
+                    if (!deleted.name and std.mem.eql(u8, n, "name")) continue;
+                    if (has_proto and std.mem.eql(u8, n, "prototype")) continue;
                     _ = try result.asArray().value.push(try interp(ctx).gcNewString(n));
                 }
             }

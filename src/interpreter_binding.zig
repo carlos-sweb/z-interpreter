@@ -486,6 +486,35 @@ fn stepIteratorValue(self: *Interpreter, arena: std.mem.Allocator, iter: JSValue
     };
 }
 
+fn copyDataProperties(self: *Interpreter, arena: std.mem.Allocator, target: JSValue, source: JSValue, excluded: []const []const u8) anyerror!void {
+    if (source.isUndefined() or source.isNull()) return;
+    const property_desc = @import("property_desc.zig");
+    const object_builtins = @import("object_builtins.zig");
+    const from = try property_desc.toObject(self, source);
+    defer from.deinit();
+    const keys = try object_builtins.ownPropertyKeyList(self, arena, from);
+    defer object_builtins.freeOwnedKeys(arena, keys);
+    outer: for (keys) |k| {
+        if (k.len >= 2 and k[0] == 0 and k[1] == 'P') continue;
+        for (excluded) |ex| {
+            if (std.mem.eql(u8, ex, k)) continue :outer;
+        }
+        const kv = try property_desc.keyToValue(self, k);
+        defer kv.deinit();
+        const desc = try object_builtins.objectGetOwnPropertyDescriptor(self, arena, JSValue.UNDEFINED, &.{ from, kv });
+        defer desc.deinit();
+        if (desc.isObject()) {
+            if (desc.asObject().value.get("enumerable")) |en| {
+                if (coercion.isTruthy(en)) {
+                    const prop_val = try self.getProperty(from, k);
+                    errdefer prop_val.deinit();
+                    try target.asObject().value.defineProperty(k, prop_val, .{ .writable = true, .enumerable = true, .configurable = true });
+                }
+            }
+        }
+    }
+}
+
 pub fn bindPattern(self: *Interpreter, env: *Environment, pattern: *const zstatements.BindingPattern, value: JSValue, mode: BindMode) anyerror!void {
 
     const arena = self.gc_allocator;
@@ -624,31 +653,12 @@ pub fn bindPattern(self: *Interpreter, env: *Environment, pattern: *const zstate
                 try self.bindPattern(env, prop.value, v, mode);
             }
             if (obj_pat.rest) |rest_name| {
-                // Own keys of an object source, minus the ones already
-                // destructured; non-object sources rest to an empty
-                // object (narrowed -- real JS copies own enumerable
-                // props of the coerced object).
                 var rest_obj = try self.ordinaryObject();
-                if (value.isProxy()) {
-                    const ks = try builtins.ownEnumerableKeys(self, arena, value);
-                    defer builtins.freeOwnedKeys(arena, ks);
-                    outer_p: for (ks) |k| {
-                        if (Interpreter.isSymbolKey(k)) continue;
-                        for (obj_pat.properties) |prop| {
-                            if (std.mem.eql(u8, prop.key, k)) continue :outer_p;
-                        }
-                        try rest_obj.asObject().value.set(k, try self.getProperty(value, k));
-                    }
-                } else if (value.isObject()) {
-                    const keys = try value.asObject().value.keys(arena);
-                    defer arena.free(keys);
-                    outer: for (keys) |k| {
-                        for (obj_pat.properties) |prop| {
-                            if (std.mem.eql(u8, prop.key, k)) continue :outer;
-                        }
-                        try rest_obj.asObject().value.set(k, value.asObject().value.get(k).?.retain());
-                    }
-                }
+                errdefer rest_obj.deinit();
+                var excl = try arena.alloc([]const u8, obj_pat.properties.len);
+                defer arena.free(excl);
+                for (obj_pat.properties, 0..) |prop, pi| excl[pi] = prop.key;
+                try copyDataProperties(self, arena, rest_obj, value, excl);
                 switch (mode) {
                     .define => try env.define(arena, rest_name.name, rest_obj),
                     .assign => env.assign(rest_name.name, rest_obj) catch try env.define(arena, rest_name.name, rest_obj),
@@ -890,35 +900,13 @@ pub fn destructuringAssign(self: *Interpreter, env: *Environment, target: *zpars
                         try self.destructuringAssignTarget(env, el_target, v);
                     },
                     .spread => |sp| {
-                        // Object rest: own keys not already consumed;
-                        // non-object sources rest to an empty object
-                        // (same narrowing as bindPattern's rest). The
-                        // element holds a `.spread` node wrapping the
-                        // actual target.
                         const arg = sp.data.spread;
                         var rest_obj = try self.ordinaryObject();
-                        // assignTo retains what it stores.
                         defer rest_obj.deinit();
-                        if (value.isProxy()) {
-                            const ks = try builtins.ownEnumerableKeys(self, arena, value);
-                            defer builtins.freeOwnedKeys(arena, ks);
-                            outer_p: for (ks) |k| {
-                                if (Interpreter.isSymbolKey(k)) continue;
-                                for (consumed.items) |c| {
-                                    if (std.mem.eql(u8, c.key, k)) continue :outer_p;
-                                }
-                                try rest_obj.asObject().value.set(k, try self.getProperty(value, k));
-                            }
-                        } else if (value.isObject()) {
-                            const keys = try value.asObject().value.keys(arena);
-                            defer arena.free(keys);
-                            outer: for (keys) |k| {
-                                for (consumed.items) |c| {
-                                    if (std.mem.eql(u8, c.key, k)) continue :outer;
-                                }
-                                try rest_obj.asObject().value.set(k, value.asObject().value.get(k).?.retain());
-                            }
-                        }
+                        var excl = try arena.alloc([]const u8, consumed.items.len);
+                        defer arena.free(excl);
+                        for (consumed.items, 0..) |c, ci| excl[ci] = c.key;
+                        try copyDataProperties(self, arena, rest_obj, value, excl);
                         try self.destructuringAssignTarget(env, arg, rest_obj);
                     },
                 }

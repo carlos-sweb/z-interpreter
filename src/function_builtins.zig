@@ -304,6 +304,41 @@ fn functionConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
     return self.makeClosure(self.global_env, zfunctions.asFunctionNode(fnode_ptr));
 }
 
+pub fn throwTypeErrorFn(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    _ = args;
+    return interp(ctx).throwError(.type_error, "'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them", .{});
+}
+
+pub fn installThrowTypeError(self: *Interpreter) !void {
+    const tte = try self.gcNewFunction(.{
+        .ctx = self,
+        .name = "",
+        .arity = 0,
+        .call = throwTypeErrorFn,
+        .constructable = false,
+    });
+    const bag = try self.functionStatics(tte);
+    const frozen_attrs = zvalue.PropertyDescriptor{ .writable = false, .enumerable = false, .configurable = false };
+    try bag.asObject().value.defineProperty("length", JSValue.fromNumber(0), frozen_attrs);
+    try bag.asObject().value.defineProperty("name", try self.gcNewString(""), frozen_attrs);
+    bag.asObject().value.freeze();
+    self.throw_type_error = tte;
+
+    const fn_proto = &self.protos.function.asObject().value;
+    try fn_proto.defineAccessor("caller", tte.retain(), tte.retain(), JSValue.UNDEFINED);
+    if (fn_proto.getOwnRecordMut("caller")) |rec| {
+        rec.descriptor.enumerable = false;
+        rec.descriptor.configurable = true;
+    }
+    try fn_proto.defineAccessor("arguments", tte.retain(), tte.retain(), JSValue.UNDEFINED);
+    if (fn_proto.getOwnRecordMut("arguments")) |rec| {
+        rec.descriptor.enumerable = false;
+        rec.descriptor.configurable = true;
+    }
+}
+
 /// Installs the `Function` constructor (no statics).
 pub fn install(self: *Interpreter) !void {
     // Function: a constructor that PARSES -- new Function('a', 'return a')

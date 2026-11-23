@@ -899,6 +899,8 @@ pub const Interpreter = struct {
     /// `toPrimitive` looks up on an object operand. Set in setupGlobals.
     symbol_to_primitive: ?JSValue = null,
     symbol_has_instance: ?JSValue = null,
+    /// Single realm-wide %ThrowTypeError% intrinsic (frozen, length 0, name "").
+    throw_type_error: ?JSValue = null,
     symbol_dispose: ?JSValue = null,
     symbol_async_dispose: ?JSValue = null,
     /// The real builtin prototype objects (`Object.prototype`,
@@ -3711,6 +3713,41 @@ test "Phase 6.4: Error.prototype.stack accessor, TypedArray for..of/TDZ, compoun
         \\var nullBaseThrewTypeError = false;
         \\try { var b = null; b[{ toString() { throw new RangeError(); } }] += 1; } catch (e) { nullBaseThrewTypeError = e instanceof TypeError; }
         \\descOk && errStackOk && setOk && taOk && tdzThrew && caOk && nullBaseThrewTypeError;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
+test "Phase 6.5: CopyDataProperties object rest and %ThrowTypeError% caller/arguments/callee" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\var getterCount = 0;
+        \\var sym = Symbol("s");
+        \\var src = { a: 1, get b() { getterCount++; return 2; }, [sym]: 3 };
+        \\Object.defineProperty(src, "hidden", { value: 99, enumerable: false, configurable: true });
+        \\var { a, ...rest } = src;
+        \\var restOk = a === 1 && rest.b === 2 && getterCount === 1 && rest[sym] === 3 && !("hidden" in rest) && !("a" in rest);
+        \\var throwSrc = { get bad() { throw new RangeError("boom"); } };
+        \\var restThrew = false;
+        \\try { var { ...r2 } = throwSrc; } catch (e) { restThrew = e instanceof RangeError; }
+        \\var pSrc = new Proxy({ x: 10, y: 20 }, {});
+        \\var { x, ...pRest } = pSrc;
+        \\var proxyRestOk = x === 10 && pRest.y === 20 && !("x" in pRest);
+        \\var dCaller = Object.getOwnPropertyDescriptor(Function.prototype, "caller");
+        \\var dArgs = Object.getOwnPropertyDescriptor(Function.prototype, "arguments");
+        \\var tte = dCaller.get;
+        \\var tteOk = typeof tte === "function" && dCaller.get === dCaller.set && dArgs.get === tte && dArgs.set === tte &&
+        \\  !Object.isExtensible(tte) && Object.isFrozen(tte) && tte.length === 0 && tte.name === "";
+        \\var callerThrew = false;
+        \\try { (function() {}).caller; } catch (e) { callerThrew = e instanceof TypeError; }
+        \\var argsCallee = Object.getOwnPropertyDescriptor((function() { "use strict"; return arguments; })(), "callee");
+        \\var calleeOk = argsCallee.get === tte && argsCallee.set === tte && argsCallee.configurable === false;
+        \\restOk && restThrew && proxyRestOk && tteOk && callerThrew && calleeOk;
     );
     defer res.deinit();
     try testing.expect(res.isBool() and res.asBool());

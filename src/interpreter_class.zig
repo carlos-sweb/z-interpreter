@@ -1027,6 +1027,18 @@ pub fn prepareCallEnv(
         var arguments = try self.gcNewArray();
         for (args) |a| _ = try arguments.asArray().value.push(a.retain());
         try self.arguments_arrays.put(self.gc_allocator, @intFromPtr(arguments.asArray()), {});
+        if (self.throw_type_error) |tte| {
+            const bag = self.array_props.get(@intFromPtr(arguments.asArray())) orelse blk: {
+                const b = try self.gcNewObject();
+                try self.array_props.put(self.gc_allocator, @intFromPtr(arguments.asArray()), b);
+                break :blk b;
+            };
+            try bag.asObject().value.defineAccessor("callee", tte.retain(), tte.retain(), JSValue.UNDEFINED);
+            if (bag.asObject().value.getOwnRecordMut("callee")) |rec| {
+                rec.descriptor.enumerable = false;
+                rec.descriptor.configurable = false;
+            }
+        }
         try call_env.define(allocator, "arguments", arguments);
     } else if (fnode.kind != .arrow) {
         try call_env.retainLazyArguments(allocator, args);
