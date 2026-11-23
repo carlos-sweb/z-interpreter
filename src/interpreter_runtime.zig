@@ -968,6 +968,72 @@ fn retainedCopy(allocator: std.mem.Allocator, args: []const JSValue) ![]JSValue 
     return copy;
 }
 
+fn requireSyncGenFiber(self: *Interpreter, this_value: JSValue, comptime method: []const u8) anyerror!*FiberState {
+    if (this_value.isObject()) {
+        if (self.generator_fibers.get(@intFromPtr(this_value.asObject()))) |fs| {
+            if (!fs.is_async) return fs;
+        }
+    }
+    return self.throwError(.type_error, "Method Generator.prototype.{s} called on incompatible receiver", .{method});
+}
+
+pub fn generatorProtoNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const fs = try requireSyncGenFiber(self, this_value, "next");
+    return generatorNext(fs, allocator, this_value, args);
+}
+
+pub fn generatorProtoReturn(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const fs = try requireSyncGenFiber(self, this_value, "return");
+    return generatorReturn(fs, allocator, this_value, args);
+}
+
+pub fn generatorProtoThrow(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const fs = try requireSyncGenFiber(self, this_value, "throw");
+    return generatorThrow(fs, allocator, this_value, args);
+}
+
+fn rejectIncompatibleAsyncGen(self: *Interpreter, comptime method: []const u8) anyerror!JSValue {
+    const p = try self.gcNewPromise();
+    errdefer p.deinit();
+    const err_obj = try self.gcNewError(.type_error, "Method AsyncGenerator.prototype." ++ method ++ " called on incompatible receiver");
+    defer err_obj.deinit();
+    try self.settlePromise(p, .rejected, err_obj);
+    return p;
+}
+
+pub fn asyncGeneratorProtoNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this_value.isObject()) {
+        if (self.generator_fibers.get(@intFromPtr(this_value.asObject()))) |fs| {
+            if (fs.is_async) return asyncGeneratorNext(fs, allocator, this_value, args);
+        }
+    }
+    return rejectIncompatibleAsyncGen(self, "next");
+}
+
+pub fn asyncGeneratorProtoReturn(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this_value.isObject()) {
+        if (self.generator_fibers.get(@intFromPtr(this_value.asObject()))) |fs| {
+            if (fs.is_async) return asyncGeneratorReturn(fs, allocator, this_value, args);
+        }
+    }
+    return rejectIncompatibleAsyncGen(self, "return");
+}
+
+pub fn asyncGeneratorProtoThrow(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (this_value.isObject()) {
+        if (self.generator_fibers.get(@intFromPtr(this_value.asObject()))) |fs| {
+            if (fs.is_async) return asyncGeneratorThrow(fs, allocator, this_value, args);
+        }
+    }
+    return rejectIncompatibleAsyncGen(self, "throw");
+}
+
 /// Calling `function*` builds the generator object -- a plain object
 /// whose `next` native drives the (not-yet-started) fiber. Parameter
 /// binding runs synchronously at call time (ECMA-262 GeneratorStart);
@@ -999,18 +1065,12 @@ pub fn makeGeneratorObject(
     fs.fiber = try fiber_mod.Fiber.init(arena, fiberEntry, fs);
     try self.gcTrackFiberState(fs);
     var obj = try self.gcNewObject();
-    if (self.iterator_prototype) |p| try obj.asObject().value.setPrototype(&p.asObject().value);
-    try obj.asObject().value.set("next", try self.gcNewFunction(.{ .ctx = fs, .name = "next", .arity = 1, .call = generatorNext }));
-    try obj.asObject().value.set("return", try self.gcNewFunction(.{ .ctx = fs, .name = "return", .arity = 1, .call = generatorReturn }));
-    try obj.asObject().value.set("throw", try self.gcNewFunction(.{ .ctx = fs, .name = "throw", .arity = 1, .call = generatorThrow }));
-    // A generator IS its own iterable: `gen()[Symbol.iterator]()`
-    // returns the generator itself (so `[...gen()]` works via the
-    // Symbol.iterator path too, and `gen()[Symbol.iterator]() === gen()`).
-    if (self.symbol_iterator) |sym| {
-        const key = try self.encodeKey(sym);
-        defer self.gc_allocator.free(key);
-        try obj.asObject().value.set(key, try self.nativeMethod("iterator", "self", 0, iteratorSelf));
+    if (self.protos.generator_proto.isObject()) {
+        try obj.asObject().value.setPrototype(&self.protos.generator_proto.asObject().value);
+    } else if (self.iterator_prototype) |p| {
+        try obj.asObject().value.setPrototype(&p.asObject().value);
     }
+    try self.generator_fibers.put(self.gc_allocator, @intFromPtr(obj.asObject()), fs);
     return obj;
 }
 
@@ -1082,14 +1142,7 @@ pub fn makeAsyncGeneratorObject(
     if (self.protos.async_generator_proto.isObject()) {
         try obj.asObject().value.setPrototype(&self.protos.async_generator_proto.asObject().value);
     }
-    try obj.asObject().value.set("next", try self.gcNewFunction(.{ .ctx = fs, .name = "next", .arity = 1, .call = asyncGeneratorNext }));
-    try obj.asObject().value.set("return", try self.gcNewFunction(.{ .ctx = fs, .name = "return", .arity = 1, .call = asyncGeneratorReturn }));
-    try obj.asObject().value.set("throw", try self.gcNewFunction(.{ .ctx = fs, .name = "throw", .arity = 1, .call = asyncGeneratorThrow }));
-    if (self.symbol_async_iterator) |sym| {
-        const key = try self.encodeKey(sym);
-        defer self.gc_allocator.free(key);
-        try obj.asObject().value.set(key, try self.nativeMethod("asyncIterator", "self", 0, iteratorSelf));
-    }
+    try self.generator_fibers.put(self.gc_allocator, @intFromPtr(obj.asObject()), fs);
     return obj;
 }
 

@@ -1576,7 +1576,19 @@ pub fn objectGetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: J
         .string => self.protos.string.retain(),
         .number => self.protos.number.retain(),
         .boolean => self.protos.boolean.retain(),
-        .function => self.protos.function.retain(),
+        .function => |box| blk: {
+            const iclass = @import("interpreter_class.zig");
+            if (box.value.call == iclass.closureCall) {
+                const cctx: *interpreter_mod.ClosureCtx = @ptrCast(@alignCast(box.value.ctx));
+                if (cctx.function_node.is_generator and cctx.function_node.is_async and self.protos.async_generator_function_proto.isObject()) {
+                    break :blk self.protos.async_generator_function_proto.retain();
+                }
+                if (cctx.function_node.is_generator and !cctx.function_node.is_async and self.protos.generator_function_proto.isObject()) {
+                    break :blk self.protos.generator_function_proto.retain();
+                }
+            }
+            break :blk self.protos.function.retain();
+        },
         .date => self.protos.date.retain(),
         .regex => self.protos.regex.retain(),
         .@"error" => blk: {

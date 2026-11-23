@@ -245,6 +245,14 @@ fn serializeJsonProperty(st: *StringifyState, key: []const u8, holder: JSValue) 
     }
 
     if (value.isObject()) {
+        if (self.raw_json_objects.contains(@intFromPtr(value.asObject()))) {
+            if (value.asObject().value.get("rawJSON")) |raw_val| {
+                if (raw_val.isString()) {
+                    try st.buf.appendSlice(st.allocator, raw_val.asString().value.data);
+                    return true;
+                }
+            }
+        }
         if (self.primitive_wrapper_data.get(@intFromPtr(value.asObject()))) |boxed| {
             if (boxed.isNumber()) {
                 const n = try builtin_helpers.toNumberStrict(self, value);
@@ -625,10 +633,48 @@ fn jsonParse(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     return internalizeJsonProperty(self, allocator, root, "", reviver, root_rec);
 }
 
+fn isJsonWhitespace(c: u8) bool {
+    return c == ' ' or c == '\t' or c == '\n' or c == '\r';
+}
+
+fn jsonRawJSON(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const json_str = try self.toDisplayStringJS(allocator, arg(args, 0));
+    defer allocator.free(json_str);
+    if (json_str.len == 0 or isJsonWhitespace(json_str[0]) or isJsonWhitespace(json_str[json_str.len - 1])) {
+        return self.throwError(.syntax_error, "Invalid raw JSON text", .{});
+    }
+    const parsed = zjson.parse(allocator, json_str) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return self.throwError(.syntax_error, "Invalid raw JSON text", .{}),
+    };
+    defer parsed.deinit();
+    if (parsed.isObject() or parsed.isArray()) {
+        return self.throwError(.syntax_error, "JSON.rawJSON text must represent a primitive JSON value", .{});
+    }
+    const obj = try self.gcNewObject();
+    errdefer obj.deinit();
+    try obj.asObject().value.defineProperty("rawJSON", try self.gcNewString(json_str), .{ .writable = false, .enumerable = true, .configurable = false });
+    obj.asObject().value.freeze();
+    try self.raw_json_objects.put(self.gc_allocator, @intFromPtr(obj.asObject()), {});
+    return obj;
+}
+
+fn jsonIsRawJSON(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const self = interp(ctx);
+    const v = arg(args, 0);
+    return JSValue.fromBool(v.isObject() and self.raw_json_objects.contains(@intFromPtr(v.asObject())));
+}
+
 /// Installs the `JSON` namespace (no constructor).
 pub fn install(self: *Interpreter) !void {
     _ = try installBuiltin(self, .{ .name = "JSON", .statics = &.{
         .{ .name = "stringify", .value = .{ .method = .{ .call = jsonStringify, .arity = 3 } } },
         .{ .name = "parse", .value = .{ .method = .{ .call = jsonParse, .arity = 2 } } },
+        .{ .name = "rawJSON", .value = .{ .method = .{ .call = jsonRawJSON, .arity = 1 } } },
+        .{ .name = "isRawJSON", .value = .{ .method = .{ .call = jsonIsRawJSON, .arity = 1 } } },
     } });
 }

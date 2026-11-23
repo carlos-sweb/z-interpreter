@@ -1152,9 +1152,40 @@ pub fn install(self: *Interpreter) !void {
     }
     self.protos.async_iterator_proto = async_iter_proto;
 
+    const iruntime = @import("interpreter_runtime.zig");
+    const ro_cfg = zvalue.PropertyDescriptor{ .writable = false, .enumerable = false, .configurable = true };
+
+    var gen_fn_proto = try self.gcNewObject();
+    if (self.protos.function.isObject()) {
+        try gen_fn_proto.asObject().value.setPrototype(&self.protos.function.asObject().value);
+    }
+    var gen_proto = try self.gcNewObject();
+    try gen_proto.asObject().value.setPrototype(&proto.asObject().value);
+    try gen_proto.asObject().value.defineProperty("constructor", gen_fn_proto.retain(), ro_cfg);
+    try defineMethod(self, gen_proto, "next", 1, iruntime.generatorProtoNext);
+    try defineMethod(self, gen_proto, "return", 1, iruntime.generatorProtoReturn);
+    try defineMethod(self, gen_proto, "throw", 1, iruntime.generatorProtoThrow);
+    try gen_proto.asObject().value.defineProperty(tag_key, try self.gcNewString("Generator"), ro_cfg);
+    try gen_fn_proto.asObject().value.defineProperty("prototype", gen_proto.retain(), ro_cfg);
+    try gen_fn_proto.asObject().value.defineProperty(tag_key, try self.gcNewString("GeneratorFunction"), ro_cfg);
+    self.protos.generator_proto = gen_proto;
+    self.protos.generator_function_proto = gen_fn_proto;
+
+    var async_gen_fn_proto = try self.gcNewObject();
+    if (self.protos.function.isObject()) {
+        try async_gen_fn_proto.asObject().value.setPrototype(&self.protos.function.asObject().value);
+    }
     var async_gen_proto = try self.gcNewObject();
     try async_gen_proto.asObject().value.setPrototype(&async_iter_proto.asObject().value);
+    try async_gen_proto.asObject().value.defineProperty("constructor", async_gen_fn_proto.retain(), ro_cfg);
+    try defineMethod(self, async_gen_proto, "next", 1, iruntime.asyncGeneratorProtoNext);
+    try defineMethod(self, async_gen_proto, "return", 1, iruntime.asyncGeneratorProtoReturn);
+    try defineMethod(self, async_gen_proto, "throw", 1, iruntime.asyncGeneratorProtoThrow);
+    try async_gen_proto.asObject().value.defineProperty(tag_key, try self.gcNewString("AsyncGenerator"), ro_cfg);
+    try async_gen_fn_proto.asObject().value.defineProperty("prototype", async_gen_proto.retain(), ro_cfg);
+    try async_gen_fn_proto.asObject().value.defineProperty(tag_key, try self.gcNewString("AsyncGeneratorFunction"), ro_cfg);
     self.protos.async_generator_proto = async_gen_proto;
+    self.protos.async_generator_function_proto = async_gen_fn_proto;
 
     var arr_iter_proto = try self.gcNewObject();
     try arr_iter_proto.asObject().value.setPrototype(&proto.asObject().value);

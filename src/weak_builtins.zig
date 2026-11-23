@@ -110,6 +110,43 @@ fn weakMapSet(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     return this_value.retain();
 }
 
+fn weakMapGetOrInsert(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const s = slotsOf(self, this_value, .weak_map) orelse return incompatible(self, "WeakMap.prototype.getOrInsert");
+    const key = arg(args, 0);
+    if (!canBeHeldWeakly(self, key)) return self.throwError(.type_error, "Invalid value used as weak map key", .{});
+    const gop = try s.weak_map.getOrPut(self.gc_allocator, identity(key));
+    if (gop.found_existing) return gop.value_ptr.value.retain();
+    const default_val = arg(args, 1);
+    gop.value_ptr.* = .{ .key = key.retain(), .value = default_val.retain() };
+    return default_val.retain();
+}
+
+fn weakMapGetOrInsertComputed(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    const s = slotsOf(self, this_value, .weak_map) orelse return incompatible(self, "WeakMap.prototype.getOrInsertComputed");
+    const key = arg(args, 0);
+    if (!canBeHeldWeakly(self, key)) return self.throwError(.type_error, "Invalid value used as weak map key", .{});
+    const cb = arg(args, 1);
+    if (!@import("property_desc.zig").isCallable(cb)) {
+        return self.throwError(.type_error, "WeakMap.prototype.getOrInsertComputed callback is not a function", .{});
+    }
+    if (s.weak_map.get(identity(key))) |e| return e.value.retain();
+    const computed = try self.callValue(cb, JSValue.UNDEFINED, &.{key}, "callbackfn");
+    errdefer computed.deinit();
+    const s2 = slotsOf(self, this_value, .weak_map) orelse return incompatible(self, "WeakMap.prototype.getOrInsertComputed");
+    const gop = try s2.weak_map.getOrPut(self.gc_allocator, identity(key));
+    if (gop.found_existing) {
+        gop.value_ptr.value.deinit();
+        gop.value_ptr.value = computed.retain();
+    } else {
+        gop.value_ptr.* = .{ .key = key.retain(), .value = computed.retain() };
+    }
+    return computed;
+}
+
 fn weakHas(comptime kind: std.meta.Tag(ObjectSlots), comptime what: []const u8) NativeFn {
     return struct {
         fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -243,6 +280,8 @@ pub fn install(self: *Interpreter) !void {
     try installClass(self, "WeakMap", 0, weakCollectionConstructor(true), .{
         .{ "delete", 1, weakDelete(.weak_map, "WeakMap.prototype.delete") },
         .{ "get", 1, weakMapGet },
+        .{ "getOrInsert", 2, weakMapGetOrInsert },
+        .{ "getOrInsertComputed", 2, weakMapGetOrInsertComputed },
         .{ "has", 1, weakHas(.weak_map, "WeakMap.prototype.has") },
         .{ "set", 2, weakMapSet },
     }, tag_key);

@@ -1653,6 +1653,14 @@ fn hostDetachArrayBuffer(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
     return JSValue.UNDEFINED;
 }
 
+fn arrayBufferIsView(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = ctx;
+    _ = allocator;
+    _ = this_value;
+    const v = arg(args, 0);
+    return JSValue.fromBool(v.isTypedArray() or v.isDataView());
+}
+
 /// Installs `ArrayBuffer`, `DataView`, and the 10 TypedArray constructors.
 pub fn install(self: *Interpreter) !void {
     const arena = self.gc_allocator;
@@ -1661,7 +1669,13 @@ pub fn install(self: *Interpreter) !void {
     // byteLength)` -- both reject a bare (non-new) call, same pattern as
     // Proxy above. TypedArray constructors are a separate, not-yet-
     // started follow-up phase.
-    _ = try installBuiltin(self, .{ .name = "ArrayBuffer", .ctor = .{ .arity = 1, .call = arrayBufferConstructor, .constructable = true } });
+    _ = try installBuiltin(self, .{
+        .name = "ArrayBuffer",
+        .ctor = .{ .arity = 1, .call = arrayBufferConstructor, .constructable = true },
+        .statics = &.{
+            .{ .name = "isView", .value = .{ .method = .{ .call = arrayBufferIsView, .arity = 1 } } },
+        },
+    });
     _ = try installBuiltin(self, .{ .name = "SharedArrayBuffer", .ctor = .{ .arity = 1, .call = sharedArrayBufferConstructor, .constructable = true } });
     _ = try installBuiltin(self, .{ .name = "DataView", .ctor = .{ .arity = 1, .call = dataViewConstructor, .constructable = true } });
 

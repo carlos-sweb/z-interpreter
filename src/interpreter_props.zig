@@ -1192,10 +1192,15 @@ pub fn functionPrototype(self: *Interpreter, fn_val: JSValue) anyerror!JSValue {
     }
     var proto = try self.gcNewObject();
     const iclass = @import("interpreter_class.zig");
-    if (fn_val.asFunction().value.call == iclass.closureCall and self.protos.async_generator_proto.isObject()) {
+    if (fn_val.asFunction().value.call == iclass.closureCall) {
         const cctx: *interpreter_mod.ClosureCtx = @ptrCast(@alignCast(fn_val.asFunction().value.ctx));
-        if (cctx.function_node.is_generator and cctx.function_node.is_async) {
+        if (cctx.function_node.is_generator and cctx.function_node.is_async and self.protos.async_generator_proto.isObject()) {
             try proto.asObject().value.setPrototype(&self.protos.async_generator_proto.asObject().value);
+            fn_val.asFunction().value.prototype = proto;
+            return proto;
+        }
+        if (cctx.function_node.is_generator and !cctx.function_node.is_async and self.protos.generator_proto.isObject()) {
+            try proto.asObject().value.setPrototype(&self.protos.generator_proto.asObject().value);
             fn_val.asFunction().value.prototype = proto;
             return proto;
         }
@@ -1412,6 +1417,21 @@ pub fn materializeProtos(self: *Interpreter) !void {
     try self.aliasSymbolIterator(self.protos.array, "array", builtins.array_methods, "values");
     try self.aliasSymbolIterator(self.protos.map, "map", builtins.map_methods, "entries");
     try self.aliasSymbolIterator(self.protos.set, "set", builtins.set_methods, "values");
+
+    if (self.global_env.get("Symbol")) |sym_ctor| {
+        const uns_sym = try self.getProperty(sym_ctor, "unscopables");
+        defer uns_sym.deinit();
+        if (uns_sym.isSymbol()) {
+            const uns_key = try self.encodeKey(uns_sym);
+            defer self.gc_allocator.free(uns_key);
+            const uns_obj = try self.gcNewObject();
+            const uns_prop_attrs = zvalue.PropertyDescriptor{ .writable = true, .enumerable = true, .configurable = true };
+            inline for (.{ "at", "copyWithin", "entries", "fill", "find", "findIndex", "findLast", "findLastIndex", "flat", "flatMap", "includes", "keys", "values" }) |mname| {
+                try uns_obj.asObject().value.defineProperty(mname, JSValue.fromBool(true), uns_prop_attrs);
+            }
+            try self.protos.array.asObject().value.defineProperty(uns_key, uns_obj, .{ .writable = false, .enumerable = false, .configurable = true });
+        }
+    }
 
     // Types without a method table today: real (near-empty) prototypes so
     // getPrototypeOf / reflection still work and instances chain correctly.

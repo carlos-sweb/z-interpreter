@@ -184,6 +184,9 @@ const Marker = struct {
         const gop = self.reached.getOrPut(self.interp.gc_allocator, addr) catch return;
         if (gop.found_existing) return;
         self.interp.traceValueChildren(v, self);
+        if (v.isObject()) {
+            if (self.interp.generator_fibers.get(@intFromPtr(v.asObject()))) |fs| self.context(fs);
+        }
     }
 
     pub fn environment(self: *Marker, e: *Environment) void {
@@ -355,6 +358,8 @@ pub fn deinit(self: *Interpreter) void {
     self.function_needs_arguments.deinit(self.gc_allocator);
     self.primitive_wrapper_data.deinit(self.gc_allocator);
     self.deleted_fn_props.deinit(self.gc_allocator);
+    self.generator_fibers.deinit(self.gc_allocator);
+    self.raw_json_objects.deinit(self.gc_allocator);
     self.pending_jobs.deinit(self.gc_allocator);
     self.timers.deinit(self.gc_allocator);
 
@@ -412,6 +417,8 @@ pub fn gcOnBoxDestroyed(ctx: *anyopaque, box: *anyopaque) void {
         if (!self.tearing_down) kv.value.deinit();
     }
     _ = self.deleted_fn_props.remove(@intFromPtr(box));
+    _ = self.generator_fibers.remove(@intFromPtr(box));
+    _ = self.raw_json_objects.remove(@intFromPtr(box));
     // A builtin instance's internal slots (WeakMap & co., Iterator helpers).
     if (self.object_slots.fetchRemove(@intFromPtr(box))) |kv| {
         var slots = kv.value;
@@ -947,6 +954,8 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
             if (box.value.statics) |s| sweeper.value(s);
             if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             _ = self.deleted_fn_props.remove(@intFromPtr(box));
+    _ = self.generator_fibers.remove(@intFromPtr(box));
+    _ = self.raw_json_objects.remove(@intFromPtr(box));
             // A ClosureCtx/FiberState/ClassCtx `ctx` is its OWN
             // registry entry, torn down on its own turn in this same
             // sweep pass -- nothing further to do with it here.

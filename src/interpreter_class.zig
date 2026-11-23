@@ -90,10 +90,34 @@ fn isAnonClassNode(node: *const zparser.Node) bool {
 /// state` is the same "AST-adjacent, freed once at shutdown, never
 /// individually freed" category this codebase already uses for exactly
 /// this kind of permanent-but-not-GC-traced string.
+pub fn setFunctionName(self: *Interpreter, value: JSValue, key_str: []const u8, prefix: ?[]const u8) anyerror!void {
+    if (!value.isFunction()) return;
+    const alloc = self.arena_state.allocator();
+    var base: []const u8 = key_str;
+    if (key_str.len >= 2 and key_str[0] == 0 and key_str[1] == 'S') {
+        if (self.symbol_keys.get(key_str)) |sym| {
+            if (sym.asSymbol().value.description) |desc| {
+                base = try std.fmt.allocPrint(alloc, "[{s}]", .{desc});
+            } else {
+                base = "";
+            }
+        } else {
+            base = "";
+        }
+    } else if (key_str.len > 0 and key_str[0] == 0) {
+        base = fieldDisplayName(key_str);
+    }
+    if (prefix) |p| {
+        value.asFunction().value.name = try std.fmt.allocPrint(alloc, "{s} {s}", .{ p, base });
+    } else {
+        value.asFunction().value.name = try alloc.dupe(u8, base);
+    }
+}
+
 pub fn maybeNameAnonymousValue(self: *Interpreter, init_node: *const zparser.Node, value: JSValue, name: []const u8) anyerror!void {
     if (!isAnonFnNode(init_node) and !isAnonClassNode(init_node)) return;
     if (!value.isFunction() or value.asFunction().value.name.len != 0) return;
-    value.asFunction().value.name = try self.arena_state.allocator().dupe(u8, name);
+    try setFunctionName(self, value, name, null);
 }
 
 /// Recovers a class-field key's readable source name for NamedEvaluation:
@@ -977,14 +1001,19 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
         // definePropertyFromJs already does for JS-level accessors.
         const method_attrs = zvalue.PropertyDescriptor{ .writable = true, .enumerable = false, .configurable = true };
         switch (el.kind) {
-            .method => try target.objectDefine(key, m, method_attrs),
+            .method => {
+                try setFunctionName(self, m, key, null);
+                try target.objectDefine(key, m, method_attrs);
+            },
             .get => {
+                try setFunctionName(self, m, key, "get");
                 try target.asObject().value.defineAccessor(key, m, null, JSValue.UNDEFINED);
                 const rec = target.asObject().value.getOwnRecordMut(key).?;
                 rec.descriptor.enumerable = false;
                 rec.descriptor.configurable = true;
             },
             .set => {
+                try setFunctionName(self, m, key, "set");
                 try target.asObject().value.defineAccessor(key, null, m, JSValue.UNDEFINED);
                 const rec = target.asObject().value.getOwnRecordMut(key).?;
                 rec.descriptor.enumerable = false;

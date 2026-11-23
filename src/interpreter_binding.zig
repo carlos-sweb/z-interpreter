@@ -486,7 +486,7 @@ fn stepIteratorValue(self: *Interpreter, arena: std.mem.Allocator, iter: JSValue
     };
 }
 
-fn copyDataProperties(self: *Interpreter, arena: std.mem.Allocator, target: JSValue, source: JSValue, excluded: []const []const u8) anyerror!void {
+pub fn copyDataProperties(self: *Interpreter, arena: std.mem.Allocator, target: JSValue, source: JSValue, excluded: []const []const u8) anyerror!void {
     if (source.isUndefined() or source.isNull()) return;
     const property_desc = @import("property_desc.zig");
     const object_builtins = @import("object_builtins.zig");
@@ -507,8 +507,7 @@ fn copyDataProperties(self: *Interpreter, arena: std.mem.Allocator, target: JSVa
             if (desc.asObject().value.get("enumerable")) |en| {
                 if (coercion.isTruthy(en)) {
                     const prop_val = try self.getProperty(from, k);
-                    errdefer prop_val.deinit();
-                    try target.asObject().value.defineProperty(k, prop_val, .{ .writable = true, .enumerable = true, .configurable = true });
+                    try target.objectDefine(k, prop_val, .{ .writable = true, .enumerable = true, .configurable = true });
                 }
             }
         }
@@ -757,6 +756,9 @@ pub fn destructuringAssign(self: *Interpreter, env: *Environment, target: *zpars
                         if (default_node) |def| {
                             v = try self.evalExpression(env, def);
                             from_default = true;
+                            if (el_target.data == .identifier) {
+                                try self.maybeNameAnonymousValue(def, v, el_target.data.identifier);
+                            }
                         }
                     }
                     if (pre_member) |pm| {
@@ -835,6 +837,9 @@ pub fn destructuringAssign(self: *Interpreter, env: *Environment, target: *zpars
                             }
                             return err;
                         };
+                        if (el_target.data == .identifier) {
+                            try self.maybeNameAnonymousValue(def, v, el_target.data.identifier);
+                        }
                     }
                 }
                 if (pre_member) |pm| {
@@ -892,10 +897,14 @@ pub fn destructuringAssign(self: *Interpreter, env: *Environment, target: *zpars
                         // always released here.
                         defer v.deinit();
                         if (el_target.data == .assignment and el_target.data.assignment.op == .assign) {
-                            if (v.isUndefined()) {
-                                v = try self.evalExpression(env, el_target.data.assignment.value);
-                            }
+                            const def = el_target.data.assignment.value;
                             el_target = el_target.data.assignment.target;
+                            if (v.isUndefined()) {
+                                v = try self.evalExpression(env, def);
+                                if (el_target.data == .identifier) {
+                                    try self.maybeNameAnonymousValue(def, v, el_target.data.identifier);
+                                }
+                            }
                         }
                         try self.destructuringAssignTarget(env, el_target, v);
                     },

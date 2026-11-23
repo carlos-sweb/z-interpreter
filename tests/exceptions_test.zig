@@ -220,5 +220,5 @@ test "console.log renders a caught error legibly" {
 // ===== Feature gaps are catchable TypeErrors =====
 
 test "a JS catch receives interpreter feature gaps as TypeErrors" {
-    try helpers.expectStdout("try { ({ ...[1, 2] }); } catch (x) { console.log(x.name); }", "TypeError\n");
+    try helpers.expectStdout("try { (1).x = 1; } catch (x) { console.log(x.name); }", "TypeError\n");
 }

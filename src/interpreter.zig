@@ -48,7 +48,10 @@ pub const Protos = struct {
     disposable_stack: JSValue = JSValue.UNDEFINED,
     async_disposable_stack: JSValue = JSValue.UNDEFINED,
     async_iterator_proto: JSValue = JSValue.UNDEFINED,
+    generator_proto: JSValue = JSValue.UNDEFINED,
+    generator_function_proto: JSValue = JSValue.UNDEFINED,
     async_generator_proto: JSValue = JSValue.UNDEFINED,
+    async_generator_function_proto: JSValue = JSValue.UNDEFINED,
     array_iterator_proto: JSValue = JSValue.UNDEFINED,
     map: JSValue = JSValue.UNDEFINED,
     set: JSValue = JSValue.UNDEFINED,
@@ -1003,6 +1006,10 @@ pub const Interpreter = struct {
     /// function dies (gcOnBoxDestroyed), like those two tables' entries,
     /// so a function later allocated at the same address doesn't inherit it.
     deleted_fn_props: std.AutoHashMapUnmanaged(usize, DeletedFnProps) = .empty,
+    /// Maps a Generator / AsyncGenerator object's box address to its FiberState.
+    generator_fibers: std.AutoHashMapUnmanaged(usize, *FiberState) = .empty,
+    /// Set of object box addresses created by `JSON.rawJSON`.
+    raw_json_objects: std.AutoHashMapUnmanaged(usize, void) = .empty,
     /// Active source text being parsed/executed so closures/classes can slice `start..end`.
     current_source: ?[]const u8 = null,
     /// The stack-depth guard: recursing below this native stack address
@@ -1747,10 +1754,9 @@ test "Temporal own properties survive marking and cycles are collected" {
     try testing.expect(!interp.temporal_props.contains(ordinary_address));
 }
 
-/// The FiberState behind a generator object (its own `next` native's ctx).
-fn fiberOf(gen: JSValue) *FiberState {
-    const next = gen.asObject().value.get("next").?;
-    return @ptrCast(@alignCast(next.asFunction().value.ctx));
+/// The FiberState behind a generator object.
+fn fiberOf(interp: *Interpreter, gen: JSValue) *FiberState {
+    return interp.generator_fibers.get(@intFromPtr(gen.asObject())).?;
 }
 
 test "yield takes the resume value: the slot ends empty and the value has one owner" {
@@ -1762,7 +1768,7 @@ test "yield takes the resume value: the slot ends empty and the value has one ow
     _ = try interp.run("var probe = {}; function* g() { var x = yield; } var it = g(); it.next();");
     const it = try interp.run("it;");
     defer it.deinit();
-    const fs = fiberOf(it);
+    const fs = fiberOf(&interp, it);
     _ = try interp.run("it.next(probe);");
     try testing.expect(fs.resume_value.isUndefined());
     const probe = try interp.run("probe;");
@@ -1788,7 +1794,7 @@ test "await takes the resume value: the slot ends empty" {
     defer it.deinit();
     const seen = try interp.run("seen;");
     try testing.expect(seen.isBool() and seen.asBool()); // the await did resume
-    try testing.expect(fiberOf(it).resume_value.isUndefined());
+    try testing.expect(fiberOf(&interp, it).resume_value.isUndefined());
 }
 
 test "a throw delivered at yield or yield* takes the resume value" {
@@ -1812,7 +1818,7 @@ test "a throw delivered at yield or yield* takes the resume value" {
         const probe = try interp.run("probe;");
         defer probe.deinit();
         const before = probe.asObject().refCount();
-        const fs = fiberOf(it);
+        const fs = fiberOf(&interp, it);
         fs.setResumeValue(probe.retain());
         fs.resume_is_throw = true;
         try interp.resumeFiber(fs);
@@ -3812,6 +3818,55 @@ test "Phase 6.6: Class field eval SyntaxError, nested #private brand checks, and
         \\RestrictedSetters.caller = 33;
         \\var rs3 = sx === 33;
         \\!executed && argErr && arrowArgErr && superErr && fnArgOk && nestedOk && protoOk && rs1 && rs2 && rs3;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
+test "Phase 6.7: fn-name, GeneratorPrototype, object spread, WeakMap.getOrInsert, ArrayBuffer.isView, JSON.rawJSON, Array.unscopables" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\var sym = Symbol("desc");
+        \\var symNoDesc = Symbol();
+        \\class C { get foo() {} set foo(v) {} [sym]() {} [symNoDesc]() {} }
+        \\var obj = { get a() {}, set a(v) {}, [sym]() {} };
+        \\var [f1 = () => {}] = [];
+        \\var f2; ({ x: f2 = function() {} } = {});
+        \\var nameOk = Object.getOwnPropertyDescriptor(C.prototype, "foo").get.name === "get foo" &&
+        \\  Object.getOwnPropertyDescriptor(C.prototype, "foo").set.name === "set foo" &&
+        \\  C.prototype[sym].name === "[desc]" && C.prototype[symNoDesc].name === "" &&
+        \\  Object.getOwnPropertyDescriptor(obj, "a").get.name === "get a" &&
+        \\  Object.getOwnPropertyDescriptor(obj, "a").set.name === "set a" &&
+        \\  obj[sym].name === "[desc]" && f1.name === "f1" && f2.name === "f2";
+        \\function* g() { yield 1; }
+        \\async function* ag() { yield 2; }
+        \\var gp = Object.getPrototypeOf(g.prototype);
+        \\var agp = Object.getPrototypeOf(ag.prototype);
+        \\var genOk = gp[Symbol.toStringTag] === "Generator" && agp[Symbol.toStringTag] === "AsyncGenerator" &&
+        \\  typeof gp.next === "function" && gp.next.length === 1 && gp.constructor.prototype === gp &&
+        \\  typeof agp.next === "function" && agp.constructor.prototype === agp && g().next().value === 1;
+        \\var sp = { ...null, ...undefined, ..."ab", a: 9, ...{ get b() { return 42; }, [sym]: 7 } };
+        \\var spreadOk = sp[0] === "a" && sp[1] === "b" && sp.a === 9 && sp.b === 42 && sp[sym] === 7;
+        \\var wm = new WeakMap();
+        \\var k1 = {}, k2 = {};
+        \\var wmOk = wm.getOrInsert(k1, 10) === 10 && wm.getOrInsert(k1, 20) === 10 &&
+        \\  wm.getOrInsertComputed(k2, () => 99) === 99 && wm.get(k2) === 99;
+        \\var ab = new ArrayBuffer(8);
+        \\var isViewOk = ArrayBuffer.isView(new Uint8Array(ab)) && ArrayBuffer.isView(new DataView(ab)) &&
+        \\  !ArrayBuffer.isView(ab) && !ArrayBuffer.isView({}) && !ArrayBuffer.isView(null);
+        \\var rj = JSON.rawJSON("12345678901234567890");
+        \\var rjErr = false;
+        \\try { JSON.rawJSON(" 1 "); } catch (e) { rjErr = e instanceof SyntaxError; }
+        \\var rawJsonOk = JSON.isRawJSON(rj) && !JSON.isRawJSON({}) && Object.getPrototypeOf(rj) === null &&
+        \\  Object.isFrozen(rj) && JSON.stringify({ n: rj }) === "{\"n\":12345678901234567890}" && rjErr;
+        \\var u = Array.prototype[Symbol.unscopables];
+        \\var unscopOk = Object.getPrototypeOf(u) === null && u.find === true && u.at === true && u.findLast === true && u.values === true;
+        \\nameOk && genOk && spreadOk && wmOk && isViewOk && rawJsonOk && unscopOk;
     );
     defer res.deinit();
     try testing.expect(res.isBool() and res.asBool());

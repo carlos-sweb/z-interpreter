@@ -204,17 +204,12 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                             },
                             .method => {
                                 const f = try self.makeObjectMethodClosure(env, zfunctions.asFunctionNode(prop.value.data.function_like), obj);
+                                try @import("interpreter_class.zig").setFunctionName(self, f, key_str, null);
                                 try obj.objectSet(key_str, f);
                             },
-                            // get+set for the same key merge into one
-                            // accessor property (defineAccessor's
-                            // contract); data-only consumers see
-                            // UNDEFINED as its value. Known leak: over
-                            // an existing data key (`{a: v, get a(){}}`)
-                            // the old value is not released; z-value has
-                            // no Rc-aware accessor wrapper.
                             .get, .set => {
                                 const f = try self.makeObjectMethodClosure(env, zfunctions.asFunctionNode(prop.value.data.function_like), obj);
+                                try @import("interpreter_class.zig").setFunctionName(self, f, key_str, if (prop.kind == .get) "get" else "set");
                                 try obj.asObject().value.defineAccessor(
                                     key_str,
                                     if (prop.kind == .get) f else null,
@@ -227,27 +222,7 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                     .spread => |spread_node| {
                         const spread_val = try self.evalExpression(env, spread_node.data.spread);
                         defer spread_val.deinit();
-                        if (spread_val.isProxy()) {
-                            // ownKeys trap (or delegate) for the key
-                            // list, `get` trap (or delegate) per key
-                            // for the value -- same narrowing as
-                            // every other trap site (no per-key
-                            // enumerability re-check via
-                            // getOwnPropertyDescriptor).
-                            const ks = try builtins.ownEnumerableKeys(self, arena, spread_val);
-                            defer builtins.freeOwnedKeys(arena, ks);
-                            for (ks) |k| {
-                                if (isSymbolKey(k)) continue;
-                                try obj.objectSet(k, try self.getProperty(spread_val, k));
-                            }
-                        } else {
-                            if (!spread_val.isObject()) return self.throwError(.type_error, "Spreading a {s} into an object literal is not supported yet", .{@tagName(spread_val.tag())});
-                            const keys = try spread_val.asObject().value.keys(arena);
-                            defer arena.free(keys);
-                            for (keys) |k| {
-                                try obj.objectSet(k, spread_val.asObject().value.get(k).?.retain());
-                            }
-                        }
+                        try @import("interpreter_binding.zig").copyDataProperties(self, arena, obj, spread_val, &.{});
                     },
                 }
             }
