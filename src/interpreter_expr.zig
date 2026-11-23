@@ -716,6 +716,59 @@ pub fn evalAssignment(self: *Interpreter, env: *Environment, a: anytype) anyerro
         }
         return value;
     }
+    const is_regular_member = a.target.data == .member and !a.target.data.member.optional and a.target.data.member.object.data != .super_expr and
+        (a.target.data.member.computed or a.target.data.member.property.data != .identifier or a.target.data.member.property.data.identifier.len == 0 or a.target.data.member.property.data.identifier[0] != '#');
+    if (is_regular_member) {
+        const m = a.target.data.member;
+        const base = try self.evalExpression(env, m.object);
+        defer base.deinit();
+        var key_owned: ?[]const u8 = null;
+        defer if (key_owned) |ko| self.gc_allocator.free(ko);
+        const key: []const u8 = if (m.computed) blk: {
+            const prop_val = try self.evalExpression(env, m.property);
+            defer prop_val.deinit();
+            if (base.isNull() or base.isUndefined()) {
+                return self.throwError(.type_error, "Cannot read properties of {s}", .{base.typeOf()});
+            }
+            const ko = try self.encodeKey(prop_val);
+            key_owned = ko;
+            break :blk ko;
+        } else blk: {
+            if (base.isNull() or base.isUndefined()) {
+                return self.throwError(.type_error, "Cannot read properties of {s}", .{base.typeOf()});
+            }
+            break :blk switch (m.property.data) {
+                .identifier => |name| name,
+                else => return error.NotImplemented,
+            };
+        };
+        const current = try self.getProperty(base, key);
+        switch (a.op) {
+            .logical_and, .logical_or, .nullish => {
+                const should_assign = switch (a.op) {
+                    .logical_and => coercion.isTruthy(current),
+                    .logical_or => !coercion.isTruthy(current),
+                    .nullish => current.isUndefined() or current.isNull(),
+                    else => unreachable,
+                };
+                if (!should_assign) return current;
+                current.deinit();
+                const value = try self.evalExpression(env, a.value);
+                errdefer value.deinit();
+                try self.setPropertyOnValue(base, key, value);
+                return value;
+            },
+            else => {
+                defer current.deinit();
+                const rhs = try self.evalExpression(env, a.value);
+                defer rhs.deinit();
+                const result = try applyBinaryOp(self, compoundToBinary(a.op), current, rhs);
+                errdefer result.deinit();
+                try self.setPropertyOnValue(base, key, result);
+                return result;
+            },
+        }
+    }
     switch (a.op) {
         .logical_and, .logical_or, .nullish => {
             const current = try self.evalExpression(env, a.target);

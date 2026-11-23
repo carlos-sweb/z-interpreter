@@ -3682,6 +3682,40 @@ test "Phase 6.3: generic Promise catch/finally, Array.fromAsync, Map.groupBy, Se
     try testing.expect(r2.isBool() and r2.asBool());
 }
 
+test "Phase 6.4: Error.prototype.stack accessor, TypedArray for..of/TDZ, compound-assignment order" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\var d = Object.getOwnPropertyDescriptor(Error.prototype, "stack");
+        \\var descOk = typeof d.get === "function" && typeof d.set === "function" && d.get.name === "get stack" && d.set.name === "set stack" && d.configurable === true && d.enumerable === false;
+        \\var err = new Error("boom");
+        \\var errStackOk = !Object.prototype.hasOwnProperty.call(err, "stack") && typeof err.stack === "string";
+        \\err.stack = "custom";
+        \\var setOk = err.stack === "custom" && Object.prototype.hasOwnProperty.call(err, "stack");
+        \\var ta = new Float32Array([3, 2, 4]);
+        \\var sum = 0;
+        \\for (var v of ta) { sum += v; ta[1] = 10; }
+        \\var taOk = sum === 17;
+        \\var tdzThrew = false;
+        \\try { let x = 1; for (const x of [x]) {} } catch (e) { tdzThrew = e instanceof ReferenceError; }
+        \\var baseCalls = 0, keyCalls = 0;
+        \\var obj = { a: 5 };
+        \\function getBase() { baseCalls++; return obj; }
+        \\var keyObj = { toString() { keyCalls++; return "a"; } };
+        \\getBase()[keyObj] += 7;
+        \\var caOk = obj.a === 12 && baseCalls === 1 && keyCalls === 1;
+        \\var nullBaseThrewTypeError = false;
+        \\try { var b = null; b[{ toString() { throw new RangeError(); } }] += 1; } catch (e) { nullBaseThrewTypeError = e instanceof TypeError; }
+        \\descOk && errStackOk && setOk && taOk && tdzThrew && caOk && nullBaseThrewTypeError;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
 
 
 

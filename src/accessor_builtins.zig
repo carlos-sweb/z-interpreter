@@ -46,6 +46,74 @@ fn num(n: usize) JSValue {
     return JSValue.fromNumber(@floatFromInt(n));
 }
 
+// ===== Error.prototype.stack =====
+
+fn errorStackGet(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    if (!isObjectLike(this_value)) {
+        return self.throwError(.type_error, "Error.prototype.stack getter called on non-object", .{});
+    }
+    if (this_value.isError()) {
+        const e = this_value.asError().value;
+        const msg = try std.fmt.allocPrint(allocator, "{s}: {s}", .{ e.kind.name(), e.message });
+        defer allocator.free(msg);
+        return self.gcNewString(msg);
+    }
+    if (this_value.isObject() and this_value.asObject().value.is_error_data) {
+        const name_v = try self.getProperty(this_value, "name");
+        defer name_v.deinit();
+        const msg_v = try self.getProperty(this_value, "message");
+        defer msg_v.deinit();
+        const name_s = if (name_v.isUndefined()) try allocator.dupe(u8, "Error") else try self.toDisplayStringJS(allocator, name_v);
+        defer allocator.free(name_s);
+        const msg_s = if (msg_v.isUndefined()) try allocator.dupe(u8, "") else try self.toDisplayStringJS(allocator, msg_v);
+        defer allocator.free(msg_s);
+        if (msg_s.len == 0) return self.gcNewString(name_s);
+        const full = try std.fmt.allocPrint(allocator, "{s}: {s}", .{ name_s, msg_s });
+        defer allocator.free(full);
+        return self.gcNewString(full);
+    }
+    return JSValue.UNDEFINED;
+}
+
+fn errorStackSet(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self = interp(ctx);
+    if (!isObjectLike(this_value)) {
+        return self.throwError(.type_error, "Error.prototype.stack setter called on non-object", .{});
+    }
+    const v = arg(args, 0);
+    if (!v.isString()) {
+        return self.throwError(.type_error, "Error.prototype.stack setter value must be a string", .{});
+    }
+    if (zvalue.equality.strictEquals(this_value, self.protos.@"error")) {
+        return self.throwError(.type_error, "Cannot set stack on Error.prototype", .{});
+    }
+    const key_val = try self.gcNewString("stack");
+    defer key_val.deinit();
+    const desc = try object_builtins.objectGetOwnPropertyDescriptor(ctx, allocator, JSValue.UNDEFINED, &.{ this_value, key_val });
+    defer desc.deinit();
+    if (desc.isUndefined()) {
+        const property_desc = @import("property_desc.zig");
+        var d = property_desc.ParsedDesc{
+            .has_value = true,
+            .value = v,
+            .has_writable = true,
+            .writable = true,
+            .has_enumerable = true,
+            .enumerable = true,
+            .has_configurable = true,
+            .configurable = true,
+        };
+        if (!try property_desc.defineOwnProperty(self, this_value, "stack", &d)) {
+            return self.throwError(.type_error, "Cannot define property stack", .{});
+        }
+        return JSValue.UNDEFINED;
+    }
+    try self.setPropertyOnValue(this_value, "stack", v);
+    return JSValue.UNDEFINED;
+}
+
 // ===== Map / Set =====
 
 fn mapSize(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -226,6 +294,7 @@ pub fn install(self: *Interpreter) !void {
     const p = &self.protos;
     try defineAccessor(self, p.map, "size", "size", mapSize, null);
     try defineAccessor(self, p.set, "size", "size", setSize, null);
+    try defineAccessor(self, p.@"error", "stack", "stack", errorStackGet, errorStackSet);
 
     try defineAccessor(self, p.array_buffer, "byteLength", "byteLength", bufferGetter(false, .byte_length, "ArrayBuffer.prototype.byteLength"), null);
     try defineAccessor(self, p.array_buffer, "maxByteLength", "maxByteLength", bufferGetter(false, .max_byte_length, "ArrayBuffer.prototype.maxByteLength"), null);

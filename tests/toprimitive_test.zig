@@ -209,7 +209,7 @@ test "ToPropertyKey order and abrupt completions" {
         \\try { var o4 = {}; o4[{ toString() { return {}; }, valueOf() { return {}; } }] = 1; } catch (e) { r.push(e.name); }
         \\console.log(r.join(","));
         \\console.log(log.join(","));
-    , "2,RangeError,TypeError\nrhs1,k1,k2,rhs2,k2\n");
+    , "2,RangeError,TypeError\nrhs1,k1,k2,rhs2\n");
 }
 
 test "a valueOf/toString read via a shared accessor getter does not corrupt refcounts" {

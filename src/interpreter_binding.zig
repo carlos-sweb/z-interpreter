@@ -985,7 +985,7 @@ pub fn forIterationStep(self: *Interpreter, env: *Environment, binding: zstateme
     const c = try self.evalStatement(iter_env, body);
     switch (c.type) {
         .break_completion => {
-            if (Interpreter.loopOwns(c.target, labels)) return Completion{};
+            if (Interpreter.loopOwns(c.target, labels)) return Completion{ .type = .normal, .value = c.value };
             return c;
         },
         .continue_completion => {
@@ -1144,7 +1144,15 @@ pub fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zs
     // exists here; a missing one would be an interpreter bug -- same
     // contract as `.await_expr`/`.yield_expr`.
     const fs: ?*FiberState = if (is_await) (self.current_fiber orelse return error.NotImplemented) else null;
-    const iterable = try self.evalExpression(env, head.iterable);
+    const head_env: *Environment = switch (head.binding) {
+        .declared => |d| if (d.kind != .@"var") blk: {
+            const tdz_env = try self.gcChildEnv(env);
+            try @import("interpreter_stmt.zig").markPatternTDZ(self, tdz_env, d.pattern);
+            break :blk tdz_env;
+        } else env,
+        else => env,
+    };
+    const iterable = try self.evalExpression(head_env, head.iterable);
     defer iterable.deinit();
     switch (iterable.unpack()) {
         .array => |box| {
@@ -1224,12 +1232,43 @@ pub fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zs
                 if (step) |c| return c;
             }
         },
+        .typed_array => |box| {
+            // Live TypedArray iteration when intact; falls back to iterator protocol if overridden.
+            const is_intact = blk: {
+                const sym = self.symbol_iterator orelse break :blk true;
+                const k = try self.encodeKey(sym);
+                defer self.gc_allocator.free(k);
+                const m = try self.getProperty(iterable, k);
+                defer m.deinit();
+                const expected = self.protos.typed_array_base.asObject().value.getOwn("values") orelse break :blk false;
+                break :blk zvalue.equality.strictEquals(m, expected);
+            };
+            if (is_intact) {
+                var i: usize = 0;
+                while (i < box.value.len) : (i += 1) {
+                    if (@import("builtin_helpers.zig").isTypedArrayDetached(&box.value)) {
+                        return self.throwError(.type_error, "Cannot iterate over a detached TypedArray", .{});
+                    }
+                    var item = try @import("builtins.zig").typedElemGet(self, box.value.kind, &box.value.owner.asArrayBuffer().value, box.value.byte_offset, box.value.len, i);
+                    if (is_await) {
+                        const awaited = try self.awaitValue(fs.?, item);
+                        item.deinit();
+                        item = awaited;
+                    }
+                    const step = try self.forIterationStep(env, head.binding, item, body, labels);
+                    item.deinit();
+                    if (step) |c| return c;
+                }
+                return .{};
+            }
+            return evalForOfIterator(self, env, fs, is_await, iterable, head.binding, body, labels);
+        },
         // The iterator protocol: a user iterable via Symbol.iterator
         // (or Symbol.asyncIterator, for `for await`), or an object that
         // IS an iterator (duck-typed `next` -- generator objects,
         // hand-written iterators). The completion value (`done: true`'s
         // value) is excluded, per spec.
-        .object => return evalForOfIterator(self, env, fs, is_await, iterable, head.binding, body, labels),
+        .object, .proxy, .function, .array_buffer, .data_view, .regex, .date, .@"error", .promise, .temporal => return evalForOfIterator(self, env, fs, is_await, iterable, head.binding, body, labels),
         else => return self.throwError(.type_error, "{s} is not iterable", .{iterable.typeOf()}),
     }
     return .{};
