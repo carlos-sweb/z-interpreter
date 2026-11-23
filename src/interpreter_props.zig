@@ -846,6 +846,11 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
                 return self.throwError(.type_error, "Cannot assign to read only property '{s}' of function", .{key});
             }
         }
+        if (obj.asFunction().value.statics) |bag| {
+            if (bag.asObject().value.has(key)) {
+                return self.setObjectProperty(bag, key, value);
+            }
+        }
         // Real [[Set]]: an inherited ACCESSOR (e.g.
         // `Object.defineProperty(Function.prototype, "x", {get,set})`)
         // must invoke the setter with `this` = this function, not

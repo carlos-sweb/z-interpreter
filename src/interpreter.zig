@@ -3799,7 +3799,19 @@ test "Phase 6.6: Class field eval SyntaxError, nested #private brand checks, and
         \\class ProtoCls { __proto__ = 7; ["__proto__"] = 8; static __proto__ = 9; }
         \\var p = new ProtoCls();
         \\var protoOk = !poisonHit && Object.getOwnPropertyDescriptor(p, "__proto__").value === 8 && Object.getOwnPropertyDescriptor(ProtoCls, "__proto__").value === 9;
-        \\!executed && argErr && arrowArgErr && superErr && fnArgOk && nestedOk && protoOk;
+        \\var sx = 0;
+        \\class RestrictedSetters {
+        \\  set arguments(v) { sx = v; }
+        \\  static set arguments(v) { sx = v; }
+        \\  static set caller(v) { sx = v; }
+        \\}
+        \\new RestrictedSetters().arguments = 11;
+        \\var rs1 = sx === 11;
+        \\RestrictedSetters.arguments = 22;
+        \\var rs2 = sx === 22;
+        \\RestrictedSetters.caller = 33;
+        \\var rs3 = sx === 33;
+        \\!executed && argErr && arrowArgErr && superErr && fnArgOk && nestedOk && protoOk && rs1 && rs2 && rs3;
     );
     defer res.deinit();
     try testing.expect(res.isBool() and res.asBool());
