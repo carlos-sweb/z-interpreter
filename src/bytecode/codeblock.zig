@@ -557,6 +557,10 @@ pub const ScopeAnalyzer = struct {
         switch (node.data) {
             .identifier => |name| try self.addFree(name),
             .template_literal => |template| for (template.expressions) |expression| try self.scanNode(expression),
+            .tagged_template => |template| {
+                try self.scanNode(template.tag);
+                for (template.expressions) |expression| try self.scanNode(expression);
+            },
             .array_literal => |items| for (items) |item| if (item) |expression| try self.scanNode(expression),
             .object_literal => |items| for (items) |item| switch (item) {
                 .spread => |expression| try self.scanNode(expression),

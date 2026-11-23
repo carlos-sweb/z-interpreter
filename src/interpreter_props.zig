@@ -423,6 +423,10 @@ pub fn setArrayProperty(self: *Interpreter, obj: JSValue, key: []const u8, value
             }
             rec.value.deinit();
             rec.value = value.retain();
+        } else if (bag.asObject().value.is_frozen) {
+            return self.throwError(.type_error, "Cannot assign to read only property '{s}' of array", .{key});
+        } else if ((idx >= arr.length() or arr.isHole(idx)) and !bag.asObject().value.is_extensible) {
+            return self.throwError(.type_error, "Cannot add property {s}, object is not extensible", .{key});
         }
     }
     const old = arr.getOpt(idx);

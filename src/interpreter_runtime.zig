@@ -541,6 +541,10 @@ fn validateEvalNode(node: *const zparser.Node, flags: EvalValidFlags) EvalValidE
             }
         },
         .template_literal => |t| for (t.expressions) |e| try validateEvalNode(e, flags),
+        .tagged_template => |t| {
+            try validateEvalNode(t.tag, flags);
+            for (t.expressions) |e| try validateEvalNode(e, flags);
+        },
         .array_literal => |items| for (items) |maybe_e| if (maybe_e) |e| try validateEvalNode(e, flags),
         .object_literal => |items| for (items) |item| switch (item) {
             .spread => |e| try validateEvalNode(e, flags),

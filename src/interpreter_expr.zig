@@ -159,6 +159,7 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
             }
             return try self.gcNewString(buf.items);
         },
+        .tagged_template => |tt| return evalTaggedTemplate(self, env, node, tt),
         .array_literal => |elements| {
             var arr = try self.gcNewArray();
             for (elements) |maybe_el| {
@@ -1054,6 +1055,107 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
                 return self.evalSource(env, args[0].asString().value.data);
             }
         }
+    }
+    return try self.callValue(callee_val, this_value, args, callee_name);
+}
+
+fn getTemplateObject(self: *Interpreter, node: *zparser.Node, cooked: []const ?[]const u8, raw: []const []const u8) anyerror!JSValue {
+    const site_key = @intFromPtr(node);
+    if (self.template_objects.get(site_key)) |cached| {
+        return cached.retain();
+    }
+    var template_arr = try self.gcNewArray();
+    errdefer template_arr.deinit();
+    var raw_arr = try self.gcNewArray();
+    errdefer raw_arr.deinit();
+
+    for (cooked, raw) |c_opt, r_str| {
+        const c_val = if (c_opt) |s| try self.gcNewString(s) else JSValue.UNDEFINED;
+        _ = template_arr.asArray().value.push(c_val) catch |err| {
+            c_val.deinit();
+            return err;
+        };
+        const r_val = try self.gcNewString(r_str);
+        _ = raw_arr.asArray().value.push(r_val) catch |err| {
+            r_val.deinit();
+            return err;
+        };
+    }
+
+    raw_arr.asArray().value.setLengthWritable(false) catch {};
+    (try self.arrayPropsObject(raw_arr)).asObject().value.freeze();
+
+    const tmpl_bag = try self.arrayPropsObject(template_arr);
+    try tmpl_bag.objectDefine("raw", raw_arr, .{ .writable = false, .enumerable = false, .configurable = false });
+    template_arr.asArray().value.setLengthWritable(false) catch {};
+    tmpl_bag.asObject().value.freeze();
+
+    try self.template_objects.put(self.gc_allocator, site_key, template_arr.retain());
+    return template_arr;
+}
+
+fn evalTaggedTemplate(self: *Interpreter, env: *Environment, node: *zparser.Node, tt: anytype) anyerror!JSValue {
+    const arena = self.gc_allocator;
+    var this_value: JSValue = JSValue.UNDEFINED;
+    defer this_value.deinit();
+    var callee_val: JSValue = undefined;
+    if (tt.tag.data == .member and tt.tag.data.member.object.data == .super_expr) {
+        const m = tt.tag.data.member;
+        const pk = try self.memberKeyString(env, m);
+        defer pk.free(arena);
+        const sproto: JSValue = blk: {
+            if (env.resolveSuperHome()) |home| {
+                defer home.deinit();
+                const p = home.asObject().value.getPrototype();
+                break :blk if (p) |pp| inner: {
+                    const Box = @TypeOf(home.asObject().*);
+                    const box: *Box = @fieldParentPtr("value", pp);
+                    break :inner (JSValue.fromObject(box)).retain();
+                } else JSValue.NULL;
+            }
+            break :blk env.resolveSuperProto() orelse
+                return self.throwError(.syntax_error, "'super' keyword unexpected here", .{});
+        };
+        defer sproto.deinit();
+        callee_val = try self.getProperty(sproto, pk.key);
+        this_value = env.resolveThis();
+    } else if (tt.tag.data == .member) {
+        const m = tt.tag.data.member;
+        const obj = try self.evalExpression(env, m.object);
+        this_value = obj;
+        if (privateMemberName(m)) |pn| {
+            callee_val = try self.privateGet(env, obj, pn);
+        } else {
+            const pk = try self.memberKeyString(env, m);
+            defer pk.free(arena);
+            callee_val = try self.getProperty(obj, pk.key);
+        }
+    } else {
+        callee_val = try self.evalExpression(env, tt.tag);
+    }
+    defer callee_val.deinit();
+
+    const tmpl_obj = try getTemplateObject(self, node, tt.cooked, tt.raw);
+    const total_args = 1 + tt.expressions.len;
+    const args = try arena.alloc(JSValue, total_args);
+    var built: usize = 1;
+    args[0] = tmpl_obj;
+    defer {
+        for (args[0..built]) |a| a.deinit();
+        arena.free(args);
+    }
+    for (tt.expressions) |expr| {
+        args[built] = try self.evalExpression(env, expr);
+        built += 1;
+    }
+
+    const callee_name: []const u8 = switch (tt.tag.data) {
+        .identifier => |name| name,
+        .member => |m| if (!m.computed and m.property.data == .identifier) m.property.data.identifier else "expression",
+        else => "expression",
+    };
+    if (!callee_val.isFunction() and !callee_val.isProxy()) {
+        return self.throwError(.type_error, "{s} is not a function", .{callee_name});
     }
     return try self.callValue(callee_val, this_value, args, callee_name);
 }

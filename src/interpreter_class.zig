@@ -229,6 +229,11 @@ fn nodeUsesArguments(node: *const zparser.Node) bool {
             for (template.expressions) |expression| if (nodeUsesArguments(expression)) break :blk true;
             break :blk false;
         },
+        .tagged_template => |template| blk: {
+            if (nodeUsesArguments(template.tag)) break :blk true;
+            for (template.expressions) |expression| if (nodeUsesArguments(expression)) break :blk true;
+            break :blk false;
+        },
         .array_literal => |items| blk: {
             for (items) |item| if (item) |expression| if (nodeUsesArguments(expression)) break :blk true;
             break :blk false;
@@ -593,6 +598,10 @@ pub fn normalizePrivateInNode(allocator: Allocator, source: []const u8, node: *z
             }
         },
         .template_literal => |t| for (t.expressions) |e| try normalizePrivateInNode(allocator, source, e),
+        .tagged_template => |t| {
+            try normalizePrivateInNode(allocator, source, t.tag);
+            for (t.expressions) |e| try normalizePrivateInNode(allocator, source, e);
+        },
         .array_literal => |items| for (items) |maybe_e| if (maybe_e) |e| try normalizePrivateInNode(allocator, source, e),
         .object_literal => |items| for (items) |item| switch (item) {
             .spread => |e| try normalizePrivateInNode(allocator, source, e),

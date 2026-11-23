@@ -318,6 +318,7 @@ pub fn deinit(self: *Interpreter) void {
     var mcit = self.method_cache.keyIterator();
     while (mcit.next()) |k| self.gc_allocator.free(k.*);
     self.method_cache.deinit(self.gc_allocator);
+    self.template_objects.deinit(self.gc_allocator);
 
     self.global_var_names.deinit(self.gc_allocator);
     self.global_builtin_names.deinit(self.gc_allocator);
@@ -849,6 +850,8 @@ pub fn markRoots(self: *Interpreter, marker: *Marker) void {
     }
     var mcit = self.method_cache.valueIterator();
     while (mcit.next()) |v| marker.value(v.*);
+    var toit = self.template_objects.valueIterator();
+    while (toit.next()) |v| marker.value(v.*);
     if (self.global_object) |v| marker.value(v);
     if (self.eval_fn) |v| marker.value(v);
     if (self.symbol_iterator) |v| marker.value(v);
@@ -1256,6 +1259,8 @@ pub fn freeAllGcNodes(self: *Interpreter) void {
     while (pwit2.next()) |v| sweeper.value(v.*);
     var mcit2 = self.method_cache.valueIterator();
     while (mcit2.next()) |v| sweeper.value(v.*);
+    var toit2 = self.template_objects.valueIterator();
+    while (toit2.next()) |v| sweeper.value(v.*);
     if (self.pending_exception) |v| sweeper.value(v);
     if (self.global_object) |v| sweeper.value(v);
     if (self.eval_fn) |v| sweeper.value(v);

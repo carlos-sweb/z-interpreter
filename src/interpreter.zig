@@ -802,6 +802,9 @@ pub const Interpreter = struct {
     /// Shared native-method values, keyed "type.name" (e.g. "array.push"),
     /// so `a.push === b.push` holds like real JS prototype methods.
     method_cache: std.StringHashMapUnmanaged(JSValue) = .empty,
+    /// Cached frozen template objects per AST call site (`@intFromPtr(node)`),
+    /// per ECMA-262 GetTemplateObject.
+    template_objects: std.AutoHashMapUnmanaged(usize, JSValue) = .empty,
     /// The environment whose `var`/function hoisting counts as "global
     /// declaration instantiation" for `globalThis` reification purposes --
     /// `run()` sets this to `script_env`; `runModule`'s entry file (no
@@ -3962,6 +3965,36 @@ test "ObjectPattern computed property keys (ECMA-262 order, Symbol, rest, defaul
         \\var forOfSum = 0;
         \\for (const { ["n"]: n } of [{ n: 10 }, { n: 20 }]) forOfSum += n;
         \\basicOk && restOk && evalOrderOk && paramOk && forOfSum === 30;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
+test "tagged templates: GetTemplateObject caching, frozen, this binding, invalid escapes, String.raw" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\function getSite(a) { return (t => t)`head${a}tail`; }
+        \\var s1 = getSite(1), s2 = getSite(2);
+        \\var cacheOk = s1 === s2 && s1.raw === s2.raw;
+        \\var frozenOk = Object.isFrozen(s1) && Object.isFrozen(s1.raw);
+        \\var rawDesc = Object.getOwnPropertyDescriptor(s1, "raw");
+        \\var descOk = rawDesc.value === s1.raw && !rawDesc.writable && !rawDesc.enumerable && !rawDesc.configurable;
+        \\var obj = {
+        \\  tag(strings, ...vals) { return [this === obj, strings[0], vals[0]]; }
+        \\};
+        \\var mRes = obj.tag`hi${42}`;
+        \\var thisOk = mRes[0] && mRes[1] === "hi" && mRes[2] === 42;
+        \\var bad = (t => [t[0] === undefined, t.raw[0]])`\unicode`;
+        \\var badOk = bad[0] && bad[1] === "\\unicode";
+        \\var rawOk = String.raw`a\nb${1}c` === "a\\nb1c";
+        \\var newErr = false;
+        \\try { eval("new tag`a`"); } catch (e) { newErr = e instanceof SyntaxError; }
+        \\cacheOk && frozenOk && descOk && thisOk && badOk && rawOk && newErr;
     );
     defer res.deinit();
     try testing.expect(res.isBool() and res.asBool());
