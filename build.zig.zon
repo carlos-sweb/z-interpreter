@@ -14,16 +14,16 @@
     },
     .dependencies = .{
         .zparser = .{
-            .url = "https://github.com/carlos-sweb/z-parser/archive/refs/tags/v0.1.1.tar.gz",
-            .hash = "zparser-0.1.1-uX9ppoQoAQBB_Ummc474_KR19NS65VYlhVXkXGfdbeRD",
+            .url = "https://github.com/carlos-sweb/z-parser/archive/refs/tags/v0.1.2.tar.gz",
+            .hash = "zparser-0.1.2-uX9pplZmAQDQVgvf1uPnfmq9EickKRM4ezBkLfgVYIg-",
         },
         .zstatements = .{
-            .url = "https://github.com/carlos-sweb/z-statements/archive/refs/tags/v0.2.1.tar.gz",
-            .hash = "zstatements-0.2.1-E_kRv9XBAQBDrVA1mwZFp5azppPaLCX5pNEOyf7dh7Y_",
+            .url = "https://github.com/carlos-sweb/z-statements/archive/refs/tags/v0.2.2.tar.gz",
+            .hash = "zstatements-0.2.2-E_kRv2rLAQBSMk4mnT3OWpWi0rNXkbgwZ04ol2PqydSn",
         },
         .zfunctions = .{
-            .url = "https://github.com/carlos-sweb/z-functions/archive/refs/tags/v0.2.1.tar.gz",
-            .hash = "zfunctions-0.2.1-vB_Irw43AQAh8JOLNL2bnK2QgHZYiDFmZTYtMPn_8G99",
+            .url = "https://github.com/carlos-sweb/z-functions/archive/refs/tags/v0.2.2.tar.gz",
+            .hash = "zfunctions-0.2.2-vB_Ir7Y2AQD2O0-fFO4mkIqs_hcKBHFjCl3RsX8T5T_s",
         },
         .zvalue = .{
             .url = "https://github.com/carlos-sweb/z-value/archive/refs/tags/v0.1.8.tar.gz",
