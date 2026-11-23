@@ -51,6 +51,57 @@ fn appendWtf8Merged(buf: *std.ArrayList(u8), allocator: Allocator, chunk: []cons
     }
 }
 
+fn isOptionalChain(node: *const zparser.Node) bool {
+    return switch (node.data) {
+        .member => |m| m.optional or isOptionalChain(m.object),
+        .call => |c| c.optional or isOptionalChain(c.callee),
+        else => false,
+    };
+}
+
+/// Evaluates an optional-chain expression, returning `null` if any `?.` link
+/// short-circuited on `null` or `undefined`.
+fn evalOptionalChain(self: *Interpreter, env: *Environment, node: *zparser.Node) anyerror!?JSValue {
+    switch (node.data) {
+        .member => |m| {
+            const obj = (if (isOptionalChain(m.object)) try evalOptionalChain(self, env, m.object) else try self.evalExpression(env, m.object)) orelse return null;
+            defer obj.deinit();
+            if (m.optional and (obj.isUndefined() or obj.isNull())) return null;
+            if (privateMemberName(m)) |pn| return try self.privateGet(env, obj, pn);
+            const pk = try self.memberKeyString(env, m);
+            defer pk.free(self.gc_allocator);
+            return try self.getProperty(obj, pk.key);
+        },
+        .call => |c| {
+            if (c.callee.data == .member and c.callee.data.member.object.data != .super_expr) {
+                const m = c.callee.data.member;
+                const obj = (if (isOptionalChain(m.object)) try evalOptionalChain(self, env, m.object) else try self.evalExpression(env, m.object)) orelse return null;
+                defer obj.deinit();
+                if (m.optional and (obj.isUndefined() or obj.isNull())) return null;
+                const callee_val = if (privateMemberName(m)) |pn|
+                    try self.privateGet(env, obj, pn)
+                else blk: {
+                    const pk = try self.memberKeyString(env, m);
+                    defer pk.free(self.gc_allocator);
+                    break :blk try self.getProperty(obj, pk.key);
+                };
+                defer callee_val.deinit();
+                if (c.optional and (callee_val.isUndefined() or callee_val.isNull())) return null;
+                var call_args = try self.evalArgsInline(env, c.args);
+                defer call_args.deinit(self.gc_allocator);
+                return try self.callValue(callee_val, obj, call_args.slice(), "(optional)");
+            }
+            const callee_val = (if (isOptionalChain(c.callee)) try evalOptionalChain(self, env, c.callee) else try self.evalExpression(env, c.callee)) orelse return null;
+            defer callee_val.deinit();
+            if (c.optional and (callee_val.isUndefined() or callee_val.isNull())) return null;
+            var call_args = try self.evalArgsInline(env, c.args);
+            defer call_args.deinit(self.gc_allocator);
+            return try self.callValue(callee_val, JSValue.UNDEFINED, call_args.slice(), "(optional)");
+        },
+        else => return try self.evalExpression(env, node),
+    }
+}
+
 pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node) anyerror!JSValue {
     // The stack-depth guard (byte-based: adapts to Debug/Release
     // frame sizes and to fiber stacks) -- deep call chains AND deep
@@ -254,12 +305,6 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
             if (m.object.data == .super_expr) {
                 const pk = try self.memberKeyString(env, m);
                 defer pk.free(self.gc_allocator);
-                // Object-literal methods (home_object) resolve their
-                // home's CURRENT prototype dynamically, every access --
-                // see Environment.home_object's doc comment for why this
-                // differs from the class-method super_proto case just
-                // below (a fixed snapshot). Checked first since the two
-                // are mutually exclusive.
                 if (env.resolveSuperHome()) |home| {
                     defer home.deinit();
                     const p = home.asObject().value.getPrototype();
@@ -276,9 +321,8 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                 defer sproto.deinit();
                 return try self.getProperty(sproto, pk.key);
             }
-            const obj = try self.evalExpression(env, m.object);
-            // Owned (evalExpression's); getProperty/privateGet only borrow
-            // it and hand back an owned result.
+            const obj_opt = if (isOptionalChain(m.object)) try evalOptionalChain(self, env, m.object) else try self.evalExpression(env, m.object);
+            const obj = obj_opt orelse return JSValue.UNDEFINED;
             defer obj.deinit();
             if (m.optional and (obj.isUndefined() or obj.isNull())) return JSValue.UNDEFINED;
             if (privateMemberName(m)) |pn| return self.privateGet(env, obj, pn);

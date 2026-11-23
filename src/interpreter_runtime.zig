@@ -368,11 +368,246 @@ pub fn run(self: *Interpreter, source: []const u8) anyerror!JSValue {
     return c.value;
 }
 
+const EvalValidFlags = struct {
+    allow_arguments: bool,
+    allow_super_call: bool,
+    allow_super_property: bool,
+};
+
+const EvalValidError = error{
+    InvalidArguments,
+    InvalidSuperCall,
+    InvalidSuperProperty,
+};
+
+fn validateEvalPattern(pattern: *const zstatements.BindingPattern, flags: EvalValidFlags) EvalValidError!void {
+    switch (pattern.*) {
+        .identifier => {},
+        .array => |arr| {
+            for (arr.elements) |maybe_el| if (maybe_el) |el| {
+                try validateEvalPattern(el.pattern, flags);
+                if (el.default) |d| try validateEvalNode(d, flags);
+            };
+            if (arr.rest) |r| try validateEvalPattern(r, flags);
+        },
+        .object => |obj| {
+            for (obj.properties) |p| {
+                try validateEvalPattern(p.value, flags);
+                if (p.default) |d| try validateEvalNode(d, flags);
+            }
+        },
+    }
+}
+
+fn validateEvalFunction(fnode: *const zfunctions.FunctionNode, outer_flags: EvalValidFlags, force_super_call: bool, force_super_prop: bool) EvalValidError!void {
+    const inner_flags: EvalValidFlags = if (fnode.kind == .arrow)
+        outer_flags
+    else
+        .{
+            .allow_arguments = true,
+            .allow_super_call = force_super_call,
+            .allow_super_property = force_super_prop or fnode.kind == .method,
+        };
+    for (fnode.params.items) |param| {
+        try validateEvalPattern(param.pattern, inner_flags);
+        if (param.default) |d| try validateEvalNode(d, inner_flags);
+    }
+    if (fnode.params.rest) |r| try validateEvalPattern(r, inner_flags);
+    switch (fnode.body) {
+        .block => |b| try validateEvalStatement(b, inner_flags),
+        .expression => |e| try validateEvalNode(e, inner_flags),
+    }
+}
+
+fn validateEvalClass(cnode: *const zfunctions.ClassNode, outer_flags: EvalValidFlags) EvalValidError!void {
+    if (cnode.superclass) |sc| try validateEvalNode(sc, outer_flags);
+    for (cnode.elements) |el| {
+        if (el.key == .computed) try validateEvalNode(el.key.computed, outer_flags);
+        if (el.kind == .static_block) {
+            if (el.function) |fn_node| {
+                const sb_flags = EvalValidFlags{ .allow_arguments = false, .allow_super_call = false, .allow_super_property = true };
+                switch (fn_node.body) {
+                    .block => |b| try validateEvalStatement(b, sb_flags),
+                    .expression => |e| try validateEvalNode(e, sb_flags),
+                }
+            }
+        } else if (el.kind == .field) {
+            if (el.value) |vexpr| {
+                try validateEvalNode(vexpr, .{ .allow_arguments = false, .allow_super_call = false, .allow_super_property = true });
+            }
+        } else if (el.function) |fn_node| {
+            const is_ctor = !el.is_static and el.kind == .method and el.key == .ident and std.mem.eql(u8, el.key.ident, "constructor");
+            try validateEvalFunction(fn_node, outer_flags, is_ctor and cnode.superclass != null, true);
+        }
+    }
+}
+
+fn validateEvalStatement(stmt: *const zstatements.Statement, flags: EvalValidFlags) EvalValidError!void {
+    switch (stmt.data) {
+        .empty, .continue_stmt, .break_stmt, .debugger, .import_decl => {},
+        .expr_stmt, .throw_stmt => |e| try validateEvalNode(e, flags),
+        .return_stmt => |maybe_e| if (maybe_e) |e| try validateEvalNode(e, flags),
+        .block => |stmts| for (stmts) |s| try validateEvalStatement(s, flags),
+        .variable => |v| for (v.declarators) |decl| {
+            try validateEvalPattern(decl.pattern, flags);
+            if (decl.init) |init| try validateEvalNode(init, flags);
+        },
+        .if_stmt => |s| {
+            try validateEvalNode(s.test_expr, flags);
+            try validateEvalStatement(s.consequent, flags);
+            if (s.alternate) |alt| try validateEvalStatement(alt, flags);
+        },
+        .while_stmt => |s| {
+            try validateEvalNode(s.test_expr, flags);
+            try validateEvalStatement(s.body, flags);
+        },
+        .do_while => |s| {
+            try validateEvalStatement(s.body, flags);
+            try validateEvalNode(s.test_expr, flags);
+        },
+        .for_stmt => |s| {
+            switch (s.head) {
+                .c_style => |h| {
+                    if (h.init) |ic| switch (ic) {
+                        .decl => |d| for (d.declarators) |decl| {
+                            try validateEvalPattern(decl.pattern, flags);
+                            if (decl.init) |init| try validateEvalNode(init, flags);
+                        },
+                        .expr => |e| try validateEvalNode(e, flags),
+                    };
+                    if (h.test_expr) |te| try validateEvalNode(te, flags);
+                    if (h.update) |up| try validateEvalNode(up, flags);
+                },
+                .for_in => |h| {
+                    switch (h.binding) {
+                        .declared => |d| try validateEvalPattern(d.pattern, flags),
+                        .existing => |bn| if (!flags.allow_arguments and std.mem.eql(u8, bn.name, "arguments")) return error.InvalidArguments,
+                        .existing_pattern => |e| try validateEvalNode(e, flags),
+                    }
+                    try validateEvalNode(h.object, flags);
+                },
+                .for_of => |h| {
+                    switch (h.binding) {
+                        .declared => |d| try validateEvalPattern(d.pattern, flags),
+                        .existing => |bn| if (!flags.allow_arguments and std.mem.eql(u8, bn.name, "arguments")) return error.InvalidArguments,
+                        .existing_pattern => |e| try validateEvalNode(e, flags),
+                    }
+                    try validateEvalNode(h.iterable, flags);
+                },
+            }
+            try validateEvalStatement(s.body, flags);
+        },
+        .labelled => |s| try validateEvalStatement(s.body, flags),
+        .try_stmt => |s| {
+            try validateEvalStatement(s.block, flags);
+            if (s.handler) |h| {
+                if (h.param) |p| try validateEvalPattern(p, flags);
+                try validateEvalStatement(h.body, flags);
+            }
+            if (s.finalizer) |fin| try validateEvalStatement(fin, flags);
+        },
+        .switch_stmt => |s| {
+            try validateEvalNode(s.discriminant, flags);
+            for (s.cases) |c| {
+                if (c.test_expr) |te| try validateEvalNode(te, flags);
+                for (c.consequent) |cs| try validateEvalStatement(cs, flags);
+            }
+        },
+        .with_stmt => |s| {
+            try validateEvalNode(s.object, flags);
+            try validateEvalStatement(s.body, flags);
+        },
+        .function_declaration => |ptr| try validateEvalFunction(zfunctions.asFunctionNode(ptr), flags, false, false),
+        .class_declaration => |ptr| try validateEvalClass(zfunctions.asClassNode(ptr), flags),
+        .export_decl => |e| switch (e) {
+            .declaration => |inner| try validateEvalStatement(inner, flags),
+            .default => |expr| try validateEvalNode(expr, flags),
+            .named, .all => {},
+        },
+    }
+}
+
+fn validateEvalNode(node: *const zparser.Node, flags: EvalValidFlags) EvalValidError!void {
+    switch (node.data) {
+        .identifier => |name| {
+            if (!flags.allow_arguments and std.mem.eql(u8, name, "arguments")) {
+                return error.InvalidArguments;
+            }
+        },
+        .super_expr => {
+            if (!flags.allow_super_property and !flags.allow_super_call) {
+                return error.InvalidSuperProperty;
+            }
+        },
+        .template_literal => |t| for (t.expressions) |e| try validateEvalNode(e, flags),
+        .array_literal => |items| for (items) |maybe_e| if (maybe_e) |e| try validateEvalNode(e, flags),
+        .object_literal => |items| for (items) |item| switch (item) {
+            .spread => |e| try validateEvalNode(e, flags),
+            .property => |p| {
+                if (p.computed) try validateEvalNode(p.key, flags);
+                try validateEvalNode(p.value, flags);
+            },
+        },
+        .spread, .paren, .await_expr => |op| try validateEvalNode(op, flags),
+        .unary => |u| try validateEvalNode(u.operand, flags),
+        .binary => |b| {
+            try validateEvalNode(b.left, flags);
+            try validateEvalNode(b.right, flags);
+        },
+        .logical => |l| {
+            try validateEvalNode(l.left, flags);
+            try validateEvalNode(l.right, flags);
+        },
+        .assignment => |a| {
+            try validateEvalNode(a.target, flags);
+            try validateEvalNode(a.value, flags);
+        },
+        .conditional => |c| {
+            try validateEvalNode(c.test_expr, flags);
+            try validateEvalNode(c.consequent, flags);
+            try validateEvalNode(c.alternate, flags);
+        },
+        .sequence => |items| for (items) |e| try validateEvalNode(e, flags),
+        .call => |c| {
+            if (c.callee.data == .super_expr) {
+                if (!flags.allow_super_call) return error.InvalidSuperCall;
+            } else {
+                try validateEvalNode(c.callee, flags);
+            }
+            for (c.args) |a| try validateEvalNode(a, flags);
+        },
+        .new_expr => |n| {
+            try validateEvalNode(n.callee, flags);
+            if (n.args) |args| for (args) |a| try validateEvalNode(a, flags);
+        },
+        .member => |m| {
+            if (m.object.data == .super_expr) {
+                if (!flags.allow_super_property) return error.InvalidSuperProperty;
+            } else {
+                try validateEvalNode(m.object, flags);
+            }
+            if (m.computed) try validateEvalNode(m.property, flags);
+        },
+        .function_like => |ptr| try validateEvalFunction(zfunctions.asFunctionNode(ptr), flags, false, false),
+        .class_like => |ptr| try validateEvalClass(zfunctions.asClassNode(ptr), flags),
+        .yield_expr => |y| if (y.argument) |a| try validateEvalNode(a, flags),
+        .number_literal, .bigint_literal, .string_literal, .boolean_literal, .null_literal, .regex_literal, .this_expr => {},
+    }
+}
+
 /// Parse and run `src` (an `eval` string) as a program in a fresh child of
 /// `scope`. Always-strict, so eval gets its own scope and declarations
 /// don't leak. A parse error becomes a catchable SyntaxError; a thrown
 /// exception from the code propagates. Returns eval's completion value.
 pub fn evalSource(self: *Interpreter, scope: *Environment, src: []const u8) anyerror!JSValue {
+    return evalSourceImpl(self, scope, src, true);
+}
+
+pub fn evalSourceIndirect(self: *Interpreter, scope: *Environment, src: []const u8) anyerror!JSValue {
+    return evalSourceImpl(self, scope, src, false);
+}
+
+fn evalSourceImpl(self: *Interpreter, scope: *Environment, src: []const u8, is_direct: bool) anyerror!JSValue {
     const ast_arena = self.arena_state.allocator();
     // The AST points into its source text (identifiers, string bodies),
     // and `src` belongs to the caller's string, which can die as soon as
@@ -399,6 +634,20 @@ pub fn evalSource(self: *Interpreter, scope: *Environment, src: []const u8) anye
         else => return self.throwError(.syntax_error, "Invalid or unexpected token in eval", .{}),
     };
     try interpreter_mod.normalizePrivateInProgram(ast_arena, owned_src, program);
+    const flags = EvalValidFlags{
+        .allow_arguments = !is_direct or !scope.isInFieldInitializer(),
+        .allow_super_call = is_direct and scope.allowsSuperCall(),
+        .allow_super_property = is_direct and scope.allowsSuperProperty(),
+    };
+    if (!flags.allow_arguments or !flags.allow_super_call or !flags.allow_super_property) {
+        for (program) |stmt| {
+            validateEvalStatement(stmt, flags) catch |err| switch (err) {
+                error.InvalidArguments => return self.throwError(.syntax_error, "'arguments' is not allowed in class field initializer", .{}),
+                error.InvalidSuperCall => return self.throwError(.syntax_error, "'super' call unexpected here", .{}),
+                error.InvalidSuperProperty => return self.throwError(.syntax_error, "'super' keyword unexpected here", .{}),
+            };
+        }
+    }
     const eval_scope = try self.gcChildEnv(scope);
     const c = try self.evalBody(eval_scope, program);
     return c.value;

@@ -211,7 +211,10 @@ const Marker = struct {
                 fs.traceChildren(self);
                 if (fs.private_ctx) |pc| self.context(pc);
             },
-            .class_ctx => |cx| cx.traceChildren(self),
+            .class_ctx => |cx| {
+                cx.traceChildren(self);
+                if (cx.outer_private_ctx) |opc| self.context(opc);
+            },
             .promise_cap_ctx => |cap| self.value(cap.promise),
             .bound_ctx => |bc| {
                 self.value(bc.target);

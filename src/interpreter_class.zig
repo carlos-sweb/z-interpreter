@@ -626,8 +626,25 @@ pub fn privateHolder(self: *Interpreter, obj: JSValue) !?JSValue {
     };
 }
 
+fn classDeclaresPrivate(cctx: *const ClassCtx, bare: []const u8) bool {
+    for (cctx.private_names) |pn| {
+        if (std.mem.eql(u8, pn, bare)) return true;
+    }
+    return false;
+}
+
+fn resolvePrivateCtxForName(env: *Environment, name: []const u8) ?*anyopaque {
+    const bare = if (name.len > 0 and name[0] == '#') name[1..] else name;
+    const start_ptr = env.resolvePrivateCtx() orelse return null;
+    var cur: ?*ClassCtx = interpreter_mod.classCtxFromOpaque(start_ptr);
+    while (cur) |cctx| : (cur = cctx.outer_private_ctx) {
+        if (classDeclaresPrivate(cctx, bare)) return cctx;
+    }
+    return start_ptr;
+}
+
 pub fn privateGet(self: *Interpreter, env: *Environment, obj: JSValue, name: []const u8) anyerror!JSValue {
-    const ctx = env.resolvePrivateCtx() orelse
+    const ctx = resolvePrivateCtxForName(env, name) orelse
         return self.throwError(.syntax_error, "Private field '{s}' must be declared in an enclosing class", .{name});
     const key = try self.encodePrivateKey(ctx, name);
     defer self.gc_allocator.free(key);
@@ -649,7 +666,7 @@ pub fn privateGet(self: *Interpreter, env: *Environment, obj: JSValue, name: []c
 }
 
 pub fn privateSet(self: *Interpreter, env: *Environment, obj: JSValue, name: []const u8, value: JSValue) anyerror!void {
-    const ctx = env.resolvePrivateCtx() orelse
+    const ctx = resolvePrivateCtxForName(env, name) orelse
         return self.throwError(.syntax_error, "Private field '{s}' must be declared in an enclosing class", .{name});
     const key = try self.encodePrivateKey(ctx, name);
     defer self.gc_allocator.free(key);
@@ -689,7 +706,7 @@ pub fn privateSet(self: *Interpreter, env: *Environment, obj: JSValue, name: []c
 /// `#name in obj` -- true iff obj carries this class's brand for the
 /// name (an own-or-prototype private entry under the encoded key).
 pub fn privateHas(self: *Interpreter, env: *Environment, obj: JSValue, name: []const u8) anyerror!bool {
-    const ctx = env.resolvePrivateCtx() orelse
+    const ctx = resolvePrivateCtxForName(env, name) orelse
         return self.throwError(.syntax_error, "Private field '{s}' must be declared in an enclosing class", .{name});
     const key = try self.encodePrivateKey(ctx, name);
     defer self.gc_allocator.free(key);
@@ -707,57 +724,50 @@ pub fn privateHas(self: *Interpreter, env: *Environment, obj: JSValue, name: []c
 /// `super()` returns for derived ones.
 pub fn runInstanceFields(self: *Interpreter, cctx: *ClassCtx, instance: JSValue) anyerror!void {
     if (cctx.instance_fields.len == 0) return;
-    if (!instance.isObject() and !instance.isTypedArray() and !instance.isArrayBuffer() and !instance.isDataView()) return; // exotic `this` -- nothing to define on
+    if (!instance.isObject() and !instance.isTypedArray() and !instance.isArrayBuffer() and !instance.isDataView() and !instance.isArray()) return; // exotic `this` -- nothing to define on
     const field_env = try self.gcChildEnv(cctx.closure_env);
-    // Etapa 2 de uniform-ownership-contract.md: Environment.this_value/
-    // super_proto are plain JSValue fields with no release mechanism of
-    // their own (they live until the whole Environment is torn down at
-    // interpreter teardown) -- since a discarded value can now actually
-    // be freed elsewhere (Etapa 1+2), storing a borrowed alias here is
-    // no longer safe. Retain a copy, matching the "consumer keeps its
-    // own reference" convention every other storage site already uses.
     field_env.this_value = instance.retain();
-    if (cctx.super_proto) |sp| field_env.super_proto = sp.retain();
+    if (cctx.super_proto) |sp|
+        field_env.super_proto = sp.retain()
+    else if (self.protos.object.isObject())
+        field_env.super_proto = self.protos.object.retain();
     field_env.private_ctx = cctx;
+    field_env.in_field_initializer = true;
+    const field_attrs = zvalue.PropertyDescriptor{ .writable = true, .enumerable = true, .configurable = true };
     for (cctx.instance_fields) |fd| {
         const v = if (fd.value) |vexpr| try self.evalExpression(field_env, vexpr) else JSValue.UNDEFINED;
-        // `v` is owned (evalExpression's contract since Etapa 1) and
-        // moves into the field; released if it never gets there.
-        errdefer v.deinit();
-        // NamedEvaluation: `class C { x = AnonFn }` names it "x" --
-        // `fieldDisplayName` recovers "#x" from a private key's
-        // internal `\x00P<hex>|#x` encoding, per real spec.
-        if (fd.value) |vexpr| try self.maybeNameAnonymousValue(vexpr, v, fieldDisplayName(fd.key));
+        {
+            errdefer v.deinit();
+            if (fd.value) |vexpr| try self.maybeNameAnonymousValue(vexpr, v, fieldDisplayName(fd.key));
+        }
         const is_private = fd.key.len > 0 and fd.key[0] == 0;
-        const target_obj = if (instance.isObject()) instance else try self.extraPropsObject(instance);
-        const target = &target_obj.asObject().value;
-        target.set(fd.key, v) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            // A constructor can freeze/preventExtensions `this` BEFORE
-            // fields initialize. Per spec, a PUBLIC field then fails
-            // with a TypeError (CreateDataPropertyOrThrow) -- but a
-            // PRIVATE field still installs: private names are not
-            // ordinary properties, so [[Extensible]]/frozen don't apply.
-            // Bypass by briefly lifting the flags for the private add.
-            error.ObjectIsFrozen, error.ObjectNotExtensible, error.PropertyNotWritable => {
-                if (!is_private) {
-                    return self.throwError(.type_error, "Cannot define property {s}, object is not extensible", .{fd.key});
-                }
-                const saved_frozen = target.is_frozen;
-                const saved_ext = target.is_extensible;
-                target.is_frozen = false;
-                target.is_extensible = true;
-                defer {
-                    target.is_frozen = saved_frozen;
-                    target.is_extensible = saved_ext;
-                }
-                target.set(fd.key, v) catch |e2| return switch (e2) {
-                    error.OutOfMemory => error.OutOfMemory,
-                    else => unreachable, // flags lifted; nothing else can gate a fresh key
-                };
-            },
-            else => return err,
+        const target_obj = blk: {
+            errdefer v.deinit();
+            break :blk if (instance.isObject())
+                instance
+            else if (instance.isArray())
+                try self.arrayPropsObject(instance)
+            else
+                try self.extraPropsObject(instance);
         };
+        if (is_private) {
+            const target = &target_obj.asObject().value;
+            const saved_frozen = target.is_frozen;
+            const saved_ext = target.is_extensible;
+            target.is_frozen = false;
+            target.is_extensible = true;
+            defer {
+                target.is_frozen = saved_frozen;
+                target.is_extensible = saved_ext;
+            }
+            try target_obj.objectDefine(fd.key, v, field_attrs);
+        } else {
+            target_obj.objectDefine(fd.key, v, field_attrs) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.ObjectIsFrozen, error.ObjectNotExtensible, error.PropertyNotWritable, error.PropertyNotConfigurable => return self.throwError(.type_error, "Cannot define property {s}, object is not extensible", .{fd.key}),
+                else => return err,
+            };
+        }
     }
 }
 
@@ -811,6 +821,23 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
         }
     }
 
+    var private_names_list: std.ArrayList([]const u8) = .empty;
+    for (cnode.elements) |el| {
+        if (el.key == .private) {
+            const raw = el.key.private;
+            const bare = if (raw.len > 0 and raw[0] == '#') raw[1..] else raw;
+            var dup = false;
+            for (private_names_list.items) |existing| {
+                if (std.mem.eql(u8, existing, bare)) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (!dup) try private_names_list.append(self.arena_state.allocator(), try self.arena_state.allocator().dupe(u8, bare));
+        }
+    }
+    const outer_private_ctx: ?*ClassCtx = if (env.resolvePrivateCtx()) |p| interpreter_mod.classCtxFromOpaque(p) else null;
+
     const cctx = try arena.create(ClassCtx);
     const class_src_text: ?[]const u8 = if (self.current_source) |s|
         if (cnode.end <= s.len and cnode.start <= cnode.end) s[cnode.start..cnode.end] else null
@@ -821,11 +848,10 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
         .ctor_fnode = ctor_fnode,
         .closure_env = closure_env,
         .name = cnode.name orelse "",
-        // Etapa 2 de uniform-ownership-contract.md: ClassCtx lives as
-        // long as the class function itself -- its own retained copy,
-        // same reasoning as ClosureCtx/Environment's fields above.
         .super_ctor = if (super_ctor) |sc| sc.retain() else null,
         .super_proto = if (super_proto) |sp| sp.retain() else null,
+        .private_names = private_names_list.items,
+        .outer_private_ctx = outer_private_ctx,
         .source_text = class_src_text,
     };
     try self.gcTrackClassCtx(cctx);
@@ -868,12 +894,29 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
     // One pass, in declaration order (the spec's order matters for
     // computed-key evaluation, static field initializers, and static
     // blocks, which all run interleaved right here).
+    const inst_super_proto: ?JSValue = if (super_proto) |sp| sp else if (self.protos.object.isObject()) self.protos.object else null;
+    const static_super_proto: ?JSValue = if (super_ctor) |sc| sc else if (self.protos.function.isObject()) self.protos.function else null;
+    const field_attrs = zvalue.PropertyDescriptor{ .writable = true, .enumerable = true, .configurable = true };
+
     var instance_fields: std.ArrayList(FieldDef) = .empty;
     for (cnode.elements) |el| {
         if (el.kind == .static_block) {
-            // Runs once, now, with this = the class and privates in
-            // scope.
-            _ = try invokeFunctionNode(self, el.function.?, closure_env, arena, class_fn, super_proto, null, cctx, &.{}, null);
+            const sb_env = try self.gcChildEnv(closure_env);
+            sb_env.this_value = class_fn.retain();
+            if (static_super_proto) |sp| sb_env.super_proto = sp.retain();
+            sb_env.private_ctx = cctx;
+            sb_env.in_field_initializer = true;
+            const fn_node = el.function.?;
+            switch (fn_node.body) {
+                .block => |b| {
+                    const comp = try self.evalBody(sb_env, b.data.block);
+                    comp.value.deinit();
+                },
+                .expression => |e| {
+                    const v = try self.evalExpression(sb_env, e);
+                    v.deinit();
+                },
+            }
             continue;
         }
 
@@ -892,42 +935,25 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
             .private, .computed => self.gc_allocator.free(key),
         };
 
-        // Real spec: a static class element (field, method, accessor,
-        // or generator) named "prototype" is a TypeError -- confirmed
-        // against real Node (a LITERAL `static prototype(){}` is
-        // actually an earlier parse-time SyntaxError there, which this
-        // engine's parser doesn't implement yet; this runtime check at
-        // least catches every case reachable today, matching the
-        // spec-mandated computed-key case -- `static ['prototype'](){}`
-        // -- exactly, and improves the literal case from silently
-        // doing nothing to a real TypeError).
         if (el.is_static and std.mem.eql(u8, key, "prototype")) {
             return self.throwError(.type_error, "Classes may not have a static property named 'prototype'", .{});
         }
 
         if (el.kind == .field) {
             if (el.is_static) {
-                // Static fields initialize at DEFINITION time, in
-                // order, with this = the class function.
                 const field_env = try self.gcChildEnv(closure_env);
-                // Etapa 2 de uniform-ownership-contract.md -- ver el
-                // mismo comentario en runInstanceFields.
                 field_env.this_value = class_fn.retain();
-                if (super_proto) |sp| field_env.super_proto = sp.retain();
+                if (static_super_proto) |sp| field_env.super_proto = sp.retain();
                 field_env.private_ctx = cctx;
+                field_env.in_field_initializer = true;
                 const v = if (el.value) |vexpr| try self.evalExpression(field_env, vexpr) else JSValue.UNDEFINED;
-                // NamedEvaluation: `class C { static x = AnonFn }` names
-                // it "x" (or "#x" for a private static field, via
-                // fieldDisplayName -- see runInstanceFields).
-                if (el.value) |vexpr| try self.maybeNameAnonymousValue(vexpr, v, fieldDisplayName(key));
-                const bag = try self.functionStatics(class_fn);
-                // `v` is owned (evalExpression's contract since Etapa 1):
-                // it moves into the property.
-                try bag.objectSet(key, v);
+                const bag = blk: {
+                    errdefer v.deinit();
+                    if (el.value) |vexpr| try self.maybeNameAnonymousValue(vexpr, v, fieldDisplayName(key));
+                    break :blk try self.functionStatics(class_fn);
+                };
+                try bag.objectDefine(key, v, field_attrs);
             } else {
-                // Instance fields are CAPTURED here (key already
-                // resolved) and initialized per-instance at
-                // construction time.
                 try instance_fields.append(arena, .{ .key = try self.arena_state.allocator().dupe(u8, key), .value = el.value });
             }
             continue;
@@ -935,7 +961,8 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
 
         // Methods / accessors.
         if (!el.is_static and el.kind == .method and el.key == .ident and std.mem.eql(u8, el.key.ident, "constructor")) continue;
-        const m = try self.makeMethodClosure(closure_env, el.function.?, super_proto, cctx);
+        const m_super = if (el.is_static) static_super_proto else inst_super_proto;
+        const m = try self.makeMethodClosure(closure_env, el.function.?, m_super, cctx);
         const target = if (el.is_static) try self.functionStatics(class_fn) else proto;
         // Real spec (ClassDefinitionEvaluation/PropertyDefinitionEvaluation
         // for MethodDefinition): every class method/accessor is installed
@@ -1211,8 +1238,15 @@ pub fn classConstructorCall(ctx: *anyopaque, allocator: Allocator, this_value: J
         self.construct_target = parent.asFunction().value.ctx;
         defer self.construct_target = null;
         const parent_result = try parent.asFunction().value.call(parent.asFunction().value.ctx, allocator, this_value, args);
-        if ((parent_result.isTemporal() and self.temporal_protos.contains(@intFromPtr(parent_result.asTemporal()))) or parent_result.isTypedArray() or parent_result.isArrayBuffer() or parent_result.isDataView() or parent_result.isSet() or parent_result.isMap()) {
+        if ((parent_result.isTemporal() and self.temporal_protos.contains(@intFromPtr(parent_result.asTemporal()))) or parent_result.isTypedArray() or parent_result.isArrayBuffer() or parent_result.isDataView() or parent_result.isSet() or parent_result.isMap() or parent_result.isArray()) {
             errdefer parent_result.deinit();
+            if (parent_result.isArray() and this_value.isObject()) {
+                if (this_value.asObject().value.getPrototype()) |pp| {
+                    const Box = @TypeOf(this_value.asObject().*);
+                    const box: *Box = @fieldParentPtr("value", pp);
+                    try self.setOwnedPrototype(parent_result, JSValue.fromObject(box));
+                }
+            }
             try self.runInstanceFields(cctx, parent_result);
             return parent_result;
         }

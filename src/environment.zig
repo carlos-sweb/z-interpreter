@@ -71,6 +71,7 @@ pub const Environment = struct {
     /// Chain-walked like `this`/super, so arrows in methods inherit it.
     private_ctx: ?*anyopaque = null,
     escaping: bool = false,
+    in_field_initializer: bool = false,
 
     pub fn destroy(self: *Environment, allocator: Allocator) void {
         env_struct_version +%= 1;
@@ -271,6 +272,41 @@ pub const Environment = struct {
             if (e.super_ctor) |v| return v.retain();
         }
         return null;
+    }
+
+    /// True if the nearest non-arrow function / initializer boundary is a
+    /// class field initializer or static block (where direct eval forbids
+    /// `arguments` and `super()`).
+    pub fn isInFieldInitializer(self: *Environment) bool {
+        var env: ?*Environment = self;
+        while (env) |e| : (env = e.parent) {
+            if (e.in_field_initializer) return true;
+            if (e.this_value != null) return false;
+        }
+        return false;
+    }
+
+    /// True if direct `eval` here may contain `super()` (nearest non-arrow
+    /// boundary is a derived class constructor).
+    pub fn allowsSuperCall(self: *Environment) bool {
+        var env: ?*Environment = self;
+        while (env) |e| : (env = e.parent) {
+            if (e.super_ctor != null) return true;
+            if (e.this_value != null) return false;
+        }
+        return false;
+    }
+
+    /// True if direct `eval` here may contain `super.x` / `super[x]` (nearest
+    /// non-arrow boundary is a method, constructor, field initializer, or
+    /// static block).
+    pub fn allowsSuperProperty(self: *Environment) bool {
+        var env: ?*Environment = self;
+        while (env) |e| : (env = e.parent) {
+            if (e.super_proto != null or e.home_object != null) return true;
+            if (e.this_value != null) return false;
+        }
+        return false;
     }
 
     /// GC prep (roadmap item 15, phase 2): enumerates every node directly

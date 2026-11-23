@@ -156,7 +156,7 @@ fn globalEval(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     const self = interp(ctx);
     const a = arg(args, 0);
     if (a.tag() != .string) return a.retain();
-    return self.evalSource(self.global_env, a.asString().value.data);
+    return self.evalSourceIndirect(self.global_env, a.asString().value.data);
 }
 
 /// Installs `console`/`print`, `parseInt`/`parseFloat`/`isNaN`/

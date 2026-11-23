@@ -556,6 +556,11 @@ pub const ClassCtx = struct {
     /// encodePrivateKey mixes into `#name` storage keys (brand checks fall
     /// out of key mismatch).
     instance_fields: []const FieldDef = &.{},
+    /// Bare private names (without leading `#`) declared directly on this
+    /// class, plus the lexically enclosing class's ClassCtx (if nested),
+    /// for ECMA-262 ResolvePrivateIdentifier.
+    private_names: []const []const u8 = &.{},
+    outer_private_ctx: ?*ClassCtx = null,
     /// Exact class source slice (for Function.prototype.toString).
     source_text: ?[]const u8 = null,
 
@@ -1082,6 +1087,7 @@ pub const Interpreter = struct {
 
     pub const run = interpreter_runtime.run;
     pub const evalSource = interpreter_runtime.evalSource;
+    pub const evalSourceIndirect = interpreter_runtime.evalSourceIndirect;
     pub const defineGlobal = interpreter_runtime.defineGlobal;
     pub const hasPendingJobs = interpreter_runtime.hasPendingJobs;
     pub const runPendingJob = interpreter_runtime.runPendingJob;
@@ -3748,6 +3754,52 @@ test "Phase 6.5: CopyDataProperties object rest and %ThrowTypeError% caller/argu
         \\var argsCallee = Object.getOwnPropertyDescriptor((function() { "use strict"; return arguments; })(), "callee");
         \\var calleeOk = argsCallee.get === tte && argsCallee.set === tte && argsCallee.configurable === false;
         \\restOk && restThrew && proxyRestOk && tteOk && callerThrew && calleeOk;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
+test "Phase 6.6: Class field eval SyntaxError, nested #private brand checks, and DefineField __proto__" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\var executed = false;
+        \\var argErr = false;
+        \\try { class C1 { x = eval("executed = true; arguments;"); } new C1(); } catch (e) { argErr = e instanceof SyntaxError; }
+        \\var arrowArgErr = false;
+        \\try { class C2 { x = eval("(() => arguments)()"); } new C2(); } catch (e) { arrowArgErr = e instanceof SyntaxError; }
+        \\var superErr = false;
+        \\try { class Base {} class C3 extends Base { x = eval("executed = true; super();"); } new C3(); } catch (e) { superErr = e instanceof SyntaxError; }
+        \\class C4 { x = eval("(function(a) { return arguments[0]; })(42)"); }
+        \\var fnArgOk = new C4().x === 42;
+        \\class Outer {
+        \\  #outer = 10;
+        \\  #shared = 1;
+        \\  makeInner() {
+        \\    var self = this;
+        \\    return class Inner {
+        \\      #shared = 2;
+        \\      readOuter() { return self.#outer; }
+        \\      readShared(o) { return o.#shared; }
+        \\    };
+        \\  }
+        \\}
+        \\var o = new Outer();
+        \\var Inner = o.makeInner();
+        \\var inn = new Inner();
+        \\var brandErr = false;
+        \\try { inn.readShared(o); } catch (e) { brandErr = e instanceof TypeError; }
+        \\var nestedOk = inn.readOuter() === 10 && inn.readShared(inn) === 2 && brandErr;
+        \\var poisonHit = false;
+        \\Object.defineProperty(Object.prototype, "__proto__", { set() { poisonHit = true; throw new Error("poison"); }, configurable: true });
+        \\class ProtoCls { __proto__ = 7; ["__proto__"] = 8; static __proto__ = 9; }
+        \\var p = new ProtoCls();
+        \\var protoOk = !poisonHit && Object.getOwnPropertyDescriptor(p, "__proto__").value === 8 && Object.getOwnPropertyDescriptor(ProtoCls, "__proto__").value === 9;
+        \\!executed && argErr && arrowArgErr && superErr && fnArgOk && nestedOk && protoOk;
     );
     defer res.deinit();
     try testing.expect(res.isBool() and res.asBool());

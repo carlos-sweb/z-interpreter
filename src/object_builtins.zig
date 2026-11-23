@@ -355,6 +355,7 @@ fn objPropertyIsEnumerable(ctx: *anyopaque, allocator: Allocator, this_value: JS
     defer allocator.free(key);
     switch (this_value.unpack()) {
         .object => return JSValue.fromBool(this_value.asObject().value.propertyIsEnumerable(key)),
+        .function => |box| return JSValue.fromBool(if (box.value.statics) |bag| bag.asObject().value.propertyIsEnumerable(key) else false),
         .temporal => return JSValue.fromBool(if (self.temporalProps(this_value)) |bag| bag.asObject().value.propertyIsEnumerable(key) else false),
         .array => |box| {
             if (std.mem.eql(u8, key, "length")) return JSValue.fromBool(false);
