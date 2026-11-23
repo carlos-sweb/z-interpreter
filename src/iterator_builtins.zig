@@ -1166,6 +1166,15 @@ pub fn install(self: *Interpreter) !void {
     try defineMethod(self, gen_proto, "return", 1, iruntime.generatorProtoReturn);
     try defineMethod(self, gen_proto, "throw", 1, iruntime.generatorProtoThrow);
     try gen_proto.asObject().value.defineProperty(tag_key, try self.gcNewString("Generator"), ro_cfg);
+    const fn_builtins = @import("function_builtins.zig");
+    const gen_fn_ctor = try self.gcNewFunction(.{
+        .ctx = self,
+        .name = "GeneratorFunction",
+        .arity = 1,
+        .call = fn_builtins.generatorFunctionConstructor,
+        .constructable = true,
+    });
+    try gen_fn_proto.asObject().value.defineProperty("constructor", gen_fn_ctor, ro_cfg);
     try gen_fn_proto.asObject().value.defineProperty("prototype", gen_proto.retain(), ro_cfg);
     try gen_fn_proto.asObject().value.defineProperty(tag_key, try self.gcNewString("GeneratorFunction"), ro_cfg);
     self.protos.generator_proto = gen_proto;
@@ -1182,10 +1191,33 @@ pub fn install(self: *Interpreter) !void {
     try defineMethod(self, async_gen_proto, "return", 1, iruntime.asyncGeneratorProtoReturn);
     try defineMethod(self, async_gen_proto, "throw", 1, iruntime.asyncGeneratorProtoThrow);
     try async_gen_proto.asObject().value.defineProperty(tag_key, try self.gcNewString("AsyncGenerator"), ro_cfg);
+    const async_gen_fn_ctor = try self.gcNewFunction(.{
+        .ctx = self,
+        .name = "AsyncGeneratorFunction",
+        .arity = 1,
+        .call = fn_builtins.asyncGeneratorFunctionConstructor,
+        .constructable = true,
+    });
+    try async_gen_fn_proto.asObject().value.defineProperty("constructor", async_gen_fn_ctor, ro_cfg);
     try async_gen_fn_proto.asObject().value.defineProperty("prototype", async_gen_proto.retain(), ro_cfg);
     try async_gen_fn_proto.asObject().value.defineProperty(tag_key, try self.gcNewString("AsyncGeneratorFunction"), ro_cfg);
     self.protos.async_generator_proto = async_gen_proto;
     self.protos.async_generator_function_proto = async_gen_fn_proto;
+
+    var async_fn_proto = try self.gcNewObject();
+    if (self.protos.function.isObject()) {
+        try async_fn_proto.asObject().value.setPrototype(&self.protos.function.asObject().value);
+    }
+    const async_fn_ctor = try self.gcNewFunction(.{
+        .ctx = self,
+        .name = "AsyncFunction",
+        .arity = 1,
+        .call = fn_builtins.asyncFunctionConstructor,
+        .constructable = true,
+    });
+    try async_fn_proto.asObject().value.defineProperty("constructor", async_fn_ctor, ro_cfg);
+    try async_fn_proto.asObject().value.defineProperty(tag_key, try self.gcNewString("AsyncFunction"), ro_cfg);
+    self.protos.async_function_proto = async_fn_proto;
 
     var arr_iter_proto = try self.gcNewObject();
     try arr_iter_proto.asObject().value.setPrototype(&proto.asObject().value);

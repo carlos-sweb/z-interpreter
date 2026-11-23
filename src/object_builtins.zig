@@ -1586,6 +1586,9 @@ pub fn objectGetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: J
                 if (cctx.function_node.is_generator and !cctx.function_node.is_async and self.protos.generator_function_proto.isObject()) {
                     break :blk self.protos.generator_function_proto.retain();
                 }
+                if (!cctx.function_node.is_generator and cctx.function_node.is_async and self.protos.async_function_proto.isObject()) {
+                    break :blk self.protos.async_function_proto.retain();
+                }
             }
             break :blk self.protos.function.retain();
         },

@@ -57,9 +57,129 @@ fn formatNativeFn(self: *Interpreter, allocator: Allocator, name: []const u8) an
     return self.gcNewString("function () { [native code] }");
 }
 
+fn skipWsCommentsBackward(src: []const u8, pos_in: usize) usize {
+    var p = pos_in;
+    while (p > 0) {
+        const c = src[p - 1];
+        if (c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == 0x0B or c == 0x0C) {
+            p -= 1;
+            continue;
+        }
+        if (p >= 2 and src[p - 2] == '*' and src[p - 1] == '/') {
+            var q = p - 2;
+            while (q >= 2) : (q -= 1) {
+                if (src[q - 2] == '/' and src[q - 1] == '*') {
+                    p = q - 2;
+                    break;
+                }
+            } else break;
+            continue;
+        }
+        break;
+    }
+    return p;
+}
+
+fn isIdentOrNumByte(c: u8) bool {
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or
+        c == '_' or c == '$' or c == '#' or c == '.' or c >= 0x80;
+}
+
+fn hasWordBefore(src: []const u8, end_pos: usize, word: []const u8) bool {
+    if (end_pos < word.len) return false;
+    const start_pos = end_pos - word.len;
+    if (!std.mem.eql(u8, src[start_pos..end_pos], word)) return false;
+    if (start_pos > 0 and isIdentOrNumByte(src[start_pos - 1])) return false;
+    return true;
+}
+
+fn findMethodStart(src: []const u8, paren_pos: usize, fnode: *const zfunctions.FunctionNode, fn_name: []const u8) usize {
+    var p = skipWsCommentsBackward(src, paren_pos);
+    if (p == 0) return paren_pos;
+    if (src[p - 1] == ']') {
+        var depth: i32 = 1;
+        p -= 1;
+        while (p > 0 and depth > 0) {
+            p -= 1;
+            const c = src[p];
+            if (c == '"' or c == '\'') {
+                const quote = c;
+                while (p > 0) {
+                    p -= 1;
+                    if (src[p] == quote) {
+                        var bs: usize = 0;
+                        var k = p;
+                        while (k > 0 and src[k - 1] == '\\') {
+                            bs += 1;
+                            k -= 1;
+                        }
+                        if (bs % 2 == 0) break;
+                    }
+                }
+            } else if (c == '/' and p > 0 and src[p - 1] == '*') {
+                p -= 1;
+                while (p >= 2) : (p -= 1) {
+                    if (src[p - 2] == '/' and src[p - 1] == '*') {
+                        p -= 2;
+                        break;
+                    }
+                }
+            } else if (c == ']') {
+                depth += 1;
+            } else if (c == '[') {
+                depth -= 1;
+            }
+        }
+    } else if (src[p - 1] == '"' or src[p - 1] == '\'') {
+        const quote = src[p - 1];
+        p -= 1;
+        while (p > 0) {
+            p -= 1;
+            if (src[p] == quote) {
+                var bs: usize = 0;
+                var k = p;
+                while (k > 0 and src[k - 1] == '\\') {
+                    bs += 1;
+                    k -= 1;
+                }
+                if (bs % 2 == 0) break;
+            }
+        }
+    } else {
+        while (p > 0 and isIdentOrNumByte(src[p - 1])) {
+            p -= 1;
+        }
+    }
+
+    if (fnode.is_generator) {
+        const q = skipWsCommentsBackward(src, p);
+        if (q > 0 and src[q - 1] == '*') p = q - 1;
+    }
+    if (fnode.is_async) {
+        const q = skipWsCommentsBackward(src, p);
+        if (hasWordBefore(src, q, "async")) p = q - 5;
+    }
+    if (!fnode.is_generator and !fnode.is_async) {
+        if (std.mem.startsWith(u8, fn_name, "get ")) {
+            const q = skipWsCommentsBackward(src, p);
+            if (hasWordBefore(src, q, "get")) p = q - 3;
+        } else if (std.mem.startsWith(u8, fn_name, "set ")) {
+            const q = skipWsCommentsBackward(src, p);
+            if (hasWordBefore(src, q, "set")) p = q - 3;
+        }
+    }
+    return p;
+}
+
 fn fnToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
     const self = interp(ctx);
+    if (this_value.isProxy()) {
+        if (!property_desc.isCallable(this_value)) {
+            return self.throwError(.type_error, "Function.prototype.toString requires that 'this' be a Function", .{});
+        }
+        return self.gcNewString("function () { [native code] }");
+    }
     if (!this_value.isFunction()) {
         return self.throwError(.type_error, "Function.prototype.toString requires that 'this' be a Function", .{});
     }
@@ -68,7 +188,14 @@ fn fnToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
         const cc: *const interpreter_mod.ClosureCtx = @ptrCast(@alignCast(fn_val.ctx));
         if (cc.source_full) |src| {
             if (cc.function_node.end <= src.len and cc.function_node.start <= cc.function_node.end) {
-                return self.gcNewString(src[cc.function_node.start..cc.function_node.end]);
+                var start_pos = cc.function_node.start;
+                if (cc.function_node.kind == .method and start_pos < src.len and src[start_pos] == '(') {
+                    start_pos = findMethodStart(src, start_pos, cc.function_node, fn_val.name);
+                } else if (cc.function_node.is_async and !std.mem.startsWith(u8, src[start_pos..], "async")) {
+                    const q = skipWsCommentsBackward(src, start_pos);
+                    if (hasWordBefore(src, q, "async")) start_pos = q - 5;
+                }
+                return self.gcNewString(src[start_pos..cc.function_node.end]);
             }
         }
     } else if (fn_val.call == interpreter_class.classConstructorCall) {
@@ -260,17 +387,16 @@ pub fn fnSymbolHasInstance(ctx: *anyopaque, allocator: Allocator, this_value: JS
     return JSValue.fromBool(try ordinaryHasInstance(interp(ctx), allocator, this_value, obj));
 }
 
-/// `new Function('a', 'b', 'return a + b')` -- compose, parse with the
-/// real parser, close over the global env. A bounded eval.
-fn functionConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = this_value;
+fn createDynamicFunction(ctx: *anyopaque, allocator: Allocator, args: []const JSValue, header: []const u8) anyerror!JSValue {
     const self = interp(ctx);
     const ast_allocator = self.arena_state.allocator();
     var src: std.ArrayList(u8) = .empty;
-    try src.appendSlice(ast_allocator, "(function anonymous(");
+    try src.appendSlice(ast_allocator, "(");
+    try src.appendSlice(ast_allocator, header);
+    try src.appendSlice(ast_allocator, " anonymous(");
     if (args.len > 1) {
         for (args[0 .. args.len - 1], 0..) |a, i| {
-            if (i != 0) try src.appendSlice(ast_allocator, ", ");
+            if (i != 0) try src.appendSlice(ast_allocator, ",");
             const s = try self.toDisplayStringJS(allocator, a);
             defer allocator.free(s);
             try src.appendSlice(ast_allocator, s);
@@ -299,9 +425,36 @@ fn functionConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
         else => return self.throwError(.syntax_error, "Invalid function source", .{}),
     };
     const prev_source = self.current_source;
+    const prev_strict = self.strict_mode;
     self.current_source = src.items;
-    defer self.current_source = prev_source;
+    self.strict_mode = false;
+    defer {
+        self.current_source = prev_source;
+        self.strict_mode = prev_strict;
+    }
     return self.makeClosure(self.global_env, zfunctions.asFunctionNode(fnode_ptr));
+}
+
+/// `new Function('a', 'b', 'return a + b')` -- compose, parse with the
+/// real parser, close over the global env. A bounded eval.
+fn functionConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    return createDynamicFunction(ctx, allocator, args, "function");
+}
+
+pub fn generatorFunctionConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    return createDynamicFunction(ctx, allocator, args, "function*");
+}
+
+pub fn asyncFunctionConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    return createDynamicFunction(ctx, allocator, args, "async function");
+}
+
+pub fn asyncGeneratorFunctionConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    return createDynamicFunction(ctx, allocator, args, "async function*");
 }
 
 pub fn throwTypeErrorFn(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {

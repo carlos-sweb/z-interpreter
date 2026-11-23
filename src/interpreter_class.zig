@@ -368,8 +368,15 @@ pub fn makeClosure(self: *Interpreter, env: *Environment, fnode: *zfunctions.Fun
     closure_env.escaping = true;
     try self.gcTrackEnvironment(closure_env);
 
+    const body_strict = fnode.body == .block and @import("bytecode/codeblock.zig").hasUseStrict(fnode.body.block.data.block);
     const ctx = try arena.create(ClosureCtx);
-    ctx.* = .{ .interp = self, .function_node = fnode, .closure_env = closure_env, .source_full = self.current_source };
+    ctx.* = .{
+        .interp = self,
+        .function_node = fnode,
+        .closure_env = closure_env,
+        .source_full = self.current_source,
+        .is_strict = self.strict_mode or body_strict,
+    };
     try self.gcTrackClosureCtx(ctx);
     const name: []const u8 = switch (fnode.kind) {
         .function_decl => |d| d.name,
@@ -415,6 +422,7 @@ pub fn makeMethodClosure(self: *Interpreter, env: *Environment, fnode: *zfunctio
     // retained copy now that a discarded value can actually be freed.
     if (super_proto) |sp| cc.super_proto = sp.retain();
     cc.private_ctx = private_ctx;
+    cc.is_strict = true;
     return v;
 }
 
@@ -1219,7 +1227,19 @@ pub fn closureCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     // Arrows have no own `this` binding -- passing null makes
     // `resolveThis()` walk up to closure_env's, matching real lexical
     // `this` inheritance.
-    const this: ?JSValue = if (fnode.kind != .arrow) this_value else null;
+    var coerced_this: ?JSValue = null;
+    defer if (coerced_this) |ct| ct.deinit();
+    const this: ?JSValue = if (fnode.kind != .arrow) blk_this: {
+        if (!closure_ctx.is_strict) {
+            if (this_value.isUndefined() or this_value.isNull()) {
+                if (closure_ctx.interp.global_object) |go| break :blk_this go;
+            } else if (!@import("builtin_helpers.zig").isObjectLike(this_value)) {
+                coerced_this = try @import("property_desc.zig").toObject(closure_ctx.interp, this_value);
+                break :blk_this coerced_this.?;
+            }
+        }
+        break :blk_this this_value;
+    } else null;
     const prev_nt = closure_ctx.interp.pending_call_new_target;
     if (fnode.kind != .arrow) {
         if (closure_ctx.interp.construct_target == ctx) {

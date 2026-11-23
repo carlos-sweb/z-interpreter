@@ -52,6 +52,7 @@ pub const Protos = struct {
     generator_function_proto: JSValue = JSValue.UNDEFINED,
     async_generator_proto: JSValue = JSValue.UNDEFINED,
     async_generator_function_proto: JSValue = JSValue.UNDEFINED,
+    async_function_proto: JSValue = JSValue.UNDEFINED,
     array_iterator_proto: JSValue = JSValue.UNDEFINED,
     map: JSValue = JSValue.UNDEFINED,
     set: JSValue = JSValue.UNDEFINED,
@@ -363,6 +364,8 @@ pub const ClosureCtx = struct {
     private_ctx: ?*anyopaque = null,
     /// Full source text from which `function_node` was parsed (for Function.prototype.toString).
     source_full: ?[]const u8 = null,
+    /// True when the function was defined in strict code or contains a `"use strict"` directive.
+    is_strict: bool = false,
 
     /// GC prep (roadmap item 15, phase 2): see Environment.traceChildren
     /// for the visitor contract. private_ctx is downcast back to *ClassCtx
@@ -3545,9 +3548,10 @@ test "Phase 5.3a: Function.prototype.toString" {
         \\var classOk = Bar.toString() === "class /* c2 */ Bar { m() {} }";
         \\var nonFnThrew = false;
         \\try { Function.prototype.toString.call({}); } catch (e) { nonFnThrew = e instanceof TypeError; }
-        \\var proxyThrew = false;
-        \\try { Function.prototype.toString.call(new Proxy(() => {}, {})); } catch (e) { proxyThrew = e instanceof TypeError; }
-        \\nativeOk && boundOk && jsOk && classOk && nonFnThrew && proxyThrew;
+        \\var proxyOk = Function.prototype.toString.call(new Proxy(() => {}, {})) === "function () { [native code] }";
+        \\var proxyNonFnThrew = false;
+        \\try { Function.prototype.toString.call(new Proxy({}, {})); } catch (e) { proxyNonFnThrew = e instanceof TypeError; }
+        \\nativeOk && boundOk && jsOk && classOk && nonFnThrew && proxyOk && proxyNonFnThrew;
     );
     defer res.deinit();
     try testing.expect(res.isBool() and res.asBool());
@@ -3995,6 +3999,47 @@ test "tagged templates: GetTemplateObject caching, frozen, this binding, invalid
         \\var newErr = false;
         \\try { eval("new tag`a`"); } catch (e) { newErr = e instanceof SyntaxError; }
         \\cacheOk && frozenOk && descOk && thisOk && badOk && rawOk && newErr;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
+test "Function.prototype.toString, call, and apply compliance" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\var nativeStr = Function.prototype.toString.call(Math.abs);
+        \\var boundStr = Function.prototype.toString.call((function f() {}).bind(null));
+        \\var proxyStr = Function.prototype.toString.call(new Proxy(function() {}, {}));
+        \\var nonCallErr = false;
+        \\try { Function.prototype.toString.call(new Proxy({}, {})); } catch (e) { nonCallErr = e instanceof TypeError; }
+        \\var obj = { get x() { return 1; }, async *m() {} };
+        \\var getterStr = Object.getOwnPropertyDescriptor(obj, "x").get.toString();
+        \\var methStr = obj.m.toString();
+        \\var dynStr = Function("a", " b", "return a + b;").toString();
+        \\var genDyn = Object.getPrototypeOf(function*(){}).constructor("a", "yield a;");
+        \\var asyncDyn = Object.getPrototypeOf(async function(){}).constructor("a", "return a;");
+        \\var toStrOk = nativeStr === "function abs() { [native code] }" &&
+        \\  boundStr === "function () { [native code] }" &&
+        \\  proxyStr === "function () { [native code] }" &&
+        \\  nonCallErr &&
+        \\  getterStr === "get x() { return 1; }" &&
+        \\  methStr === "async *m() {}" &&
+        \\  dynStr === "function anonymous(a, b\n) {\nreturn a + b;\n}" &&
+        \\  genDyn.toString().startsWith("function* anonymous(a") &&
+        \\  asyncDyn.toString().startsWith("async function anonymous(a");
+        \\var primErr = false;
+        \\try { (function(){}).apply(null, 42); } catch (e) { primErr = e instanceof TypeError; }
+        \\var alRes = (function(a, b) { return a + b; }).apply(null, { 0: 10, 1: 20, length: 2 });
+        \\var nullRes = (function() { return arguments.length; }).apply(null, null);
+        \\var sloppyThis = Function("return this === globalThis;").call(undefined);
+        \\var sloppyNum = Function("this.touched = true; return this.touched && typeof this === 'object';").apply(1);
+        \\var strictThis = (function() { "use strict"; return this === undefined; }).call(undefined);
+        \\toStrOk && primErr && alRes === 30 && nullRes === 0 && sloppyThis && sloppyNum && strictThis;
     );
     defer res.deinit();
     try testing.expect(res.isBool() and res.asBool());
