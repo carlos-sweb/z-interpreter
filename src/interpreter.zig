@@ -4084,6 +4084,56 @@ test "ArrayBuffer.prototype.transfer, transferToFixedLength, and detached" {
     try testing.expect(res.isBool() and res.asBool());
 }
 
+test "Object.prototype.toString, valueOf, isPrototypeOf, hasOwnProperty, propertyIsEnumerable" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\var ts = Object.prototype.toString;
+        \\var primTags = ts.call(undefined) === "[object Undefined]" &&
+        \\  ts.call(null) === "[object Null]" &&
+        \\  ts.call(true) === "[object Boolean]" &&
+        \\  ts.call(9) === "[object Number]" &&
+        \\  ts.call("") === "[object String]" &&
+        \\  ts.call(1n) === "[object BigInt]" &&
+        \\  ts.call((function() { return arguments; })()) === "[object Arguments]";
+        \\var proxyTags = ts.call(new Proxy([], {})) === "[object Array]" &&
+        \\  ts.call(new Proxy(function() {}, {})) === "[object Function]" &&
+        \\  ts.call(new Proxy(async function() {}, {})) === "[object AsyncFunction]" &&
+        \\  ts.call(function*() {}) === "[object GeneratorFunction]";
+        \\var rev = Proxy.revocable({}, {});
+        \\rev.revoke();
+        \\var revErr = false;
+        \\try { ts.call(rev.proxy); } catch (e) { revErr = e instanceof TypeError; }
+        \\var getterErr = false;
+        \\try { ts.call({ get [Symbol.toStringTag]() { throw new RangeError("boom"); } }); } catch (e) { getterErr = e instanceof RangeError; }
+        \\Number.prototype[Symbol.toStringTag] = "CustomNum";
+        \\var customTag = ts.call(42) === "[object CustomNum]";
+        \\delete Number.prototype[Symbol.toStringTag];
+        \\var voOk = typeof Object.prototype.valueOf.call(true) === "object" &&
+        \\  typeof Object.prototype.valueOf.call(5) === "object";
+        \\var voNullErr = false;
+        \\try { Object.prototype.valueOf.call(null); } catch (e) { voNullErr = e instanceof TypeError; }
+        \\var hopNullErr = false;
+        \\try { Object.prototype.hasOwnProperty.call(undefined, "a"); } catch (e) { hopNullErr = e instanceof TypeError; }
+        \\var pieNullErr = false;
+        \\try { Object.prototype.propertyIsEnumerable.call(null, "a"); } catch (e) { pieNullErr = e instanceof TypeError; }
+        \\var ipoNullErr = false;
+        \\try { Object.prototype.isPrototypeOf.call(null, {}); } catch (e) { ipoNullErr = e instanceof TypeError; }
+        \\var base = {};
+        \\var p = new Proxy({}, { getPrototypeOf() { return base; } });
+        \\var ipoProxyOk = base.isPrototypeOf(p) === true;
+        \\var immutErr = false;
+        \\try { Object.setPrototypeOf(Object.prototype, Object.create(null)); } catch (e) { immutErr = e instanceof TypeError; }
+        \\primTags && proxyTags && revErr && getterErr && customTag && voOk && voNullErr && hopNullErr && pieNullErr && ipoNullErr && ipoProxyOk && immutErr;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
 
 
 

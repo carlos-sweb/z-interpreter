@@ -305,6 +305,9 @@ pub fn objHasOwnProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
     const self = interp(ctx);
     const key = try self.encodeKey(arg(args, 0));
     defer allocator.free(key);
+    if (this_value.isUndefined() or this_value.isNull()) {
+        return self.throwError(.type_error, "Cannot convert undefined or null to object", .{});
+    }
     return switch (this_value.unpack()) {
         .object => |box| blk: {
             if (self.global_object) |go| {
@@ -353,6 +356,9 @@ fn objPropertyIsEnumerable(ctx: *anyopaque, allocator: Allocator, this_value: JS
     const self = interp(ctx);
     const key = try self.encodeKey(arg(args, 0));
     defer allocator.free(key);
+    if (this_value.isUndefined() or this_value.isNull()) {
+        return self.throwError(.type_error, "Cannot convert undefined or null to object", .{});
+    }
     switch (this_value.unpack()) {
         .object => return JSValue.fromBool(this_value.asObject().value.propertyIsEnumerable(key)),
         .function => |box| return JSValue.fromBool(if (box.value.statics) |bag| bag.asObject().value.propertyIsEnumerable(key) else false),
@@ -391,97 +397,92 @@ fn objPropertyIsEnumerable(ctx: *anyopaque, allocator: Allocator, this_value: JS
 /// does delete: `delete Object.prototype.toString` must not change
 /// this fallback's behavior). Same reach-back pattern as
 /// `reflect_builtins.zig`'s `object_builtins.X` aliases.
+fn isArrayForToString(self: *Interpreter, v: JSValue) anyerror!bool {
+    var cur = v;
+    while (cur.isProxy()) {
+        const box = cur.asProxy();
+        if (box.value.handler.isNull()) {
+            return self.throwError(.type_error, "Cannot perform 'isArray' on a proxy that has been revoked", .{});
+        }
+        cur = box.value.target;
+    }
+    if (!cur.isArray()) return false;
+    return !self.arguments_arrays.contains(@intFromPtr(cur.asArray()));
+}
+
 pub fn objToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     _ = args;
     const self = interp(ctx);
-    var owned_tag = JSValue.UNDEFINED;
-    defer owned_tag.deinit();
-    const tag: []const u8 = switch (this_value.unpack()) {
-        .undefined => "Undefined",
-        .null => "Null",
-        .array => "Array",
+    if (this_value.isUndefined()) return self.gcNewString("[object Undefined]");
+    if (this_value.isNull()) return self.gcNewString("[object Null]");
+
+    const obj = try property_desc.toObject(self, this_value);
+    defer obj.deinit();
+
+    const is_array = try isArrayForToString(self, obj);
+    const builtin_tag: []const u8 = if (is_array)
+        "Array"
+    else switch (obj.unpack()) {
+        .array => |box| if (self.arguments_arrays.contains(@intFromPtr(box))) "Arguments" else "Array",
         .function => "Function",
         .@"error" => "Error",
         .date => "Date",
         .regex => "RegExp",
-        // Real spec gets these via the generic `@@toStringTag` fallback
-        // (Map.prototype/Set.prototype/Promise.prototype's own
-        // property, now installed -- see materializeProtos), not the
-        // hardcoded internal-slot list Array/Function/Error/Date/
-        // RegExp above -- narrowed to a hardcoded case here too rather
-        // than a real property lookup, so overriding e.g.
-        // `Map.prototype[Symbol.toStringTag]` wouldn't change this
-        // specific result (confirmed against real Node this matches
-        // for the untouched-prototype case, which is the only one
-        // that mattered for what was actually failing).
-        .map => "Map",
-        .set => "Set",
-        .promise => "Promise",
-        // Unlike Map/Set/Promise above, test262 has real coverage of
-        // deleting/overriding Symbol.prototype/BigInt.prototype[Symbol.
-        // toStringTag] and observing it here (symbol-tag-non-str-builtin
-        // .js), so this can't be hardcoded -- it needs a real Get.
-        // Neither type has a builtinTag entry in the spec's internal-
-        // slot list, so the fallback (no tag installed, or a non-string
-        // tag) is "Object", not "Symbol"/"BigInt".
-        // ArrayBuffer.prototype/SharedArrayBuffer.prototype[Symbol.
-        // toStringTag] are real own accessor properties too (spec
-        // 25.1.5.4 / 25.2.5.6) -- same dynamic-Get fallback as
-        // .symbol/.bigint/.object below, so it naturally distinguishes
-        // the two via whichever prototype `arrayBufferProto` dispatched
-        // this value's [[Prototype]] to (materializeProtos installs a
-        // different string on each).
-        .array_buffer, .symbol, .bigint, .temporal => blk: {
-            if (self.symbol_to_string_tag) |tag_sym| {
-                const tag_key = try self.encodeKey(tag_sym);
-                defer self.gc_allocator.free(tag_key);
-                owned_tag = try self.getProperty(this_value, tag_key);
-                if (owned_tag.isString()) break :blk owned_tag.asString().value.data;
-            }
-            break :blk "Object";
-        },
-        .object => blk: {
-            if (self.unboxPrimitiveWrapper(this_value)) |prim| {
-                break :blk switch (prim.tag()) {
+        .proxy => if (property_desc.isCallable(obj)) "Function" else "Object",
+        .object => blk_obj: {
+            if (self.unboxPrimitiveWrapper(obj)) |prim| {
+                break :blk_obj switch (prim.tag()) {
+                    .boolean => "Boolean",
                     .number => "Number",
                     .string => "String",
-                    .boolean => "Boolean",
                     else => "Object",
                 };
             }
-            // A plain object (Math, JSON, or any object with its own
-            // [Symbol.toStringTag]) has no internal-slot builtinTag
-            // entry, so real spec falls straight to a dynamic Get here
-            // -- same mechanism as the .symbol/.bigint case above.
-            if (self.symbol_to_string_tag) |tag_sym| {
-                const tag_key = try self.encodeKey(tag_sym);
-                defer self.gc_allocator.free(tag_key);
-                owned_tag = try self.getProperty(this_value, tag_key);
-                if (owned_tag.isString()) break :blk owned_tag.asString().value.data;
-            }
-            if (this_value.asObject().value.is_error_data) break :blk "Error";
-            break :blk "Object";
+            if (obj.asObject().value.is_error_data) break :blk_obj "Error";
+            break :blk_obj "Object";
         },
         else => "Object",
     };
+
+    var owned_tag = JSValue.UNDEFINED;
+    defer owned_tag.deinit();
+    var tag: []const u8 = builtin_tag;
+    if (self.symbol_to_string_tag) |tag_sym| {
+        const tag_key = try self.encodeKey(tag_sym);
+        defer self.gc_allocator.free(tag_key);
+        owned_tag = try self.getProperty(obj, tag_key);
+        if (owned_tag.isString()) tag = owned_tag.asString().value.data;
+    }
+
     const msg = try std.fmt.allocPrint(self.gc_allocator, "[object {s}]", .{tag});
     defer self.gc_allocator.free(msg);
     return self.gcNewString(msg);
 }
 
 fn objValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
     _ = allocator;
     _ = args;
-    return this_value.retain();
+    return property_desc.toObject(interp(ctx), this_value);
 }
 
 fn objIsPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
-    _ = allocator;
-    if (!this_value.isObject() or !arg(args, 0).isObject()) return JSValue.fromBool(false);
-    return JSValue.fromBool(this_value.asObject().value.isPrototypeOf(&arg(args, 0).asObject().value));
+    const self = interp(ctx);
+    const v_arg = arg(args, 0);
+    if (!builtin_helpers.isObjectLike(v_arg)) return JSValue.fromBool(false);
+    const o = try property_desc.toObject(self, this_value);
+    defer o.deinit();
+    var cur = try objectGetPrototypeOf(ctx, allocator, JSValue.UNDEFINED, &.{v_arg});
+    while (!cur.isNull()) {
+        if (zvalue.equality.strictEquals(o, cur)) {
+            cur.deinit();
+            return JSValue.fromBool(true);
+        }
+        const next = try objectGetPrototypeOf(ctx, allocator, JSValue.UNDEFINED, &.{cur});
+        cur.deinit();
+        cur = next;
+    }
+    return JSValue.fromBool(false);
 }
 
 // ===== Object statics: constructor + descriptors =====
@@ -1229,6 +1230,9 @@ fn objectIsExtensible(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
 }
 
 pub fn setPrototypeOfInternal(self: *Interpreter, obj: JSValue, proto: JSValue) anyerror!bool {
+    if (self.protos.object.isObject() and zvalue.equality.strictEquals(obj, self.protos.object)) {
+        return proto.isNull();
+    }
     if (obj.isProxy()) {
         const box = obj.asProxy();
         if (try self.proxyTrap(box, "setPrototypeOf")) |trap_fn| {

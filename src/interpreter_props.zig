@@ -256,7 +256,22 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             }
             if (std.mem.eql(u8, key, "name")) break :blk try self.gcNewString(box.value.name);
             if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.arity));
-            const fn_proto = self.proto_refs.get(@intFromPtr(box)) orelse self.protos.function;
+            const fn_proto = self.proto_refs.get(@intFromPtr(box)) orelse blk_fp: {
+                const iclass = @import("interpreter_class.zig");
+                if (box.value.call == iclass.closureCall) {
+                    const cctx: *interpreter_mod.ClosureCtx = @ptrCast(@alignCast(box.value.ctx));
+                    if (cctx.function_node.is_generator and cctx.function_node.is_async and self.protos.async_generator_function_proto.isObject()) {
+                        break :blk_fp self.protos.async_generator_function_proto;
+                    }
+                    if (cctx.function_node.is_generator and !cctx.function_node.is_async and self.protos.generator_function_proto.isObject()) {
+                        break :blk_fp self.protos.generator_function_proto;
+                    }
+                    if (!cctx.function_node.is_generator and cctx.function_node.is_async and self.protos.async_function_proto.isObject()) {
+                        break :blk_fp self.protos.async_function_proto;
+                    }
+                }
+                break :blk_fp self.protos.function;
+            };
             if (!fn_proto.isNull()) {
                 if (try self.getFromProto(obj, fn_proto, key)) |m| break :blk m;
             }
