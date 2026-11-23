@@ -967,7 +967,7 @@ pub fn bindForIteration(self: *Interpreter, env: *Environment, binding: zstateme
         // `for ([a, b] of x)` over existing bindings -- a destructuring
         // assignment per iteration, no fresh env.
         .existing_pattern => |node| {
-            try self.destructuringAssign(env, node, value);
+            try self.destructuringAssignTarget(env, node, value);
             return env;
         },
     }

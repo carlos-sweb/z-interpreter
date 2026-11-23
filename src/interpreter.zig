@@ -3872,6 +3872,32 @@ test "Phase 6.7: fn-name, GeneratorPrototype, object spread, WeakMap.getOrInsert
     try testing.expect(res.isBool() and res.asBool());
 }
 
+test "Cap1 crashfix: for-of and for-in member/paren/private LHS targets" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\var x = {};
+        \\for (x.y of [23]) {}
+        \\var async = { x: 0 };
+        \\for (async.x of [1]) {}
+        \\var z = {};
+        \\for (z.k in { attr: null }) {}
+        \\var p = 0;
+        \\for ((p) of [7]) {}
+        \\class C { #f; mOf() { for (this.#f of [1]) {} } mIn() { for (this.#f in { a: 0 }) {} } }
+        \\var errOf = false, errIn = false;
+        \\try { C.prototype.mOf.call({}); } catch (e) { errOf = e instanceof TypeError; }
+        \\try { C.prototype.mIn.call({}); } catch (e) { errIn = e instanceof TypeError; }
+        \\x.y === 23 && async.x === 1 && z.k === "attr" && p === 7 && errOf && errIn;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
 
 
 
