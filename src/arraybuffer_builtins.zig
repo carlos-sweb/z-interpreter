@@ -56,6 +56,8 @@ const normIndex = builtins.normIndex;
 
 pub const array_buffer_methods = std.StaticStringMap(MethodSpec).initComptime(.{
     .{ "slice", MethodSpec{ .call = arrayBufferSlice, .arity = 2 } },
+    .{ "transfer", MethodSpec{ .call = arrayBufferTransfer, .arity = 0 } },
+    .{ "transferToFixedLength", MethodSpec{ .call = arrayBufferTransferToFixedLength, .arity = 0 } },
 });
 
 pub const shared_array_buffer_methods = std.StaticStringMap(MethodSpec).initComptime(.{
@@ -143,6 +145,7 @@ fn arrayBufferSlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     const self = interp(ctx);
     if (this_value.tag() != .array_buffer) return self.throwError(.type_error, "ArrayBuffer.prototype.slice called on incompatible receiver", .{});
     const src = &this_value.asArrayBuffer().value;
+    if (src.isDetached()) return self.throwError(.type_error, "Cannot perform ArrayBuffer.prototype.slice on a detached ArrayBuffer", .{});
     const len = src.byteLength();
     const start_arg = arg(args, 0);
     const end_arg = arg(args, 1);
@@ -172,6 +175,50 @@ fn arrayBufferSlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     var copy = src.slice(self.gc_allocator, first, final) catch |e| return self.bufferErr(e);
     copy.is_shared = src.is_shared;
     return self.gcNewArrayBufferFromValue(copy);
+}
+
+/// ECMA-262 25.1.3.1 ArrayBufferCopyAndDetach(arrayBuffer, newLength, preserveResizability).
+fn arrayBufferCopyAndDetach(ctx: *anyopaque, this_value: JSValue, args: []const JSValue, method: []const u8) anyerror!JSValue {
+    const self = interp(ctx);
+    if (this_value.tag() != .array_buffer) {
+        return self.throwError(.type_error, "ArrayBuffer.prototype.{s} called on incompatible receiver", .{method});
+    }
+    const src = &this_value.asArrayBuffer().value;
+    if (src.is_shared) {
+        return self.throwError(.type_error, "ArrayBuffer.prototype.{s} cannot be called on a SharedArrayBuffer", .{method});
+    }
+    const new_len_arg = arg(args, 0);
+    const new_byte_length: usize = if (new_len_arg.isUndefined())
+        src.byteLength()
+    else
+        try toByteIndexArg(self, new_len_arg, "newLength");
+    if (src.isDetached()) {
+        return self.throwError(.type_error, "Cannot perform ArrayBuffer.prototype.{s} on a detached ArrayBuffer", .{method});
+    }
+    // Guard against excessive allocations under 2 GiB address space cap.
+    if (new_byte_length > 512 * 1024 * 1024) {
+        return self.throwError(.range_error, "Array buffer allocation failed", .{});
+    }
+    const new_ab = self.gcNewArrayBuffer(new_byte_length) catch {
+        return self.throwError(.range_error, "Array buffer allocation failed", .{});
+    };
+    errdefer new_ab.deinit();
+    const copy_len = @min(src.byteLength(), new_byte_length);
+    if (copy_len > 0) {
+        @memcpy(new_ab.asArrayBuffer().value.bytes[0..copy_len], src.bytes[0..copy_len]);
+    }
+    src.detach();
+    return new_ab;
+}
+
+fn arrayBufferTransfer(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    return arrayBufferCopyAndDetach(ctx, this_value, args, "transfer");
+}
+
+fn arrayBufferTransferToFixedLength(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    return arrayBufferCopyAndDetach(ctx, this_value, args, "transferToFixedLength");
 }
 
 fn dataViewConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {

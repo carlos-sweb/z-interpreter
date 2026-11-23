@@ -4045,6 +4045,45 @@ test "Function.prototype.toString, call, and apply compliance" {
     try testing.expect(res.isBool() and res.asBool());
 }
 
+test "ArrayBuffer.prototype.transfer, transferToFixedLength, and detached" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\var ab = new ArrayBuffer(4);
+        \\var u8 = new Uint8Array(ab);
+        \\u8[0] = 10; u8[1] = 20; u8[2] = 30; u8[3] = 40;
+        \\var ab2 = ab.transfer();
+        \\var sameOk = ab.detached === true && ab.byteLength === 0 && ab2.detached === false && ab2.byteLength === 4;
+        \\var u8_2 = new Uint8Array(ab2);
+        \\var dataOk = u8_2[0] === 10 && u8_2[3] === 40 && u8.length === 0;
+        \\var secondErr = false;
+        \\try { ab.transfer(); } catch (e) { secondErr = e instanceof TypeError; }
+        \\var grown = ab2.transfer(6);
+        \\var g8 = new Uint8Array(grown);
+        \\var growOk = ab2.detached && grown.byteLength === 6 && g8[0] === 10 && g8[4] === 0 && g8[5] === 0;
+        \\var shrunk = grown.transferToFixedLength(2);
+        \\var s8 = new Uint8Array(shrunk);
+        \\var shrinkOk = grown.detached && shrunk.byteLength === 2 && s8[0] === 10 && s8[1] === 20;
+        \\var negErr = false;
+        \\try { shrunk.transfer(-1); } catch (e) { negErr = e instanceof RangeError; }
+        \\var sideErr = false;
+        \\try {
+        \\  shrunk.transfer({ valueOf() { shrunk.transfer(); return 2; } });
+        \\} catch (e) { sideErr = e instanceof TypeError; }
+        \\var descOk = ArrayBuffer.prototype.transfer.length === 0 &&
+        \\  ArrayBuffer.prototype.transfer.name === "transfer" &&
+        \\  ArrayBuffer.prototype.transferToFixedLength.length === 0 &&
+        \\  ArrayBuffer.prototype.transferToFixedLength.name === "transferToFixedLength";
+        \\sameOk && dataOk && secondErr && growOk && shrinkOk && negErr && sideErr && descOk;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
 
 
 
