@@ -600,7 +600,7 @@ pub const ScopeAnalyzer = struct {
             .function_like => |ptr| try self.scanNested(zfunctions.asFunctionNode(ptr)),
             .class_like => |ptr| try self.scanClass(zfunctions.asClassNode(ptr)),
             .yield_expr => |yield_expr| if (yield_expr.argument) |argument| try self.scanNode(argument),
-            .super_expr => self.has_super = true,
+            .super_expr, .new_target => self.has_super = true,
             else => {},
         }
     }

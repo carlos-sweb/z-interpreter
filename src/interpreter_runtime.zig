@@ -591,7 +591,7 @@ fn validateEvalNode(node: *const zparser.Node, flags: EvalValidFlags) EvalValidE
         .function_like => |ptr| try validateEvalFunction(zfunctions.asFunctionNode(ptr), flags, false, false),
         .class_like => |ptr| try validateEvalClass(zfunctions.asClassNode(ptr), flags),
         .yield_expr => |y| if (y.argument) |a| try validateEvalNode(a, flags),
-        .number_literal, .bigint_literal, .string_literal, .boolean_literal, .null_literal, .regex_literal, .this_expr => {},
+        .number_literal, .bigint_literal, .string_literal, .boolean_literal, .null_literal, .regex_literal, .this_expr, .new_target => {},
     }
 }
 
@@ -625,6 +625,7 @@ fn evalSourceImpl(self: *Interpreter, scope: *Environment, src: []const u8, is_d
     // deep inside an already-recursed script, so a freshly-computed
     // budget here would over-allow (see z-parser-improve.md).
     parser.setStackLimit(self.stack_limit);
+    parser.stmt_parser.expr_parser.new_target_allowed = is_direct and scope.allowsNewTarget();
     const program = parser.parseProgram() catch |err| switch (err) {
         // Same message as `evalExpression`'s own stack guard (line
         // ~3387) -- deeply nested source text and deeply nested

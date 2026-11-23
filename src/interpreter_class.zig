@@ -272,7 +272,7 @@ fn nodeUsesArguments(node: *const zparser.Node) bool {
         // that AST has a dedicated scanner.
         .class_like => true,
         .yield_expr => |yield_expr| if (yield_expr.argument) |argument| nodeUsesArguments(argument) else false,
-        .number_literal, .bigint_literal, .string_literal, .boolean_literal, .null_literal, .regex_literal, .this_expr, .super_expr => false,
+        .number_literal, .bigint_literal, .string_literal, .boolean_literal, .null_literal, .regex_literal, .this_expr, .super_expr, .new_target => false,
     };
 }
 
@@ -634,7 +634,7 @@ pub fn normalizePrivateInNode(allocator: Allocator, source: []const u8, node: *z
         .function_like => |ptr| try normalizePrivateInFunction(allocator, source, zfunctions.asFunctionNode(ptr)),
         .class_like => |ptr| try normalizePrivateInClass(allocator, source, zfunctions.asClassNode(ptr)),
         .yield_expr => |y| if (y.argument) |a| try normalizePrivateInNode(allocator, source, a),
-        .number_literal, .bigint_literal, .string_literal, .boolean_literal, .null_literal, .regex_literal, .this_expr, .super_expr => {},
+        .number_literal, .bigint_literal, .string_literal, .boolean_literal, .null_literal, .regex_literal, .this_expr, .super_expr, .new_target => {},
     }
 }
 
@@ -757,6 +757,7 @@ pub fn runInstanceFields(self: *Interpreter, cctx: *ClassCtx, instance: JSValue)
         field_env.super_proto = self.protos.object.retain();
     field_env.private_ctx = cctx;
     field_env.in_field_initializer = true;
+    field_env.new_target = JSValue.UNDEFINED;
     const field_attrs = zvalue.PropertyDescriptor{ .writable = true, .enumerable = true, .configurable = true };
     for (cctx.instance_fields) |fd| {
         const v = if (fd.value) |vexpr| try self.evalExpression(field_env, vexpr) else JSValue.UNDEFINED;
@@ -930,6 +931,7 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
             if (static_super_proto) |sp| sb_env.super_proto = sp.retain();
             sb_env.private_ctx = cctx;
             sb_env.in_field_initializer = true;
+            sb_env.new_target = JSValue.UNDEFINED;
             const fn_node = el.function.?;
             switch (fn_node.body) {
                 .block => |b| {
@@ -1073,7 +1075,10 @@ pub fn prepareCallEnv(
     errdefer if (!call_env.escaping) {
         call_env.destroy(self.gc_allocator);
     };
-    if (this_value) |tv| call_env.this_value = tv.retain();
+    if (this_value) |tv| {
+        call_env.this_value = tv.retain();
+        call_env.new_target = (self.pending_call_new_target orelse JSValue.UNDEFINED).retain();
+    }
     if (super_proto) |sp| call_env.super_proto = sp.retain();
     if (super_ctor) |sc| call_env.super_ctor = sc.retain();
     call_env.private_ctx = private_ctx;
@@ -1204,6 +1209,16 @@ pub fn closureCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     // `resolveThis()` walk up to closure_env's, matching real lexical
     // `this` inheritance.
     const this: ?JSValue = if (fnode.kind != .arrow) this_value else null;
+    const prev_nt = closure_ctx.interp.pending_call_new_target;
+    if (fnode.kind != .arrow) {
+        if (closure_ctx.interp.construct_target == ctx) {
+            closure_ctx.interp.construct_target = null;
+            closure_ctx.interp.pending_call_new_target = closure_ctx.interp.construct_new_target orelse JSValue.UNDEFINED;
+        } else {
+            closure_ctx.interp.pending_call_new_target = JSValue.UNDEFINED;
+        }
+    }
+    defer closure_ctx.interp.pending_call_new_target = prev_nt;
     if (fnode.is_generator and fnode.is_async) {
         return closure_ctx.interp.makeAsyncGeneratorObject(fnode, closure_ctx.closure_env, this, closure_ctx.super_proto, closure_ctx.private_ctx, args, closure_ctx.home_object);
     }
@@ -1225,6 +1240,11 @@ pub fn classConstructorCall(ctx: *anyopaque, allocator: Allocator, this_value: J
     // Consume the token: plain calls made inside the constructor body
     // must not look like constructions (evalNew's defer restores it for
     // its own caller either way).
+    const ctor_nt = if (self.construct_new_target) |nt| nt.retain() else JSValue.UNDEFINED;
+    defer ctor_nt.deinit();
+    const prev_nt = self.pending_call_new_target;
+    self.pending_call_new_target = ctor_nt;
+    defer self.pending_call_new_target = prev_nt;
     self.construct_target = null;
 
     // Instance fields: a BASE class initializes them before its ctor body

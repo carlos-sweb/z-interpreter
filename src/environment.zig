@@ -51,6 +51,7 @@ pub const Environment = struct {
     /// by chain walk like `this` -- arrows nested in methods inherit.
     super_proto: ?JSValue = null,
     super_ctor: ?JSValue = null,
+    new_target: ?JSValue = null,
     /// Non-null only at an object-literal method/getter/setter call
     /// boundary: the object literal itself (real spec's [[HomeObject]]).
     /// Unlike `super_proto` (a class method's parent prototype, captured
@@ -84,6 +85,7 @@ pub const Environment = struct {
         if (self.this_value) |v| v.deinit();
         if (self.super_proto) |v| v.deinit();
         if (self.super_ctor) |v| v.deinit();
+        if (self.new_target) |v| v.deinit();
         if (self.home_object) |v| v.deinit();
         self.tdz.deinit(allocator);
         self.consts.deinit(allocator);
@@ -309,6 +311,26 @@ pub const Environment = struct {
         return false;
     }
 
+    /// Walks up to the nearest non-arrow function / class field / static block
+    /// environment and returns its `new.target` binding (retained).
+    pub fn resolveNewTarget(self: *Environment) JSValue {
+        var env: ?*Environment = self;
+        while (env) |e| : (env = e.parent) {
+            if (e.new_target) |v| return v.retain();
+        }
+        return JSValue.UNDEFINED;
+    }
+
+    /// True if direct `eval` here is inside a function, method, constructor,
+    /// class field initializer, or static block (where `new.target` is legal).
+    pub fn allowsNewTarget(self: *Environment) bool {
+        var env: ?*Environment = self;
+        while (env) |e| : (env = e.parent) {
+            if (e.new_target != null) return true;
+        }
+        return false;
+    }
+
     /// GC prep (roadmap item 15, phase 2): enumerates every node directly
     /// reachable from this environment, for a future mark-phase to recurse
     /// through. `visitor` is duck-typed with `value(JSValue) void` (a
@@ -327,6 +349,7 @@ pub const Environment = struct {
         if (self.this_value) |v| visitor.value(v);
         if (self.super_proto) |v| visitor.value(v);
         if (self.super_ctor) |v| visitor.value(v);
+        if (self.new_target) |v| visitor.value(v);
         if (self.home_object) |v| visitor.value(v);
     }
 };

@@ -347,6 +347,7 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
         // their own bindings first and raise this same error when
         // there's nothing to resolve).
         .super_expr => return self.throwError(.syntax_error, "'super' keyword unexpected here", .{}),
+        .new_target => return env.resolveNewTarget(),
         .new_expr => |n| return self.evalNew(env, n),
         .regex_literal => |r| return self.makeRegex(r.pattern, r.flags),
         .bigint_literal => |raw| return self.gcNewBigInt(raw),
@@ -924,8 +925,16 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
         const args = try self.evalArgs(env, c.args);
         defer freeArgs(self, args);
         const prev_target = self.construct_target;
+        const prev_new_target = self.construct_new_target;
+        const cur_nt = env.resolveNewTarget();
+        defer cur_nt.deinit();
         self.construct_target = sctor.asFunction().value.ctx;
-        defer self.construct_target = prev_target;
+        self.construct_new_target = cur_nt.retain();
+        defer {
+            self.construct_target = prev_target;
+            if (self.construct_new_target) |nt| nt.deinit();
+            self.construct_new_target = prev_new_target;
+        }
         const this_v = env.resolveThis();
         defer this_v.deinit();
         const result = try sctor.asFunction().value.call(sctor.asFunction().value.ctx, arena, this_v, args);

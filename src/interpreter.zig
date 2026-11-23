@@ -842,6 +842,9 @@ pub const Interpreter = struct {
     /// The effective newTarget and already-observed prototype for the current
     /// construction. Both are owned while active and restored around nesting.
     construct_new_target: ?JSValue = null,
+    /// Borrowed `new.target` for the non-arrow function/constructor currently
+    /// being entered via `prepareCallEnv` (null/undefined for ordinary calls).
+    pending_call_new_target: ?JSValue = null,
     construct_proto: ?JSValue = null,
     /// User code runs in this child of global_env (created on first
     /// run(), persistent across runs). The separation makes the lexical
@@ -3893,6 +3896,40 @@ test "Cap1 crashfix: for-of and for-in member/paren/private LHS targets" {
         \\try { C.prototype.mOf.call({}); } catch (e) { errOf = e instanceof TypeError; }
         \\try { C.prototype.mIn.call({}); } catch (e) { errIn = e instanceof TypeError; }
         \\x.y === 23 && async.x === 1 && z.k === "attr" && p === 7 && errOf && errIn;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
+test "Cap2.1: new.target in calls, constructors, super(), arrows, field initializers, eval, and top-level SyntaxError" {
+    const testing = std.testing;
+    var allocating: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try gcTestInterp(&allocating);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\function F() { return new.target; }
+        \\var callOk = F() === undefined;
+        \\var ctorOk = (new F()) === F;
+        \\function WithArrow() { this.get = () => new.target; }
+        \\var arrowOk = (new WithArrow()).get() === WithArrow;
+        \\var seenBase, seenSub;
+        \\class Base {
+        \\  fieldNT = new.target;
+        \\  constructor() { seenBase = new.target; }
+        \\}
+        \\class Sub extends Base {
+        \\  constructor() { super(); seenSub = new.target; }
+        \\}
+        \\var s = new Sub();
+        \\var inheritOk = seenBase === Sub && seenSub === Sub && s.fieldNT === undefined;
+        \\var evalNT = (function() { return eval("new.target"); })();
+        \\var evalCtor = new (function E() { this.nt = eval("new.target"); })();
+        \\var evalOk = evalNT === undefined && evalCtor.nt === evalCtor.constructor;
+        \\var topErr = false;
+        \\try { (0, eval)("new.target"); } catch (e) { topErr = e instanceof SyntaxError; }
+        \\callOk && ctorOk && arrowOk && inheritOk && evalOk && topErr;
     );
     defer res.deinit();
     try testing.expect(res.isBool() and res.asBool());
