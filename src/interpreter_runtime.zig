@@ -392,6 +392,7 @@ fn validateEvalPattern(pattern: *const zstatements.BindingPattern, flags: EvalVa
         },
         .object => |obj| {
             for (obj.properties) |p| {
+                if (p.computed_key) |ck| try validateEvalNode(ck, flags);
                 try validateEvalPattern(p.value, flags);
                 if (p.default) |d| try validateEvalNode(d, flags);
             }

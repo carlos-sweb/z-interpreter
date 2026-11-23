@@ -3935,6 +3935,38 @@ test "Cap2.1: new.target in calls, constructors, super(), arrows, field initiali
     try testing.expect(res.isBool() and res.asBool());
 }
 
+test "ObjectPattern computed property keys (ECMA-262 order, Symbol, rest, defaults)" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\var sym = Symbol("s");
+        \\var log = [];
+        \\var kObj = { toString() { log.push("kObj"); return "b"; } };
+        \\var src = { a: 1, b: 2, [sym]: 3, c: 4 };
+        \\const { ["a"]: x, [kObj]: y, [sym]: z, ["missing"]: fn = () => {}, ...rest } = src;
+        \\var basicOk = x === 1 && y === 2 && z === 3 && fn.name === "fn" && log.length === 1;
+        \\var restOk = rest.c === 4 && !("a" in rest) && !("b" in rest) && !(sym in rest);
+        \\var evalOrderOk = false;
+        \\var ran = false;
+        \\try {
+        \\  const { [(ran = true, "a")]: bad } = null;
+        \\} catch (e) {
+        \\  evalOrderOk = (e instanceof TypeError) && !ran;
+        \\}
+        \\function f({ [sym]: v }) { return v; }
+        \\var paramOk = f({ [sym]: 99 }) === 99;
+        \\var forOfSum = 0;
+        \\for (const { ["n"]: n } of [{ n: 10 }, { n: 20 }]) forOfSum += n;
+        \\basicOk && restOk && evalOrderOk && paramOk && forOfSum === 30;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
 
 
 

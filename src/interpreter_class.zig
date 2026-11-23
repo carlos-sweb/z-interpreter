@@ -213,6 +213,7 @@ fn bindingPatternUsesArguments(pattern: *const zstatements.BindingPattern) bool 
         },
         .object => |object| blk: {
             for (object.properties) |property| {
+                if (property.computed_key) |ck| if (nodeUsesArguments(ck)) break :blk true;
                 if (bindingPatternUsesArguments(property.value)) break :blk true;
                 if (property.default) |default_value| if (nodeUsesArguments(default_value)) break :blk true;
             }
@@ -459,6 +460,7 @@ fn normalizePrivateInPattern(allocator: Allocator, source: []const u8, pattern: 
         },
         .object => |obj| {
             for (obj.properties) |p| {
+                if (p.computed_key) |ck| try normalizePrivateInNode(allocator, source, ck);
                 try normalizePrivateInPattern(allocator, source, p.value);
                 if (p.default) |d| try normalizePrivateInNode(allocator, source, d);
             }

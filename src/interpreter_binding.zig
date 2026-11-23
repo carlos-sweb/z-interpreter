@@ -627,16 +627,32 @@ pub fn bindPattern(self: *Interpreter, env: *Environment, pattern: *const zstate
         .object => |obj_pat| {
             if (value.isUndefined() or value.isNull()) {
                 const what: []const u8 = if (value.isNull()) "null" else "undefined";
-                if (obj_pat.properties.len > 0) {
+                if (obj_pat.properties.len > 0 and obj_pat.properties[0].computed_key == null) {
                     return self.throwError(.type_error, "Cannot destructure property '{s}' of '{s}' as it is {s}.", .{ obj_pat.properties[0].key, what, what });
                 }
                 return self.throwError(.type_error, "Cannot destructure '{s}' as it is {s}.", .{ what, what });
+            }
+            var excluded_keys: std.ArrayList(Interpreter.PropKey) = .empty;
+            defer {
+                for (excluded_keys.items) |pk| pk.free(arena);
+                excluded_keys.deinit(arena);
             }
             // getProperty is the whole point of the reuse: string
             // `.length`, error `.message`, prototype-chain lookups on
             // objects -- all already live there.
             for (obj_pat.properties) |prop| {
-                var v = try self.getProperty(value, prop.key);
+                const pk: Interpreter.PropKey = if (prop.computed_key) |ck| blk: {
+                    const kv = try self.evalExpression(env, ck);
+                    defer kv.deinit();
+                    break :blk .{ .key = try self.encodeKey(kv), .owned = true };
+                } else .{ .key = prop.key, .owned = false };
+                var pk_stored = false;
+                defer if (!pk_stored) pk.free(arena);
+                if (obj_pat.rest != null) {
+                    try excluded_keys.append(arena, pk);
+                    pk_stored = true;
+                }
+                var v = try self.getProperty(value, pk.key);
                 // Owned either way (getProperty's, or the default's) and
                 // bindPattern retains what it binds: always released here.
                 defer v.deinit();
@@ -654,9 +670,9 @@ pub fn bindPattern(self: *Interpreter, env: *Environment, pattern: *const zstate
             if (obj_pat.rest) |rest_name| {
                 var rest_obj = try self.ordinaryObject();
                 errdefer rest_obj.deinit();
-                var excl = try arena.alloc([]const u8, obj_pat.properties.len);
+                var excl = try arena.alloc([]const u8, excluded_keys.items.len);
                 defer arena.free(excl);
-                for (obj_pat.properties, 0..) |prop, pi| excl[pi] = prop.key;
+                for (excluded_keys.items, 0..) |pk, pi| excl[pi] = pk.key;
                 try copyDataProperties(self, arena, rest_obj, value, excl);
                 switch (mode) {
                     .define => try env.define(arena, rest_name.name, rest_obj),
