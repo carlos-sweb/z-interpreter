@@ -207,29 +207,19 @@ fn iteratorFromValues(self: *Interpreter, allocator: Allocator, items: []const J
 fn mapKeys(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
     const m = try requireMap(ctx, this_value, "keys");
-    return iteratorFromValues(interp(ctx), allocator, m.asMap().value.keys());
+    return builtin_helpers.makeMapIterator(interp(ctx), allocator, m, .keys);
 }
 
 fn mapValues(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
     const m = try requireMap(ctx, this_value, "values");
-    return iteratorFromValues(interp(ctx), allocator, m.asMap().value.values());
+    return builtin_helpers.makeMapIterator(interp(ctx), allocator, m, .values);
 }
 
 fn mapEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
     const m = try requireMap(ctx, this_value, "entries");
-    const ks = m.asMap().value.keys();
-    const vs = m.asMap().value.values();
-    var pairs: std.ArrayList(JSValue) = .empty;
-    defer pairs.deinit(allocator);
-    for (ks, vs) |k, v| {
-        var pair = try interp(ctx).gcNewArray();
-        _ = try pair.asArray().value.push(k.retain());
-        _ = try pair.asArray().value.push(v.retain());
-        try pairs.append(allocator, pair);
-    }
-    return iteratorFromValues(interp(ctx), allocator, pairs.items);
+    return builtin_helpers.makeMapIterator(interp(ctx), allocator, m, .entries);
 }
 
 const SetRecord = struct {
@@ -566,21 +556,13 @@ fn setForEach(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 fn setValues(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
     const s = try requireSet(ctx, this_value, "values");
-    return iteratorFromValues(interp(ctx), allocator, s.asSet().value.values());
+    return builtin_helpers.makeSetIterator(interp(ctx), allocator, s, .values);
 }
 
 fn setEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
     const s = try requireSet(ctx, this_value, "entries");
-    var pairs: std.ArrayList(JSValue) = .empty;
-    defer pairs.deinit(allocator);
-    for (s.asSet().value.values()) |v| {
-        var pair = try interp(ctx).gcNewArray();
-        _ = try pair.asArray().value.push(v.retain());
-        _ = try pair.asArray().value.push(v.retain());
-        try pairs.append(allocator, pair);
-    }
-    return iteratorFromValues(interp(ctx), allocator, pairs.items);
+    return builtin_helpers.makeSetIterator(interp(ctx), allocator, s, .entries);
 }
 
 fn mapGroupBy(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {

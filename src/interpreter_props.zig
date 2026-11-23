@@ -1445,7 +1445,7 @@ pub fn materializeProtos(self: *Interpreter) !void {
             defer self.gc_allocator.free(uns_key);
             const uns_obj = try self.gcNewObject();
             const uns_prop_attrs = zvalue.PropertyDescriptor{ .writable = true, .enumerable = true, .configurable = true };
-            inline for (.{ "at", "copyWithin", "entries", "fill", "find", "findIndex", "findLast", "findLastIndex", "flat", "flatMap", "includes", "keys", "values" }) |mname| {
+            inline for (.{ "at", "copyWithin", "entries", "fill", "find", "findIndex", "findLast", "findLastIndex", "flat", "flatMap", "includes", "keys", "toReversed", "toSorted", "toSpliced", "values" }) |mname| {
                 try uns_obj.asObject().value.defineProperty(mname, JSValue.fromBool(true), uns_prop_attrs);
             }
             try self.protos.array.asObject().value.defineProperty(uns_key, uns_obj, .{ .writable = false, .enumerable = false, .configurable = true });

@@ -654,9 +654,153 @@ fn evalSourceImpl(self: *Interpreter, scope: *Environment, src: []const u8, is_d
             };
         }
     }
+    if (!is_direct) {
+        const is_eval_strict = codeblock.hasUseStrict(program);
+        const prev_strict = self.strict_mode;
+        self.strict_mode = is_eval_strict;
+        defer self.strict_mode = prev_strict;
+
+        const var_env = self.global_var_env orelse self.script_env orelse scope;
+        if (!is_eval_strict) {
+            try evalValidateGlobalDecls(self, var_env, program);
+            try self.hoistVarScope(var_env, program);
+            // Hoist top-level function declarations onto global var_env
+            for (program) |stmt| {
+                if (stmt.data == .function_declaration) {
+                    const fnode = zfunctions.asFunctionNode(stmt.data.function_declaration);
+                    const name = fnode.kind.function_decl.name;
+                    const value = try self.makeClosure(var_env, fnode);
+                    try var_env.define(self.gc_allocator, name, value);
+                    try self.global_var_names.put(self.gc_allocator, name, {});
+                }
+            }
+            const lex_scope = try self.gcChildEnv(var_env);
+            // Hoist only lexical declarations (let/const/class) in lex_scope
+            for (program) |stmt| {
+                switch (stmt.data) {
+                    .variable => |v| if (v.kind != .@"var") {
+                        for (v.declarators) |decl| try self.markPatternTDZ(lex_scope, decl.pattern);
+                        if (v.kind == .@"const") {
+                            for (v.declarators) |decl| try self.markPatternConst(lex_scope, decl.pattern);
+                        }
+                    },
+                    .class_declaration => |ptr| {
+                        const cnode = zfunctions.asClassNode(ptr);
+                        const name = cnode.name.?;
+                        if (lex_scope.declaresLocally(name)) {
+                            return self.throwError(.syntax_error, "Identifier '{s}' has already been declared", .{name});
+                        }
+                        try lex_scope.markTDZ(self.gc_allocator, name);
+                    },
+                    else => {},
+                }
+            }
+            var last: JSValue = JSValue.UNDEFINED;
+            errdefer last.deinit();
+            for (program) |stmt| {
+                if (stmt.data == .function_declaration) continue;
+                const c = try self.evalStatement(lex_scope, stmt);
+                if (c.type != .normal) {
+                    last.deinit();
+                    return c.value;
+                }
+                if (stmt.data != .variable and stmt.data != .empty and stmt.data != .class_declaration) {
+                    last.deinit();
+                    last = c.value;
+                } else {
+                    c.value.deinit();
+                }
+            }
+            return last;
+        }
+        const eval_scope = try self.gcChildEnv(var_env);
+        const c = try self.evalBody(eval_scope, program);
+        return c.value;
+    }
     const eval_scope = try self.gcChildEnv(scope);
     const c = try self.evalBody(eval_scope, program);
     return c.value;
+}
+
+fn evalCheckGlobalBinding(self: *Interpreter, var_env: *Environment, name: []const u8, is_func: bool) anyerror!void {
+    if (var_env.declaresLocally(name) and !self.global_var_names.contains(name)) {
+        return self.throwError(.syntax_error, "Identifier '{s}' has already been declared", .{name});
+    }
+    if (is_func and (std.mem.eql(u8, name, "NaN") or std.mem.eql(u8, name, "Infinity") or std.mem.eql(u8, name, "undefined"))) {
+        return self.throwError(.type_error, "Cannot redefine property: {s}", .{name});
+    }
+    if (self.global_object) |go| {
+        const go_obj = &go.asObject().value;
+        if (go_obj.getOwnRecord(name)) |rec| {
+            if (is_func and !rec.descriptor.configurable) {
+                if (rec.isAccessor() or !rec.descriptor.writable or !rec.descriptor.enumerable) {
+                    return self.throwError(.type_error, "Cannot redefine property: {s}", .{name});
+                }
+            }
+        } else if (!go_obj.is_extensible and !var_env.declaresLocally(name) and !self.global_env.declaresLocally(name)) {
+            return self.throwError(.type_error, "Cannot define property {s}, object is not extensible", .{name});
+        }
+    }
+}
+
+fn evalCheckPatternGlobal(self: *Interpreter, var_env: *Environment, pat: *const zstatements.BindingPattern) anyerror!void {
+    switch (pat.*) {
+        .identifier => |id| try evalCheckGlobalBinding(self, var_env, id.name, false),
+        .array => |arr| {
+            for (arr.elements) |maybe_el| if (maybe_el) |el| try evalCheckPatternGlobal(self, var_env, el.pattern);
+            if (arr.rest) |r| try evalCheckPatternGlobal(self, var_env, r);
+        },
+        .object => |obj| {
+            for (obj.properties) |p| try evalCheckPatternGlobal(self, var_env, p.value);
+            if (obj.rest) |r| try evalCheckGlobalBinding(self, var_env, r.name, false);
+        },
+    }
+}
+
+fn evalValidateGlobalDecls(self: *Interpreter, var_env: *Environment, stmts: []const *zstatements.Statement) anyerror!void {
+    for (stmts) |stmt| {
+        switch (stmt.data) {
+            .function_declaration => |ptr| {
+                const name = zfunctions.asFunctionNode(ptr).kind.function_decl.name;
+                try evalCheckGlobalBinding(self, var_env, name, true);
+            },
+            .variable => |v| if (v.kind == .@"var") {
+                for (v.declarators) |d| try evalCheckPatternGlobal(self, var_env, d.pattern);
+            },
+            .block => |inner| try evalValidateGlobalDecls(self, var_env, inner),
+            .if_stmt => |i| {
+                try evalValidateGlobalDecls(self, var_env, &.{i.consequent});
+                if (i.alternate) |alt| try evalValidateGlobalDecls(self, var_env, &.{alt});
+            },
+            .while_stmt => |w| try evalValidateGlobalDecls(self, var_env, &.{w.body}),
+            .do_while => |d| try evalValidateGlobalDecls(self, var_env, &.{d.body}),
+            .for_stmt => |f| {
+                switch (f.head) {
+                    .c_style => |cs| if (cs.init) |init| switch (init) {
+                        .decl => |d| if (d.kind == .@"var") for (d.declarators) |decl| try evalCheckPatternGlobal(self, var_env, decl.pattern),
+                        else => {},
+                    },
+                    .for_in => |fi| switch (fi.binding) {
+                        .declared => |d| if (d.kind == .@"var") try evalCheckPatternGlobal(self, var_env, d.pattern),
+                        else => {},
+                    },
+                    .for_of => |fo| switch (fo.binding) {
+                        .declared => |d| if (d.kind == .@"var") try evalCheckPatternGlobal(self, var_env, d.pattern),
+                        else => {},
+                    },
+                }
+                try evalValidateGlobalDecls(self, var_env, &.{f.body});
+            },
+            .try_stmt => |t| {
+                try evalValidateGlobalDecls(self, var_env, &.{t.block});
+                if (t.handler) |h| try evalValidateGlobalDecls(self, var_env, &.{h.body});
+                if (t.finalizer) |fin| try evalValidateGlobalDecls(self, var_env, &.{fin});
+            },
+            .switch_stmt => |s| for (s.cases) |sc| try evalValidateGlobalDecls(self, var_env, sc.consequent),
+            .labelled => |l| try evalValidateGlobalDecls(self, var_env, &.{l.body}),
+            else => {},
+        }
+    }
 }
 
 /// Installs a host-provided global binding (QuickJS-libc-style: the

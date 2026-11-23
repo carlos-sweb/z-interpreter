@@ -1224,10 +1224,22 @@ pub fn install(self: *Interpreter) !void {
 
     var arr_iter_proto = try self.gcNewObject();
     try arr_iter_proto.asObject().value.setPrototype(&proto.asObject().value);
+    try defineMethod(self, arr_iter_proto, "next", 0, builtin_helpers.arrayIterProtoNext);
+    var map_iter_proto = try self.gcNewObject();
+    try map_iter_proto.asObject().value.setPrototype(&proto.asObject().value);
+    try defineMethod(self, map_iter_proto, "next", 0, builtin_helpers.mapIterProtoNext);
+    var set_iter_proto = try self.gcNewObject();
+    try set_iter_proto.asObject().value.setPrototype(&proto.asObject().value);
+    try defineMethod(self, set_iter_proto, "next", 0, builtin_helpers.setIterProtoNext);
     if (self.symbol_to_string_tag) |tsym| {
         const tkey = try self.encodeKey(tsym);
         defer self.gc_allocator.free(tkey);
-        try arr_iter_proto.asObject().value.defineProperty(tkey, try self.gcNewString("Array Iterator"), .{ .writable = false, .enumerable = false, .configurable = true });
+        const tag_desc = zvalue.PropertyDescriptor{ .writable = false, .enumerable = false, .configurable = true };
+        try arr_iter_proto.asObject().value.defineProperty(tkey, try self.gcNewString("Array Iterator"), tag_desc);
+        try map_iter_proto.asObject().value.defineProperty(tkey, try self.gcNewString("Map Iterator"), tag_desc);
+        try set_iter_proto.asObject().value.defineProperty(tkey, try self.gcNewString("Set Iterator"), tag_desc);
     }
     self.protos.array_iterator_proto = arr_iter_proto;
+    self.protos.map_iterator_proto = map_iter_proto;
+    self.protos.set_iterator_proto = set_iter_proto;
 }

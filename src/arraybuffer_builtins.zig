@@ -102,7 +102,12 @@ fn arrayBufferConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSV
     if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor ArrayBuffer requires 'new'", .{});
     const len_arg = arg(args, 0);
     const byte_length: usize = if (len_arg.tag() == .undefined) 0 else try toByteIndexArg(self, len_arg, "length");
-    const ab = try self.gcNewArrayBuffer(byte_length);
+    if (byte_length > 512 * 1024 * 1024) {
+        return self.throwError(.range_error, "Array buffer allocation failed", .{});
+    }
+    const ab = self.gcNewArrayBuffer(byte_length) catch {
+        return self.throwError(.range_error, "Array buffer allocation failed", .{});
+    };
     errdefer ab.deinit();
     if (self.construct_proto) |proto| {
         if (!zvalue.equality.strictEquals(proto, self.protos.array_buffer)) {
@@ -123,7 +128,12 @@ fn sharedArrayBufferConstructor(ctx: *anyopaque, allocator: Allocator, this_valu
     if (self.construct_target != ctx) return self.throwError(.type_error, "Constructor SharedArrayBuffer requires 'new'", .{});
     const len_arg = arg(args, 0);
     const byte_length: usize = if (len_arg.tag() == .undefined) 0 else try toByteIndexArg(self, len_arg, "length");
-    const sab = try self.gcNewSharedArrayBuffer(byte_length);
+    if (byte_length > 512 * 1024 * 1024) {
+        return self.throwError(.range_error, "Array buffer allocation failed", .{});
+    }
+    const sab = self.gcNewSharedArrayBuffer(byte_length) catch {
+        return self.throwError(.range_error, "Array buffer allocation failed", .{});
+    };
     errdefer sab.deinit();
     if (self.construct_proto) |proto| {
         if (!zvalue.equality.strictEquals(proto, self.protos.shared_array_buffer)) {
@@ -1307,26 +1317,7 @@ fn taSlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
 /// `.retain()` -- `taGet`'s results are already owned, see the section
 /// comment above).
 fn taIterator(self: *Interpreter, allocator: Allocator, this_value: JSValue, kind: @FieldType(ArrayIterCtx, "kind")) anyerror!JSValue {
-    const len = taLen(this_value);
-    const snapshot = try allocator.alloc(JSValue, len);
-    var i: usize = 0;
-    while (i < len) : (i += 1) snapshot[i] = try taGet(self, this_value, i);
-    const ic = try allocator.create(ArrayIterCtx);
-    ic.* = .{ .interp = self, .items = snapshot, .kind = kind };
-    try self.gcTrackArrayIterCtx(ic);
-    var obj = try self.gcNewObject();
-    const iter_proto = if (self.protos.array_iterator_proto.isObject())
-        self.protos.array_iterator_proto
-    else
-        (self.iterator_prototype orelse JSValue.UNDEFINED);
-    if (iter_proto.isObject()) try obj.asObject().value.setPrototype(&iter_proto.asObject().value);
-    try obj.asObject().value.set("next", try self.gcNewFunction(.{ .ctx = ic, .name = "next", .call = arrayIterNext }));
-    if (self.symbol_iterator) |sym| {
-        const key = try self.encodeKey(sym);
-        defer allocator.free(key);
-        try obj.asObject().value.set(key, try self.nativeMethod("iterator", "self", 0, iteratorSelfBuiltin));
-    }
-    return obj;
+    return builtin_helpers.makeArrayIterator(self, allocator, this_value, kind);
 }
 
 fn taKeys(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {

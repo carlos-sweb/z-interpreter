@@ -99,7 +99,7 @@ fn globalEncodeURI(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     const s = try argString(interp(ctx), allocator, args, 0);
     defer allocator.free(s);
     const encoded = zurlcode.encode(allocator, s, .uri) catch |err| switch (err) {
-        error.InvalidUtf8 => unreachable, // ZString's data is always valid UTF-8
+        error.InvalidUtf8 => return interp(ctx).throwError(.uri_error, "URI malformed", .{}),
         error.OutOfMemory => return error.OutOfMemory,
     };
     defer allocator.free(encoded);
@@ -113,7 +113,7 @@ fn globalEncodeURIComponent(ctx: *anyopaque, allocator: Allocator, this_value: J
     const s = try argString(interp(ctx), allocator, args, 0);
     defer allocator.free(s);
     const encoded = zurlcode.encode(allocator, s, .component) catch |err| switch (err) {
-        error.InvalidUtf8 => unreachable, // ZString's data is always valid UTF-8
+        error.InvalidUtf8 => return interp(ctx).throwError(.uri_error, "URI malformed", .{}),
         error.OutOfMemory => return error.OutOfMemory,
     };
     defer allocator.free(encoded);
@@ -156,7 +156,8 @@ fn globalEval(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     const self = interp(ctx);
     const a = arg(args, 0);
     if (a.tag() != .string) return a.retain();
-    return self.evalSourceIndirect(self.global_env, a.asString().value.data);
+    const global_scope = self.global_var_env orelse self.script_env orelse self.global_env;
+    return self.evalSourceIndirect(global_scope, a.asString().value.data);
 }
 
 /// Installs `console`/`print`, `parseInt`/`parseFloat`/`isNaN`/

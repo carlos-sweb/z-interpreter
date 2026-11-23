@@ -489,57 +489,216 @@ pub fn arrayLikeToList(self: *Interpreter, allocator: Allocator, value: JSValue)
     return out.toOwnedSlice(allocator);
 }
 
-/// keys()/values()/entries() -- iterator objects with `next` and a
-/// Symbol.iterator returning self. A snapshot over the current elements.
+pub const IterProtoKind = enum { array, map, set };
+
+/// keys()/values()/entries() -- iterator objects with internal slot in
+/// `interp.iter_slots`, inheriting `next` from `%ArrayIteratorPrototype%` /
+/// `%MapIteratorPrototype%` / `%SetIteratorPrototype%`.
 pub const ArrayIterCtx = struct {
     interp: *Interpreter,
-    items: []const JSValue, // retained snapshot
+    proto_kind: IterProtoKind = .array,
+    source: JSValue = JSValue.UNDEFINED,
+    items: []const JSValue = &.{},
     index: usize = 0,
+    exhausted: bool = false,
     kind: enum { keys, values, entries },
 };
+
+fn iterStepFromCtx(ic: *ArrayIterCtx) anyerror!JSValue {
+    const self = ic.interp;
+    var result = try self.ordinaryObject();
+    errdefer result.deinit();
+    if (ic.exhausted) {
+        try result.asObject().value.set("value", JSValue.UNDEFINED);
+        try result.asObject().value.set("done", JSValue.fromBool(true));
+        return result;
+    }
+    switch (ic.source.unpack()) {
+        .array => |box| {
+            const len = box.value.length();
+            if (ic.index >= len) {
+                ic.exhausted = true;
+                try result.asObject().value.set("value", JSValue.UNDEFINED);
+                try result.asObject().value.set("done", JSValue.fromBool(true));
+                return result;
+            }
+            const i = ic.index;
+            ic.index += 1;
+            const val: JSValue = switch (ic.kind) {
+                .keys => JSValue.fromNumber(@floatFromInt(i)),
+                .values => blk: {
+                    var buf: [32]u8 = undefined;
+                    const key = std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
+                    break :blk try self.getProperty(ic.source, key);
+                },
+                .entries => blk: {
+                    var buf: [32]u8 = undefined;
+                    const key = std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
+                    const el = try self.getProperty(ic.source, key);
+                    var pair = try self.gcNewArray();
+                    _ = try pair.asArray().value.push(JSValue.fromNumber(@floatFromInt(i)));
+                    _ = try pair.asArray().value.push(el);
+                    break :blk pair;
+                },
+            };
+            try result.asObject().value.set("value", val);
+            try result.asObject().value.set("done", JSValue.fromBool(false));
+            return result;
+        },
+        .typed_array => |box| {
+            if (isTypedArrayDetached(&box.value)) {
+                return self.throwError(.type_error, "Cannot iterate over a detached TypedArray", .{});
+            }
+            const len = box.value.len;
+            if (ic.index >= len) {
+                ic.exhausted = true;
+                try result.asObject().value.set("value", JSValue.UNDEFINED);
+                try result.asObject().value.set("done", JSValue.fromBool(true));
+                return result;
+            }
+            const i = ic.index;
+            ic.index += 1;
+            const val: JSValue = switch (ic.kind) {
+                .keys => JSValue.fromNumber(@floatFromInt(i)),
+                .values => try typedElemGet(self, box.value.kind, &box.value.owner.asArrayBuffer().value, box.value.byte_offset, len, i),
+                .entries => blk: {
+                    const el = try typedElemGet(self, box.value.kind, &box.value.owner.asArrayBuffer().value, box.value.byte_offset, len, i);
+                    var pair = try self.gcNewArray();
+                    _ = try pair.asArray().value.push(JSValue.fromNumber(@floatFromInt(i)));
+                    _ = try pair.asArray().value.push(el);
+                    break :blk pair;
+                },
+            };
+            try result.asObject().value.set("value", val);
+            try result.asObject().value.set("done", JSValue.fromBool(false));
+            return result;
+        },
+        .map => |box| {
+            const ks = box.value.keys();
+            const vs = box.value.values();
+            if (ic.index >= ks.len) {
+                ic.exhausted = true;
+                try result.asObject().value.set("value", JSValue.UNDEFINED);
+                try result.asObject().value.set("done", JSValue.fromBool(true));
+                return result;
+            }
+            const i = ic.index;
+            ic.index += 1;
+            const val: JSValue = switch (ic.kind) {
+                .keys => ks[i].retain(),
+                .values => vs[i].retain(),
+                .entries => blk: {
+                    var pair = try self.gcNewArray();
+                    _ = try pair.asArray().value.push(ks[i].retain());
+                    _ = try pair.asArray().value.push(vs[i].retain());
+                    break :blk pair;
+                },
+            };
+            try result.asObject().value.set("value", val);
+            try result.asObject().value.set("done", JSValue.fromBool(false));
+            return result;
+        },
+        .set => |box| {
+            const vs = box.value.values();
+            if (ic.index >= vs.len) {
+                ic.exhausted = true;
+                try result.asObject().value.set("value", JSValue.UNDEFINED);
+                try result.asObject().value.set("done", JSValue.fromBool(true));
+                return result;
+            }
+            const i = ic.index;
+            ic.index += 1;
+            const val: JSValue = switch (ic.kind) {
+                .keys, .values => vs[i].retain(),
+                .entries => blk: {
+                    var pair = try self.gcNewArray();
+                    _ = try pair.asArray().value.push(vs[i].retain());
+                    _ = try pair.asArray().value.push(vs[i].retain());
+                    break :blk pair;
+                },
+            };
+            try result.asObject().value.set("value", val);
+            try result.asObject().value.set("done", JSValue.fromBool(false));
+            return result;
+        },
+        else => {
+            if (ic.index >= ic.items.len) {
+                ic.exhausted = true;
+                try result.asObject().value.set("value", JSValue.UNDEFINED);
+                try result.asObject().value.set("done", JSValue.fromBool(true));
+                return result;
+            }
+            const i = ic.index;
+            ic.index += 1;
+            const val: JSValue = switch (ic.kind) {
+                .keys => JSValue.fromNumber(@floatFromInt(i)),
+                .values => ic.items[i].retain(),
+                .entries => blk: {
+                    var pair = try self.gcNewArray();
+                    _ = try pair.asArray().value.push(JSValue.fromNumber(@floatFromInt(i)));
+                    _ = try pair.asArray().value.push(ic.items[i].retain());
+                    break :blk pair;
+                },
+            };
+            try result.asObject().value.set("value", val);
+            try result.asObject().value.set("done", JSValue.fromBool(false));
+            return result;
+        },
+    }
+}
 
 pub fn arrayIterNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     _ = this_value;
     _ = args;
     const ic: *ArrayIterCtx = @ptrCast(@alignCast(ctx));
-    // Chained to Object.prototype like any ordinary object -- confirmed
-    // against real Node that `Object.getPrototypeOf(it.next())` is
-    // Object.prototype, not null.
-    var result = try ic.interp.ordinaryObject();
-    if (ic.index >= ic.items.len) {
-        try result.asObject().value.set("value", JSValue.UNDEFINED);
-        try result.asObject().value.set("done", JSValue.fromBool(true));
-        return result;
+    return iterStepFromCtx(ic);
+}
+
+fn iterProtoNextImpl(ctx: *anyopaque, this_value: JSValue, expected: IterProtoKind, label: []const u8) anyerror!JSValue {
+    const self = interp(ctx);
+    if (!this_value.isObject()) {
+        return self.throwError(.type_error, "Method {s} Iterator.prototype.next called on incompatible receiver", .{label});
     }
-    const i = ic.index;
-    ic.index += 1;
-    const value: JSValue = switch (ic.kind) {
-        .keys => JSValue.fromNumber(@floatFromInt(i)),
-        .values => ic.items[i].retain(),
-        .entries => blk: {
-            var pair = try ic.interp.gcNewArray();
-            _ = try pair.asArray().value.push(JSValue.fromNumber(@floatFromInt(i)));
-            _ = try pair.asArray().value.push(ic.items[i].retain());
-            break :blk pair;
-        },
+    const ic = self.iter_slots.get(@intFromPtr(this_value.asObject())) orelse {
+        return self.throwError(.type_error, "Method {s} Iterator.prototype.next called on incompatible receiver", .{label});
     };
-    try result.asObject().value.set("value", value);
-    try result.asObject().value.set("done", JSValue.fromBool(false));
-    return result;
+    if (ic.proto_kind != expected) {
+        return self.throwError(.type_error, "Method {s} Iterator.prototype.next called on incompatible receiver", .{label});
+    }
+    return iterStepFromCtx(ic);
+}
+
+pub fn arrayIterProtoNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = args;
+    return iterProtoNextImpl(ctx, this_value, .array, "Array");
+}
+
+pub fn mapIterProtoNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = args;
+    return iterProtoNextImpl(ctx, this_value, .map, "Map");
+}
+
+pub fn setIterProtoNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = args;
+    return iterProtoNextImpl(ctx, this_value, .set, "Set");
 }
 
 pub fn makeArrayIterator(self: *Interpreter, allocator: Allocator, this_value: JSValue, kind: @FieldType(ArrayIterCtx, "kind")) anyerror!JSValue {
-    const snapshot: []JSValue = if (this_value.isArray()) blk: {
-        const src = this_value.asArray().value.toSlice();
-        const s = try allocator.alloc(JSValue, src.len);
-        for (src, 0..) |item, i| s[i] = item.retain();
-        break :blk s;
-    } else blk: {
+    const ic = try allocator.create(ArrayIterCtx);
+    if (this_value.isArray() or this_value.isTypedArray()) {
+        ic.* = .{ .interp = self, .proto_kind = .array, .source = this_value.retain(), .kind = kind };
+    } else {
         const len_v = try self.getProperty(this_value, "length");
         defer len_v.deinit();
         const len = try toLength(self, len_v);
-        if (len > 4294967295) return self.throwError(.range_error, "Invalid array length", .{});
+        if (len > 4294967295) {
+            allocator.destroy(ic);
+            return self.throwError(.range_error, "Invalid array length", .{});
+        }
         const s = try allocator.alloc(JSValue, len);
         var i: usize = 0;
         while (i < len) : (i += 1) {
@@ -547,23 +706,47 @@ pub fn makeArrayIterator(self: *Interpreter, allocator: Allocator, this_value: J
             const key = std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
             s[i] = try self.getProperty(this_value, key);
         }
-        break :blk s;
-    };
-    const ic = try allocator.create(ArrayIterCtx);
-    ic.* = .{ .interp = self, .items = snapshot, .kind = kind };
+        ic.* = .{ .interp = self, .proto_kind = .array, .items = s, .kind = kind };
+    }
     try self.gcTrackArrayIterCtx(ic);
     var obj = try self.gcNewObject();
+    errdefer obj.deinit();
     const iter_proto = if (self.protos.array_iterator_proto.isObject())
         self.protos.array_iterator_proto
     else
         (self.iterator_prototype orelse JSValue.UNDEFINED);
     if (iter_proto.isObject()) try obj.asObject().value.setPrototype(&iter_proto.asObject().value);
-    try obj.asObject().value.set("next", try self.gcNewFunction(.{ .ctx = ic, .name = "next", .call = arrayIterNext }));
-    if (self.symbol_iterator) |sym| {
-        const key = try self.encodeKey(sym);
-        defer allocator.free(key);
-        try obj.asObject().value.set(key, try self.nativeMethod("iterator", "self", 0, iteratorSelfBuiltin));
-    }
+    try self.iter_slots.put(self.gc_allocator, @intFromPtr(obj.asObject()), ic);
+    return obj;
+}
+
+pub fn makeMapIterator(self: *Interpreter, allocator: Allocator, map_val: JSValue, kind: @FieldType(ArrayIterCtx, "kind")) anyerror!JSValue {
+    const ic = try allocator.create(ArrayIterCtx);
+    ic.* = .{ .interp = self, .proto_kind = .map, .source = map_val.retain(), .kind = kind };
+    try self.gcTrackArrayIterCtx(ic);
+    var obj = try self.gcNewObject();
+    errdefer obj.deinit();
+    const iter_proto = if (self.protos.map_iterator_proto.isObject())
+        self.protos.map_iterator_proto
+    else
+        (self.iterator_prototype orelse JSValue.UNDEFINED);
+    if (iter_proto.isObject()) try obj.asObject().value.setPrototype(&iter_proto.asObject().value);
+    try self.iter_slots.put(self.gc_allocator, @intFromPtr(obj.asObject()), ic);
+    return obj;
+}
+
+pub fn makeSetIterator(self: *Interpreter, allocator: Allocator, set_val: JSValue, kind: @FieldType(ArrayIterCtx, "kind")) anyerror!JSValue {
+    const ic = try allocator.create(ArrayIterCtx);
+    ic.* = .{ .interp = self, .proto_kind = .set, .source = set_val.retain(), .kind = kind };
+    try self.gcTrackArrayIterCtx(ic);
+    var obj = try self.gcNewObject();
+    errdefer obj.deinit();
+    const iter_proto = if (self.protos.set_iterator_proto.isObject())
+        self.protos.set_iterator_proto
+    else
+        (self.iterator_prototype orelse JSValue.UNDEFINED);
+    if (iter_proto.isObject()) try obj.asObject().value.setPrototype(&iter_proto.asObject().value);
+    try self.iter_slots.put(self.gc_allocator, @intFromPtr(obj.asObject()), ic);
     return obj;
 }
 

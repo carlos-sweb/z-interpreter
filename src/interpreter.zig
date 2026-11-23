@@ -54,6 +54,8 @@ pub const Protos = struct {
     async_generator_function_proto: JSValue = JSValue.UNDEFINED,
     async_function_proto: JSValue = JSValue.UNDEFINED,
     array_iterator_proto: JSValue = JSValue.UNDEFINED,
+    map_iterator_proto: JSValue = JSValue.UNDEFINED,
+    set_iterator_proto: JSValue = JSValue.UNDEFINED,
     map: JSValue = JSValue.UNDEFINED,
     set: JSValue = JSValue.UNDEFINED,
     symbol: JSValue = JSValue.UNDEFINED,
@@ -808,6 +810,9 @@ pub const Interpreter = struct {
     /// Cached frozen template objects per AST call site (`@intFromPtr(node)`),
     /// per ECMA-262 GetTemplateObject.
     template_objects: std.AutoHashMapUnmanaged(usize, JSValue) = .empty,
+    /// Internal iterator slots (`[[IteratedObject]]` / Map / Set iterator state)
+    /// keyed by the iterator JSObject box address.
+    iter_slots: std.AutoHashMapUnmanaged(usize, *builtins.ArrayIterCtx) = .empty,
     /// The environment whose `var`/function hoisting counts as "global
     /// declaration instantiation" for `globalThis` reification purposes --
     /// `run()` sets this to `script_env`; `runModule`'s entry file (no
@@ -4152,6 +4157,47 @@ test "GeneratorFunction, AsyncGeneratorFunction, and AsyncFunction intrinsic pro
         \\var agfOk = (agDecl instanceof AGF) && (new AGF() instanceof AGF) && (AGF() instanceof AGF) && AGF[Symbol.hasInstance](agDecl);
         \\var afOk = Object.getPrototypeOf(aArrow) === AF.prototype && aArrow.prototype === undefined && !aArrow.hasOwnProperty("prototype");
         \\gfOk && agfOk && afOk;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
+test "Phase 8.2: indirect eval, Array.prototype, iterator slots, OOM RangeError, encodeURI surrogates" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\(0, eval)("var gIndirect = 42; let lexOnly = 99;");
+        \\var evalGlobalOk = gIndirect === 42 && globalThis.gIndirect === 42 && typeof lexOnly === "undefined";
+        \\(0, eval)("'use strict'; var strictOnly = 7;");
+        \\var evalStrictOk = typeof strictOnly === "undefined";
+        \\var evalThisOk = (function() { "use strict"; return (0, eval)("this === globalThis"); })();
+        \\var u = Array.prototype[Symbol.unscopables];
+        \\var unscopOk = u.toReversed === true && u.toSorted === true && u.toSpliced === true;
+        \\var frozenArr = Object.freeze([1, 2]);
+        \\var pushErr = false;
+        \\try { frozenArr.push(); } catch (e) { pushErr = e instanceof TypeError; }
+        \\var popErr = false;
+        \\try { Object.freeze([]).pop(); } catch (e) { popErr = e instanceof TypeError; }
+        \\var incOk = [1, 2, 3].includes(1, 1) === false && [1, 2, 3].includes(2, 1) === true && [1, 2].includes(1, Infinity) === false;
+        \\var tsOk = [1, 2, 3].toSpliced().length === 3;
+        \\var mapIterProto = Object.getPrototypeOf(new Map().entries());
+        \\var setIterProto = Object.getPrototypeOf(new Set().values());
+        \\var arrIterProto = Object.getPrototypeOf([].values());
+        \\var iterTagOk = mapIterProto[Symbol.toStringTag] === "Map Iterator" &&
+        \\  setIterProto[Symbol.toStringTag] === "Set Iterator" &&
+        \\  arrIterProto[Symbol.toStringTag] === "Array Iterator" &&
+        \\  mapIterProto.hasOwnProperty("next") && arrIterProto.hasOwnProperty("next");
+        \\var iterSlotErr = false;
+        \\try { mapIterProto.next.call({}); } catch (e) { iterSlotErr = e instanceof TypeError; }
+        \\var abErr = false;
+        \\try { new ArrayBuffer(Math.pow(2, 53) - 1); } catch (e) { abErr = e instanceof RangeError; }
+        \\var uriErr = false;
+        \\try { encodeURI(String.fromCharCode(0xDC00)); } catch (e) { uriErr = e instanceof URIError; }
+        \\evalGlobalOk && evalStrictOk && evalThisOk && unscopOk && pushErr && popErr && incOk && tsOk && iterTagOk && iterSlotErr && abErr && uriErr;
     );
     defer res.deinit();
     try testing.expect(res.isBool() and res.asBool());

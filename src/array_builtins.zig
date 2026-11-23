@@ -293,12 +293,20 @@ fn isConcatSpreadable(self: *Interpreter, allocator: Allocator, val: JSValue) an
     const sp = try self.getProperty(val, key);
     defer sp.deinit();
     if (sp.tag() != .undefined) return coercion.isTruthy(sp);
-    return isArrayValue(self, val);
+    var cur = val;
+    while (cur.isProxy()) {
+        const box = cur.asProxy();
+        if (box.value.handler.isNull()) {
+            return self.throwError(.type_error, "Cannot perform 'isArray' on a proxy that has been revoked", .{});
+        }
+        cur = box.value.target;
+    }
+    return isArrayValue(self, cur);
 }
 
 fn arrayPush(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
-    if (this_value.tag() == .array and !this_value.asArray().value.isHoley() and !this_value.asArray().value.isSparse() and !this_value.asArray().value.hasElementDescriptors()) {
+    if (this_value.tag() == .array and this_value.asArray().value.isLengthWritable() and interp(ctx).array_props.get(@intFromPtr(this_value.asArray())) == null and !this_value.asArray().value.isHoley() and !this_value.asArray().value.isSparse() and !this_value.asArray().value.hasElementDescriptors()) {
         for (args) |a| _ = try this_value.asArray().value.push(a.retain());
         return JSValue.fromNumber(@floatFromInt(this_value.asArray().value.length()));
     }
@@ -319,7 +327,7 @@ fn arrayPush(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
 
 fn arrayPop(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
-    if (this_value.tag() == .array and !this_value.asArray().value.isHoley() and !this_value.asArray().value.isSparse() and !this_value.asArray().value.hasElementDescriptors()) {
+    if (this_value.tag() == .array and this_value.asArray().value.isLengthWritable() and interp(ctx).array_props.get(@intFromPtr(this_value.asArray())) == null and !this_value.asArray().value.isHoley() and !this_value.asArray().value.isSparse() and !this_value.asArray().value.hasElementDescriptors()) {
         return this_value.asArray().value.pop() orelse JSValue.UNDEFINED;
     }
     const obj = try toArrayLikeObject(ctx, this_value, "pop");
@@ -340,7 +348,7 @@ fn arrayPop(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
 
 fn arrayShift(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
-    if (this_value.tag() == .array and !this_value.asArray().value.isHoley() and !this_value.asArray().value.isSparse() and !this_value.asArray().value.hasElementDescriptors()) {
+    if (this_value.tag() == .array and this_value.asArray().value.isLengthWritable() and interp(ctx).array_props.get(@intFromPtr(this_value.asArray())) == null and !this_value.asArray().value.isHoley() and !this_value.asArray().value.isSparse() and !this_value.asArray().value.hasElementDescriptors()) {
         return this_value.asArray().value.shift() orelse JSValue.UNDEFINED;
     }
     const obj = try toArrayLikeObject(ctx, this_value, "shift");
@@ -368,7 +376,7 @@ fn arrayShift(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 }
 
 fn arrayUnshift(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    if (this_value.tag() == .array and !this_value.asArray().value.isHoley() and !this_value.asArray().value.isSparse() and !this_value.asArray().value.hasElementDescriptors()) {
+    if (this_value.tag() == .array and this_value.asArray().value.isLengthWritable() and interp(ctx).array_props.get(@intFromPtr(this_value.asArray())) == null and !this_value.asArray().value.isHoley() and !this_value.asArray().value.isSparse() and !this_value.asArray().value.hasElementDescriptors()) {
         // Insert in reverse so the args end up in order at the front.
         var i = args.len;
         while (i > 0) {
@@ -442,12 +450,30 @@ fn arrayIncludes(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     _ = allocator;
     const obj = try toArrayLikeObject(ctx, this_value, "includes");
     defer obj.deinit();
-    const target = arg(args, 0);
-    if (obj.tag() == .array and !obj.asArray().value.isHoley() and !obj.asArray().value.isSparse()) return JSValue.fromBool(obj.asArray().value.includes(target, null));
     const self = interp(ctx);
     const len = try arrayLikeLength(ctx, obj);
+    if (len == 0) return JSValue.fromBool(false);
+    const target = arg(args, 0);
+    const n: f64 = if (args.len > 1 and args[1].tag() != .undefined) blk: {
+        const raw = try self.toNumberJS(args[1]);
+        if (std.math.isNan(raw) or raw == 0) break :blk 0;
+        break :blk @trunc(raw);
+    } else 0;
+    if (n >= @as(f64, @floatFromInt(len))) return JSValue.fromBool(false);
+    const start_k: usize = if (n >= 0) @intFromFloat(n) else blk: {
+        const kf = @as(f64, @floatFromInt(len)) + n;
+        break :blk if (kf < 0) 0 else @intFromFloat(kf);
+    };
+    if (obj.tag() == .array and !obj.asArray().value.isHoley() and !obj.asArray().value.isSparse() and !obj.asArray().value.hasElementDescriptors()) {
+        const slice = obj.asArray().value.toSlice();
+        var i = start_k;
+        while (i < slice.len) : (i += 1) {
+            if (zvalue.equality.sameValueZero(slice[i], target)) return JSValue.fromBool(true);
+        }
+        return JSValue.fromBool(false);
+    }
     var buf: [32]u8 = undefined;
-    var i: usize = if (arg(args, 1).tag() == .undefined) 0 else normIndex(try self.toNumberJS(arg(args, 1)), len);
+    var i = start_k;
     while (i < len) : (i += 1) {
         const key = std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
         const item = try self.getProperty(obj, key);
@@ -465,7 +491,7 @@ fn arrayJoin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     const owned_sep: ?[]const u8 = if (sep_arg.tag() == .undefined) null else try self.toDisplayStringJS(allocator, sep_arg);
     defer if (owned_sep) |s| allocator.free(s);
     const sep = owned_sep orelse ",";
-    if (obj.tag() == .array) {
+    if (obj.tag() == .array and !obj.asArray().value.isHoley() and !obj.asArray().value.isSparse()) {
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(allocator);
         for (obj.asArray().value.toSlice(), 0..) |item, i| {
@@ -1300,7 +1326,9 @@ fn arrayToSpliced(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
         break :blk if (p < 0) 0 else @intCast(p);
     } else @min(@as(usize, @intCast(start_int)), len);
 
-    const delete_count: usize = if (args.len <= 1)
+    const delete_count: usize = if (args.len == 0)
+        0
+    else if (args.len == 1)
         len - actual_start
     else blk: {
         const dc = try interp(ctx).toNumberJS(arg(args, 1));
@@ -1310,7 +1338,7 @@ fn arrayToSpliced(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
 
     const raw_inserts = if (args.len > 2) args[2..] else &[_]JSValue{};
     const new_len = len + raw_inserts.len - delete_count;
-    if (new_len > 4294967295) return interp(ctx).throwError(.range_error, "Invalid array length", .{});
+    if (new_len > 4294967295) return interp(ctx).throwError(.type_error, "Invalid array length", .{});
 
     var result = try interp(ctx).gcNewArray();
     var i: usize = 0;

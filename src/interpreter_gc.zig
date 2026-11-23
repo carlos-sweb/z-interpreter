@@ -242,7 +242,10 @@ const Marker = struct {
                 self.value(c.reject_fn);
             },
             .revoke_ctx => |c| self.value(c.proxy),
-            .array_iter_ctx => |c| for (c.items) |item| self.value(item),
+            .array_iter_ctx => |c| {
+                self.value(c.source);
+                for (c.items) |item| self.value(item);
+            },
             else => {},
         }
     }
@@ -319,6 +322,7 @@ pub fn deinit(self: *Interpreter) void {
     while (mcit.next()) |k| self.gc_allocator.free(k.*);
     self.method_cache.deinit(self.gc_allocator);
     self.template_objects.deinit(self.gc_allocator);
+    self.iter_slots.deinit(self.gc_allocator);
 
     self.global_var_names.deinit(self.gc_allocator);
     self.global_builtin_names.deinit(self.gc_allocator);
@@ -384,6 +388,7 @@ fn markValue(marker: *Marker, v: JSValue) void {
 pub fn gcOnBoxDestroyed(ctx: *anyopaque, box: *anyopaque) void {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     _ = self.gc_registry.remove(@intFromPtr(box));
+    _ = self.iter_slots.remove(@intFromPtr(box));
     // A destroyed box might be a `.regex` with its own entry in
     // regex_state (source/flags duped separately from whatever the
     // Regex engine itself owns, for `.source`/`.flags` reflection --
@@ -749,6 +754,9 @@ pub fn traceValueChildren(self: *Interpreter, v: JSValue, visitor: anytype) void
             if (self.proto_refs.get(@intFromPtr(box))) |p| visitor.value(p);
             // A wrapper object's boxed primitive (`new String("x")`).
             if (self.primitive_wrapper_data.get(@intFromPtr(box))) |prim| visitor.value(prim);
+            if (self.iter_slots.get(@intFromPtr(box))) |ic| {
+                if (@hasDecl(@TypeOf(visitor.*), "context")) visitor.context(ic);
+            }
         },
         .map => |box| {
             for (box.value.keys()) |*key| visitor.value(key.*);
@@ -1129,8 +1137,9 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
             self.gc_allocator.destroy(c);
         },
         .array_iter_ctx => |c| {
+            sweeper.value(c.source);
             for (c.items) |v| sweeper.value(v);
-            self.gc_allocator.free(c.items);
+            if (c.items.len > 0) self.gc_allocator.free(c.items);
             self.gc_allocator.destroy(c);
         },
     }
