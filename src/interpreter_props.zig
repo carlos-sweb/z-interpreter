@@ -1371,6 +1371,20 @@ pub fn materializeProtos(self: *Interpreter) !void {
     try self.primitive_wrapper_data.put(self.gc_allocator, @intFromPtr(self.protos.boolean.asObject()), JSValue.fromBool(false));
     try self.primitive_wrapper_data.put(self.gc_allocator, @intFromPtr(self.protos.string.asObject()), try self.gcNewString(""));
 
+    if (self.symbol_iterator) |sym| {
+        const key = try self.encodeKey(sym);
+        defer self.gc_allocator.free(key);
+        const str_iter_fn = try self.gcNewFunction(.{
+            .ctx = self,
+            .name = "[Symbol.iterator]",
+            .arity = 0,
+            .call = @import("string_builtins.zig").stringSymbolIterator,
+            .constructable = false,
+        });
+        const iter_attrs = zvalue.PropertyDescriptor{ .writable = true, .enumerable = false, .configurable = true };
+        try self.protos.string.asObject().value.defineProperty(key, str_iter_fn, iter_attrs);
+    }
+
     // Real spec: Map.prototype/Set.prototype/Promise.prototype/Symbol.
     // prototype/BigInt.prototype[Symbol.toStringTag] are real own
     // properties ("Map"/"Set"/"Promise"/"Symbol"/"BigInt") --

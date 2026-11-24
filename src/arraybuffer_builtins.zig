@@ -948,14 +948,17 @@ fn taAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []cons
     return taGet(self, this_value, @intCast(idx));
 }
 
-fn taJoinWith(self: *Interpreter, allocator: Allocator, this_value: JSValue, sep: []const u8) anyerror!JSValue {
-    const len = taLen(this_value);
+fn taJoinWith(self: *Interpreter, allocator: Allocator, this_value: JSValue, sep: []const u8, len: usize) anyerror!JSValue {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     var i: usize = 0;
     while (i < len) : (i += 1) {
         if (i != 0) try buf.appendSlice(allocator, sep);
-        const s = try coercion.toDisplayString(allocator, try taGet(self, this_value, i));
+        if (isTypedArrayDetached(this_value)) continue;
+        const elem = try taGet(self, this_value, i);
+        defer elem.deinit();
+        if (elem.isUndefined() or elem.isNull()) continue;
+        const s = try coercion.toDisplayString(allocator, elem);
         defer allocator.free(s);
         try buf.appendSlice(allocator, s);
     }
@@ -965,15 +968,12 @@ fn taJoinWith(self: *Interpreter, allocator: Allocator, this_value: JSValue, sep
 fn taJoin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     try requireTypedArray(ctx, this_value, "join");
     const self = interp(ctx);
-    // Real spec: `undefined` (including not passed) is the only case
-    // that means the default ",", same real-ToString-of-the-separator
-    // rule as Array.prototype.join (see array_builtins.zig's arrayJoin
-    // and its comment -- `[1,2].join(null)` is "1null2", not "1,2").
+    const len = taLen(this_value);
     const sep_arg = arg(args, 0);
     const owned_sep: ?[]const u8 = if (sep_arg.tag() == .undefined) null else try self.toDisplayStringJS(allocator, sep_arg);
     defer if (owned_sep) |s| allocator.free(s);
     const sep = owned_sep orelse ",";
-    return taJoinWith(self, allocator, this_value, sep);
+    return taJoinWith(self, allocator, this_value, sep, len);
 }
 
 fn taToLocaleString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1005,7 +1005,7 @@ fn taToLocaleString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
 fn taToStringMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
     try requireTypedArray(ctx, this_value, "toString");
-    return taJoinWith(interp(ctx), allocator, this_value, ",");
+    return taJoinWith(interp(ctx), allocator, this_value, ",", taLen(this_value));
 }
 
 fn taFill(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -1034,6 +1034,7 @@ fn taCopyWithin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     const target = normIndex(try toNumberStrict(self, arg(args, 0)), len);
     const start = if (arg(args, 1).tag() == .undefined) 0 else normIndex(try toNumberStrict(self, arg(args, 1)), len);
     const end = if (arg(args, 2).tag() == .undefined) len else normIndex(try toNumberStrict(self, arg(args, 2)), len);
+    if (isTypedArrayDetached(this_value)) return self.throwError(.type_error, "Cannot perform TypedArray.prototype.copyWithin on a detached ArrayBuffer", .{});
     if (start >= end or target >= len) return this_value.retain();
     const count = @min(end - start, len - target);
     // Snapshot first so overlapping source/destination ranges are always
@@ -1261,10 +1262,10 @@ fn taSetMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
 /// which copies) -- clamped like `slice`, never throws on out-of-range.
 fn taSubarray(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
-    try requireTypedArray(ctx, this_value, "subarray");
     const self = interp(ctx);
+    if (this_value.tag() != .typed_array) return self.throwError(.type_error, "Method TypedArray.prototype.subarray called on incompatible receiver", .{});
     const box = this_value.asTypedArray().value;
-    const len = box.len;
+    const len = if (isTypedArrayDetached(this_value)) 0 else box.len;
     const start = if (arg(args, 0).tag() == .undefined) 0 else normIndex(try toNumberStrict(self, arg(args, 0)), len);
     const end = if (arg(args, 1).tag() == .undefined) len else normIndex(try toNumberStrict(self, arg(args, 1)), len);
     const count = if (end > start) end - start else 0;
@@ -1285,6 +1286,7 @@ fn taSubarray(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 
 /// A COPY into a fresh buffer (unlike `subarray`).
 fn taSlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
     try requireTypedArray(ctx, this_value, "slice");
     const self = interp(ctx);
     const box = this_value.asTypedArray().value;
@@ -1296,15 +1298,12 @@ fn taSlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
     errdefer result.deinit();
     if (count > 0) {
         if (isTypedArrayDetached(this_value)) return self.throwError(.type_error, "Cannot perform TypedArray.prototype.slice on a detached ArrayBuffer", .{});
-        const tmp = try allocator.alloc(JSValue, count);
-        defer {
-            for (tmp) |v| v.deinit();
-            allocator.free(tmp);
-        }
         var i: usize = 0;
-        while (i < count) : (i += 1) tmp[i] = try taGet(self, this_value, start + i);
-        i = 0;
-        while (i < count) : (i += 1) try taWrite(self, result, i, tmp[i]);
+        while (i < count) : (i += 1) {
+            const v = try taGet(self, this_value, start + i);
+            defer v.deinit();
+            try taWrite(self, result, i, v);
+        }
     }
     return result;
 }
@@ -1386,6 +1385,7 @@ fn typedArrayCreateFromConstructor(self: *Interpreter, ctor: JSValue, len: usize
     const new_ta = try self.constructValue(ctor, &.{JSValue.fromNumber(@floatFromInt(len))}, "TypedArray");
     errdefer new_ta.deinit();
     if (new_ta.tag() != .typed_array) return self.throwError(.type_error, "Derived TypedArray constructor created a non-TypedArray object", .{});
+    if (isTypedArrayDetached(new_ta)) return self.throwError(.type_error, "Derived TypedArray constructor created a detached TypedArray", .{});
     if (new_ta.asTypedArray().value.len < len) return self.throwError(.type_error, "Derived TypedArray constructor created an array which was too small", .{});
     return new_ta;
 }

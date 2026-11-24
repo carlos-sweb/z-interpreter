@@ -63,7 +63,7 @@ pub fn sameValue(a: JSValue, b: JSValue) bool {
 }
 
 fn isSymbolKey(name: []const u8) bool {
-    return std.mem.startsWith(u8, name, "__symbol_");
+    return name.len >= 2 and name[0] == 0 and name[1] == 'S';
 }
 
 pub fn displayKey(key: []const u8) []const u8 {

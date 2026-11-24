@@ -56,6 +56,7 @@ pub const Protos = struct {
     array_iterator_proto: JSValue = JSValue.UNDEFINED,
     map_iterator_proto: JSValue = JSValue.UNDEFINED,
     set_iterator_proto: JSValue = JSValue.UNDEFINED,
+    string_iterator_proto: JSValue = JSValue.UNDEFINED,
     map: JSValue = JSValue.UNDEFINED,
     set: JSValue = JSValue.UNDEFINED,
     symbol: JSValue = JSValue.UNDEFINED,
@@ -4257,6 +4258,49 @@ test "Phase 8.3: extends null, derived this TDZ, double super, dynamic HomeObjec
         \\var dupPrivErr = false;
         \\try { new WithPriv(custom); } catch (e) { dupPrivErr = e instanceof TypeError; }
         \\extNullOk && extNullSuperErr && tdzErr && doubleSuperErr && noSuperErr && dyn1 && dyn2 && superSetOk && customFieldOk && dupPrivErr;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
+test "Phase 8.4: String/TypedArray prototypes, for-in semantics, object expressions" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\var repErr = false;
+        \\try { "abc".replaceAll(/a/, "b"); } catch (e) { repErr = e instanceof TypeError; }
+        \\var strIter = "a\uD83D\uDE00b"[Symbol.iterator]();
+        \\var strIterProto = Object.getPrototypeOf(strIter);
+        \\var strIterOk = strIterProto[Symbol.toStringTag] === "String Iterator" &&
+        \\  strIter.next().value === "a" && strIter.next().value === "\uD83D\uDE00" && strIter.next().value === "b" && strIter.next().done === true;
+        \\var strIterSlotErr = false;
+        \\try { strIterProto.next.call({}); } catch (e) { strIterSlotErr = e instanceof TypeError; }
+        \\var taCwErr = false;
+        \\var ta1 = new Uint8Array([1, 2, 3]);
+        \\try { ta1.copyWithin(0, { valueOf() { ta1.buffer.transfer(); return 1; } }); } catch (e) { taCwErr = e instanceof TypeError; }
+        \\var taSliceErr = false;
+        \\var ta2 = new Uint8Array([1, 2, 3]);
+        \\ta2.constructor = { [Symbol.species]: function(n) { var o = new Uint8Array(n); o.buffer.transfer(); return o; } };
+        \\try { ta2.slice(); } catch (e) { taSliceErr = e instanceof TypeError; }
+        \\var forInTdz = false;
+        \\try { eval("for (let x in x) {}"); } catch (e) { forInTdz = e instanceof ReferenceError; }
+        \\var parentObj = { p1: 1, p2: 2 };
+        \\var childObj = Object.create(parentObj);
+        \\Object.defineProperty(childObj, "p2", { value: 9, enumerable: false });
+        \\var seenKeys = [];
+        \\for (var k in childObj) seenKeys.push(k);
+        \\var shadowOk = seenKeys.length === 1 && seenKeys[0] === "p1";
+        \\var oProto1 = { v: 10 }, oProto2 = { v: 20 };
+        \\var objLit = { __proto__: oProto1, getV() { return super.v; } };
+        \\var objSuper1 = objLit.getV() === 10;
+        \\Object.setPrototypeOf(objLit, oProto2);
+        \\var objSuper2 = objLit.getV() === 20;
+        \\var nullProtoOk = Object.getPrototypeOf({ __proto__: null }) === null;
+        \\repErr && strIterOk && strIterSlotErr && taCwErr && taSliceErr && forInTdz && shadowOk && objSuper1 && objSuper2 && nullProtoOk;
     );
     defer res.deinit();
     try testing.expect(res.isBool() and res.asBool());

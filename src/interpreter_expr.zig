@@ -193,13 +193,23 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
                         switch (prop.kind) {
                             .init => {
                                 const value = try self.evalExpression(env, prop.value);
-                                // NamedEvaluation: `{ x: AnonFn }` names
-                                // the function/class with the (already
-                                // static-or-computed-resolved) key.
-                                try self.maybeNameAnonymousValue(prop.value, value, key_str);
-                                // `value` is owned (evalExpression's contract
-                                // since Etapa 1): it moves into the property.
-                                try obj.objectSet(key_str, value);
+                                if (!prop.computed and !prop.shorthand and std.mem.eql(u8, key_str, "__proto__")) {
+                                    if (value.isObject()) {
+                                        try self.setOwnedPrototype(obj, value);
+                                        value.deinit();
+                                    } else if (value.isNull()) {
+                                        try obj.asObject().value.setPrototype(null);
+                                        if (self.proto_refs.fetchRemove(@intFromPtr(obj.asObject()))) |kv| kv.value.deinit();
+                                    } else {
+                                        value.deinit();
+                                    }
+                                } else {
+                                    // NamedEvaluation: `{ x: AnonFn }` names
+                                    // the function/class with the (already
+                                    // static-or-computed-resolved) key.
+                                    try self.maybeNameAnonymousValue(prop.value, value, key_str);
+                                    try obj.objectDefine(key_str, value, .{ .writable = true, .enumerable = true, .configurable = true });
+                                }
                             },
                             .method => {
                                 const f = try self.makeObjectMethodClosure(env, zfunctions.asFunctionNode(prop.value.data.function_like), obj);
@@ -1033,11 +1043,11 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
             const iclass = @import("interpreter_class.zig");
             const sctor_is_js = sctor.isProxy() or (sctor.isFunction() and (sctor.asFunction().value.call == iclass.closureCall or sctor.asFunction().value.call == iclass.classConstructorCall));
             const should_adopt = (sctor_is_js and @import("builtin_helpers.zig").isObjectLike(result)) or
-                result.isArray() or
+                result.isArray() or result.isRegex() or
                 (result.isTemporal() and self.temporal_protos.contains(@intFromPtr(result.asTemporal()))) or
                 result.isTypedArray() or result.isArrayBuffer() or result.isDataView() or result.isSet() or result.isMap();
             if (should_adopt) {
-                if (result.isArray() and this_v.isObject()) {
+                if ((result.isArray() or result.isRegex()) and this_v.isObject()) {
                     if (this_v.asObject().value.getPrototype()) |pp| {
                         const Box = @TypeOf(this_v.asObject().*);
                         const box: *Box = @fieldParentPtr("value", pp);

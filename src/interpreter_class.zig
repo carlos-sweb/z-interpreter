@@ -397,6 +397,9 @@ pub fn makeClosure(self: *Interpreter, env: *Environment, fnode: *zfunctions.Fun
             .function_decl, .function_expr => true,
         },
     });
+    if (fnode.is_generator) {
+        _ = try self.functionPrototype(fn_value);
+    }
     if (self_name) |n| {
         try closure_env.define(arena, n, fn_value.retain());
         // immutable-bindings.md: a named function expression's own
@@ -1352,12 +1355,12 @@ pub fn classConstructorCall(ctx: *anyopaque, allocator: Allocator, this_value: J
             try self.constructValue(parent, args, "super");
         const parent_is_js = parent.isProxy() or (parent.isFunction() and (parent.asFunction().value.call == closureCall or parent.asFunction().value.call == classConstructorCall));
         const should_adopt = (parent_is_js and @import("builtin_helpers.zig").isObjectLike(parent_result)) or
-            parent_result.isArray() or
+            parent_result.isArray() or parent_result.isRegex() or
             (parent_result.isTemporal() and self.temporal_protos.contains(@intFromPtr(parent_result.asTemporal()))) or
             parent_result.isTypedArray() or parent_result.isArrayBuffer() or parent_result.isDataView() or parent_result.isSet() or parent_result.isMap();
         if (should_adopt) {
             errdefer parent_result.deinit();
-            if (parent_result.isArray() and this_value.isObject()) {
+            if ((parent_result.isArray() or parent_result.isRegex()) and this_value.isObject()) {
                 if (this_value.asObject().value.getPrototype()) |pp| {
                     const Box = @TypeOf(this_value.asObject().*);
                     const box: *Box = @fieldParentPtr("value", pp);

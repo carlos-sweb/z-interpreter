@@ -392,9 +392,11 @@ fn stringConcat(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 }
 
 fn stringLocaleCompare(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self = interp(ctx);
     const data = try requireString(ctx, allocator, this_value, "localeCompare");
     defer allocator.free(data);
-    const other: []const u8 = if (arg(args, 0).tag() == .string) arg(args, 0).asString().value.data else "";
+    const other = try self.toDisplayStringJS(allocator, arg(args, 0));
+    defer allocator.free(other);
     return JSValue.fromNumber(switch (std.mem.order(u8, data, other)) {
         .lt => -1,
         .eq => 0,
@@ -440,10 +442,33 @@ fn stringNormalize(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
 }
 
 fn stringToStringMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
     _ = args;
-    const data = try requireString(ctx, allocator, this_value, "toString");
-    defer allocator.free(data);
-    return interp(ctx).gcNewString(data);
+    const self = interp(ctx);
+    if (this_value.isString()) return this_value.retain();
+    if (this_value.isObject()) {
+        if (self.primitive_wrapper_data.get(@intFromPtr(this_value.asObject()))) |prim| {
+            if (prim.isString()) return prim.retain();
+        }
+    }
+    return self.throwError(.type_error, "String.prototype.toString requires that 'this' be a String", .{});
+}
+
+pub fn stringSymbolIterator(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = args;
+    const self = interp(ctx);
+    if (this_value.isUndefined() or this_value.isNull()) {
+        return self.throwError(.type_error, "String.prototype[Symbol.iterator] called on null or undefined", .{});
+    }
+    const str_val: JSValue = if (this_value.isString())
+        this_value.retain()
+    else blk: {
+        const s = try self.toDisplayStringJS(allocator, this_value);
+        defer allocator.free(s);
+        break :blk try self.gcNewString(s);
+    };
+    defer str_val.deinit();
+    return builtin_helpers.makeStringIterator(self, allocator, str_val);
 }
 
 /// Appends `chunk` to `buf`, merging a WTF-8 high-surrogate tail with a

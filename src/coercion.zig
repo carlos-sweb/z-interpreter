@@ -192,13 +192,11 @@ pub fn toDisplayString(allocator: Allocator, v: JSValue) ![]u8 {
         // in inspect.zig.
         .date => |box| box.value.toString(allocator) catch try allocator.dupe(u8, "Invalid Date"),
         .promise => try allocator.dupe(u8, "[object Promise]"),
-        // `/source/` (flags omitted -- the exact form is regex.toString()).
-        .regex => |box| try std.fmt.allocPrint(allocator, "/{s}/", .{box.value.getPattern()}),
         // Digits only, no trailing `n` -- that suffix is a console.log/
         // inspect-only display convention (see inspect.zig's own .bigint
         // case), not part of ToString: `${1n}` === "1", not "1n".
         .bigint => |box| try box.value.toString(allocator, 10),
-        .object, .symbol, .map, .set, .@"error", .function, .proxy, .array_buffer, .data_view, .typed_array, .temporal => error.NotImplemented,
+        .object, .regex, .symbol, .map, .set, .@"error", .function, .proxy, .array_buffer, .data_view, .typed_array, .temporal => error.NotImplemented,
     };
 }
 

@@ -1287,6 +1287,67 @@ pub fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zs
     return .{};
 }
 
+fn definePatternTdz(self: *Interpreter, env: *Environment, pattern: *const zstatements.BindingPattern) anyerror!void {
+    const arena = self.gc_allocator;
+    switch (pattern.*) {
+        .identifier => |id| try env.tdz.put(arena, id.name, {}),
+        .array => |arr| {
+            for (arr.elements) |maybe_el| if (maybe_el) |el| try definePatternTdz(self, env, el.pattern);
+            if (arr.rest) |r| try definePatternTdz(self, env, r);
+        },
+        .object => |obj| {
+            for (obj.properties) |prop| try definePatternTdz(self, env, prop.value);
+            if (obj.rest) |r| try env.tdz.put(arena, r.name, {});
+        },
+    }
+}
+
+fn objectHasKeyInChain(obj: anytype, key: []const u8) bool {
+    var cur: ?@TypeOf(obj) = obj;
+    while (cur) |o| : (cur = o.getPrototype()) {
+        if (o.getOwnRecord(key) != null) return true;
+    }
+    return false;
+}
+
+fn forInStep(self: *Interpreter, env: *Environment, binding: zstatements.ForBinding, value: JSValue, body: *zstatements.Statement, labels: []const []const u8, last_value: *JSValue) anyerror!?Completion {
+    const iter_env = try self.bindForIteration(env, binding, value);
+    const c = try self.evalStatement(iter_env, body);
+    switch (c.type) {
+        .break_completion => {
+            if (Interpreter.loopOwns(c.target, labels)) {
+                if (!c.value.isUndefined()) {
+                    last_value.deinit();
+                    last_value.* = JSValue.UNDEFINED;
+                    return Completion{ .type = .normal, .value = c.value };
+                }
+                const out = last_value.*;
+                last_value.* = JSValue.UNDEFINED;
+                return Completion{ .type = .normal, .value = out };
+            }
+            return c;
+        },
+        .continue_completion => {
+            if (!Interpreter.loopOwns(c.target, labels)) return c;
+            if (!c.value.isUndefined()) {
+                last_value.deinit();
+                last_value.* = c.value;
+            }
+            return null;
+        },
+        .return_completion => return c,
+        .normal => {
+            if (!c.value.isUndefined()) {
+                last_value.deinit();
+                last_value.* = c.value;
+            } else {
+                c.value.deinit();
+            }
+            return null;
+        },
+    }
+}
+
 /// for-in over enumerable string keys: own + inherited (walking the
 /// prototype chain, shadowed keys seen once), array/string indices as
 /// STRINGS (for-in keys are always strings in real JS), and -- per
@@ -1295,20 +1356,32 @@ pub fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zs
 /// set, ...) iterate zero times.
 pub fn evalForIn(self: *Interpreter, env: *Environment, head: anytype, body: *zstatements.Statement, labels: []const []const u8) anyerror!Completion {
     const arena = self.gc_allocator;
-    const target = try self.evalExpression(env, head.object);
+    const head_env: *Environment = switch (head.binding) {
+        .declared => |d| if (d.kind != .@"var") blk: {
+            const tdz_env = try self.gcChildEnv(env);
+            try definePatternTdz(self, tdz_env, d.pattern);
+            break :blk tdz_env;
+        } else env,
+        else => env,
+    };
+    const target = try self.evalExpression(head_env, head.object);
     defer target.deinit();
+    var last_value: JSValue = JSValue.UNDEFINED;
+    errdefer last_value.deinit();
     switch (target.unpack()) {
         .object => |box| {
             var seen: std.StringHashMapUnmanaged(void) = .empty;
             defer seen.deinit(arena);
             var keys_list: std.ArrayList([]const u8) = .empty;
             defer keys_list.deinit(arena);
+            var is_global = false;
             // `globalThis`: top-level var/function names and ad-hoc
             // globals aren't backed by a real ZObject record, so the
             // bag walk below would miss them entirely -- same gap as
             // ownEnumerableKeys (see its global_builtin_names comment).
             if (self.global_object) |go| {
                 if (target.asObject() == go.asObject()) {
+                    is_global = true;
                     if (self.global_var_env) |gve| {
                         for (gve.bindings.items) |binding| {
                             if (seen.contains(binding.name)) continue;
@@ -1326,21 +1399,27 @@ pub fn evalForIn(self: *Interpreter, env: *Environment, head: anytype, body: *zs
             }
             var current: ?*const @TypeOf(box.value) = &box.value;
             while (current) |o| : (current = o.getPrototype()) {
-                const ks = try o.keys(arena);
+                const ks = try o.getOwnPropertyNames(arena);
                 defer arena.free(ks);
                 for (ks) |k| {
                     if (Interpreter.isSymbolKey(k)) continue; // symbols never in for-in
                     if (!seen.contains(k)) {
                         try seen.put(arena, k, {});
-                        try keys_list.append(arena, k);
+                        if (o.getOwnRecord(k)) |rec| {
+                            if (rec.descriptor.enumerable) try keys_list.append(arena, k);
+                        }
                     }
                 }
             }
             for (keys_list.items) |k| {
+                if (!is_global and !objectHasKeyInChain(&box.value, k)) continue;
                 const kv = try self.gcNewString(k);
-                const step = try self.forIterationStep(env, head.binding, kv, body, labels);
+                const step = try forInStep(self, env, head.binding, kv, body, labels, &last_value);
                 kv.deinit();
-                if (step) |c| return c;
+                if (step) |c| {
+                    last_value.deinit();
+                    return c;
+                }
             }
         },
         .array => |box| {
@@ -1372,33 +1451,40 @@ pub fn evalForIn(self: *Interpreter, env: *Environment, head: anytype, body: *zs
                 try keys_list.append(arena, key_str);
             }
             if (bag_opt) |bag| {
-                const ks = try bag.asObject().value.keys(arena);
+                const ks = try bag.asObject().value.getOwnPropertyNames(arena);
                 defer arena.free(ks);
                 for (ks) |k| {
                     if (Interpreter.isSymbolKey(k)) continue;
                     if (!seen.contains(k)) {
                         try seen.put(arena, k, {});
-                        try keys_list.append(arena, k);
+                        if (bag.asObject().value.getOwnRecord(k)) |rec| {
+                            if (rec.descriptor.enumerable) try keys_list.append(arena, k);
+                        }
                     }
                 }
             }
             var current: ?*const @TypeOf(self.protos.array.asObject().value) = &self.protos.array.asObject().value;
             while (current) |o| : (current = o.getPrototype()) {
-                const ks = try o.keys(arena);
+                const ks = try o.getOwnPropertyNames(arena);
                 defer arena.free(ks);
                 for (ks) |k| {
                     if (Interpreter.isSymbolKey(k)) continue;
                     if (!seen.contains(k)) {
                         try seen.put(arena, k, {});
-                        try keys_list.append(arena, k);
+                        if (o.getOwnRecord(k)) |rec| {
+                            if (rec.descriptor.enumerable) try keys_list.append(arena, k);
+                        }
                     }
                 }
             }
             for (keys_list.items) |k| {
                 const kv = try self.gcNewString(k);
-                const step = try self.forIterationStep(env, head.binding, kv, body, labels);
+                const step = try forInStep(self, env, head.binding, kv, body, labels, &last_value);
                 kv.deinit();
-                if (step) |c| return c;
+                if (step) |c| {
+                    last_value.deinit();
+                    return c;
+                }
             }
         },
         .date, .promise, .map, .set, .@"error", .regex, .array_buffer, .data_view => {
@@ -1409,9 +1495,12 @@ pub fn evalForIn(self: *Interpreter, env: *Environment, head: anytype, body: *zs
                 for (ks) |k| {
                     if (Interpreter.isSymbolKey(k)) continue;
                     const kv = try self.gcNewString(k);
-                    const step = try self.forIterationStep(env, head.binding, kv, body, labels);
+                    const step = try forInStep(self, env, head.binding, kv, body, labels, &last_value);
                     kv.deinit();
-                    if (step) |c| return c;
+                    if (step) |c| {
+                        last_value.deinit();
+                        return c;
+                    }
                 }
             }
         },
@@ -1423,9 +1512,12 @@ pub fn evalForIn(self: *Interpreter, env: *Environment, head: anytype, body: *zs
                 const key_str = try std.fmt.allocPrint(arena, "{d}", .{i});
                 defer arena.free(key_str);
                 const kv = try self.gcNewString(key_str);
-                const step = try self.forIterationStep(env, head.binding, kv, body, labels);
+                const step = try forInStep(self, env, head.binding, kv, body, labels, &last_value);
                 kv.deinit();
-                if (step) |c| return c;
+                if (step) |c| {
+                    last_value.deinit();
+                    return c;
+                }
             }
         },
         // Narrowing: only the proxy's own (trap-aware) keys -- unlike
@@ -1440,9 +1532,12 @@ pub fn evalForIn(self: *Interpreter, env: *Environment, head: anytype, body: *zs
             for (ks) |k| {
                 if (Interpreter.isSymbolKey(k)) continue;
                 const kv = try self.gcNewString(k);
-                const step = try self.forIterationStep(env, head.binding, kv, body, labels);
+                const step = try forInStep(self, env, head.binding, kv, body, labels, &last_value);
                 kv.deinit();
-                if (step) |c| return c;
+                if (step) |c| {
+                    last_value.deinit();
+                    return c;
+                }
             }
         },
         .typed_array => {
@@ -1451,13 +1546,16 @@ pub fn evalForIn(self: *Interpreter, env: *Environment, head: anytype, body: *zs
             for (ks) |k| {
                 if (Interpreter.isSymbolKey(k)) continue;
                 const kv = try self.gcNewString(k);
-                const step = try self.forIterationStep(env, head.binding, kv, body, labels);
+                const step = try forInStep(self, env, head.binding, kv, body, labels, &last_value);
                 kv.deinit();
-                if (step) |c| return c;
+                if (step) |c| {
+                    last_value.deinit();
+                    return c;
+                }
             }
         },
         else => {}, // incl. null/undefined: zero iterations, no error (spec)
     }
-    return .{};
+    return .{ .type = .normal, .value = last_value };
 }
 

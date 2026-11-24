@@ -1231,6 +1231,9 @@ pub fn install(self: *Interpreter) !void {
     var set_iter_proto = try self.gcNewObject();
     try set_iter_proto.asObject().value.setPrototype(&proto.asObject().value);
     try defineMethod(self, set_iter_proto, "next", 0, builtin_helpers.setIterProtoNext);
+    var str_iter_proto = try self.gcNewObject();
+    try str_iter_proto.asObject().value.setPrototype(&proto.asObject().value);
+    try defineMethod(self, str_iter_proto, "next", 0, builtin_helpers.stringIterProtoNext);
     if (self.symbol_to_string_tag) |tsym| {
         const tkey = try self.encodeKey(tsym);
         defer self.gc_allocator.free(tkey);
@@ -1238,8 +1241,10 @@ pub fn install(self: *Interpreter) !void {
         try arr_iter_proto.asObject().value.defineProperty(tkey, try self.gcNewString("Array Iterator"), tag_desc);
         try map_iter_proto.asObject().value.defineProperty(tkey, try self.gcNewString("Map Iterator"), tag_desc);
         try set_iter_proto.asObject().value.defineProperty(tkey, try self.gcNewString("Set Iterator"), tag_desc);
+        try str_iter_proto.asObject().value.defineProperty(tkey, try self.gcNewString("String Iterator"), tag_desc);
     }
     self.protos.array_iterator_proto = arr_iter_proto;
     self.protos.map_iterator_proto = map_iter_proto;
     self.protos.set_iterator_proto = set_iter_proto;
+    self.protos.string_iterator_proto = str_iter_proto;
 }

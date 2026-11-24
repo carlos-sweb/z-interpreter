@@ -489,7 +489,7 @@ pub fn arrayLikeToList(self: *Interpreter, allocator: Allocator, value: JSValue)
     return out.toOwnedSlice(allocator);
 }
 
-pub const IterProtoKind = enum { array, map, set };
+pub const IterProtoKind = enum { array, map, set, string };
 
 /// keys()/values()/entries() -- iterator objects with internal slot in
 /// `interp.iter_slots`, inheriting `next` from `%ArrayIteratorPrototype%` /
@@ -514,6 +514,22 @@ fn iterStepFromCtx(ic: *ArrayIterCtx) anyerror!JSValue {
         return result;
     }
     switch (ic.source.unpack()) {
+        .string => |box| {
+            const data = box.value.data;
+            if (ic.index >= data.len) {
+                ic.exhausted = true;
+                try result.asObject().value.set("value", JSValue.UNDEFINED);
+                try result.asObject().value.set("done", JSValue.fromBool(true));
+                return result;
+            }
+            const seq_len = std.unicode.utf8ByteSequenceLength(data[ic.index]) catch 1;
+            const end = @min(ic.index + seq_len, data.len);
+            const ch = try self.gcNewString(data[ic.index..end]);
+            ic.index = end;
+            try result.asObject().value.set("value", ch);
+            try result.asObject().value.set("done", JSValue.fromBool(false));
+            return result;
+        },
         .array => |box| {
             const len = box.value.length();
             if (ic.index >= len) {
@@ -675,6 +691,12 @@ pub fn arrayIterProtoNext(ctx: *anyopaque, allocator: Allocator, this_value: JSV
     return iterProtoNextImpl(ctx, this_value, .array, "Array");
 }
 
+pub fn stringIterProtoNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = args;
+    return iterProtoNextImpl(ctx, this_value, .string, "String");
+}
+
 pub fn mapIterProtoNext(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     _ = args;
@@ -743,6 +765,21 @@ pub fn makeSetIterator(self: *Interpreter, allocator: Allocator, set_val: JSValu
     errdefer obj.deinit();
     const iter_proto = if (self.protos.set_iterator_proto.isObject())
         self.protos.set_iterator_proto
+    else
+        (self.iterator_prototype orelse JSValue.UNDEFINED);
+    if (iter_proto.isObject()) try obj.asObject().value.setPrototype(&iter_proto.asObject().value);
+    try self.iter_slots.put(self.gc_allocator, @intFromPtr(obj.asObject()), ic);
+    return obj;
+}
+
+pub fn makeStringIterator(self: *Interpreter, allocator: Allocator, str_val: JSValue) anyerror!JSValue {
+    const ic = try allocator.create(ArrayIterCtx);
+    ic.* = .{ .interp = self, .proto_kind = .string, .source = str_val.retain(), .kind = .values };
+    try self.gcTrackArrayIterCtx(ic);
+    var obj = try self.gcNewObject();
+    errdefer obj.deinit();
+    const iter_proto = if (self.protos.string_iterator_proto.isObject())
+        self.protos.string_iterator_proto
     else
         (self.iterator_prototype orelse JSValue.UNDEFINED);
     if (iter_proto.isObject()) try obj.asObject().value.setPrototype(&iter_proto.asObject().value);
