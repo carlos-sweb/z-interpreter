@@ -3008,7 +3008,9 @@ fn compileOsrImpl(
                     try a.movRegMem(.rcx, .rax, arr_holey_off);
                     try a.testRegReg(.rcx, .rcx);
                     try a.jcc(.ne, bail_lbl);
-                    break :blk .rax;
+                    // Preserve *ArrayBox in %r9 across emitLoadNumToXmm (which clobbers %rax).
+                    try a.movRegReg(.r9, .rax);
+                    break :blk .r9;
                 };
 
                 // key = regs[op.c]; guard key < BASE_TAG and exact int32 >= 0
@@ -3097,7 +3099,9 @@ fn compileOsrImpl(
                     try a.movRegMem(.rcx, .rax, arr_holey_off);
                     try a.testRegReg(.rcx, .rcx);
                     try a.jcc(.ne, bail_lbl);
-                    break :blk .rax;
+                    // Preserve *ArrayBox in %r9 across emitLoadNumToXmm (which clobbers %rax).
+                    try a.movRegReg(.r9, .rax);
+                    break :blk .r9;
                 };
 
                 // key = regs[op.b]; guard key < BASE_TAG and exact int32 >= 0
@@ -5388,4 +5392,46 @@ test "baseline JIT Phase 5A frozen object and accessor fall back to slow path" {
     defer res.deinit();
     try std.testing.expect(res.isNumber());
     try std.testing.expectEqual(@as(f64, 14500), res.asNumber());
+}
+
+test "baseline JIT OSR preserves non-hoisted ArrayBox across uncached index load in get_elem/set_elem (qsort)" {
+    const allocator = std.testing.allocator;
+    var writer = std.Io.Writer.Allocating.init(allocator);
+    defer writer.deinit();
+    var interp = try @import("../interpreter.zig").Interpreter.init(allocator, &writer.writer);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+
+    const res = try interp.run(
+        \\function qsort(arr, lo, hi) {
+        \\    var i = lo;
+        \\    var j = hi;
+        \\    var pivot = arr[(lo + hi) >> 1];
+        \\    while (i <= j) {
+        \\        while (arr[i] < pivot) i++;
+        \\        while (arr[j] > pivot) j--;
+        \\        if (i <= j) {
+        \\            var tmp = arr[i];
+        \\            arr[i] = arr[j];
+        \\            arr[j] = tmp;
+        \\            i++;
+        \\            j--;
+        \\        }
+        \\    }
+        \\    if (lo < j) qsort(arr, lo, j);
+        \\    if (i < hi) qsort(arr, i, hi);
+        \\}
+        \\var n = 50;
+        \\var arr = new Array(n);
+        \\var s = 123456789;
+        \\for (var i = 0; i < n; i++) {
+        \\    s = (s * 1664525 + 1013904223) % 2147483648;
+        \\    arr[i] = s;
+        \\}
+        \\qsort(arr, 0, n - 1);
+        \\arr[0] + arr[n >> 1] + arr[n - 1];
+    );
+    defer res.deinit();
+    try std.testing.expect(res.isNumber());
+    try std.testing.expectEqual(@as(f64, 3353778030), res.asNumber());
 }
