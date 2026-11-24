@@ -88,7 +88,7 @@ pub const Assembler = struct {
         return .{ .allocator = allocator };
     }
 
-    pub fn deinit(self: *Assembler) void {
+    pub noinline fn deinit(self: *Assembler) void {
         self.code.deinit(self.allocator);
         self.labels.deinit(self.allocator);
         self.fixups.deinit(self.allocator);
@@ -107,31 +107,31 @@ pub const Assembler = struct {
         return (@as(u8, mod) << 6) | (@as(u8, reg) << 3) | @as(u8, rm);
     }
 
-    inline fn emitByte(self: *Assembler, b: u8) !void {
+    noinline fn emitByte(self: *Assembler, b: u8) !void {
         try self.code.append(self.allocator, b);
     }
 
-    inline fn emitBytes(self: *Assembler, bytes: []const u8) !void {
+    noinline fn emitBytes(self: *Assembler, bytes: []const u8) !void {
         try self.code.appendSlice(self.allocator, bytes);
     }
 
-    inline fn emitU32(self: *Assembler, v: u32) !void {
+    noinline fn emitU32(self: *Assembler, v: u32) !void {
         var buf: [4]u8 = undefined;
         std.mem.writeInt(u32, &buf, v, .little);
         try self.emitBytes(&buf);
     }
 
-    inline fn emitI32(self: *Assembler, v: i32) !void {
+    noinline fn emitI32(self: *Assembler, v: i32) !void {
         try self.emitU32(@bitCast(v));
     }
 
-    inline fn emitU64(self: *Assembler, v: u64) !void {
+    noinline fn emitU64(self: *Assembler, v: u64) !void {
         var buf: [8]u8 = undefined;
         std.mem.writeInt(u64, &buf, v, .little);
         try self.emitBytes(&buf);
     }
 
-    fn emitMemOperand(self: *Assembler, reg_field: u3, base: Reg, disp: i32) !void {
+    noinline fn emitMemOperand(self: *Assembler, reg_field: u3, base: Reg, disp: i32) !void {
         const rm = base.low3();
         if (disp == 0 and rm != 5) {
             try self.emitByte(modRM(0b00, reg_field, rm));
@@ -147,73 +147,73 @@ pub const Assembler = struct {
         }
     }
 
-    pub fn createLabel(self: *Assembler) !Label {
+    pub noinline fn createLabel(self: *Assembler) !Label {
         const id: Label = @intCast(self.labels.items.len);
         try self.labels.append(self.allocator, null);
         return id;
     }
 
-    pub fn bindLabel(self: *Assembler, label: Label) void {
+    pub noinline fn bindLabel(self: *Assembler, label: Label) void {
         self.labels.items[label] = self.code.items.len;
     }
 
-    pub fn pushReg(self: *Assembler, reg: Reg) !void {
+    pub noinline fn pushReg(self: *Assembler, reg: Reg) !void {
         if (reg.isExt()) try self.emitByte(0x41);
         try self.emitByte(0x50 + @as(u8, reg.low3()));
     }
 
-    pub fn popReg(self: *Assembler, reg: Reg) !void {
+    pub noinline fn popReg(self: *Assembler, reg: Reg) !void {
         if (reg.isExt()) try self.emitByte(0x41);
         try self.emitByte(0x58 + @as(u8, reg.low3()));
     }
 
-    pub fn ret(self: *Assembler) !void {
+    pub noinline fn ret(self: *Assembler) !void {
         try self.emitByte(0xC3);
     }
 
-    pub fn movRegReg(self: *Assembler, dst: Reg, src: Reg) !void {
+    pub noinline fn movRegReg(self: *Assembler, dst: Reg, src: Reg) !void {
         try self.emitByte(rexW(src.isExt(), dst.isExt()));
         try self.emitByte(0x89);
         try self.emitByte(modRM(0b11, src.low3(), dst.low3()));
     }
 
-    pub fn movRegImm64(self: *Assembler, dst: Reg, imm: u64) !void {
+    pub noinline fn movRegImm64(self: *Assembler, dst: Reg, imm: u64) !void {
         try self.emitByte(rexW(false, dst.isExt()));
         try self.emitByte(0xB8 + @as(u8, dst.low3()));
         try self.emitU64(imm);
     }
 
-    pub fn movRegImm32(self: *Assembler, dst: Reg, imm: u32) !void {
+    pub noinline fn movRegImm32(self: *Assembler, dst: Reg, imm: u32) !void {
         if (dst.isExt()) try self.emitByte(0x41);
         try self.emitByte(0xB8 + @as(u8, dst.low3()));
         try self.emitU32(imm);
     }
 
-    pub fn xorRegReg(self: *Assembler, dst: Reg, src: Reg) !void {
+    pub noinline fn xorRegReg(self: *Assembler, dst: Reg, src: Reg) !void {
         try self.emitByte(rexW(src.isExt(), dst.isExt()));
         try self.emitByte(0x31);
         try self.emitByte(modRM(0b11, src.low3(), dst.low3()));
     }
 
-    pub fn movRegMem(self: *Assembler, dst: Reg, base: Reg, disp: i32) !void {
+    pub noinline fn movRegMem(self: *Assembler, dst: Reg, base: Reg, disp: i32) !void {
         try self.emitByte(rexW(dst.isExt(), base.isExt()));
         try self.emitByte(0x8B);
         try self.emitMemOperand(dst.low3(), base, disp);
     }
 
-    pub fn movMemReg(self: *Assembler, base: Reg, disp: i32, src: Reg) !void {
+    pub noinline fn movMemReg(self: *Assembler, base: Reg, disp: i32, src: Reg) !void {
         try self.emitByte(rexW(src.isExt(), base.isExt()));
         try self.emitByte(0x89);
         try self.emitMemOperand(src.low3(), base, disp);
     }
 
-    pub fn lea(self: *Assembler, dst: Reg, base: Reg, disp: i32) !void {
+    pub noinline fn lea(self: *Assembler, dst: Reg, base: Reg, disp: i32) !void {
         try self.emitByte(rexW(dst.isExt(), base.isExt()));
         try self.emitByte(0x8D);
         try self.emitMemOperand(dst.low3(), base, disp);
     }
 
-    pub fn addRegImm32(self: *Assembler, dst: Reg, imm: i32) !void {
+    pub noinline fn addRegImm32(self: *Assembler, dst: Reg, imm: i32) !void {
         try self.emitByte(rexW(false, dst.isExt()));
         if (imm >= -128 and imm <= 127) {
             try self.emitByte(0x83);
@@ -226,13 +226,13 @@ pub const Assembler = struct {
         }
     }
 
-    pub fn addRegReg(self: *Assembler, dst: Reg, src: Reg) !void {
+    pub noinline fn addRegReg(self: *Assembler, dst: Reg, src: Reg) !void {
         try self.emitByte(rexW(src.isExt(), dst.isExt()));
         try self.emitByte(0x01);
         try self.emitByte(modRM(0b11, src.low3(), dst.low3()));
     }
 
-    pub fn subRegImm32(self: *Assembler, dst: Reg, imm: i32) !void {
+    pub noinline fn subRegImm32(self: *Assembler, dst: Reg, imm: i32) !void {
         try self.emitByte(rexW(false, dst.isExt()));
         if (imm >= -128 and imm <= 127) {
             try self.emitByte(0x83);
@@ -245,31 +245,31 @@ pub const Assembler = struct {
         }
     }
 
-    pub fn subRegReg(self: *Assembler, dst: Reg, src: Reg) !void {
+    pub noinline fn subRegReg(self: *Assembler, dst: Reg, src: Reg) !void {
         try self.emitByte(rexW(src.isExt(), dst.isExt()));
         try self.emitByte(0x29);
         try self.emitByte(modRM(0b11, src.low3(), dst.low3()));
     }
 
-    pub fn decReg64(self: *Assembler, reg: Reg) !void {
+    pub noinline fn decReg64(self: *Assembler, reg: Reg) !void {
         try self.emitByte(rexW(false, reg.isExt()));
         try self.emitByte(0xFF);
         try self.emitByte(modRM(0b11, 1, reg.low3()));
     }
 
-    pub fn incReg64(self: *Assembler, reg: Reg) !void {
+    pub noinline fn incReg64(self: *Assembler, reg: Reg) !void {
         try self.emitByte(rexW(false, reg.isExt()));
         try self.emitByte(0xFF);
         try self.emitByte(modRM(0b11, 0, reg.low3()));
     }
 
-    pub fn cmpRegReg(self: *Assembler, lhs: Reg, rhs: Reg) !void {
+    pub noinline fn cmpRegReg(self: *Assembler, lhs: Reg, rhs: Reg) !void {
         try self.emitByte(rexW(rhs.isExt(), lhs.isExt()));
         try self.emitByte(0x39);
         try self.emitByte(modRM(0b11, rhs.low3(), lhs.low3()));
     }
 
-    pub fn cmpRegImm32(self: *Assembler, lhs: Reg, imm: i32) !void {
+    pub noinline fn cmpRegImm32(self: *Assembler, lhs: Reg, imm: i32) !void {
         try self.emitByte(rexW(false, lhs.isExt()));
         if (imm >= -128 and imm <= 127) {
             try self.emitByte(0x83);
@@ -282,21 +282,21 @@ pub const Assembler = struct {
         }
     }
 
-    pub fn shrRegImm8(self: *Assembler, dst: Reg, count: u8) !void {
+    pub noinline fn shrRegImm8(self: *Assembler, dst: Reg, count: u8) !void {
         try self.emitByte(rexW(false, dst.isExt()));
         try self.emitByte(0xC1);
         try self.emitByte(modRM(0b11, 5, dst.low3()));
         try self.emitByte(count);
     }
 
-    pub fn shlRegImm8(self: *Assembler, dst: Reg, count: u8) !void {
+    pub noinline fn shlRegImm8(self: *Assembler, dst: Reg, count: u8) !void {
         try self.emitByte(rexW(false, dst.isExt()));
         try self.emitByte(0xC1);
         try self.emitByte(modRM(0b11, 4, dst.low3()));
         try self.emitByte(count);
     }
 
-    pub fn imulRegRegImm32(self: *Assembler, dst: Reg, src: Reg, imm: i32) !void {
+    pub noinline fn imulRegRegImm32(self: *Assembler, dst: Reg, src: Reg, imm: i32) !void {
         if (imm >= -128 and imm <= 127) {
             try self.emitByte(rexW(dst.isExt(), src.isExt()));
             try self.emitByte(0x6B);
@@ -310,50 +310,50 @@ pub const Assembler = struct {
         }
     }
 
-    pub fn testRegReg(self: *Assembler, a: Reg, b: Reg) !void {
+    pub noinline fn testRegReg(self: *Assembler, a: Reg, b: Reg) !void {
         try self.emitByte(rexW(b.isExt(), a.isExt()));
         try self.emitByte(0x85);
         try self.emitByte(modRM(0b11, b.low3(), a.low3()));
     }
 
-    pub fn cmovpRegReg(self: *Assembler, dst: Reg, src: Reg) !void {
+    pub noinline fn cmovpRegReg(self: *Assembler, dst: Reg, src: Reg) !void {
         try self.emitByte(rexW(dst.isExt(), src.isExt()));
         try self.emitByte(0x0F);
         try self.emitByte(0x4A);
         try self.emitByte(modRM(0b11, dst.low3(), src.low3()));
     }
 
-    pub fn andRegImm8(self: *Assembler, dst: Reg, imm: i8) !void {
+    pub noinline fn andRegImm8(self: *Assembler, dst: Reg, imm: i8) !void {
         try self.emitByte(rexW(false, dst.isExt()));
         try self.emitByte(0x83);
         try self.emitByte(modRM(0b11, 4, dst.low3()));
         try self.emitByte(@bitCast(imm));
     }
 
-    pub fn andRegReg(self: *Assembler, dst: Reg, src: Reg) !void {
+    pub noinline fn andRegReg(self: *Assembler, dst: Reg, src: Reg) !void {
         try self.emitByte(rexW(src.isExt(), dst.isExt()));
         try self.emitByte(0x21);
         try self.emitByte(modRM(0b11, src.low3(), dst.low3()));
     }
 
-    pub fn xorRegReg64(self: *Assembler, dst: Reg, src: Reg) !void {
+    pub noinline fn xorRegReg64(self: *Assembler, dst: Reg, src: Reg) !void {
         try self.emitByte(rexW(src.isExt(), dst.isExt()));
         try self.emitByte(0x31);
         try self.emitByte(modRM(0b11, src.low3(), dst.low3()));
     }
 
-    inline fn emitRex32(self: *Assembler, r_ext: bool, b_ext: bool) !void {
+    noinline fn emitRex32(self: *Assembler, r_ext: bool, b_ext: bool) !void {
         const rex: u8 = 0x40 | (if (r_ext) @as(u8, 4) else 0) | (if (b_ext) @as(u8, 1) else 0);
         if (rex != 0x40) try self.emitByte(rex);
     }
 
-    pub fn movReg32Reg32(self: *Assembler, dst: Reg, src: Reg) !void {
+    pub noinline fn movReg32Reg32(self: *Assembler, dst: Reg, src: Reg) !void {
         try self.emitRex32(src.isExt(), dst.isExt());
         try self.emitByte(0x89);
         try self.emitByte(modRM(0b11, src.low3(), dst.low3()));
     }
 
-    pub fn addReg32Imm32(self: *Assembler, dst: Reg, imm: i32) !void {
+    pub noinline fn addReg32Imm32(self: *Assembler, dst: Reg, imm: i32) !void {
         try self.emitRex32(false, dst.isExt());
         if (imm >= -128 and imm <= 127) {
             try self.emitByte(0x83);
@@ -366,7 +366,7 @@ pub const Assembler = struct {
         }
     }
 
-    pub fn subReg32Imm32(self: *Assembler, dst: Reg, imm: i32) !void {
+    pub noinline fn subReg32Imm32(self: *Assembler, dst: Reg, imm: i32) !void {
         try self.emitRex32(false, dst.isExt());
         if (imm >= -128 and imm <= 127) {
             try self.emitByte(0x83);
@@ -379,25 +379,25 @@ pub const Assembler = struct {
         }
     }
 
-    pub fn andReg32Reg32(self: *Assembler, dst: Reg, src: Reg) !void {
+    pub noinline fn andReg32Reg32(self: *Assembler, dst: Reg, src: Reg) !void {
         try self.emitRex32(src.isExt(), dst.isExt());
         try self.emitByte(0x21);
         try self.emitByte(modRM(0b11, src.low3(), dst.low3()));
     }
 
-    pub fn orReg32Reg32(self: *Assembler, dst: Reg, src: Reg) !void {
+    pub noinline fn orReg32Reg32(self: *Assembler, dst: Reg, src: Reg) !void {
         try self.emitRex32(src.isExt(), dst.isExt());
         try self.emitByte(0x09);
         try self.emitByte(modRM(0b11, src.low3(), dst.low3()));
     }
 
-    pub fn xorReg32Reg32(self: *Assembler, dst: Reg, src: Reg) !void {
+    pub noinline fn xorReg32Reg32(self: *Assembler, dst: Reg, src: Reg) !void {
         try self.emitRex32(src.isExt(), dst.isExt());
         try self.emitByte(0x31);
         try self.emitByte(modRM(0b11, src.low3(), dst.low3()));
     }
 
-    pub fn andReg32Imm32(self: *Assembler, dst: Reg, imm: i32) !void {
+    pub noinline fn andReg32Imm32(self: *Assembler, dst: Reg, imm: i32) !void {
         try self.emitRex32(false, dst.isExt());
         if (imm >= -128 and imm <= 127) {
             try self.emitByte(0x83);
@@ -410,7 +410,7 @@ pub const Assembler = struct {
         }
     }
 
-    pub fn orReg32Imm32(self: *Assembler, dst: Reg, imm: i32) !void {
+    pub noinline fn orReg32Imm32(self: *Assembler, dst: Reg, imm: i32) !void {
         try self.emitRex32(false, dst.isExt());
         if (imm >= -128 and imm <= 127) {
             try self.emitByte(0x83);
@@ -423,7 +423,7 @@ pub const Assembler = struct {
         }
     }
 
-    pub fn xorReg32Imm32(self: *Assembler, dst: Reg, imm: i32) !void {
+    pub noinline fn xorReg32Imm32(self: *Assembler, dst: Reg, imm: i32) !void {
         try self.emitRex32(false, dst.isExt());
         if (imm >= -128 and imm <= 127) {
             try self.emitByte(0x83);
@@ -436,84 +436,84 @@ pub const Assembler = struct {
         }
     }
 
-    pub fn shlReg32Imm8(self: *Assembler, dst: Reg, count: u8) !void {
+    pub noinline fn shlReg32Imm8(self: *Assembler, dst: Reg, count: u8) !void {
         try self.emitRex32(false, dst.isExt());
         try self.emitByte(0xC1);
         try self.emitByte(modRM(0b11, 4, dst.low3()));
         try self.emitByte(count);
     }
 
-    pub fn shrReg32Imm8(self: *Assembler, dst: Reg, count: u8) !void {
+    pub noinline fn shrReg32Imm8(self: *Assembler, dst: Reg, count: u8) !void {
         try self.emitRex32(false, dst.isExt());
         try self.emitByte(0xC1);
         try self.emitByte(modRM(0b11, 5, dst.low3()));
         try self.emitByte(count);
     }
 
-    pub fn sarReg32Imm8(self: *Assembler, dst: Reg, count: u8) !void {
+    pub noinline fn sarReg32Imm8(self: *Assembler, dst: Reg, count: u8) !void {
         try self.emitRex32(false, dst.isExt());
         try self.emitByte(0xC1);
         try self.emitByte(modRM(0b11, 7, dst.low3()));
         try self.emitByte(count);
     }
 
-    pub fn notReg32(self: *Assembler, dst: Reg) !void {
+    pub noinline fn notReg32(self: *Assembler, dst: Reg) !void {
         try self.emitRex32(false, dst.isExt());
         try self.emitByte(0xF7);
         try self.emitByte(modRM(0b11, 2, dst.low3()));
     }
 
-    pub fn shlReg32Cl(self: *Assembler, dst: Reg) !void {
+    pub noinline fn shlReg32Cl(self: *Assembler, dst: Reg) !void {
         try self.emitRex32(false, dst.isExt());
         try self.emitByte(0xD3);
         try self.emitByte(modRM(0b11, 4, dst.low3()));
     }
 
-    pub fn shrReg32Cl(self: *Assembler, dst: Reg) !void {
+    pub noinline fn shrReg32Cl(self: *Assembler, dst: Reg) !void {
         try self.emitRex32(false, dst.isExt());
         try self.emitByte(0xD3);
         try self.emitByte(modRM(0b11, 5, dst.low3()));
     }
 
-    pub fn sarReg32Cl(self: *Assembler, dst: Reg) !void {
+    pub noinline fn sarReg32Cl(self: *Assembler, dst: Reg) !void {
         try self.emitRex32(false, dst.isExt());
         try self.emitByte(0xD3);
         try self.emitByte(modRM(0b11, 7, dst.low3()));
     }
 
-    pub fn divReg32(self: *Assembler, divisor: Reg) !void {
+    pub noinline fn divReg32(self: *Assembler, divisor: Reg) !void {
         try self.emitRex32(false, divisor.isExt());
         try self.emitByte(0xF7);
         try self.emitByte(modRM(0b11, 6, divisor.low3()));
     }
 
-    pub fn divReg64(self: *Assembler, divisor: Reg) !void {
+    pub noinline fn divReg64(self: *Assembler, divisor: Reg) !void {
         try self.emitByte(rexW(false, divisor.isExt()));
         try self.emitByte(0xF7);
         try self.emitByte(modRM(0b11, 6, divisor.low3()));
     }
 
-    pub fn btReg64Reg64(self: *Assembler, base: Reg, bit: Reg) !void {
+    pub noinline fn btReg64Reg64(self: *Assembler, base: Reg, bit: Reg) !void {
         try self.emitByte(rexW(bit.isExt(), base.isExt()));
         try self.emitByte(0x0F);
         try self.emitByte(0xA3);
         try self.emitByte(modRM(0b11, bit.low3(), base.low3()));
     }
 
-    pub fn btrReg64Reg64(self: *Assembler, dst: Reg, bit: Reg) !void {
+    pub noinline fn btrReg64Reg64(self: *Assembler, dst: Reg, bit: Reg) !void {
         try self.emitByte(rexW(bit.isExt(), dst.isExt()));
         try self.emitByte(0x0F);
         try self.emitByte(0xB3);
         try self.emitByte(modRM(0b11, bit.low3(), dst.low3()));
     }
 
-    pub fn idivReg32(self: *Assembler, divisor: Reg) !void {
+    pub noinline fn idivReg32(self: *Assembler, divisor: Reg) !void {
         try self.emitRex32(false, divisor.isExt());
         try self.emitByte(0xF7);
         try self.emitByte(modRM(0b11, 7, divisor.low3()));
     }
 
-    pub fn cmpReg32Imm32(self: *Assembler, lhs: Reg, imm: i32) !void {
+    pub noinline fn cmpReg32Imm32(self: *Assembler, lhs: Reg, imm: i32) !void {
         try self.emitRex32(false, lhs.isExt());
         if (imm >= -128 and imm <= 127) {
             try self.emitByte(0x83);
@@ -526,19 +526,19 @@ pub const Assembler = struct {
         }
     }
 
-    pub fn testReg32Reg32(self: *Assembler, a: Reg, b: Reg) !void {
+    pub noinline fn testReg32Reg32(self: *Assembler, a: Reg, b: Reg) !void {
         try self.emitRex32(b.isExt(), a.isExt());
         try self.emitByte(0x85);
         try self.emitByte(modRM(0b11, b.low3(), a.low3()));
     }
 
-    pub fn cmpReg32Reg32(self: *Assembler, lhs: Reg, rhs: Reg) !void {
+    pub noinline fn cmpReg32Reg32(self: *Assembler, lhs: Reg, rhs: Reg) !void {
         try self.emitRex32(rhs.isExt(), lhs.isExt());
         try self.emitByte(0x39);
         try self.emitByte(modRM(0b11, rhs.low3(), lhs.low3()));
     }
 
-    pub fn setcc(self: *Assembler, cond: Cond, dst: Reg) !void {
+    pub noinline fn setcc(self: *Assembler, cond: Cond, dst: Reg) !void {
         if (dst.isExt() or @intFromEnum(dst) >= 4) {
             try self.emitByte(0x40 | (if (dst.isExt()) @as(u8, 1) else 0));
         }
@@ -547,47 +547,47 @@ pub const Assembler = struct {
         try self.emitByte(modRM(0b11, 0, dst.low3()));
     }
 
-    pub fn movzxReg64Reg8(self: *Assembler, dst: Reg, src: Reg) !void {
+    pub noinline fn movzxReg64Reg8(self: *Assembler, dst: Reg, src: Reg) !void {
         try self.emitByte(rexW(dst.isExt(), src.isExt()));
         try self.emitByte(0x0F);
         try self.emitByte(0xB6);
         try self.emitByte(modRM(0b11, dst.low3(), src.low3()));
     }
 
-    pub fn movzxReg64Mem8(self: *Assembler, dst: Reg, base: Reg, disp: i32) !void {
+    pub noinline fn movzxReg64Mem8(self: *Assembler, dst: Reg, base: Reg, disp: i32) !void {
         try self.emitByte(rexW(dst.isExt(), base.isExt()));
         try self.emitByte(0x0F);
         try self.emitByte(0xB6);
         try self.emitMemOperand(dst.low3(), base, disp);
     }
 
-    pub fn movzxReg64Mem16(self: *Assembler, dst: Reg, base: Reg, disp: i32) !void {
+    pub noinline fn movzxReg64Mem16(self: *Assembler, dst: Reg, base: Reg, disp: i32) !void {
         try self.emitByte(rexW(dst.isExt(), base.isExt()));
         try self.emitByte(0x0F);
         try self.emitByte(0xB7);
         try self.emitMemOperand(dst.low3(), base, disp);
     }
 
-    pub fn movReg32Mem(self: *Assembler, dst: Reg, base: Reg, disp: i32) !void {
+    pub noinline fn movReg32Mem(self: *Assembler, dst: Reg, base: Reg, disp: i32) !void {
         try self.emitRex32(dst.isExt(), base.isExt());
         try self.emitByte(0x8B);
         try self.emitMemOperand(dst.low3(), base, disp);
     }
 
-    pub fn movMem32Reg(self: *Assembler, base: Reg, disp: i32, src: Reg) !void {
+    pub noinline fn movMem32Reg(self: *Assembler, base: Reg, disp: i32, src: Reg) !void {
         try self.emitRex32(src.isExt(), base.isExt());
         try self.emitByte(0x89);
         try self.emitMemOperand(src.low3(), base, disp);
     }
 
-    pub fn movMem16Reg(self: *Assembler, base: Reg, disp: i32, src: Reg) !void {
+    pub noinline fn movMem16Reg(self: *Assembler, base: Reg, disp: i32, src: Reg) !void {
         try self.emitByte(0x66);
         try self.emitRex32(src.isExt(), base.isExt());
         try self.emitByte(0x89);
         try self.emitMemOperand(src.low3(), base, disp);
     }
 
-    pub fn movRegMemIndexed8(self: *Assembler, dst: Reg, base: Reg, index: Reg, disp: i32) !void {
+    pub noinline fn movRegMemIndexed8(self: *Assembler, dst: Reg, base: Reg, index: Reg, disp: i32) !void {
         std.debug.assert(index != .rsp);
         const rex: u8 = 0x48 |
             (if (dst.isExt()) @as(u8, 4) else 0) |
@@ -610,7 +610,7 @@ pub const Assembler = struct {
         }
     }
 
-    pub fn movMemIndexed8Reg(self: *Assembler, base: Reg, index: Reg, disp: i32, src: Reg) !void {
+    pub noinline fn movMemIndexed8Reg(self: *Assembler, base: Reg, index: Reg, disp: i32, src: Reg) !void {
         std.debug.assert(index != .rsp);
         const rex: u8 = 0x48 |
             (if (src.isExt()) @as(u8, 4) else 0) |
@@ -633,19 +633,19 @@ pub const Assembler = struct {
         }
     }
 
-    pub fn callReg(self: *Assembler, target: Reg) !void {
+    pub noinline fn callReg(self: *Assembler, target: Reg) !void {
         if (target.isExt()) try self.emitByte(0x41);
         try self.emitByte(0xFF);
         try self.emitByte(modRM(0b11, 2, target.low3()));
     }
 
-    pub fn incMem64(self: *Assembler, base: Reg, disp: i32) !void {
+    pub noinline fn incMem64(self: *Assembler, base: Reg, disp: i32) !void {
         try self.emitByte(rexW(false, base.isExt()));
         try self.emitByte(0xFF);
         try self.emitMemOperand(0, base, disp);
     }
 
-    pub fn movqXmmReg(self: *Assembler, dst: Xmm, src: Reg) !void {
+    pub noinline fn movqXmmReg(self: *Assembler, dst: Xmm, src: Reg) !void {
         try self.emitByte(0x66);
         try self.emitByte(rexW(dst.isExt(), src.isExt()));
         try self.emitByte(0x0F);
@@ -653,7 +653,7 @@ pub const Assembler = struct {
         try self.emitByte(modRM(0b11, dst.low3(), src.low3()));
     }
 
-    pub fn movqRegXmm(self: *Assembler, dst: Reg, src: Xmm) !void {
+    pub noinline fn movqRegXmm(self: *Assembler, dst: Reg, src: Xmm) !void {
         try self.emitByte(0x66);
         try self.emitByte(rexW(src.isExt(), dst.isExt()));
         try self.emitByte(0x0F);
@@ -661,13 +661,13 @@ pub const Assembler = struct {
         try self.emitByte(modRM(0b11, src.low3(), dst.low3()));
     }
 
-    pub fn movsdXmmXmm(self: *Assembler, dst: Xmm, src: Xmm) !void {
+    pub noinline fn movsdXmmXmm(self: *Assembler, dst: Xmm, src: Xmm) !void {
         try self.emitByte(0xF2);
         if (rexSSE(dst.isExt(), src.isExt())) |r| try self.emitByte(r);
         try self.emitBytes(&.{ 0x0F, 0x10, modRM(0b11, dst.low3(), src.low3()) });
     }
 
-    pub fn movsdXmmMem(self: *Assembler, dst: Xmm, base: Reg, disp: i32) !void {
+    pub noinline fn movsdXmmMem(self: *Assembler, dst: Xmm, base: Reg, disp: i32) !void {
         try self.emitByte(0xF2);
         if (rexSSE(dst.isExt(), base.isExt())) |r| try self.emitByte(r);
         try self.emitByte(0x0F);
@@ -675,7 +675,7 @@ pub const Assembler = struct {
         try self.emitMemOperand(dst.low3(), base, disp);
     }
 
-    pub fn movsdMemXmm(self: *Assembler, base: Reg, disp: i32, src: Xmm) !void {
+    pub noinline fn movsdMemXmm(self: *Assembler, base: Reg, disp: i32, src: Xmm) !void {
         try self.emitByte(0xF2);
         if (rexSSE(src.isExt(), base.isExt())) |r| try self.emitByte(r);
         try self.emitByte(0x0F);
@@ -683,43 +683,43 @@ pub const Assembler = struct {
         try self.emitMemOperand(src.low3(), base, disp);
     }
 
-    pub fn addsd(self: *Assembler, dst: Xmm, src: Xmm) !void {
+    pub noinline fn addsd(self: *Assembler, dst: Xmm, src: Xmm) !void {
         try self.emitByte(0xF2);
         if (rexSSE(dst.isExt(), src.isExt())) |r| try self.emitByte(r);
         try self.emitBytes(&.{ 0x0F, 0x58, modRM(0b11, dst.low3(), src.low3()) });
     }
 
-    pub fn subsd(self: *Assembler, dst: Xmm, src: Xmm) !void {
+    pub noinline fn subsd(self: *Assembler, dst: Xmm, src: Xmm) !void {
         try self.emitByte(0xF2);
         if (rexSSE(dst.isExt(), src.isExt())) |r| try self.emitByte(r);
         try self.emitBytes(&.{ 0x0F, 0x5C, modRM(0b11, dst.low3(), src.low3()) });
     }
 
-    pub fn mulsd(self: *Assembler, dst: Xmm, src: Xmm) !void {
+    pub noinline fn mulsd(self: *Assembler, dst: Xmm, src: Xmm) !void {
         try self.emitByte(0xF2);
         if (rexSSE(dst.isExt(), src.isExt())) |r| try self.emitByte(r);
         try self.emitBytes(&.{ 0x0F, 0x59, modRM(0b11, dst.low3(), src.low3()) });
     }
 
-    pub fn divsd(self: *Assembler, dst: Xmm, src: Xmm) !void {
+    pub noinline fn divsd(self: *Assembler, dst: Xmm, src: Xmm) !void {
         try self.emitByte(0xF2);
         if (rexSSE(dst.isExt(), src.isExt())) |r| try self.emitByte(r);
         try self.emitBytes(&.{ 0x0F, 0x5E, modRM(0b11, dst.low3(), src.low3()) });
     }
 
-    pub fn sqrtsd(self: *Assembler, dst: Xmm, src: Xmm) !void {
+    pub noinline fn sqrtsd(self: *Assembler, dst: Xmm, src: Xmm) !void {
         try self.emitByte(0xF2);
         if (rexSSE(dst.isExt(), src.isExt())) |r| try self.emitByte(r);
         try self.emitBytes(&.{ 0x0F, 0x51, modRM(0b11, dst.low3(), src.low3()) });
     }
 
-    pub fn xorpd(self: *Assembler, dst: Xmm, src: Xmm) !void {
+    pub noinline fn xorpd(self: *Assembler, dst: Xmm, src: Xmm) !void {
         try self.emitByte(0x66);
         if (rexSSE(dst.isExt(), src.isExt())) |r| try self.emitByte(r);
         try self.emitBytes(&.{ 0x0F, 0x57, modRM(0b11, dst.low3(), src.low3()) });
     }
 
-    pub fn cvttsd2siReg32Xmm(self: *Assembler, dst: Reg, src: Xmm) !void {
+    pub noinline fn cvttsd2siReg32Xmm(self: *Assembler, dst: Reg, src: Xmm) !void {
         try self.emitByte(0xF2);
         if (rexSSE(dst.isExt(), src.isExt())) |r| try self.emitByte(r);
         try self.emitByte(0x0F);
@@ -727,7 +727,7 @@ pub const Assembler = struct {
         try self.emitByte(modRM(0b11, dst.low3(), src.low3()));
     }
 
-    pub fn cvttsd2siqReg64Xmm(self: *Assembler, dst: Reg, src: Xmm) !void {
+    pub noinline fn cvttsd2siqReg64Xmm(self: *Assembler, dst: Reg, src: Xmm) !void {
         try self.emitByte(0xF2);
         try self.emitByte(rexW(dst.isExt(), src.isExt()));
         try self.emitByte(0x0F);
@@ -735,7 +735,7 @@ pub const Assembler = struct {
         try self.emitByte(modRM(0b11, dst.low3(), src.low3()));
     }
 
-    pub fn cvtsi2sdXmmReg32(self: *Assembler, dst: Xmm, src: Reg) !void {
+    pub noinline fn cvtsi2sdXmmReg32(self: *Assembler, dst: Xmm, src: Reg) !void {
         try self.emitByte(0xF2);
         if (rexSSE(dst.isExt(), src.isExt())) |r| try self.emitByte(r);
         try self.emitByte(0x0F);
@@ -743,7 +743,7 @@ pub const Assembler = struct {
         try self.emitByte(modRM(0b11, dst.low3(), src.low3()));
     }
 
-    pub fn cvtsi2sdqXmmReg64(self: *Assembler, dst: Xmm, src: Reg) !void {
+    pub noinline fn cvtsi2sdqXmmReg64(self: *Assembler, dst: Xmm, src: Reg) !void {
         try self.emitByte(0xF2);
         try self.emitByte(rexW(dst.isExt(), src.isExt()));
         try self.emitByte(0x0F);
@@ -751,20 +751,20 @@ pub const Assembler = struct {
         try self.emitByte(modRM(0b11, dst.low3(), src.low3()));
     }
 
-    pub fn ucomisd(self: *Assembler, lhs: Xmm, rhs: Xmm) !void {
+    pub noinline fn ucomisd(self: *Assembler, lhs: Xmm, rhs: Xmm) !void {
         try self.emitByte(0x66);
         if (rexSSE(lhs.isExt(), rhs.isExt())) |r| try self.emitByte(r);
         try self.emitBytes(&.{ 0x0F, 0x2E, modRM(0b11, lhs.low3(), rhs.low3()) });
     }
 
-    pub fn jmp(self: *Assembler, target: Label) !void {
+    pub noinline fn jmp(self: *Assembler, target: Label) !void {
         try self.emitByte(0xE9);
         const patch_offset = self.code.items.len;
         try self.emitU32(0);
         try self.fixups.append(self.allocator, .{ .patch_offset = patch_offset, .target_label = target });
     }
 
-    pub fn jcc(self: *Assembler, cond: Cond, target: Label) !void {
+    pub noinline fn jcc(self: *Assembler, cond: Cond, target: Label) !void {
         try self.emitByte(0x0F);
         try self.emitByte(0x80 + @as(u8, @intFromEnum(cond)));
         const patch_offset = self.code.items.len;
@@ -772,14 +772,14 @@ pub const Assembler = struct {
         try self.fixups.append(self.allocator, .{ .patch_offset = patch_offset, .target_label = target });
     }
 
-    pub fn callLabel(self: *Assembler, target: Label) !void {
+    pub noinline fn callLabel(self: *Assembler, target: Label) !void {
         try self.emitByte(0xE8);
         const patch_offset = self.code.items.len;
         try self.emitU32(0);
         try self.fixups.append(self.allocator, .{ .patch_offset = patch_offset, .target_label = target });
     }
 
-    pub fn finalizeFixups(self: *Assembler) !void {
+    pub noinline fn finalizeFixups(self: *Assembler) !void {
         for (self.fixups.items) |fixup| {
             const target = self.labels.items[fixup.target_label] orelse return error.UnboundLabel;
             const next_ip = fixup.patch_offset + 4;
@@ -789,7 +789,7 @@ pub const Assembler = struct {
         }
     }
 
-    pub fn finalizeExecutable(self: *Assembler) ![]align(std.heap.page_size_min) u8 {
+    pub noinline fn finalizeExecutable(self: *Assembler) ![]align(std.heap.page_size_min) u8 {
         if (!comptime is_supported_host) return error.UnsupportedPlatform;
         try self.finalizeFixups();
         if (self.code.items.len == 0) return error.EmptyCode;
