@@ -29,6 +29,10 @@ const HEADER_OBJECT: u32 = blk: {
     const dummy: JSValue = JSValue.fromHeap(.object, @as(*zvalue.Rc(zvalue.ZObject(JSValue)), @ptrFromInt(8)));
     break :blk @intCast(dummy.bits >> 47);
 };
+const HEADER_TYPED_ARRAY_BITS: u64 = blk: {
+    const dummy: JSValue = JSValue.fromHeap(.typed_array, @as(*zvalue.Rc(zvalue.TypedArrayBox), @ptrFromInt(8)));
+    break :blk dummy.bits & JSValue.TAG15_MASK;
+};
 
 const ObjectBox = zvalue.Rc(zvalue.ZObject(JSValue));
 const ZObj = zvalue.ZObject(JSValue);
@@ -1792,6 +1796,9 @@ pub noinline fn canCompileOsr(block: *const codeblock.CodeBlock, start_ip: usize
             .new_object => {
                 if (op.a >= block.register_count) return false;
             },
+            .throw_value => {
+                if (op.b == 0 and op.a >= block.register_count) return false;
+            },
             .set_prop, .set_prop_transition => {
                 if (op.a >= block.register_count or op.c >= block.register_count) return false;
                 if (constantName(block, op.b) == null) return false;
@@ -1980,10 +1987,54 @@ noinline fn analyzePromotedProps(
 
 const MAX_HOISTED_ARRAYS = 8;
 
+const HoistedElemKind = enum(u8) {
+    zarray_holey,
+    zarray_dense,
+    ta_f64,
+    ta_i32,
+    ta_u8,
+
+    inline fn isPtrLen(self: HoistedElemKind) bool {
+        return self != .zarray_holey;
+    }
+
+    inline fn isTypedArray(self: HoistedElemKind) bool {
+        return switch (self) {
+            .ta_f64, .ta_i32, .ta_u8 => true,
+            else => false,
+        };
+    }
+
+    inline fn expectedTypedKind(self: HoistedElemKind) u64 {
+        return switch (self) {
+            .ta_f64 => @intFromEnum(zvalue.TypedKind.f64),
+            .ta_i32 => @intFromEnum(zvalue.TypedKind.i32),
+            .ta_u8 => @intFromEnum(zvalue.TypedKind.u8),
+            else => unreachable,
+        };
+    }
+};
+
+fn classifyTypedArrayForHoist(v: JSValue) ?HoistedElemKind {
+    if (!v.isTypedArray()) return null;
+    const ta = &v.asTypedArray().value;
+    if (!ta.owner.isArrayBuffer()) return null;
+    const ab = &ta.owner.asArrayBuffer().value;
+    if (ab.isDetached()) return null;
+    if (ta.len > 0x7FFF_F000) return null;
+    return switch (ta.kind) {
+        .f64 => .ta_f64,
+        .i32 => .ta_i32,
+        .u8 => .ta_u8,
+        else => null,
+    };
+}
+
 const HoistedArrays = struct {
     regs: [MAX_HOISTED_ARRAYS]u8 = @splat(0),
     written: [MAX_HOISTED_ARRAYS]bool = @splat(false),
     dense: [MAX_HOISTED_ARRAYS]bool = @splat(false),
+    kinds: [MAX_HOISTED_ARRAYS]HoistedElemKind = @splat(.zarray_holey),
     use_counts: [MAX_HOISTED_ARRAYS]u32 = @splat(0),
     count: usize = 0,
     primary_in_regs: bool = false,
@@ -2549,7 +2600,7 @@ const OsrPrePass = struct {
             if (op1.opcode != .get_elem or op1.c != op0.a or op1.b == op0.a) continue;
             if ((self.live_out[start_ip + j + 1] & regBit64(op0.a)) != 0) continue;
             const h_slot = hoisted_arrs.find(op1.b) orelse continue;
-            if (!hoisted_arrs.dense[h_slot]) continue;
+            if (!hoisted_arrs.kinds[h_slot].isPtrLen()) continue;
             const raw_imm = asExactInt32(block.constants[op0.c].number) orelse continue;
             if (raw_imm < -4096 or raw_imm > 4096) continue;
             self.fused_idx_delta[j] = if (op0.opcode == .add_local_const) raw_imm else -raw_imm;
@@ -2648,7 +2699,10 @@ noinline fn analyzeHoistedArrays(
                     if (std.mem.eql(u8, kname, "length")) {
                         const eff_b = if (op.b < 64) (cur_copy_src[op.b] orelse op.b) else op.b;
                         if (op.a != eff_b) {
-                            const can_add = if (frame_regs_opt) |fregs| (eff_b < fregs.len and fregs[eff_b].isArray()) else false;
+                            const can_add = if (frame_regs_opt) |fregs|
+                                (eff_b < fregs.len and (fregs[eff_b].isArray() or classifyTypedArrayForHoist(fregs[eff_b]) != null))
+                            else
+                                false;
                             if (can_add) {
                                 addOrBumpCand(&cands, &cand_written, &cand_uses, &cand_count, eff_b, false, w);
                             }
@@ -2758,46 +2812,54 @@ noinline fn analyzeHoistedArrays(
         }
     }
 
-    const Entry = struct { reg: u8, written: bool, dense: bool, uses: u32 };
+    const Entry = struct { reg: u8, written: bool, kind: HoistedElemKind, uses: u32 };
     var entries: [16]Entry = undefined;
     var entry_count: usize = 0;
 
     for (0..cand_count) |k| {
         if (!valid[k]) continue;
         const r = cands[k];
-        var is_dense = false;
+        var elem_kind: HoistedElemKind = .zarray_holey;
         if (frame_regs_opt) |fregs| {
-            if (r >= fregs.len or !fregs[r].isArray()) continue;
-            const box = fregs[r].asArray();
-            const arr = &box.value;
-            if (cand_written[k] and @hasField(@TypeOf(arr.*), "is_frozen") and arr.is_frozen) continue;
-            if (arr.items.items.len > 0x7FFF_F000) continue;
-            if (arr.holey != null) {
-                vm.maybeCompactFilledHoleyArray(arr);
-            }
-            if (arr.holey) |h| {
-                if (h.sparse != null or h.has_element_descriptors or !h.length_writable) continue;
-                is_dense = false;
+            if (r >= fregs.len) continue;
+            if (fregs[r].isArray()) {
+                const box = fregs[r].asArray();
+                const arr = &box.value;
+                if (cand_written[k] and @hasField(@TypeOf(arr.*), "is_frozen") and arr.is_frozen) continue;
+                if (arr.items.items.len > 0x7FFF_F000) continue;
+                if (arr.holey != null) {
+                    vm.maybeCompactFilledHoleyArray(arr);
+                }
+                if (arr.holey) |h| {
+                    if (h.sparse != null or h.has_element_descriptors or !h.length_writable) continue;
+                    elem_kind = .zarray_holey;
+                } else {
+                    elem_kind = .zarray_dense;
+                }
+            } else if (classifyTypedArrayForHoist(fregs[r])) |tk| {
+                elem_kind = tk;
             } else {
-                is_dense = true;
+                continue;
             }
         }
         entries[entry_count] = .{
             .reg = r,
             .written = cand_written[k],
-            .dense = is_dense,
+            .kind = elem_kind,
             .uses = cand_uses[k],
         };
         entry_count += 1;
     }
 
-    // Sort descending: dense arrays first, then by weighted loop use count
+    // Sort descending: (ptr, len) buffers (dense ZArray and TypedArray) first, then by weighted loop use count
     var i: usize = 0;
     while (i < entry_count) : (i += 1) {
         var j = i + 1;
         while (j < entry_count) : (j += 1) {
-            const j_better = (entries[j].dense and !entries[i].dense) or
-                (entries[j].dense == entries[i].dense and entries[j].uses > entries[i].uses);
+            const j_ptr = entries[j].kind.isPtrLen();
+            const i_ptr = entries[i].kind.isPtrLen();
+            const j_better = (j_ptr and !i_ptr) or
+                (j_ptr == i_ptr and entries[j].uses > entries[i].uses);
             if (j_better) {
                 const tmp = entries[i];
                 entries[i] = entries[j];
@@ -2811,11 +2873,12 @@ noinline fn analyzeHoistedArrays(
     for (0..take) |k| {
         res.regs[k] = entries[k].reg;
         res.written[k] = entries[k].written;
-        res.dense[k] = entries[k].dense;
+        res.kinds[k] = entries[k].kind;
+        res.dense[k] = (entries[k].kind == .zarray_dense);
         res.use_counts[k] = entries[k].uses;
     }
     res.count = take;
-    res.primary_in_regs = (take >= 1 and res.dense[0]);
+    res.primary_in_regs = (take >= 1 and res.kinds[0].isPtrLen());
     return res;
 }
 
@@ -3326,6 +3389,12 @@ noinline fn emitReleaseHeapIfRefGt1(
     try a.cmpRegImm32(.rcx, HEADER_FUNCTION);
     try a.jcc(.e, is_ref_lbl);
     try a.cmpRegImm32(.rcx, HEADER_OBJECT);
+    try a.jcc(.e, is_ref_lbl);
+    try a.movRegReg(.rdx, .rax);
+    try a.movRegImm64(.rcx, JSValue.TAG15_MASK);
+    try a.andRegReg(.rdx, .rcx);
+    try a.movRegImm64(.rcx, HEADER_TYPED_ARRAY_BITS);
+    try a.cmpRegReg(.rdx, .rcx);
     try a.jcc(.ne, bail_lbl); // Other heap type -> bail out
 
     // Array or Function: ptr = rax & PTR_MASK
@@ -3498,6 +3567,7 @@ const OsrCompiler = struct {
     last_elem_store: ?ElemStorePair = null,
     known_valid_elem_idx: ?u8 = null,
     known_dense_valid_idx: [MAX_HOISTED_ARRAYS]?u8 = @splat(null),
+    cur_copy_src: [64]?u8 = @splat(null),
     live_r8_i32: ?u8 = null,
     incoming_elem_store: []?ElemStorePair,
     skip_ops_remaining: u8 = 0,
@@ -3713,41 +3783,64 @@ const OsrCompiler = struct {
         } else if (hoisted_arrs.count > 0) {
             for (0..hoisted_arrs.count) |h_idx| {
                 const arr_r = hoisted_arrs.regs[h_idx];
-                const is_dense = hoisted_arrs.dense[h_idx];
-                const is_written = hoisted_arrs.written[h_idx];
-                const prep_flags: u64 = (if (is_dense) @as(u64, 1) else 0) | (if (is_written) @as(u64, 2) else 0);
+                const h_kind = hoisted_arrs.kinds[h_idx];
+                if (h_kind.isTypedArray()) {
+                    try a.movRegMem(.rax, .r12, @intCast(@as(usize, arr_r) * 8));
+                    try a.movRegReg(.rcx, .rax);
+                    try a.movRegImm64(.rdx, JSValue.TAG15_MASK);
+                    try a.andRegReg(.rcx, .rdx);
+                    try a.movRegImm64(.rdx, HEADER_TYPED_ARRAY_BITS);
+                    try a.cmpRegReg(.rcx, .rdx);
+                    try a.jcc(.ne, preheader_bailout);
 
-                try a.movRegMem(.rax, .r12, @intCast(@as(usize, arr_r) * 8));
-                try a.movRegReg(.rcx, .rax);
-                try a.shrRegImm8(.rcx, 47);
-                try a.cmpRegImm32(.rcx, HEADER_ARRAY);
-                try a.jcc(.ne, preheader_bailout);
+                    try a.movRegImm64(.rcx, JSValue.ALIGNED_PTR_MASK);
+                    try a.andRegReg(.rax, .rcx);
 
-                try a.movRegImm64(.rcx, JSValue.PTR_MASK);
-                try a.andRegReg(.rax, .rcx);
-                try a.movRegReg(.rbp, .rax); // callee-saved %rbp holds *ArrayBox across jitPrepareHoistedArray
-
-                try a.movRegReg(.rdi, .r13);
-                try a.movRegReg(.rsi, .rbp);
-                try a.movRegImm64(.rdx, prep_flags);
-                try a.movRegImm64(.rax, @intFromPtr(&vm.jitPrepareHoistedArray));
-                try a.callReg(.rax);
-                try a.testRegReg(.rax, .rax);
-                try a.jcc(.ne, preheader_bailout);
-
-                if (is_dense) {
-                    try a.movRegMem(.rax, .rbp, arr_items_ptr_off);
-                    try a.movRegMem(.rcx, .rbp, arr_items_len_off);
-                    try a.movMemReg(.rsp, @intCast(h_idx * 16), .rax);
-                    try a.movMemReg(.rsp, @intCast(h_idx * 16 + 8), .rcx);
+                    try a.movRegReg(.rdi, .r13);
+                    try a.movRegReg(.rsi, .rax);
+                    try a.movRegImm64(.rdx, h_kind.expectedTypedKind());
+                    try a.lea(.rcx, .rsp, @intCast(h_idx * 16));
+                    try a.movRegImm64(.rax, @intFromPtr(&vm.jitPrepareHoistedTypedArray));
+                    try a.callReg(.rax);
+                    try a.testRegReg(.rax, .rax);
+                    try a.jcc(.ne, preheader_bailout);
                 } else {
-                    try a.movMemReg(.rsp, @intCast(h_idx * 16), .rbp);
+                    const is_dense = hoisted_arrs.dense[h_idx];
+                    const is_written = hoisted_arrs.written[h_idx];
+                    const prep_flags: u64 = (if (is_dense) @as(u64, 1) else 0) | (if (is_written) @as(u64, 2) else 0);
+
+                    try a.movRegMem(.rax, .r12, @intCast(@as(usize, arr_r) * 8));
+                    try a.movRegReg(.rcx, .rax);
+                    try a.shrRegImm8(.rcx, 47);
+                    try a.cmpRegImm32(.rcx, HEADER_ARRAY);
+                    try a.jcc(.ne, preheader_bailout);
+
+                    try a.movRegImm64(.rcx, JSValue.PTR_MASK);
+                    try a.andRegReg(.rax, .rcx);
+                    try a.movRegReg(.rbp, .rax); // callee-saved %rbp holds *ArrayBox across jitPrepareHoistedArray
+
+                    try a.movRegReg(.rdi, .r13);
+                    try a.movRegReg(.rsi, .rbp);
+                    try a.movRegImm64(.rdx, prep_flags);
+                    try a.movRegImm64(.rax, @intFromPtr(&vm.jitPrepareHoistedArray));
+                    try a.callReg(.rax);
+                    try a.testRegReg(.rax, .rax);
+                    try a.jcc(.ne, preheader_bailout);
+
+                    if (is_dense) {
+                        try a.movRegMem(.rax, .rbp, arr_items_ptr_off);
+                        try a.movRegMem(.rcx, .rbp, arr_items_len_off);
+                        try a.movMemReg(.rsp, @intCast(h_idx * 16), .rax);
+                        try a.movMemReg(.rsp, @intCast(h_idx * 16 + 8), .rcx);
+                    } else {
+                        try a.movMemReg(.rsp, @intCast(h_idx * 16), .rbp);
+                    }
                 }
             }
             if (hoisted_arrs.primary_in_regs) {
                 try a.movRegMem(.rbx, .rsp, 0);
                 try a.movRegMem(.rbp, .rsp, 8);
-            } else if (hoisted_arrs.count == 1 and !hoisted_arrs.dense[0]) {
+            } else if (hoisted_arrs.count == 1 and hoisted_arrs.kinds[0] == .zarray_holey) {
                 try a.movRegMem(.rbx, .rsp, 0);
             }
         }
@@ -3783,6 +3876,7 @@ const OsrCompiler = struct {
             self.known_f64 = @splat(null);
             self.known_valid_elem_idx = null;
             self.known_dense_valid_idx = @splat(null);
+            self.cur_copy_src = @splat(null);
             self.live_r8_i32 = null;
         }
         if (self.prepass.is_back_target[idx]) {
@@ -3852,6 +3946,12 @@ const OsrCompiler = struct {
         for (&self.known_dense_valid_idx) |*kd| {
             if (kd.* == reg) kd.* = null;
         }
+        if (reg < 64) {
+            self.cur_copy_src[reg] = null;
+            for (0..64) |m| {
+                if (self.cur_copy_src[m] == reg) self.cur_copy_src[m] = null;
+            }
+        }
     }
 
     noinline fn updateTrackingAfterOp(self: *OsrCompiler, idx: usize, ip: usize, op: codeblock.Op, next_live_r8_i32: ?u8) void {
@@ -3865,10 +3965,12 @@ const OsrCompiler = struct {
             const get_op = block.ops[ip + 1];
             self.invalidateKilledReg(get_op.a);
             if (get_op.a < 64) {
+                const h_s = hoisted_arrs.find(get_op.b);
+                const k = if (h_s) |s| hoisted_arrs.kinds[s] else .zarray_holey;
                 self.known_f64[get_op.a] = null;
-                self.reg_is_int32[get_op.a] = false;
-                self.reg_is_uint31[get_op.a] = false;
-                self.reg_is_exact_idx[get_op.a] = false;
+                self.reg_is_int32[get_op.a] = (k == .ta_u8);
+                self.reg_is_uint31[get_op.a] = (k == .ta_u8);
+                self.reg_is_exact_idx[get_op.a] = (k == .ta_u8 or k == .ta_i32);
             }
         } else switch (op.opcode) {
             .nop,
@@ -3929,8 +4031,10 @@ const OsrCompiler = struct {
                 }
             },
             .move, .load_local, .store_local => {
+                const resolved_src: ?u8 = if (op.b < 64) (self.cur_copy_src[op.b] orelse op.b) else null;
                 self.invalidateKilledReg(op.a);
                 if (op.a < 64) {
+                    self.cur_copy_src[op.a] = if (resolved_src != null and resolved_src.? != op.a) resolved_src else null;
                     self.known_f64[op.a] = if (op.b < 64) self.known_f64[op.b] else null;
                     self.reg_is_int32[op.a] = if (op.b < 64) self.reg_is_int32[op.b] else false;
                     self.reg_is_uint31[op.a] = if (op.b < 64) self.reg_is_uint31[op.b] else false;
@@ -4005,10 +4109,11 @@ const OsrCompiler = struct {
                 }
             },
             .get_prop => {
+                const eff_prop_b = if (op.b < 64) (self.cur_copy_src[op.b] orelse op.b) else op.b;
                 self.invalidateKilledReg(op.a);
                 if (op.a < 64) {
                     const is_hoisted_len = if (constantName(block, op.c)) |kn|
-                        (std.mem.eql(u8, kn, "length") and hoisted_arrs.find(op.b) != null and hoisted_arrs.dense[hoisted_arrs.find(op.b).?])
+                        (std.mem.eql(u8, kn, "length") and hoisted_arrs.find(eff_prop_b) != null and hoisted_arrs.kinds[hoisted_arrs.find(eff_prop_b).?].isPtrLen())
                     else
                         false;
                     self.known_f64[op.a] = null;
@@ -4021,7 +4126,7 @@ const OsrCompiler = struct {
                 if (self.last_elem_store) |les| {
                     if (op.a == les.idx_reg or op.a == les.val_reg) self.last_elem_store = null;
                 }
-                const eff_get_arr = self.prepass.compound_arr_override[idx] orelse op.b;
+                const eff_get_arr = self.prepass.compound_arr_override[idx] orelse (if (op.b < 64) (self.cur_copy_src[op.b] orelse op.b) else op.b);
                 if (op.opcode == .get_elem and self.single_hoisted_arr != null and self.single_hoisted_arr.? == eff_get_arr and op.a != op.c) {
                     self.known_valid_elem_idx = op.c;
                 } else if (self.known_valid_elem_idx) |kvi| {
@@ -4031,10 +4136,16 @@ const OsrCompiler = struct {
                     if (kd.* == op.a) kd.* = null;
                 }
                 if (op.a < 64) {
+                    const h_s = if (op.opcode == .get_elem or op.opcode == .get_elem_const) hoisted_arrs.find(eff_get_arr) else null;
+                    const k = if (h_s) |s| hoisted_arrs.kinds[s] else .zarray_holey;
+                    self.cur_copy_src[op.a] = null;
+                    for (0..64) |m| {
+                        if (self.cur_copy_src[m] == op.a) self.cur_copy_src[m] = null;
+                    }
                     self.known_f64[op.a] = null;
-                    self.reg_is_int32[op.a] = false;
-                    self.reg_is_uint31[op.a] = false;
-                    self.reg_is_exact_idx[op.a] = false;
+                    self.reg_is_int32[op.a] = (k == .ta_u8);
+                    self.reg_is_uint31[op.a] = (k == .ta_u8);
+                    self.reg_is_exact_idx[op.a] = (k == .ta_u8 or k == .ta_i32);
                 }
             },
         }
@@ -4120,7 +4231,7 @@ const OsrCompiler = struct {
                         try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
                         try a.jmp(done_move_lbl);
 
-                        // val >= HEAP_BASE: check if (val >> 47) == HEADER_ARRAY or HEADER_FUNCTION
+                        // val >= HEAP_BASE: check if (val >> 47) == HEADER_ARRAY, HEADER_FUNCTION, HEADER_OBJECT, or TypedArray
                         a.bindLabel(heap_move_lbl);
                         try a.movRegReg(.rcx, .rax);
                         try a.shrRegImm8(.rcx, 47);
@@ -4130,6 +4241,12 @@ const OsrCompiler = struct {
                         try a.cmpRegImm32(.rcx, HEADER_FUNCTION);
                         try a.jcc(.e, inc_rc_lbl);
                         try a.cmpRegImm32(.rcx, HEADER_OBJECT);
+                        try a.jcc(.e, inc_rc_lbl);
+                        try a.movRegReg(.rdx, .rax);
+                        try a.movRegImm64(.rcx, JSValue.TAG15_MASK);
+                        try a.andRegReg(.rdx, .rcx);
+                        try a.movRegImm64(.rcx, HEADER_TYPED_ARRAY_BITS);
+                        try a.cmpRegReg(.rdx, .rcx);
                         try a.jcc(.ne, bail_lbl);
 
                         // Retain: ptr = val & PTR_MASK; ptr._count += 1
@@ -4153,7 +4270,8 @@ const OsrCompiler = struct {
                 }
             },
             .to_prop_key => {
-                if (self.analysis.hoisted_arrs.find(op.b) == null) {
+                const eff_tpk_b = if (op.b < 64) (self.cur_copy_src[op.b] orelse op.b) else op.b;
+                if (self.analysis.hoisted_arrs.find(eff_tpk_b) == null) {
                     try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
                     try a.movRegImm64(.rcx, JSValue.UNDEFINED.bits);
                     try a.cmpRegReg(.rax, .rcx);
@@ -4169,6 +4287,226 @@ const OsrCompiler = struct {
                 }
             },
             else => unreachable,
+        }
+    }
+
+    noinline fn emitTypedArrayLoadAtRcx(
+        self: *OsrCompiler,
+        kind: HoistedElemKind,
+        ptr_reg: x64_asm.Reg,
+        dst_reg: u8,
+        bail_lbl: Label,
+        next_live_r8_i32: *?u8,
+        idx_reg_opt: ?u8,
+    ) !void {
+        const a = self.a;
+        const reg_to_xmm = &self.analysis.reg_to_xmm;
+        const dst_cached = (dst_reg < 64 and reg_to_xmm[dst_reg] != null);
+        const dst_xmm: Xmm = if (dst_cached) reg_to_xmm[dst_reg].? else .xmm0;
+
+        switch (kind) {
+            .ta_f64 => {
+                try a.movsdXmmMemIndexed8(dst_xmm, ptr_reg, .rcx, 0);
+                if (!dst_cached) {
+                    try emitStoreXmmToNum(a, reg_to_xmm, dst_reg, .xmm0, bail_lbl);
+                }
+                if (idx_reg_opt) |ir| {
+                    if (ir < 64 and ir != dst_reg) next_live_r8_i32.* = ir;
+                } else if (self.live_r8_i32 != null and self.live_r8_i32.? != dst_reg) {
+                    next_live_r8_i32.* = self.live_r8_i32;
+                }
+            },
+            .ta_i32 => {
+                try a.movReg32MemIndexed4(.rax, ptr_reg, .rcx, 0);
+                try a.cvtsi2sdXmmReg32(dst_xmm, .rax);
+                try a.movReg32Reg32(.r8, .rax);
+                if (!dst_cached) {
+                    try emitStoreXmmToNum(a, reg_to_xmm, dst_reg, .xmm0, bail_lbl);
+                }
+                if (dst_reg < 64) next_live_r8_i32.* = dst_reg;
+            },
+            .ta_u8 => {
+                try a.movzxReg32Mem8Indexed1(.rax, ptr_reg, .rcx, 0);
+                try a.cvtsi2sdXmmReg32(dst_xmm, .rax);
+                try a.movReg32Reg32(.r8, .rax);
+                if (!dst_cached) {
+                    try emitStoreXmmToNum(a, reg_to_xmm, dst_reg, .xmm0, bail_lbl);
+                }
+                if (dst_reg < 64) next_live_r8_i32.* = dst_reg;
+            },
+            else => unreachable,
+        }
+    }
+
+    noinline fn emitTypedArrayGetElem(
+        self: *OsrCompiler,
+        h_slot: usize,
+        op: codeblock.Op,
+        bail_lbl: Label,
+        next_live_r8_i32: *?u8,
+    ) !void {
+        const a = self.a;
+        const reg_to_xmm = &self.analysis.reg_to_xmm;
+        const hoisted_arrs = &self.analysis.hoisted_arrs;
+        const kind = hoisted_arrs.kinds[h_slot];
+
+        if (op.opcode == .get_elem_const) {
+            const elem_idx: u32 = @intFromFloat(self.block.constants[op.c].number);
+            try a.movRegImm32(.rcx, elem_idx);
+            if (h_slot == 0 and hoisted_arrs.primary_in_regs) {
+                try a.cmpRegReg(.rcx, .rbp);
+                try a.jcc(.ae, bail_lbl);
+                try self.emitTypedArrayLoadAtRcx(kind, .rbx, op.a, bail_lbl, next_live_r8_i32, null);
+            } else {
+                try a.movRegMem(.rdx, .rsp, @intCast(h_slot * 16 + 8));
+                try a.cmpRegReg(.rcx, .rdx);
+                try a.jcc(.ae, bail_lbl);
+                try a.movRegMem(.r9, .rsp, @intCast(h_slot * 16));
+                try self.emitTypedArrayLoadAtRcx(kind, .r9, op.a, bail_lbl, next_live_r8_i32, null);
+            }
+            return;
+        }
+
+        if (self.live_r8_i32 != null and self.live_r8_i32.? == op.c) {
+            try a.movReg32Reg32(.rcx, .r8);
+        } else {
+            try emitLoadNumToXmm(a, reg_to_xmm, op.c, .xmm0, bail_lbl);
+            try a.cvttsd2siReg32Xmm(.rcx, .xmm0);
+            if (!(op.c < 64 and (self.reg_is_int32[op.c] or self.reg_is_exact_idx[op.c]))) {
+                try a.cvtsi2sdXmmReg32(.xmm1, .rcx);
+                try a.ucomisd(.xmm0, .xmm1);
+                try a.jcc(.p, bail_lbl);
+                try a.jcc(.ne, bail_lbl);
+            }
+            try a.movReg32Reg32(.r8, .rcx);
+        }
+
+        const skip_bounds = (self.known_dense_valid_idx[h_slot] != null and self.known_dense_valid_idx[h_slot].? == op.c);
+        if (h_slot == 0 and hoisted_arrs.primary_in_regs) {
+            if (!skip_bounds) {
+                try a.cmpRegReg(.rcx, .rbp);
+                try a.jcc(.ae, bail_lbl);
+            }
+            try self.emitTypedArrayLoadAtRcx(kind, .rbx, op.a, bail_lbl, next_live_r8_i32, op.c);
+        } else {
+            if (!skip_bounds) {
+                try a.movRegMem(.rdx, .rsp, @intCast(h_slot * 16 + 8));
+                try a.cmpRegReg(.rcx, .rdx);
+                try a.jcc(.ae, bail_lbl);
+            }
+            try a.movRegMem(.r9, .rsp, @intCast(h_slot * 16));
+            try self.emitTypedArrayLoadAtRcx(kind, .r9, op.a, bail_lbl, next_live_r8_i32, op.c);
+        }
+
+        if (op.c < 64 and op.c != op.a) {
+            self.reg_is_int32[op.c] = true;
+            self.reg_is_uint31[op.c] = true;
+            self.reg_is_exact_idx[op.c] = true;
+            self.known_dense_valid_idx[h_slot] = op.c;
+        }
+    }
+
+    noinline fn emitTypedArraySetElem(
+        self: *OsrCompiler,
+        h_slot: usize,
+        op: codeblock.Op,
+        bail_lbl: Label,
+        next_live_r8_i32: *?u8,
+    ) !void {
+        const a = self.a;
+        const reg_to_xmm = &self.analysis.reg_to_xmm;
+        const cached_regs = &self.analysis.cached_regs;
+        const cached_count = self.analysis.cached_count;
+        const hoisted_arrs = &self.analysis.hoisted_arrs;
+        const kind = hoisted_arrs.kinds[h_slot];
+
+        const val_in_r8 = (kind != .ta_f64 and self.live_r8_i32 != null and self.live_r8_i32.? == op.c);
+        const val_xmm: Xmm = if (op.c < 64 and reg_to_xmm[op.c] != null) reg_to_xmm[op.c].? else .xmm2;
+
+        if (val_in_r8) {
+            try a.movReg32Reg32(.r10, .r8);
+        } else if (!(op.c < 64 and reg_to_xmm[op.c] != null)) {
+            try a.movRegMem(.r10, .r12, @intCast(@as(usize, op.c) * 8));
+            try a.cmpRegReg(.r10, .r15);
+            try a.jcc(.ae, bail_lbl);
+            try a.movqXmmReg(.xmm2, .r10);
+        }
+
+        if (self.live_r8_i32 != null and self.live_r8_i32.? == op.b) {
+            try a.movReg32Reg32(.rcx, .r8);
+        } else {
+            try emitLoadNumToXmm(a, reg_to_xmm, op.b, .xmm0, bail_lbl);
+            try a.cvttsd2siReg32Xmm(.rcx, .xmm0);
+            if (!(op.b < 64 and (self.reg_is_int32[op.b] or self.reg_is_exact_idx[op.b]))) {
+                try a.cvtsi2sdXmmReg32(.xmm1, .rcx);
+                try a.ucomisd(.xmm0, .xmm1);
+                try a.jcc(.p, bail_lbl);
+                try a.jcc(.ne, bail_lbl);
+            }
+            try a.movReg32Reg32(.r8, .rcx);
+        }
+
+        const skip_bounds = (self.known_dense_valid_idx[h_slot] != null and self.known_dense_valid_idx[h_slot].? == op.b);
+        const ptr_reg: x64_asm.Reg = if (h_slot == 0 and hoisted_arrs.primary_in_regs) blk: {
+            if (!skip_bounds) {
+                try a.cmpRegReg(.rcx, .rbp);
+                try a.jcc(.ae, bail_lbl);
+            }
+            break :blk .rbx;
+        } else blk: {
+            if (!skip_bounds) {
+                try a.movRegMem(.rdx, .rsp, @intCast(h_slot * 16 + 8));
+                try a.cmpRegReg(.rcx, .rdx);
+                try a.jcc(.ae, bail_lbl);
+            }
+            try a.movRegMem(.r9, .rsp, @intCast(h_slot * 16));
+            break :blk .r9;
+        };
+
+        switch (kind) {
+            .ta_f64 => {
+                try a.movsdMemIndexed8Xmm(ptr_reg, .rcx, 0, val_xmm);
+            },
+            .ta_i32, .ta_u8 => {
+                if (val_in_r8) {
+                    try a.movReg32Reg32(.rax, .r10);
+                } else if (op.c < 64 and self.reg_is_int32[op.c]) {
+                    try a.cvttsd2siReg32Xmm(.rax, val_xmm);
+                } else {
+                    const i32_ready_lbl = try a.createLabel();
+                    try a.cvttsd2siqReg64Xmm(.rax, val_xmm);
+                    try a.movRegImm64(.rdx, 0x8000_0000_0000_0000);
+                    try a.cmpRegReg(.rax, .rdx);
+                    try a.jcc(.ne, i32_ready_lbl);
+
+                    try a.pushReg(.rcx);
+                    try a.pushReg(.r9);
+                    try a.movqRegXmm(.rdi, val_xmm);
+                    if (cached_count > 0) try emitFlushCached(a, cached_regs, cached_count);
+                    try a.movRegImm64(.rax, @intFromPtr(&vm.jitF64ToInt32));
+                    try a.callReg(.rax);
+                    if (cached_count > 0) try emitReloadCached(a, cached_regs, cached_count);
+                    try a.popReg(.r9);
+                    try a.popReg(.rcx);
+                    try a.movReg32Reg32(.r8, .rcx);
+
+                    a.bindLabel(i32_ready_lbl);
+                }
+                if (kind == .ta_i32) {
+                    try a.movMem32Indexed4Reg(ptr_reg, .rcx, 0, .rax);
+                } else {
+                    try a.movMem8Indexed1Reg(ptr_reg, .rcx, 0, .rax);
+                }
+            },
+            else => unreachable,
+        }
+
+        if (op.b < 64) {
+            self.reg_is_int32[op.b] = true;
+            self.reg_is_uint31[op.b] = true;
+            self.reg_is_exact_idx[op.b] = true;
+            self.known_dense_valid_idx[h_slot] = op.b;
+            next_live_r8_i32.* = op.b;
         }
     }
 
@@ -4188,8 +4526,12 @@ const OsrCompiler = struct {
 
         if (op.opcode == .get_elem_const) {
             const elem_idx: u32 = @intFromFloat(self.block.constants[op.c].number);
-            const eff_arr = self.prepass.compound_arr_override[idx] orelse op.b;
+            const eff_arr = self.prepass.compound_arr_override[idx] orelse (if (op.b < 64) (self.cur_copy_src[op.b] orelse op.b) else op.b);
             if (hoisted_arrs.find(eff_arr)) |h_slot| {
+                if (hoisted_arrs.kinds[h_slot].isTypedArray()) {
+                    try self.emitTypedArrayGetElem(h_slot, op, bail_lbl, next_live_r8_i32);
+                    return;
+                }
                 if (hoisted_arrs.dense[h_slot]) {
                     if (h_slot == 0 and hoisted_arrs.primary_in_regs) {
                         try a.cmpRegImm32(.rbp, @intCast(elem_idx));
@@ -4274,7 +4616,7 @@ const OsrCompiler = struct {
             return;
         }
 
-        const eff_arr = self.prepass.compound_arr_override[idx] orelse op.b;
+        const eff_arr = self.prepass.compound_arr_override[idx] orelse (if (op.b < 64) (self.cur_copy_src[op.b] orelse op.b) else op.b);
 
         if (self.single_hoisted_arr != null and self.single_hoisted_arr.? == eff_arr) {
             if (self.last_elem_store) |les| {
@@ -4288,6 +4630,10 @@ const OsrCompiler = struct {
         }
 
         const hoisted_slot = hoisted_arrs.find(eff_arr);
+        if (hoisted_slot != null and hoisted_arrs.kinds[hoisted_slot.?].isTypedArray()) {
+            try self.emitTypedArrayGetElem(hoisted_slot.?, op, bail_lbl, next_live_r8_i32);
+            return;
+        }
         if (hoisted_slot != null and hoisted_arrs.dense[hoisted_slot.?]) {
             const h_slot = hoisted_slot.?;
             if (self.live_r8_i32 != null and self.live_r8_i32.? == op.c) {
@@ -4590,7 +4936,12 @@ const OsrCompiler = struct {
             return;
         }
 
-        const eff_arr = self.prepass.compound_arr_override[idx] orelse op.a;
+        const eff_arr = self.prepass.compound_arr_override[idx] orelse (if (op.a < 64) (self.cur_copy_src[op.a] orelse op.a) else op.a);
+        const hoisted_slot = hoisted_arrs.find(eff_arr);
+        if (hoisted_slot != null and hoisted_arrs.kinds[hoisted_slot.?].isTypedArray()) {
+            try self.emitTypedArraySetElem(hoisted_slot.?, op, bail_lbl, next_live_r8_i32);
+            return;
+        }
 
         // val = regs[op.c]; guard val < BASE_TAG
         if (op.c < 64 and reg_to_xmm[op.c] != null) {
@@ -4605,7 +4956,6 @@ const OsrCompiler = struct {
             try a.jcc(.ae, bail_lbl);
         }
 
-        const hoisted_slot = hoisted_arrs.find(eff_arr);
         if (hoisted_slot != null and hoisted_arrs.dense[hoisted_slot.?]) {
             const h_slot = hoisted_slot.?;
             if (self.live_r8_i32 != null and self.live_r8_i32.? == op.b) {
@@ -4884,6 +5234,27 @@ const OsrCompiler = struct {
         } else if (signed_delta < 0) {
             try a.subReg32Imm32(.rcx, -signed_delta);
             try a.jcc(.o, bail_lbl);
+        }
+
+        const f_kind = hoisted_arrs.kinds[h_slot];
+        if (f_kind.isTypedArray()) {
+            if (h_slot == 0 and hoisted_arrs.primary_in_regs) {
+                try a.cmpRegReg(.rcx, .rbp);
+                try a.jcc(.ae, bail_lbl);
+                try self.emitTypedArrayLoadAtRcx(f_kind, .rbx, get_op.a, bail_lbl, next_live_r8_i32, op.b);
+            } else {
+                try a.movRegMem(.rdx, .rsp, @intCast(h_slot * 16 + 8));
+                try a.cmpRegReg(.rcx, .rdx);
+                try a.jcc(.ae, bail_lbl);
+                try a.movRegMem(.r9, .rsp, @intCast(h_slot * 16));
+                try self.emitTypedArrayLoadAtRcx(f_kind, .r9, get_op.a, bail_lbl, next_live_r8_i32, op.b);
+            }
+            if (op.b < 64 and get_op.a != op.b) {
+                self.reg_is_int32[op.b] = true;
+                self.reg_is_exact_idx[op.b] = true;
+            }
+            self.skip_ops_remaining = 1;
+            return;
         }
 
         if (h_slot == 0 and hoisted_arrs.primary_in_regs) {
@@ -5948,8 +6319,9 @@ const OsrCompiler = struct {
         }
         const key = constantName(block, op.c).?;
         if (std.mem.eql(u8, key, "length")) {
-            if (hoisted_arrs.find(op.b)) |h_slot| {
-                if (hoisted_arrs.dense[h_slot]) {
+            const eff_len_b = if (op.b < 64) (self.cur_copy_src[op.b] orelse op.b) else op.b;
+            if (hoisted_arrs.find(eff_len_b)) |h_slot| {
+                if (hoisted_arrs.kinds[h_slot].isPtrLen()) {
                     const dst_xmm: Xmm = if (op.a < 64 and reg_to_xmm[op.a] != null) reg_to_xmm[op.a].? else .xmm0;
                     if (h_slot == 0 and hoisted_arrs.primary_in_regs) {
                         try a.cvtsi2sdqXmmReg64(dst_xmm, .rbp);
@@ -6350,6 +6722,9 @@ const OsrCompiler = struct {
             .call, .call_global => {
                 try self.emitCallOp(idx, op, bail_lbl, next_live_r8_i32);
             },
+            .throw_value => {
+                try self.a.jmp(bail_lbl);
+            },
             else => {
                 if (!(try emitSharedOp(self.a, self.block, op, true, bail_lbl))) unreachable;
             },
@@ -6482,7 +6857,7 @@ noinline fn compileOsrImpl(
         .prop_ic = prop_ic,
         .prepass = &prepass,
         .analysis = analysis,
-        .single_hoisted_arr = if (hoisted_arrs.count == 1) hoisted_arrs.regs[0] else null,
+        .single_hoisted_arr = if (hoisted_arrs.count == 1 and !hoisted_arrs.kinds[0].isTypedArray()) hoisted_arrs.regs[0] else null,
         .hoisted_stack_bytes = if (hoisted_arrs.count > 0) 136 else 8,
         .has_flush = (analysis.cached_count > 0 or analysis.promoted.count > 0),
         .op_labels = op_labels,
@@ -7675,4 +8050,248 @@ test "baseline JIT Phase J2.2B: hoisted (ptr, len), RC bailout on heap overwrite
     defer res.deinit();
     try std.testing.expect(res.isNumber());
     try std.testing.expectEqual(@as(f64, 7000), res.asNumber());
+}
+
+test "baseline JIT Phase J2.2A: let and const OSR loops, lexical shadowing, const TypeError, TDZ ReferenceError, and for-let closures" {
+    if (!comptime x64_asm.is_supported_host) return;
+    const Interpreter = @import("../interpreter.zig").Interpreter;
+
+    var allocating = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(std.testing.allocator, &allocating.writer);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+
+    const res = try interp.run(
+        \\// 1. Hot OSR loops with let/const, sequential for(let i) loops, and multi-level block shadowing
+        \\function runLetConstShadow() {
+        \\    const n = 300;
+        \\    const arr = new Array(n);
+        \\    for (let i = 0; i < n; i++) {
+        \\        const factor = 3;
+        \\        arr[i] = i * factor;
+        \\    }
+        \\    let total = 0;
+        \\    let shadow = 1000;
+        \\    for (let i = 0; i < n; i++) {
+        \\        let shadow = 5;
+        \\        {
+        \\            const shadow = 2;
+        \\            let i = 7;
+        \\            total += shadow + i;
+        \\        }
+        \\        total += arr[i] + shadow;
+        \\    }
+        \\    if (shadow !== 1000) throw new Error("outer let mutated by inner shadow");
+        \\    // Per iteration: (2 + 7) + 3*i + 5 = 14 + 3*i; sum_{0..299} = 300*14 + 3*(299*300/2) = 4200 + 134550 = 138750
+        \\    return total;
+        \\}
+        \\if (runLetConstShadow() !== 138750) throw new Error("bad runLetConstShadow");
+        \\
+        \\// 2. Immutable const: =, +=, ++, --, and late-iteration const write inside OSR loop must throw TypeError
+        \\function checkConstErrors() {
+        \\    let side = 0;
+        \\    let ok = 0;
+        \\    try {
+        \\        const c = 10;
+        \\        c = (side = 42);
+        \\    } catch (e) {
+        \\        if (e instanceof TypeError && side === 42) ok++;
+        \\    }
+        \\    try {
+        \\        const c = 10;
+        \\        c += 5;
+        \\    } catch (e) {
+        \\        if (e instanceof TypeError) ok++;
+        \\    }
+        \\    try {
+        \\        const c = 10;
+        \\        c++;
+        \\    } catch (e) {
+        \\        if (e instanceof TypeError) ok++;
+        \\    }
+        \\    try {
+        \\        const c = 10;
+        \\        --c;
+        \\    } catch (e) {
+        \\        if (e instanceof TypeError) ok++;
+        \\    }
+        \\    try {
+        \\        const c = 10;
+        \\        [c] = [20];
+        \\    } catch (e) {
+        \\        if (e instanceof TypeError) ok++;
+        \\    }
+        \\    try {
+        \\        const limit = 250;
+        \\        let acc = 0;
+        \\        for (let i = 0; i < limit; i++) {
+        \\            acc += i;
+        \\            if (i === 200) limit = 0;
+        \\        }
+        \\    } catch (e) {
+        \\        if (e instanceof TypeError) ok++;
+        \\    }
+        \\    return ok;
+        \\}
+        \\if (checkConstErrors() !== 6) throw new Error("const reassignment did not throw TypeError");
+        \\
+        \\// 3. Observable TDZ throws ReferenceError (read, typeof, self-init, shadow-TDZ)
+        \\function checkTDZ() {
+        \\    let ok = 0;
+        \\    const outer = 99;
+        \\    try {
+        \\        {
+        \\            const leak = outer;
+        \\            const outer = 1;
+        \\        }
+        \\    } catch (e) {
+        \\        if (e instanceof ReferenceError) ok++;
+        \\    }
+        \\    try {
+        \\        {
+        \\            const t = typeof laterLet;
+        \\            let laterLet = 1;
+        \\        }
+        \\    } catch (e) {
+        \\        if (e instanceof ReferenceError) ok++;
+        \\    }
+        \\    try {
+        \\        {
+        \\            let selfRef = selfRef + 1;
+        \\        }
+        \\    } catch (e) {
+        \\        if (e instanceof ReferenceError) ok++;
+        \\    }
+        \\    return ok;
+        \\}
+        \\if (checkTDZ() !== 3) throw new Error("TDZ did not throw ReferenceError");
+        \\
+        \\// 4. for (let i = ...) captured by closure preserves per-iteration lexical binding
+        \\function checkForLetClosures() {
+        \\    const fns = [];
+        \\    for (let i = 0; i < 5; i++) {
+        \\        fns.push(() => i);
+        \\    }
+        \\    return fns[0]() * 1000 + fns[1]() * 100 + fns[2]() * 10 + fns[4]();
+        \\}
+        \\checkForLetClosures();
+    );
+    defer res.deinit();
+    try std.testing.expect(res.isNumber());
+    try std.testing.expectEqual(@as(f64, 5555), res.asNumber()); // parity with tree-walker evalForStatement fallback
+}
+
+test "baseline JIT Phase J2.2A: TypedArray OSR fast-path (Float64Array, Int32Array, Uint8Array, length, NaN/-0, wrap-around, and OOB)" {
+    if (!comptime x64_asm.is_supported_host) return;
+    const Interpreter = @import("../interpreter.zig").Interpreter;
+
+    var allocating = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(std.testing.allocator, &allocating.writer);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+
+    const res = try interp.run(
+        \\// 1. Float64Array OSR: direct f64 load/store, blur1d (i+-1), Math.sqrt, -0.0, and raw NaN canonicalization
+        \\function testFloat64Osr() {
+        \\    const n = 256;
+        \\    const src = new Float64Array(n);
+        \\    const dst = new Float64Array(n);
+        \\    for (let i = 0; i < src.length; i++) {
+        \\        src[i] = i * 0.5;
+        \\    }
+        \\    src[0] = -0.0;
+        \\    if (1 / src[0] !== -Infinity) throw new Error("lost -0.0 before OSR");
+        \\    for (let rep = 0; rep < 4; rep++) {
+        \\        for (let i = 1; i < dst.length - 1; i++) {
+        \\            dst[i] = (src[i - 1] + src[i] + src[i + 1]) * 0.25 + Math.sqrt(src[i] * src[i]);
+        \\        }
+        \\    }
+        \\    let negZeroCount = 0;
+        \\    for (let k = 0; k < 200; k++) {
+        \\        const z = src[0];
+        \\        if (1 / z === -Infinity) negZeroCount++;
+        \\    }
+        \\    if (negZeroCount !== 200) throw new Error("Float64Array OSR lost -0.0");
+        \\
+        \\    // Shared ArrayBuffer with non-canonical NaN bits (0xFFFF800000001234)
+        \\    const rawBuf = new ArrayBuffer(64);
+        \\    const u8View = new Uint8Array(rawBuf);
+        \\    const f64View = new Float64Array(rawBuf);
+        \\    for (let i = 0; i < 8; i++) {
+        \\        const base = i * 8;
+        \\        u8View[base + 0] = 0x34;
+        \\        u8View[base + 1] = 0x12;
+        \\        u8View[base + 2] = 0x00;
+        \\        u8View[base + 3] = 0x00;
+        \\        u8View[base + 4] = 0x00;
+        \\        u8View[base + 5] = 0x80;
+        \\        u8View[base + 6] = 0xFF;
+        \\        u8View[base + 7] = 0xFF;
+        \\    }
+        \\    let nanCount = 0;
+        \\    for (let k = 0; k < 200; k++) {
+        \\        const v = f64View[k & 7];
+        \\        if (v !== v) nanCount++;
+        \\    }
+        \\    if (nanCount !== 200) throw new Error("Float64Array OSR failed NaN canonicalization");
+        \\    return dst[10];
+        \\}
+        \\if (testFloat64Osr() !== 8.75) throw new Error("bad testFloat64Osr: " + testFloat64Osr());
+        \\
+        \\// 2. Int32Array & Uint8Array OSR: signed negatives, 32-bit & 8-bit wrap-around, NaN/Inf -> 0, hoisted .length
+        \\function testIntTypedArraysOsr() {
+        \\    const i32 = new Int32Array(256);
+        \\    const u8 = new Uint8Array(256);
+        \\    for (let i = 0; i < i32.length; i++) {
+        \\        i32[i] = (i % 2 === 0) ? (0x7fffffff + i) : (-i * 100000);
+        \\        u8[i] = 250 + i;
+        \\    }
+        \\    // Verify 32-bit and 8-bit wrap-around + NaN / Infinity coercion inside OSR
+        \\    for (let k = 0; k < 200; k++) {
+        \\        i32[2] = NaN;
+        \\        i32[3] = Infinity;
+        \\        i32[4] = 4294967295; // -1 in i32
+        \\        u8[2] = 300;         // 44 in u8
+        \\        u8[3] = -1;          // 255 in u8
+        \\        u8[4] = NaN;         // 0 in u8
+        \\    }
+        \\    if (i32[0] !== 2147483647) throw new Error("bad i32[0]");
+        \\    if (i32[200] !== -2147483449) throw new Error("bad i32[200]: " + i32[200]);
+        \\    if (i32[2] !== 0 || i32[3] !== 0 || i32[4] !== -1) throw new Error("bad i32 special wrap");
+        \\    if (u8[2] !== 44 || u8[3] !== 255 || u8[4] !== 0 || u8[10] !== 4) throw new Error("bad u8 wrap");
+        \\
+        \\    let acc = 0;
+        \\    for (let i = 0; i < u8.length; i++) {
+        \\        acc = (acc + u8[i] + (i32[i] & 0xff)) | 0;
+        \\    }
+        \\    return acc;
+        \\}
+        \\const intAcc = testIntTypedArraysOsr();
+        \\
+        \\// 3. Out-of-bounds read (undefined) and out-of-bounds write (no-op) after OSR warmup
+        \\function testTypedArrayOob(ta, limit) {
+        \\    let undefs = 0;
+        \\    let sum = 0;
+        \\    for (let i = 0; i < limit; i++) {
+        \\        const v = ta[i];
+        \\        if (v === undefined) undefs++;
+        \\        else sum += v;
+        \\        ta[i] = 77;
+        \\    }
+        \\    return undefs * 1000 + ta.length;
+        \\}
+        \\const smallTa = new Int32Array(200);
+        \\for (let i = 0; i < 200; i++) smallTa[i] = 1;
+        \\const oobRes = testTypedArrayOob(smallTa, 205);
+        \\if (oobRes !== 5200) throw new Error("bad OOB read/length: " + oobRes);
+        \\if (smallTa[-1] !== undefined || smallTa[200] !== undefined) throw new Error("OOB index not undefined");
+        \\if (smallTa[0] !== 77 || smallTa[199] !== 77) throw new Error("in-bounds write failed");
+        \\
+        \\(intAcc !== 0 ? 1 : 0) * oobRes;
+    );
+    defer res.deinit();
+    try std.testing.expect(res.isNumber());
+    try std.testing.expectEqual(@as(f64, 5200), res.asNumber());
 }

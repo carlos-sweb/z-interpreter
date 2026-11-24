@@ -633,6 +633,88 @@ pub const Assembler = struct {
         }
     }
 
+    noinline fn emitSibOperand(self: *Assembler, reg_field: u3, base: Reg, index: Reg, scale_bits: u2, disp: i32) !void {
+        std.debug.assert(index != .rsp);
+        const sib: u8 = (@as(u8, scale_bits) << 6) | (@as(u8, index.low3()) << 3) | @as(u8, base.low3());
+        if (disp == 0 and base.low3() != 5) {
+            try self.emitByte(modRM(0b00, reg_field, 4));
+            try self.emitByte(sib);
+        } else if (disp >= -128 and disp <= 127) {
+            try self.emitByte(modRM(0b01, reg_field, 4));
+            try self.emitByte(sib);
+            try self.emitByte(@bitCast(@as(i8, @intCast(disp))));
+        } else {
+            try self.emitByte(modRM(0b10, reg_field, 4));
+            try self.emitByte(sib);
+            try self.emitI32(disp);
+        }
+    }
+
+    pub noinline fn movReg32MemIndexed4(self: *Assembler, dst: Reg, base: Reg, index: Reg, disp: i32) !void {
+        const rex_bits: u8 =
+            (if (dst.isExt()) @as(u8, 4) else 0) |
+            (if (index.isExt()) @as(u8, 2) else 0) |
+            (if (base.isExt()) @as(u8, 1) else 0);
+        if (rex_bits != 0) try self.emitByte(0x40 | rex_bits);
+        try self.emitByte(0x8B);
+        try self.emitSibOperand(dst.low3(), base, index, 0b10, disp);
+    }
+
+    pub noinline fn movMem32Indexed4Reg(self: *Assembler, base: Reg, index: Reg, disp: i32, src: Reg) !void {
+        const rex_bits: u8 =
+            (if (src.isExt()) @as(u8, 4) else 0) |
+            (if (index.isExt()) @as(u8, 2) else 0) |
+            (if (base.isExt()) @as(u8, 1) else 0);
+        if (rex_bits != 0) try self.emitByte(0x40 | rex_bits);
+        try self.emitByte(0x89);
+        try self.emitSibOperand(src.low3(), base, index, 0b10, disp);
+    }
+
+    pub noinline fn movzxReg32Mem8Indexed1(self: *Assembler, dst: Reg, base: Reg, index: Reg, disp: i32) !void {
+        const rex_bits: u8 =
+            (if (dst.isExt()) @as(u8, 4) else 0) |
+            (if (index.isExt()) @as(u8, 2) else 0) |
+            (if (base.isExt()) @as(u8, 1) else 0);
+        if (rex_bits != 0) try self.emitByte(0x40 | rex_bits);
+        try self.emitByte(0x0F);
+        try self.emitByte(0xB6);
+        try self.emitSibOperand(dst.low3(), base, index, 0b00, disp);
+    }
+
+    pub noinline fn movMem8Indexed1Reg(self: *Assembler, base: Reg, index: Reg, disp: i32, src: Reg) !void {
+        const rex_bits: u8 =
+            (if (src.isExt()) @as(u8, 4) else 0) |
+            (if (index.isExt()) @as(u8, 2) else 0) |
+            (if (base.isExt()) @as(u8, 1) else 0);
+        if (rex_bits != 0 or @intFromEnum(src) >= 4) try self.emitByte(0x40 | rex_bits);
+        try self.emitByte(0x88);
+        try self.emitSibOperand(src.low3(), base, index, 0b00, disp);
+    }
+
+    pub noinline fn movsdXmmMemIndexed8(self: *Assembler, dst: Xmm, base: Reg, index: Reg, disp: i32) !void {
+        try self.emitByte(0xF2);
+        const rex_bits: u8 =
+            (if (dst.isExt()) @as(u8, 4) else 0) |
+            (if (index.isExt()) @as(u8, 2) else 0) |
+            (if (base.isExt()) @as(u8, 1) else 0);
+        if (rex_bits != 0) try self.emitByte(0x40 | rex_bits);
+        try self.emitByte(0x0F);
+        try self.emitByte(0x10);
+        try self.emitSibOperand(dst.low3(), base, index, 0b11, disp);
+    }
+
+    pub noinline fn movsdMemIndexed8Xmm(self: *Assembler, base: Reg, index: Reg, disp: i32, src: Xmm) !void {
+        try self.emitByte(0xF2);
+        const rex_bits: u8 =
+            (if (src.isExt()) @as(u8, 4) else 0) |
+            (if (index.isExt()) @as(u8, 2) else 0) |
+            (if (base.isExt()) @as(u8, 1) else 0);
+        if (rex_bits != 0) try self.emitByte(0x40 | rex_bits);
+        try self.emitByte(0x0F);
+        try self.emitByte(0x11);
+        try self.emitSibOperand(src.low3(), base, index, 0b11, disp);
+    }
+
     pub noinline fn callReg(self: *Assembler, target: Reg) !void {
         if (target.isExt()) try self.emitByte(0x41);
         try self.emitByte(0xFF);

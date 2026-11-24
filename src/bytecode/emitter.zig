@@ -41,15 +41,25 @@ pub const BytecodeEmitter = struct {
         try_depth: u16,
     };
 
+    const EmitterBinding = struct {
+        name: []const u8,
+        slot: u16,
+        kind: codeblock.LocalKind,
+        depth: u16,
+        captured: bool,
+        initialized: bool,
+    };
+
     allocator: Allocator,
     scope: codeblock.ScopeAnalysis,
     ops: std.ArrayListUnmanaged(codeblock.Op) = .empty,
     constants: std.ArrayListUnmanaged(codeblock.Constant) = .empty,
     free_registers: std.ArrayListUnmanaged(u8) = .empty,
     call_sites: std.ArrayListUnmanaged(codeblock.CallSiteCache) = .empty,
+    bindings: std.ArrayListUnmanaged(EmitterBinding) = .empty,
     next_register: u16,
     max_register: u16,
-    uninitialized_lexical: [256]bool = @splat(false),
+    scope_depth: u16 = 0,
     is_script: bool = false,
     try_depth: u16 = 0,
     current_loop: ?*LoopCtx = null,
@@ -73,19 +83,20 @@ pub const BytecodeEmitter = struct {
             .next_register = scope.local_count,
             .max_register = scope.local_count,
         };
-        for (self.scope.locals) |local| {
-            if (local.kind == .let or local.kind == .@"const") {
-                if (local.slot < 256) self.uninitialized_lexical[local.slot] = true;
-            }
-        }
         defer self.scope.deinit(allocator);
         defer self.free_registers.deinit(allocator);
         defer self.call_sites.deinit(allocator);
+        defer self.bindings.deinit(allocator);
         for (function.params.items) |param| {
             if (self.scope.capturesLocal(param.pattern.identifier.name)) return error.UnsupportedSyntax;
         }
         errdefer self.ops.deinit(allocator);
         errdefer self.constants.deinit(allocator);
+
+        try self.initRootBindings();
+        if (function.body == .block and function.body.block.data == .block) {
+            try self.prebindBlockLexicals(function.body.block.data.block);
+        }
 
         try self.emitBody(function.body);
         try self.fuseCmpJumps();
@@ -104,7 +115,7 @@ pub const BytecodeEmitter = struct {
         for (scope.captured_locals, 0..) |n, i| {
             captured_names[i] = try allocator.dupe(u8, n);
             duped_count += 1;
-            const kind = scope.localKind(n);
+            const kind = self.rootBindingKind(n);
             captured_is_lexical[i] = (kind == .let or kind == .@"const");
         }
         return .{ .block = .{
@@ -136,16 +147,15 @@ pub const BytecodeEmitter = struct {
             .max_register = scope.local_count,
             .is_script = true,
         };
-        for (self.scope.locals) |local| {
-            if (local.kind == .let or local.kind == .@"const") {
-                if (local.slot < 256) self.uninitialized_lexical[local.slot] = true;
-            }
-        }
         defer self.scope.deinit(allocator);
         defer self.free_registers.deinit(allocator);
         defer self.call_sites.deinit(allocator);
+        defer self.bindings.deinit(allocator);
         errdefer self.ops.deinit(allocator);
         errdefer self.constants.deinit(allocator);
+
+        try self.initRootBindings();
+        try self.prebindBlockLexicals(statements);
 
         var last_register: ?u8 = null;
         for (statements) |statement| {
@@ -219,9 +229,100 @@ pub const BytecodeEmitter = struct {
         }
     }
 
+    fn initRootBindings(self: *BytecodeEmitter) !void {
+        for (self.scope.locals) |local| {
+            switch (local.kind) {
+                .parameter, .@"var", .function => {
+                    try self.bindings.append(self.allocator, .{
+                        .name = local.name,
+                        .slot = local.slot,
+                        .kind = local.kind,
+                        .depth = 0,
+                        .captured = self.scope.capturesLocal(local.name),
+                        .initialized = true,
+                    });
+                },
+                else => {},
+            }
+        }
+    }
+
+    fn rootBindingKind(self: *const BytecodeEmitter, name: []const u8) ?codeblock.LocalKind {
+        for (self.bindings.items) |b| {
+            if (b.depth == 0 and std.mem.eql(u8, b.name, name)) return b.kind;
+        }
+        return self.scope.localKind(name);
+    }
+
+    fn prebindVariableLexical(self: *BytecodeEmitter, variable: anytype) !void {
+        const lkind: codeblock.LocalKind = if (variable.kind == .@"const") .@"const" else .let;
+        for (variable.declarators) |declarator| {
+            if (declarator.pattern.* != .identifier) return error.UnsupportedSyntax;
+            const slot = self.scope.patternSlot(declarator.pattern) orelse return error.UnsupportedSyntax;
+            const name = declarator.pattern.identifier.name;
+            try self.bindings.append(self.allocator, .{
+                .name = name,
+                .slot = slot,
+                .kind = lkind,
+                .depth = self.scope_depth,
+                .captured = (self.scope_depth == 0 and self.scope.capturesLocal(name)),
+                .initialized = false,
+            });
+        }
+    }
+
+    fn prebindBlockLexicals(self: *BytecodeEmitter, stmts: anytype) anyerror!void {
+        for (stmts) |stmt| {
+            switch (stmt.data) {
+                .variable => |variable| {
+                    if (variable.kind != .@"var") {
+                        try self.prebindVariableLexical(variable);
+                    }
+                },
+                .class_declaration => return error.UnsupportedSyntax,
+                .function_declaration => {
+                    if (self.scope_depth > 0) return error.UnsupportedSyntax;
+                },
+                else => {},
+            }
+        }
+    }
+
+    fn resolveBinding(self: *const BytecodeEmitter, name: []const u8) ?EmitterBinding {
+        var i = self.bindings.items.len;
+        while (i > 0) {
+            i -= 1;
+            const b = self.bindings.items[i];
+            if (std.mem.eql(u8, b.name, name)) return b;
+        }
+        return null;
+    }
+
+    fn findBindingIndexBySlot(self: *const BytecodeEmitter, slot: u16) ?usize {
+        var i = self.bindings.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.bindings.items[i].slot == slot) return i;
+        }
+        return null;
+    }
+
+    fn emitConstAssignTypeError(self: *BytecodeEmitter) !void {
+        try self.emitOp(.{ .opcode = .throw_value, .a = 0, .b = 1 });
+    }
+
     fn emitStatement(self: *BytecodeEmitter, statement: *const zstatements.Statement) anyerror!void {
         switch (statement.data) {
-            .block => |items| for (items) |item| try self.emitStatement(item),
+            .block => |items| {
+                const mark = self.bindings.items.len;
+                self.scope_depth += 1;
+                defer {
+                    self.bindings.items.len = mark;
+                    self.scope_depth -= 1;
+                }
+                try self.prebindBlockLexicals(items);
+                for (items) |item| try self.emitStatement(item);
+            },
             .return_stmt => |value| {
                 if (value) |expression| {
                     const register = try self.emitReadOperand(expression);
@@ -260,58 +361,60 @@ pub const BytecodeEmitter = struct {
     }
 
     fn emitStore(self: *BytecodeEmitter, name: []const u8, reg: u8) !void {
-        if (std.mem.eql(u8, name, "arguments") and self.scope.localSlot("arguments") == null) {
+        if (std.mem.eql(u8, name, "arguments") and self.resolveBinding("arguments") == null) {
             return error.UnsupportedSyntax;
         }
-        if (self.scope.localSlot(name)) |slot| {
-            if (slot < 256 and self.uninitialized_lexical[slot]) return error.UnsupportedSyntax;
-        }
-        if (self.scope.localKind(name)) |kind| {
-            if (kind == .@"const") return error.UnsupportedSyntax;
-        }
-        return self.emitStoreDirect(name, reg, 0);
-    }
-
-    fn emitStoreDirect(self: *BytecodeEmitter, name: []const u8, reg: u8, init_mode: u8) !void {
-        if (std.mem.eql(u8, name, "arguments") and self.scope.localSlot("arguments") == null) {
-            return error.UnsupportedSyntax;
-        }
-        if (self.scope.localSlot(name)) |slot| {
-            if (!self.scope.capturesLocal(name)) {
-                return self.emitOp(.{ .opcode = .store_local, .a = try small(slot), .b = reg });
+        if (self.resolveBinding(name)) |b| {
+            if (!b.initialized) return error.UnsupportedSyntax;
+            if (b.kind == .@"const") return self.emitConstAssignTypeError();
+            if (!b.captured) {
+                return self.emitOp(.{ .opcode = .store_local, .a = try small(b.slot), .b = reg });
             }
         }
         const constant = try self.addConstant(.{ .property_key = name });
-        return self.emitOp(.{ .opcode = .store_global, .a = constant, .b = reg, .c = init_mode });
+        return self.emitOp(.{ .opcode = .store_global, .a = constant, .b = reg, .c = 0 });
     }
 
     fn emitVariable(self: *BytecodeEmitter, variable: anytype) !void {
         for (variable.declarators) |declarator| {
             if (declarator.pattern.* != .identifier) return error.UnsupportedSyntax;
             const name = declarator.pattern.identifier.name;
-            if (declarator.init == null and variable.kind == .@"var") continue;
-            if (self.scope.localSlot(name)) |slot| {
+            const slot = self.scope.patternSlot(declarator.pattern) orelse return error.UnsupportedSyntax;
+            if (variable.kind == .@"var") {
+                if (declarator.init == null) continue;
+                const init = declarator.init.?;
                 if (!self.scope.capturesLocal(name)) {
                     const local_slot = try small(slot);
-                    if (declarator.init) |init| {
-                        try self.emitExprInto(init, local_slot, name);
-                    } else {
-                        try self.emitOp(.{ .opcode = .load_undefined, .a = local_slot });
-                    }
-                    if (slot < 256) self.uninitialized_lexical[slot] = false;
-                    continue;
+                    try self.emitExprInto(init, local_slot, name);
+                } else {
+                    const val_reg = try self.emitExpression(init);
+                    const constant = try self.addConstant(.{ .property_key = name });
+                    try self.emitOp(.{ .opcode = .store_global, .a = constant, .b = val_reg, .c = 0 });
+                    self.freeRegister(val_reg);
                 }
+                continue;
             }
-            const val_reg = if (declarator.init) |init|
-                try self.emitExpression(init)
-            else
-                try self.emitSimple(.load_undefined);
-            if (self.scope.localSlot(name)) |slot| {
-                if (slot < 256) self.uninitialized_lexical[slot] = false;
+            const b_idx = self.findBindingIndexBySlot(slot) orelse return error.UnsupportedSyntax;
+            const is_captured = self.bindings.items[b_idx].captured;
+            if (!is_captured) {
+                const local_slot = try small(slot);
+                if (declarator.init) |init| {
+                    try self.emitExprInto(init, local_slot, name);
+                } else {
+                    try self.emitOp(.{ .opcode = .load_undefined, .a = local_slot });
+                }
+                self.bindings.items[b_idx].initialized = true;
+            } else {
+                const val_reg = if (declarator.init) |init|
+                    try self.emitExpression(init)
+                else
+                    try self.emitSimple(.load_undefined);
+                self.bindings.items[b_idx].initialized = true;
+                const init_mode: u8 = if (variable.kind == .@"const") 2 else 1;
+                const constant = try self.addConstant(.{ .property_key = name });
+                try self.emitOp(.{ .opcode = .store_global, .a = constant, .b = val_reg, .c = init_mode });
+                self.freeRegister(val_reg);
             }
-            const init_mode: u8 = if (variable.kind == .@"const") 2 else if (variable.kind == .let) 1 else 0;
-            try self.emitStoreDirect(name, val_reg, init_mode);
-            self.freeRegister(val_reg);
         }
     }
 
@@ -395,6 +498,16 @@ pub const BytecodeEmitter = struct {
     fn emitFor(self: *BytecodeEmitter, head: zstatements.ForHead, body: *const zstatements.Statement) anyerror!void {
         switch (head) {
             .c_style => |c_style| {
+                const has_lex_init = if (c_style.init) |init| (init == .decl and init.decl.kind != .@"var") else false;
+                const lex_mark = self.bindings.items.len;
+                if (has_lex_init) self.scope_depth += 1;
+                defer if (has_lex_init) {
+                    self.bindings.items.len = lex_mark;
+                    self.scope_depth -= 1;
+                };
+                if (has_lex_init) {
+                    try self.prebindVariableLexical(c_style.init.?.decl);
+                }
                 if (c_style.init) |init| switch (init) {
                     .decl => |variable| try self.emitVariable(variable),
                     .expr => |expression| {
@@ -477,12 +590,33 @@ pub const BytecodeEmitter = struct {
         try self.emitOp(.{ .opcode = .end_catch });
         const end_jump = try self.emitJump(.jump, 0);
         try self.patchJump(setup_jump, self.ops.items.len);
+        const catch_mark = self.bindings.items.len;
+        self.scope_depth += 1;
+        defer {
+            self.bindings.items.len = catch_mark;
+            self.scope_depth -= 1;
+        }
         if (handler.param) |param| {
             if (param.* != .identifier) return error.UnsupportedSyntax;
-            try self.emitStore(param.identifier.name, err_reg);
+            const p_slot = self.scope.patternSlot(param) orelse return error.UnsupportedSyntax;
+            const p_name = param.identifier.name;
+            try self.bindings.append(self.allocator, .{
+                .name = p_name,
+                .slot = p_slot,
+                .kind = .catch_binding,
+                .depth = self.scope_depth,
+                .captured = false,
+                .initialized = true,
+            });
+            try self.emitStore(p_name, err_reg);
         }
         self.freeRegister(err_reg);
-        try self.emitStatement(handler.body);
+        if (handler.body.data == .block) {
+            try self.prebindBlockLexicals(handler.body.data.block);
+            for (handler.body.data.block) |stmt_item| try self.emitStatement(stmt_item);
+        } else {
+            try self.emitStatement(handler.body);
+        }
         try self.patchJump(end_jump, self.ops.items.len);
     }
 
@@ -511,14 +645,21 @@ pub const BytecodeEmitter = struct {
             .unary => |unary| return self.emitUnary(unary),
             .binary => |binary| return self.emitBinary(binary),
             .assignment => |assignment| {
+                const target_unwrapped = unwrapParen(assignment.target);
                 if (assignment.op == .assign) {
-                    if (assignment.target.data == .identifier) {
-                        const name = assignment.target.data.identifier;
+                    if (target_unwrapped.data == .identifier) {
+                        const name = target_unwrapped.data.identifier;
+                        if (std.mem.eql(u8, name, "arguments") and self.resolveBinding("arguments") == null) {
+                            return error.UnsupportedSyntax;
+                        }
+                        if (self.resolveBinding(name)) |b| {
+                            if (!b.initialized) return error.UnsupportedSyntax;
+                        }
                         const value = try self.emitExpression(assignment.value);
                         try self.emitStore(name, value);
                         return value;
-                    } else if (assignment.target.data == .member) {
-                        const m = assignment.target.data.member;
+                    } else if (target_unwrapped.data == .member) {
+                        const m = target_unwrapped.data.member;
                         if (m.optional) return error.UnsupportedSyntax;
                         const rhs_mutates = exprMayMutateLocal(assignment.value);
                         if (!m.computed) {
@@ -586,10 +727,22 @@ pub const BytecodeEmitter = struct {
                         .ushr => .ushr,
                         else => unreachable,
                     };
-                    if (assignment.target.data == .identifier) {
-                        const name = assignment.target.data.identifier;
-                        if (self.scope.localKind(name) == .@"const") return error.UnsupportedSyntax;
-                        if (self.getLocalSlot(assignment.target)) |local_slot| {
+                    if (target_unwrapped.data == .identifier) {
+                        const name = target_unwrapped.data.identifier;
+                        if (self.resolveBinding(name)) |b| {
+                            if (!b.initialized) return error.UnsupportedSyntax;
+                            if (b.kind == .@"const") {
+                                const old_val = try self.emitIdentifier(name);
+                                const right_val = try self.emitReadOperand(assignment.value);
+                                const res_reg = try self.allocRegister();
+                                try self.emitOp(.{ .opcode = opcode, .a = res_reg, .b = old_val, .c = right_val });
+                                self.freeRegister(right_val);
+                                self.freeRegister(old_val);
+                                try self.emitConstAssignTypeError();
+                                return res_reg;
+                            }
+                        }
+                        if (self.getLocalSlot(target_unwrapped)) |local_slot| {
                             if (!exprMayMutateLocal(assignment.value)) {
                                 const right_val = try self.emitReadOperand(assignment.value);
                                 try self.emitOp(.{ .opcode = opcode, .a = local_slot, .b = local_slot, .c = right_val });
@@ -605,8 +758,8 @@ pub const BytecodeEmitter = struct {
                         self.freeRegister(old_val);
                         try self.emitStore(name, res_reg);
                         return res_reg;
-                    } else if (assignment.target.data == .member) {
-                        const m = assignment.target.data.member;
+                    } else if (target_unwrapped.data == .member) {
+                        const m = target_unwrapped.data.member;
                         if (m.optional or m.object.data == .super_expr) return error.UnsupportedSyntax;
                         if (!m.computed) {
                             if (m.property.data != .identifier) return error.UnsupportedSyntax;
@@ -673,24 +826,23 @@ pub const BytecodeEmitter = struct {
     }
 
     fn emitIdentifier(self: *BytecodeEmitter, name: []const u8) !u8 {
-        if (std.mem.eql(u8, name, "arguments") and self.scope.localSlot("arguments") == null) {
+        if (std.mem.eql(u8, name, "arguments") and self.resolveBinding("arguments") == null) {
             return error.UnsupportedSyntax;
         }
-        if (self.scope.localSlot(name)) |slot| {
-            if (slot < 256 and self.uninitialized_lexical[slot]) return error.UnsupportedSyntax;
-        }
-        const destination = try self.allocRegister();
-        if (self.scope.localSlot(name)) |slot| {
-            if (self.scope.capturesLocal(name)) {
+        if (self.resolveBinding(name)) |b| {
+            if (!b.initialized) return error.UnsupportedSyntax;
+            const destination = try self.allocRegister();
+            if (b.captured) {
                 const constant = try self.addConstant(.{ .property_key = name });
                 try self.emitOp(.{ .opcode = .load_global, .a = destination, .b = constant });
             } else {
-                try self.emitOp(.{ .opcode = .load_local, .a = destination, .b = try small(slot) });
+                try self.emitOp(.{ .opcode = .load_local, .a = destination, .b = try small(b.slot) });
             }
-        } else {
-            const constant = try self.addConstant(.{ .property_key = name });
-            try self.emitOp(.{ .opcode = .load_global, .a = destination, .b = constant });
+            return destination;
         }
+        const destination = try self.allocRegister();
+        const constant = try self.addConstant(.{ .property_key = name });
+        try self.emitOp(.{ .opcode = .load_global, .a = destination, .b = constant });
         return destination;
     }
 
@@ -701,12 +853,17 @@ pub const BytecodeEmitter = struct {
             if (unary.op == .post_inc or unary.op == .post_dec or unary.op == .pre_inc or unary.op == .pre_dec) {
                 if (self.getLocalSlot(unary.operand)) |local_slot| {
                     const unwrap = unwrapParen(unary.operand);
-                    if (unwrap.data == .identifier and self.scope.localKind(unwrap.data.identifier) == .@"const") return error.UnsupportedSyntax;
-                    const one_idx = try self.addConstant(.{ .number = 1.0 });
-                    const is_inc = (unary.op == .post_inc or unary.op == .pre_inc);
-                    const super_op: codeblock.Opcode = if (is_inc) .add_local_const else .sub_local_const;
-                    try self.emitOp(.{ .opcode = super_op, .a = local_slot, .b = local_slot, .c = one_idx });
-                    return;
+                    const is_const = if (unwrap.data == .identifier)
+                        (if (self.resolveBinding(unwrap.data.identifier)) |b| b.kind == .@"const" else false)
+                    else
+                        false;
+                    if (!is_const) {
+                        const one_idx = try self.addConstant(.{ .number = 1.0 });
+                        const is_inc = (unary.op == .post_inc or unary.op == .pre_inc);
+                        const super_op: codeblock.Opcode = if (is_inc) .add_local_const else .sub_local_const;
+                        try self.emitOp(.{ .opcode = super_op, .a = local_slot, .b = local_slot, .c = one_idx });
+                        return;
+                    }
                 }
             }
         }
@@ -749,12 +906,17 @@ pub const BytecodeEmitter = struct {
             },
             .typeof => {
                 const unwrap = unwrapParen(unary.operand);
-                if (unwrap.data == .identifier and self.scope.localSlot(unwrap.data.identifier) == null) {
+                if (unwrap.data == .identifier) {
                     const name = unwrap.data.identifier;
-                    const name_const = try self.addConstant(.{ .property_key = name });
-                    const destination = try self.allocRegister();
-                    try self.emitOp(.{ .opcode = .typeof_global, .a = destination, .b = name_const });
-                    return destination;
+                    if (self.resolveBinding(name)) |b| {
+                        if (!b.initialized) return error.UnsupportedSyntax;
+                    } else {
+                        if (std.mem.eql(u8, name, "arguments")) return error.UnsupportedSyntax;
+                        const name_const = try self.addConstant(.{ .property_key = name });
+                        const destination = try self.allocRegister();
+                        try self.emitOp(.{ .opcode = .typeof_global, .a = destination, .b = name_const });
+                        return destination;
+                    }
                 }
                 const operand = try self.emitReadOperand(unary.operand);
                 const destination = try self.allocRegister();
@@ -763,12 +925,26 @@ pub const BytecodeEmitter = struct {
                 return destination;
             },
             .post_inc, .post_dec, .pre_inc, .pre_dec => {
-                if (unary.operand.data != .identifier) return error.UnsupportedSyntax;
-                const name = unary.operand.data.identifier;
-                if (self.scope.localKind(name) == .@"const") return error.UnsupportedSyntax;
+                const op_unwrap = unwrapParen(unary.operand);
+                if (op_unwrap.data != .identifier) return error.UnsupportedSyntax;
+                const name = op_unwrap.data.identifier;
                 const is_inc = (unary.op == .post_inc or unary.op == .pre_inc);
                 const is_post = (unary.op == .post_inc or unary.op == .post_dec);
-                if (self.getLocalSlot(unary.operand)) |local_slot| {
+                if (self.resolveBinding(name)) |b| {
+                    if (!b.initialized) return error.UnsupportedSyntax;
+                    if (b.kind == .@"const") {
+                        const old_reg = try self.emitIdentifier(name);
+                        const one_reg = try self.emitConstant(.{ .number = 1.0 });
+                        const new_reg = try self.allocRegister();
+                        const opcode: codeblock.Opcode = if (is_inc) .add_num else .sub_num;
+                        try self.emitOp(.{ .opcode = opcode, .a = new_reg, .b = old_reg, .c = one_reg });
+                        self.freeRegister(one_reg);
+                        self.freeRegister(old_reg);
+                        try self.emitConstAssignTypeError();
+                        return new_reg;
+                    }
+                }
+                if (self.getLocalSlot(op_unwrap)) |local_slot| {
                     const one_idx = try self.addConstant(.{ .number = 1.0 });
                     const super_op: codeblock.Opcode = if (is_inc) .add_local_const else .sub_local_const;
                     const dst = try self.allocRegister();
@@ -800,11 +976,9 @@ pub const BytecodeEmitter = struct {
         const unwrap = unwrapParen(node);
         if (unwrap.data == .identifier) {
             const name = unwrap.data.identifier;
-            if (self.scope.localSlot(name)) |slot| {
-                if (slot < 256 and self.uninitialized_lexical[slot]) return null;
-                if (!self.scope.capturesLocal(name)) {
-                    return small(slot) catch null;
-                }
+            if (self.resolveBinding(name)) |b| {
+                if (!b.initialized or b.captured) return null;
+                return small(b.slot) catch null;
             }
         }
         return null;
@@ -1026,11 +1200,17 @@ pub const BytecodeEmitter = struct {
             break :blk dst;
         } else if (unwrapped.data == .identifier) blk: {
             const name = unwrapped.data.identifier;
-            if (self.scope.localSlot(name) == null or self.scope.capturesLocal(name)) {
-                global_call_name = name;
-                break :blk try self.allocRegister();
+            if (self.resolveBinding(name)) |b| {
+                if (!b.initialized) return error.UnsupportedSyntax;
+                if (b.captured) {
+                    global_call_name = name;
+                    break :blk try self.allocRegister();
+                }
+                break :blk try self.emitExpression(call.callee);
             }
-            break :blk try self.emitExpression(call.callee);
+            if (std.mem.eql(u8, name, "arguments")) return error.UnsupportedSyntax;
+            global_call_name = name;
+            break :blk try self.allocRegister();
         } else try self.emitExpression(call.callee);
         if (self.next_register != @as(u16, callee) + 1) return error.UnsupportedSyntax;
         const argument_slots: u16 = std.math.cast(u16, call.args.len) orelse return error.TooManyRegisters;

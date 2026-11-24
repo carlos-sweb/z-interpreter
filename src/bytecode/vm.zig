@@ -872,6 +872,18 @@ noinline fn throwValueOp(
     op: codeblock.Op,
 ) !*CallFrame {
     @branchHint(.cold);
+    if (op.b == 1) {
+        if (frame_count.* > 0) {
+            if (frames[frame_count.* - 1].interp) |it| {
+                _ = it.throwError(.type_error, "Assignment to constant variable.", .{}) catch {};
+                if (it.pending_exception) |thrown| {
+                    it.pending_exception = null;
+                    return handleJsThrow(frames, frame_count, registers, reg_top, catch_stack, catch_top, thrown);
+                }
+            }
+        }
+        return error.UnsupportedOpcode;
+    }
     const thrown = (try getRegister(frame_regs, op.a)).retain();
     return handleJsThrow(frames, frame_count, registers, reg_top, catch_stack, catch_top, thrown);
 }
@@ -1192,6 +1204,31 @@ pub fn jitPrepareHoistedArray(ctx: *codeblock.OsrContext, box_addr: usize, flags
     }
     if (arr.items.items.len > 0x7FFF_F000) return 1;
     return 0;
+}
+
+pub noinline fn jitPrepareHoistedTypedArray(ctx: *codeblock.OsrContext, box_addr: usize, expected_kind: u64, out_slot: *[2]u64) callconv(.c) u64 {
+    const frame: *CallFrame = @ptrCast(@alignCast(ctx.frame_ptr));
+    const box: *zvalue.Rc(zvalue.TypedArrayBox) = @ptrFromInt(box_addr);
+    const ta = &box.value;
+    if (@intFromEnum(ta.kind) != expected_kind) return 1;
+    if (!ta.owner.isArrayBuffer()) return 1;
+    const ab = &ta.owner.asArrayBuffer().value;
+    if (ab.isDetached()) return 1;
+    if (ta.len > 0x7FFF_F000) return 1;
+    const elem_bytes = std.math.mul(usize, ta.len, ta.kind.elemSize()) catch return 1;
+    const byte_end = std.math.add(usize, ta.byte_offset, elem_bytes) catch return 1;
+    if (byte_end > ab.bytes.len) return 1;
+    if (frame.interp) |it| {
+        if (it.array_props.get(box_addr) != null) return 1;
+        if (it.proto_refs.get(box_addr) != null) return 1;
+    }
+    out_slot[0] = @intFromPtr(ab.bytes.ptr) + ta.byte_offset;
+    out_slot[1] = ta.len;
+    return 0;
+}
+
+pub noinline fn jitF64ToInt32(bits: u64) callconv(.c) i32 {
+    return numberToInt32(@bitCast(bits));
 }
 
 pub fn jitLoadGlobal(ctx: *codeblock.OsrContext, regs: [*]JSValue, dst: u32, name_ptr: [*]const u8, name_len: usize) callconv(.c) u64 {
