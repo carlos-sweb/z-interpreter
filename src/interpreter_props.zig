@@ -1273,9 +1273,9 @@ pub fn typedArrayProto(self: *Interpreter, kind: zvalue.TypedKind) JSValue {
 /// on a full miss. This is how the primitive types (array/string/date/...)
 /// resolve their methods now that those live on real prototype objects.
 pub fn getFromProto(self: *Interpreter, receiver: JSValue, proto: JSValue, key: []const u8) anyerror!?JSValue {
-    if (!proto.isObject()) return null;
+    const obj_proto = if (proto.isObject()) proto else if (proto.isFunction()) try self.functionStatics(proto) else return null;
     const arena = self.gc_allocator;
-    var current: ?*const @TypeOf(proto.asObject().value) = &proto.asObject().value;
+    var current: ?*const @TypeOf(obj_proto.asObject().value) = &obj_proto.asObject().value;
     while (current) |o| : (current = o.getPrototype()) {
         const rec = o.getOwnRecord(key) orelse continue;
         if (rec.isAccessor()) {

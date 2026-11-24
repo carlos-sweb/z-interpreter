@@ -1074,6 +1074,8 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
         },
         .fiber_state => |fs| {
             if (fs.this_value) |v| sweeper.value(v);
+            if (fs.super_proto) |v| sweeper.value(v);
+            if (fs.home_object) |v| sweeper.value(v);
             for (fs.args) |a| sweeper.value(a);
             sweeper.value(fs.resume_value);
             if (fs.yielded) |v| sweeper.value(v);

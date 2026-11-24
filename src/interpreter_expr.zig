@@ -125,11 +125,9 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
             .not_found => return self.throwError(.reference_error, "{s} is not defined", .{name}),
         },
         .this_expr => {
-            if (self.pending_field_init) |pending| {
-                if (env.resolvePrivateCtx()) |pctx| {
-                    if (pending == pctx) {
-                        return self.throwError(.reference_error, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor", .{});
-                    }
+            if (env.resolveThisEnv()) |te| {
+                if (!te.this_initialized) {
+                    return self.throwError(.reference_error, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor", .{});
                 }
             }
             return env.resolveThis();
@@ -279,23 +277,16 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
             // getProperty's receiver rule -- close enough for this
             // narrow phase).
             if (m.object.data == .super_expr) {
+                const sproto = try resolveSuperBase(self, env);
+                defer sproto.deinit();
                 const pk = try self.memberKeyString(env, m);
                 defer pk.free(self.gc_allocator);
-                if (env.resolveSuperHome()) |home| {
-                    defer home.deinit();
-                    const p = home.asObject().value.getPrototype();
-                    const sproto: JSValue = if (p) |pp| blk: {
-                        const Box = @TypeOf(home.asObject().*);
-                        const box: *Box = @fieldParentPtr("value", pp);
-                        break :blk (JSValue.fromObject(box)).retain();
-                    } else JSValue.NULL;
-                    defer sproto.deinit();
-                    return try self.getProperty(sproto, pk.key);
+                const this_v = env.resolveThis();
+                defer this_v.deinit();
+                if (sproto.isNull() or sproto.isUndefined()) {
+                    return self.throwError(.type_error, "Cannot read properties of null (reading '{s}')", .{pk.key});
                 }
-                const sproto = env.resolveSuperProto() orelse
-                    return self.throwError(.syntax_error, "'super' keyword unexpected here", .{});
-                defer sproto.deinit();
-                return try self.getProperty(sproto, pk.key);
+                return (try self.getFromProto(this_v, sproto, pk.key)) orelse JSValue.UNDEFINED;
             }
             const obj_opt = if (isOptionalChain(m.object)) try evalOptionalChain(self, env, m.object) else try self.evalExpression(env, m.object);
             const obj = obj_opt orelse return JSValue.UNDEFINED;
@@ -718,6 +709,29 @@ pub fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSV
 }
 
 pub fn evalAssignment(self: *Interpreter, env: *Environment, a: anytype) anyerror!JSValue {
+    if (a.op == .assign and a.target.data == .member and a.target.data.member.object.data == .super_expr) {
+        const m = a.target.data.member;
+        const sproto = try resolveSuperBase(self, env);
+        defer sproto.deinit();
+        const receiver = env.resolveThis();
+        defer receiver.deinit();
+        var key_owned: ?[]const u8 = null;
+        defer if (key_owned) |ko| self.gc_allocator.free(ko);
+        const prop_val: ?JSValue = if (m.computed) try self.evalExpression(env, m.property) else null;
+        defer if (prop_val) |pv| pv.deinit();
+        const value = try self.evalExpression(env, a.value);
+        errdefer value.deinit();
+        const key: []const u8 = if (prop_val) |pv| blk: {
+            const ko = try self.encodeKey(pv);
+            key_owned = ko;
+            break :blk ko;
+        } else switch (m.property.data) {
+            .identifier => |name| name,
+            else => return error.NotImplemented,
+        };
+        try assignSuperProperty(self, sproto, receiver, key, value);
+        return value;
+    }
     if (a.op == .assign) {
         const value = try self.evalExpression(env, a.value);
         errdefer value.deinit();
@@ -891,6 +905,28 @@ fn rejectSymbolOperands(self: *Interpreter, a: JSValue, b: JSValue) anyerror!voi
     }
 }
 
+fn assignSuperProperty(self: *Interpreter, sproto: JSValue, receiver: JSValue, key: []const u8, value: JSValue) anyerror!void {
+    const obj_proto: ?JSValue = if (sproto.isObject()) sproto else if (sproto.isFunction()) try self.functionStatics(sproto) else null;
+    if (obj_proto) |op| {
+        var cur: ?*const @TypeOf(op.asObject().value) = &op.asObject().value;
+        while (cur) |o| : (cur = o.getPrototype()) {
+            if (o.getOwnRecord(key)) |rec| {
+                if (rec.isAccessor()) {
+                    const setter = rec.setter orelse
+                        return self.throwError(.type_error, "Cannot set property {s} of #<Object> which has only a getter", .{key});
+                    _ = try self.callValue(setter, receiver, &.{value}, key);
+                    return;
+                }
+                if (!rec.descriptor.writable) {
+                    return self.throwError(.type_error, "Cannot assign to read only property '{s}'", .{key});
+                }
+                break;
+            }
+        }
+    }
+    try self.setPropertyOnValue(receiver, key, value);
+}
+
 pub fn assignTo(self: *Interpreter, env: *Environment, target: *zparser.Node, value: JSValue) anyerror!void {
     switch (target.data) {
         // env.assign takes ownership -- retain, matching bindPattern's
@@ -902,6 +938,34 @@ pub fn assignTo(self: *Interpreter, env: *Environment, target: *zparser.Node, va
         },
         .paren => |inner| try self.assignTo(env, inner, value),
         .member => |m| {
+            if (m.object.data == .super_expr) {
+                const sproto = try resolveSuperBase(self, env);
+                defer sproto.deinit();
+                const pk = try self.memberKeyString(env, m);
+                defer pk.free(self.gc_allocator);
+                const receiver = env.resolveThis();
+                defer receiver.deinit();
+                if (sproto.isObject()) {
+                    var cur: ?*const @TypeOf(sproto.asObject().value) = &sproto.asObject().value;
+                    while (cur) |o| : (cur = o.getPrototype()) {
+                        if (o.getOwnRecord(pk.key)) |rec| {
+                            if (rec.isAccessor()) {
+                                const setter = rec.setter orelse
+                                    return self.throwError(.type_error, "Cannot set property {s} of #<Object> which has only a getter", .{pk.key});
+                                _ = try self.callValue(setter, receiver, &.{value}, pk.key);
+                                return;
+                            }
+                            if (!rec.descriptor.writable) {
+                                return self.throwError(.type_error, "Cannot assign to read only property '{s}'", .{pk.key});
+                            }
+                            break;
+                        }
+                    }
+                } else if (sproto.isNull() or sproto.isUndefined()) {
+                    // Super base is null: ordinary Set falls through to receiver (which throws if receiver is not object).
+                }
+                return self.setPropertyOnValue(receiver, pk.key, value);
+            }
             const obj = try self.evalExpression(env, m.object);
             // Owned (evalExpression's); the setters only borrow it.
             defer obj.deinit();
@@ -912,6 +976,21 @@ pub fn assignTo(self: *Interpreter, env: *Environment, target: *zparser.Node, va
         },
         else => return error.NotImplemented,
     }
+}
+
+fn resolveSuperBase(self: *Interpreter, env: *Environment) anyerror!JSValue {
+    if (env.resolveThisEnv()) |te| {
+        if (!te.this_initialized) {
+            return self.throwError(.reference_error, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor", .{});
+        }
+    }
+    if (env.resolveSuperHome()) |home| {
+        defer home.deinit();
+        const object_builtins = @import("object_builtins.zig");
+        return object_builtins.objectGetPrototypeOf(@ptrCast(self), self.gc_allocator, JSValue.UNDEFINED, &.{home});
+    }
+    return env.resolveSuperProto() orelse
+        return self.throwError(.syntax_error, "'super' keyword unexpected here", .{});
 }
 
 pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSValue {
@@ -925,29 +1004,52 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
         defer sctor.deinit();
         const args = try self.evalArgs(env, c.args);
         defer freeArgs(self, args);
+        if (!self.isConstructor(sctor)) {
+            return self.throwError(.type_error, "Super constructor is not a constructor", .{});
+        }
         const prev_target = self.construct_target;
         const prev_new_target = self.construct_new_target;
         const cur_nt = env.resolveNewTarget();
         defer cur_nt.deinit();
-        self.construct_target = sctor.asFunction().value.ctx;
+        self.construct_target = if (sctor.isFunction()) sctor.asFunction().value.ctx else null;
         self.construct_new_target = cur_nt.retain();
         defer {
             self.construct_target = prev_target;
             if (self.construct_new_target) |nt| nt.deinit();
             self.construct_new_target = prev_new_target;
         }
-        const this_v = env.resolveThis();
+        const this_env = env.resolveThisEnv();
+        const this_v = if (this_env) |te| (te.this_value orelse JSValue.UNDEFINED).retain() else env.resolveThis();
         defer this_v.deinit();
-        const result = try sctor.asFunction().value.call(sctor.asFunction().value.ctx, arena, this_v, args);
-        // A Temporal base constructor returns the branded exotic it created.
-        // Adopt it as the derived constructor's this only when commit 2 gave
-        // it an explicit newTarget prototype; ordinary super() returns keep
-        // the provisional ordinary instance.
-        if ((result.isTemporal() and self.temporal_protos.contains(@intFromPtr(result.asTemporal()))) or result.isTypedArray() or result.isArrayBuffer() or result.isDataView() or result.isSet() or result.isMap()) {
-            if (env.this_value) |previous| previous.deinit();
-            env.this_value = result.retain();
-            if (self.adopted_super_this) |previous| previous.deinit();
-            self.adopted_super_this = result.retain();
+        const result = if (sctor.isFunction())
+            try sctor.asFunction().value.call(sctor.asFunction().value.ctx, arena, this_v, args)
+        else
+            try self.constructValue(sctor, args, "super");
+        if (this_env) |te| {
+            if (te.this_initialized) {
+                result.deinit();
+                return self.throwError(.reference_error, "Super constructor may only be called once", .{});
+            }
+            const iclass = @import("interpreter_class.zig");
+            const sctor_is_js = sctor.isProxy() or (sctor.isFunction() and (sctor.asFunction().value.call == iclass.closureCall or sctor.asFunction().value.call == iclass.classConstructorCall));
+            const should_adopt = (sctor_is_js and @import("builtin_helpers.zig").isObjectLike(result)) or
+                result.isArray() or
+                (result.isTemporal() and self.temporal_protos.contains(@intFromPtr(result.asTemporal()))) or
+                result.isTypedArray() or result.isArrayBuffer() or result.isDataView() or result.isSet() or result.isMap();
+            if (should_adopt) {
+                if (result.isArray() and this_v.isObject()) {
+                    if (this_v.asObject().value.getPrototype()) |pp| {
+                        const Box = @TypeOf(this_v.asObject().*);
+                        const box: *Box = @fieldParentPtr("value", pp);
+                        try self.setOwnedPrototype(result, JSValue.fromObject(box));
+                    }
+                }
+                if (te.this_value) |previous| previous.deinit();
+                te.this_value = result.retain();
+                if (self.adopted_super_this) |previous| previous.deinit();
+                self.adopted_super_this = result.retain();
+            }
+            te.this_initialized = true;
         }
         // The derived class's own instance fields initialize exactly
         // when super() returns (spec order: parent fields ran during
@@ -955,9 +1057,13 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
         if (self.pending_field_init) |p| {
             self.pending_field_init = null;
             const pc: *ClassCtx = @ptrCast(@alignCast(p));
-            const this_v2 = env.resolveThis();
+            const this_v2 = if (this_env) |te| (te.this_value orelse JSValue.UNDEFINED).retain() else env.resolveThis();
             defer this_v2.deinit();
             try self.runInstanceFields(pc, this_v2);
+        }
+        if (this_env) |te| {
+            if (!zvalue.equality.strictEquals(result, this_v)) result.deinit();
+            return (te.this_value orelse JSValue.UNDEFINED).retain();
         }
         return result;
     }
@@ -965,39 +1071,23 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
     // invoked with the current `this` -- the whole point of super.
     if (c.callee.data == .member and c.callee.data.member.object.data == .super_expr) {
         const m = c.callee.data.member;
+        const sproto = try resolveSuperBase(self, env);
+        defer sproto.deinit();
         const pk = try self.memberKeyString(env, m);
         defer pk.free(self.gc_allocator);
-        // Same home_object-first resolution as the `.member` GET case
-        // above (see its own comment for why) -- duplicated here rather
-        // than shared because this branch also needs the method value
-        // itself (to validate callability) before invoking with the
-        // enclosing `this`, not the prototype.
-        const sproto: JSValue = blk: {
-            if (env.resolveSuperHome()) |home| {
-                defer home.deinit();
-                const p = home.asObject().value.getPrototype();
-                break :blk if (p) |pp| inner: {
-                    const Box = @TypeOf(home.asObject().*);
-                    const box: *Box = @fieldParentPtr("value", pp);
-                    break :inner (JSValue.fromObject(box)).retain();
-                } else JSValue.NULL;
-            }
-            // resolveSuperProto already returns an owned reference
-            // (Etapa 1) -- no extra .retain() needed here anymore.
-            break :blk env.resolveSuperProto() orelse
-                return self.throwError(.syntax_error, "'super' keyword unexpected here", .{});
-        };
-        defer sproto.deinit();
-        const method = try self.getProperty(sproto, pk.key);
-        defer method.deinit();
-        if (!method.isFunction()) {
-            return self.throwError(.type_error, "(intermediate value).{s} is not a function", .{pk.key});
-        }
-        const args = try self.evalArgs(env, c.args);
-        defer freeArgs(self, args);
         const this_v = env.resolveThis();
         defer this_v.deinit();
-        return try method.asFunction().value.call(method.asFunction().value.ctx, arena, this_v, args);
+        if (sproto.isNull() or sproto.isUndefined()) {
+            return self.throwError(.type_error, "Cannot read properties of null (reading '{s}')", .{pk.key});
+        }
+        const method = (try self.getFromProto(this_v, sproto, pk.key)) orelse JSValue.UNDEFINED;
+        defer method.deinit();
+        const args = try self.evalArgs(env, c.args);
+        defer freeArgs(self, args);
+        if (!method.isFunction() and !method.isProxy()) {
+            return self.throwError(.type_error, "(intermediate value).{s} is not a function", .{pk.key});
+        }
+        return try self.callValue(method, this_v, args, pk.key);
     }
     var this_value: JSValue = JSValue.UNDEFINED;
     defer this_value.deinit();

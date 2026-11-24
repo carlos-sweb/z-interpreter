@@ -413,7 +413,7 @@ pub fn makeClosure(self: *Interpreter, env: *Environment, fnode: *zfunctions.Fun
 /// resolves inside the body) and the declaring class's private identity
 /// (so `this.#x` resolves). Safe cast: makeClosure always installs a
 /// ClosureCtx as the ctx of the closures it creates.
-pub fn makeMethodClosure(self: *Interpreter, env: *Environment, fnode: *zfunctions.FunctionNode, super_proto: ?JSValue, private_ctx: ?*anyopaque) anyerror!JSValue {
+pub fn makeMethodClosure(self: *Interpreter, env: *Environment, fnode: *zfunctions.FunctionNode, super_proto: ?JSValue, private_ctx: ?*anyopaque, home_object: ?JSValue) anyerror!JSValue {
     const v = try self.makeClosure(env, fnode);
     const cc: *ClosureCtx = @ptrCast(@alignCast(v.asFunction().value.ctx));
     // Etapa 2 de uniform-ownership-contract.md: ClosureCtx lives as
@@ -421,6 +421,7 @@ pub fn makeMethodClosure(self: *Interpreter, env: *Environment, fnode: *zfunctio
     // shape as Environment's this_value/super_proto -- needs its own
     // retained copy now that a discarded value can actually be freed.
     if (super_proto) |sp| cc.super_proto = sp.retain();
+    if (home_object) |ho| cc.home_object = ho.retain();
     cc.private_ctx = private_ctx;
     cc.is_strict = true;
     return v;
@@ -784,7 +785,7 @@ pub fn runInstanceFields(self: *Interpreter, cctx: *ClassCtx, instance: JSValue)
             errdefer v.deinit();
             if (fd.value) |vexpr| try self.maybeNameAnonymousValue(vexpr, v, fieldDisplayName(fd.key));
         }
-        const is_private = fd.key.len > 0 and fd.key[0] == 0;
+        const is_private = fd.key.len >= 2 and fd.key[0] == 0 and fd.key[1] == 'P';
         const target_obj = blk: {
             errdefer v.deinit();
             break :blk if (instance.isObject())
@@ -796,6 +797,10 @@ pub fn runInstanceFields(self: *Interpreter, cctx: *ClassCtx, instance: JSValue)
         };
         if (is_private) {
             const target = &target_obj.asObject().value;
+            if (target.getOwnRecord(fd.key) != null) {
+                v.deinit();
+                return self.throwError(.type_error, "Cannot initialize private field twice on the same object", .{});
+            }
             const saved_frozen = target.is_frozen;
             const saved_ext = target.is_extensible;
             target.is_frozen = false;
@@ -829,21 +834,30 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
     // Owned (evalExpression's): ClassCtx retains its own copy below.
     defer if (super_ctor) |sc| sc.deinit();
     var super_proto: ?JSValue = null;
+    defer if (super_proto) |sp| sp.deinit();
+    const is_derived = cnode.superclass != null;
     if (cnode.superclass) |sc_expr| {
         const sc = try self.evalExpression(env, sc_expr);
-        if (!sc.isFunction() or !sc.asFunction().value.constructable) {
-            defer sc.deinit();
-            const shown = try coercion.toDisplayString(arena, sc);
-            defer arena.free(shown);
-            return self.throwError(.type_error, "Class extends value {s} is not a constructor or null", .{shown});
+        if (sc.isNull()) {
+            super_proto = JSValue.NULL;
+            if (self.protos.function.isObject()) {
+                super_ctor = self.protos.function.retain();
+            }
+        } else {
+            if (!self.isConstructor(sc)) {
+                defer sc.deinit();
+                const shown = try coercion.toDisplayString(arena, sc);
+                defer arena.free(shown);
+                return self.throwError(.type_error, "Class extends value {s} is not a constructor or null", .{shown});
+            }
+            super_ctor = sc;
+            const parent_proto = try self.getProperty(sc, "prototype");
+            if (!parent_proto.isObject() and !parent_proto.isNull()) {
+                parent_proto.deinit();
+                return self.throwError(.type_error, "Class extends value does not have a valid prototype property", .{});
+            }
+            super_proto = parent_proto;
         }
-        super_ctor = sc;
-        const parent_proto = try self.getProperty(sc, "prototype");
-        defer parent_proto.deinit();
-        if (!parent_proto.isObject()) {
-            return self.throwError(.type_error, "Class extends value does not have a valid prototype property", .{});
-        }
-        super_proto = parent_proto;
     }
 
     // Named classes can self-reference inside method bodies (same
@@ -853,10 +867,11 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
     var proto = try self.gcNewObject();
     // The parent's prototype/statics are held by this class's own
     // references, not only by the ClassCtx (which only the collector frees).
-    if (super_proto) |sp|
-        try self.setOwnedPrototype(proto, sp)
-    else if (self.protos.object.isObject())
+    if (super_proto) |sp| {
+        if (!sp.isNull()) try self.setOwnedPrototype(proto, sp);
+    } else if (self.protos.object.isObject()) {
         try proto.asObject().value.setPrototype(&self.protos.object.asObject().value);
+    }
 
     var ctor_fnode: ?*zfunctions.FunctionNode = null;
     for (cnode.elements) |el| {
@@ -894,6 +909,7 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
         .name = cnode.name orelse "",
         .super_ctor = if (super_ctor) |sc| sc.retain() else null,
         .super_proto = if (super_proto) |sp| sp.retain() else null,
+        .is_derived = is_derived,
         .private_names = private_names_list.items,
         .outer_private_ctx = outer_private_ctx,
         .source_text = class_src_text,
@@ -911,13 +927,15 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
     try proto.asObject().value.defineProperty("constructor", class_fn.retain(), .{ .writable = true, .enumerable = false, .configurable = true });
     class_fn.asFunction().value.prototype = proto;
 
-    // A derived class always gets a statics bag chained to the
-    // parent's (forcing the parent's into existence) so static
-    // inheritance works even when this class declares no statics.
+    // A derived class chains [[Prototype]] of the constructor to its superclass
+    // (or Function.prototype for `extends null`), and chains its statics bag
+    // to the parent's bag for static inheritance.
     if (super_ctor) |parent| {
-        const parent_bag = try self.functionStatics(parent);
-        const bag = try self.functionStatics(class_fn);
-        try self.setOwnedPrototype(bag, parent_bag);
+        if (parent.isFunction()) {
+            const parent_bag = try self.functionStatics(parent);
+            const bag = try self.functionStatics(class_fn);
+            try self.setOwnedPrototype(bag, parent_bag);
+        }
     }
 
     // The class's own name binds BEFORE static elements run (spec:
@@ -1007,7 +1025,8 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
         // Methods / accessors.
         if (!el.is_static and el.kind == .method and el.key == .ident and std.mem.eql(u8, el.key.ident, "constructor")) continue;
         const m_super = if (el.is_static) static_super_proto else inst_super_proto;
-        const m = try self.makeMethodClosure(closure_env, el.function.?, m_super, cctx);
+        const m_home = if (el.is_static) try self.functionStatics(class_fn) else proto;
+        const m = try self.makeMethodClosure(closure_env, el.function.?, m_super, cctx, m_home);
         const target = if (el.is_static) try self.functionStatics(class_fn) else proto;
         // Real spec (ClassDefinitionEvaluation/PropertyDefinitionEvaluation
         // for MethodDefinition): every class method/accessor is installed
@@ -1257,7 +1276,7 @@ pub fn closureCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
         return closure_ctx.interp.makeGeneratorObject(fnode, closure_ctx.closure_env, this, closure_ctx.super_proto, closure_ctx.private_ctx, args, closure_ctx.home_object);
     }
     if (fnode.is_async) {
-        return closure_ctx.interp.runAsyncFunction(fnode, closure_ctx.closure_env, this, closure_ctx.private_ctx, args);
+        return closure_ctx.interp.runAsyncFunction(fnode, closure_ctx.closure_env, this, closure_ctx.super_proto, closure_ctx.private_ctx, args, closure_ctx.home_object);
     }
     return invokeFunctionNode(closure_ctx.interp, fnode, closure_ctx.closure_env, allocator, this, closure_ctx.super_proto, null, closure_ctx.private_ctx, args, closure_ctx.home_object);
 }
@@ -1282,12 +1301,12 @@ pub fn classConstructorCall(ctx: *anyopaque, allocator: Allocator, this_value: J
     // (spec: right after this-creation); a DERIVED class defers them until
     // super() returns -- armed here, consumed by evalCall's super() branch
     // (save/restore keeps nested constructions inside the body correct).
-    if (cctx.super_ctor == null) {
+    if (!cctx.is_derived) {
         try self.runInstanceFields(cctx, this_value);
     }
 
     if (cctx.ctor_fnode) |fnode| {
-        if (cctx.super_ctor != null) {
+        if (cctx.is_derived) {
             const prev_pending = self.pending_field_init;
             const prev_adopted = self.adopted_super_this;
             self.pending_field_init = cctx;
@@ -1297,12 +1316,18 @@ pub fn classConstructorCall(ctx: *anyopaque, allocator: Allocator, this_value: J
                 if (self.adopted_super_this) |value| value.deinit();
                 self.adopted_super_this = prev_adopted;
             }
-            const result = try invokeFunctionNode(self, fnode, cctx.closure_env, allocator, this_value, cctx.super_proto, cctx.super_ctor, cctx, args, null);
+            const call_env = try prepareCallEnv(self, fnode, cctx.closure_env, allocator, this_value, cctx.super_proto, cctx.super_ctor, cctx, args, null, false);
+            call_env.this_initialized = false;
+            defer if (!call_env.escaping) {
+                call_env.destroy(self.gc_allocator);
+            };
+            const result = try evalPreparedFunctionBody(self, fnode, call_env);
             if (result.isUndefined()) {
-                if (self.pending_field_init != null) {
+                if (!call_env.this_initialized) {
                     return self.throwError(.reference_error, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor", .{});
                 }
                 if (self.adopted_super_this) |value| return value.retain();
+                return call_env.this_value.?.retain();
             } else if (!@import("builtin_helpers.zig").isObjectLike(result)) {
                 result.deinit();
                 return self.throwError(.type_error, "Derived constructors may only return object or undefined", .{});
@@ -1314,11 +1339,23 @@ pub fn classConstructorCall(ctx: *anyopaque, allocator: Allocator, this_value: J
     // Implicit constructor: a derived class forwards this + args to its
     // parent (`constructor(...args) { super(...args) }`) and then runs its
     // own field initializers; a base class is a no-op.
-    if (cctx.super_ctor) |parent| {
-        self.construct_target = parent.asFunction().value.ctx;
+    if (cctx.is_derived) {
+        const parent = cctx.super_ctor orelse return self.throwError(.type_error, "Super constructor is not a constructor", .{});
+        if (!self.isConstructor(parent)) {
+            return self.throwError(.type_error, "Super constructor is not a constructor", .{});
+        }
+        self.construct_target = if (parent.isFunction()) parent.asFunction().value.ctx else null;
         defer self.construct_target = null;
-        const parent_result = try parent.asFunction().value.call(parent.asFunction().value.ctx, allocator, this_value, args);
-        if ((parent_result.isTemporal() and self.temporal_protos.contains(@intFromPtr(parent_result.asTemporal()))) or parent_result.isTypedArray() or parent_result.isArrayBuffer() or parent_result.isDataView() or parent_result.isSet() or parent_result.isMap() or parent_result.isArray()) {
+        const parent_result = if (parent.isFunction())
+            try parent.asFunction().value.call(parent.asFunction().value.ctx, allocator, this_value, args)
+        else
+            try self.constructValue(parent, args, "super");
+        const parent_is_js = parent.isProxy() or (parent.isFunction() and (parent.asFunction().value.call == closureCall or parent.asFunction().value.call == classConstructorCall));
+        const should_adopt = (parent_is_js and @import("builtin_helpers.zig").isObjectLike(parent_result)) or
+            parent_result.isArray() or
+            (parent_result.isTemporal() and self.temporal_protos.contains(@intFromPtr(parent_result.asTemporal()))) or
+            parent_result.isTypedArray() or parent_result.isArrayBuffer() or parent_result.isDataView() or parent_result.isSet() or parent_result.isMap();
+        if (should_adopt) {
             errdefer parent_result.deinit();
             if (parent_result.isArray() and this_value.isObject()) {
                 if (this_value.asObject().value.getPrototype()) |pp| {
@@ -1330,11 +1367,10 @@ pub fn classConstructorCall(ctx: *anyopaque, allocator: Allocator, this_value: J
             try self.runInstanceFields(cctx, parent_result);
             return parent_result;
         }
-        // Ordinary parent constructors return the provisional instance (or
-        // another non-Temporal value) without transferring ownership here.
-        // Keep the old path intact: constructValue retains this_value and
-        // returns it after this implicit constructor yields undefined.
+        // Ordinary parent constructors return the provisional instance without
+        // transferring ownership here (e.g. boxPrimitiveIfConstructed).
         try self.runInstanceFields(cctx, this_value);
+        return JSValue.UNDEFINED;
     }
     return JSValue.UNDEFINED;
 }

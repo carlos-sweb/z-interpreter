@@ -58,7 +58,7 @@ fn fiberEntry(arg: *anyopaque) void {
     const res_or_err = if (fs.is_generator)
         evalPreparedFunctionBody(self, fs.fnode, fs.closure_env)
     else
-        invokeFunctionNode(self, fs.fnode, fs.closure_env, arena, fs.this_value, null, null, fs.private_ctx, fs.args, null);
+        invokeFunctionNode(self, fs.fnode, fs.closure_env, arena, fs.this_value, fs.super_proto, null, fs.private_ctx, fs.args, fs.home_object);
     const result = res_or_err catch |err0| {
         if (err0 == error.JsReturn) {
             const rv = self.pending_return orelse JSValue.UNDEFINED;
@@ -1227,7 +1227,7 @@ pub fn makeGeneratorObject(
 /// Calling `async function` starts the body IMMEDIATELY on its fiber
 /// (synchronous until the first await -- real semantics) and returns
 /// the promise; completion settles it from inside the entry.
-pub fn runAsyncFunction(self: *Interpreter, fnode: *zfunctions.FunctionNode, closure_env: *Environment, this_value: ?JSValue, private_ctx: ?*anyopaque, args: []const JSValue) anyerror!JSValue {
+pub fn runAsyncFunction(self: *Interpreter, fnode: *zfunctions.FunctionNode, closure_env: *Environment, this_value: ?JSValue, super_proto: ?JSValue, private_ctx: ?*anyopaque, args: []const JSValue, home_object: ?JSValue) anyerror!JSValue {
     const arena = self.gc_allocator;
     const fs = try arena.create(FiberState);
     fs.* = .{
@@ -1238,6 +1238,8 @@ pub fn runAsyncFunction(self: *Interpreter, fnode: *zfunctions.FunctionNode, clo
         .fnode = fnode,
         .closure_env = closure_env,
         .this_value = if (this_value) |tv| tv.retain() else null,
+        .super_proto = if (super_proto) |sp| sp.retain() else null,
+        .home_object = if (home_object) |ho| ho.retain() else null,
         .private_ctx = private_ctx,
         .args = try retainedCopy(arena, args),
         .promise = try self.gcNewPromise(),

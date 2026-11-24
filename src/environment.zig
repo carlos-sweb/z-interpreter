@@ -73,6 +73,9 @@ pub const Environment = struct {
     private_ctx: ?*anyopaque = null,
     escaping: bool = false,
     in_field_initializer: bool = false,
+    /// False only inside a derived class constructor before `super()` completes
+    /// (ECMA-262 Function Environment Record [[ThisBindingStatus]] == uninitialized).
+    this_initialized: bool = true,
 
     pub fn destroy(self: *Environment, allocator: Allocator) void {
         env_struct_version +%= 1;
@@ -252,6 +255,14 @@ pub const Environment = struct {
         var env: ?*Environment = self;
         while (env) |e| : (env = e.parent) {
             if (e.home_object) |v| return v.retain();
+        }
+        return null;
+    }
+
+    pub fn resolveThisEnv(self: *Environment) ?*Environment {
+        var env: ?*Environment = self;
+        while (env) |e| : (env = e.parent) {
+            if (e.this_value != null) return e;
         }
         return null;
     }

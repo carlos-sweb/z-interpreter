@@ -467,6 +467,8 @@ pub const FiberState = struct {
     fnode: *zfunctions.FunctionNode,
     closure_env: *Environment,
     this_value: ?JSValue,
+    super_proto: ?JSValue = null,
+    home_object: ?JSValue = null,
     /// The declaring class's private identity for method bodies (so
     /// `this.#x` works inside generator/async methods too).
     private_ctx: ?*anyopaque,
@@ -528,6 +530,8 @@ pub const FiberState = struct {
     pub fn traceChildren(self: *const FiberState, visitor: anytype) void {
         visitor.environment(self.closure_env);
         if (self.this_value) |v| visitor.value(v);
+        if (self.super_proto) |v| visitor.value(v);
+        if (self.home_object) |v| visitor.value(v);
         if (self.private_ctx) |pc| classCtxFromOpaque(pc).traceChildren(visitor);
         for (self.args) |a| visitor.value(a);
         visitor.value(self.resume_value);
@@ -555,6 +559,7 @@ pub const ClassCtx = struct {
     name: []const u8,
     super_ctor: ?JSValue,
     super_proto: ?JSValue,
+    is_derived: bool = false,
     /// Instance fields in declaration order, initialized per-instance at
     /// construction time (base classes: at constructor entry; derived
     /// classes: right after super() returns). Keys pre-resolved.
@@ -4198,6 +4203,60 @@ test "Phase 8.2: indirect eval, Array.prototype, iterator slots, OOM RangeError,
         \\var uriErr = false;
         \\try { encodeURI(String.fromCharCode(0xDC00)); } catch (e) { uriErr = e instanceof URIError; }
         \\evalGlobalOk && evalStrictOk && evalThisOk && unscopOk && pushErr && popErr && incOk && tsOk && iterTagOk && iterSlotErr && abErr && uriErr;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
+test "Phase 8.3: extends null, derived this TDZ, double super, dynamic HomeObject, private duplicate" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\class NullSub extends null {
+        \\  constructor() { return { ok: true }; }
+        \\}
+        \\var extNullOk = Object.getPrototypeOf(NullSub.prototype) === null &&
+        \\  Object.getPrototypeOf(NullSub) === Function.prototype &&
+        \\  (new NullSub()).ok === true;
+        \\var extNullSuperErr = false;
+        \\try { new (class extends null {})(); } catch (e) { extNullSuperErr = e instanceof TypeError; }
+        \\class Base { constructor(v) { if (v) return v; } }
+        \\var tdzErr = false;
+        \\try {
+        \\  new (class extends Base { constructor() { this.x = 1; super(); } })();
+        \\} catch (e) { tdzErr = e instanceof ReferenceError; }
+        \\var doubleSuperErr = false;
+        \\try {
+        \\  new (class extends Base { constructor() { super(); super(); } })();
+        \\} catch (e) { doubleSuperErr = e instanceof ReferenceError; }
+        \\var noSuperErr = false;
+        \\try {
+        \\  new (class extends Base { constructor() {} })();
+        \\} catch (e) { noSuperErr = e instanceof ReferenceError; }
+        \\class P1 { get val() { return this.n + 1; } }
+        \\class P2 { get val() { return this.n + 100; } }
+        \\class C extends P1 {
+        \\  constructor() { super(); this.n = 5; }
+        \\  getVal() { return (() => super.val)(); }
+        \\  setSuper(v) { super.prop = v; }
+        \\}
+        \\var c = new C();
+        \\var dyn1 = c.getVal() === 6;
+        \\Object.setPrototypeOf(C.prototype, P2.prototype);
+        \\var dyn2 = c.getVal() === 105;
+        \\c.setSuper(77);
+        \\var superSetOk = c.prop === 77;
+        \\var custom = {};
+        \\class WithPriv extends Base { #p = 42; getP() { return this.#p; } }
+        \\var inst = new WithPriv(custom);
+        \\var customFieldOk = inst === custom && WithPriv.prototype.getP.call(inst) === 42;
+        \\var dupPrivErr = false;
+        \\try { new WithPriv(custom); } catch (e) { dupPrivErr = e instanceof TypeError; }
+        \\extNullOk && extNullSuperErr && tdzErr && doubleSuperErr && noSuperErr && dyn1 && dyn2 && superSetOk && customFieldOk && dupPrivErr;
     );
     defer res.deinit();
     try testing.expect(res.isBool() and res.asBool());

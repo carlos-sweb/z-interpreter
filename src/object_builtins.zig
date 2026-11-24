@@ -1582,6 +1582,10 @@ pub fn objectGetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: J
         .boolean => self.protos.boolean.retain(),
         .function => |box| blk: {
             const iclass = @import("interpreter_class.zig");
+            if (box.value.call == iclass.classConstructorCall) {
+                const cctx: *interpreter_mod.ClassCtx = @ptrCast(@alignCast(box.value.ctx));
+                if (cctx.super_ctor) |sc| break :blk sc.retain();
+            }
             if (box.value.call == iclass.closureCall) {
                 const cctx: *interpreter_mod.ClosureCtx = @ptrCast(@alignCast(box.value.ctx));
                 if (cctx.function_node.is_generator and cctx.function_node.is_async and self.protos.async_generator_function_proto.isObject()) {
