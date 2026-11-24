@@ -5640,3 +5640,58 @@ test "baseline JIT Phase J1: new Array(n) bytecode+OSR, member compound assign s
     try std.testing.expect(res.isNumber());
     try std.testing.expect(res.asNumber() > 0);
 }
+
+test "bytecode VM regressions: array defineProperty accessor, omitted params reset, and try/catch NotImplemented" {
+    const allocator = std.testing.allocator;
+    var writer = std.Io.Writer.Allocating.init(allocator);
+    defer writer.deinit();
+    var interp = try @import("../interpreter.zig").Interpreter.init(allocator, &writer.writer);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+
+    const res = try interp.run(
+        \\// 1. Array index accessor defined via Object.defineProperty read from bytecode
+        \\function readElem(obj, key) {
+        \\    if (obj[key] !== 11) throw new Error("bad elem");
+        \\    return obj[key];
+        \\}
+        \\var arr = [];
+        \\Object.defineProperty(arr, "0", { get: function() { return 11; }, configurable: false });
+        \\var r1 = readElem(arr, "0") + readElem(arr, 0);
+        \\
+        \\// 2. Omitted parameters in bytecode calls must be undefined, not stale primitives from prior frame
+        \\function dirtyFrame(a, b, c, d) {
+        \\    var x = a + b + c + d;
+        \\    return x;
+        \\}
+        \\function checkOmitted(a, b, c, d) {
+        \\    if (c !== undefined || d !== undefined) throw new Error("stale param");
+        \\    return a + b;
+        \\}
+        \\function driver() {
+        \\    var s = dirtyFrame(10, 20, 30, 40);
+        \\    var t = checkOmitted(1, 2);
+        \\    return s + t;
+        \\}
+        \\var r2 = driver();
+        \\
+        \\// 3. Bytecode try/catch must catch TypeError from class extends arrow function (NotImplemented gap)
+        \\function assertThrowsTypeError(fn) {
+        \\    try {
+        \\        fn();
+        \\    } catch (e) {
+        \\        if (e instanceof TypeError) return 1;
+        \\        throw new Error("wrong error");
+        \\    }
+        \\    throw new Error("did not throw");
+        \\}
+        \\var r3 = assertThrowsTypeError(() => {
+        \\    var C = class extends (() => {}) {};
+        \\});
+        \\
+        \\r1 * 1000 + r2 + r3;
+    );
+    defer res.deinit();
+    try std.testing.expect(res.isNumber());
+    try std.testing.expectEqual(@as(f64, 22104), res.asNumber());
+}

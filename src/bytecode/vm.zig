@@ -236,6 +236,15 @@ fn keyToString(allocator: Allocator, key_val: JSValue, buf: *[32]u8) ![]const u8
     return error.UnsupportedOpcode;
 }
 
+fn isCanonicalArrayIndexKey(key: []const u8) bool {
+    if (key.len == 0) return false;
+    if (key.len > 1 and key[0] == '0') return false;
+    for (key) |ch| {
+        if (ch < '0' or ch > '9') return false;
+    }
+    return true;
+}
+
 fn getProp(frame: *CallFrame, allocator: Allocator, obj: JSValue, key: []const u8) !JSValue {
     if (frame.interp) |it| {
         if (it.global_object) |go| {
@@ -270,8 +279,14 @@ fn getProp(frame: *CallFrame, allocator: Allocator, obj: JSValue, key: []const u
         if (std.mem.eql(u8, key, "length")) {
             return JSValue.fromNumber(@floatFromInt(box.value.length()));
         }
-        const idx = std.fmt.parseInt(usize, key, 10) catch return if (frame.interp) |it| it.getProperty(obj, key) else JSValue.UNDEFINED;
-        if (idx >= box.value.length()) return if (frame.interp) |it| it.getProperty(obj, key) else JSValue.UNDEFINED;
+        const has_props = if (frame.interp) |it| it.array_props.get(@intFromPtr(box)) != null else false;
+        if (box.value.holey == null and !has_props and isCanonicalArrayIndexKey(key)) {
+            const idx = std.fmt.parseInt(usize, key, 10) catch return if (frame.interp) |it| it.getProperty(obj, key) else JSValue.UNDEFINED;
+            if (idx < box.value.items.items.len) return box.value.items.items[idx].retain();
+        }
+        if (frame.interp) |it| return it.getProperty(obj, key);
+        const idx = std.fmt.parseInt(usize, key, 10) catch return JSValue.UNDEFINED;
+        if (idx >= box.value.length()) return JSValue.UNDEFINED;
         return box.value.get(idx).retain();
     } else if (obj.isString()) {
         const box = obj.asString();
@@ -368,18 +383,22 @@ fn maybeCompactFilledHoleyArray(arr: *zvalue.ZArray(JSValue)) void {
 
 noinline fn getElem(frame: *CallFrame, allocator: Allocator, obj: JSValue, key_val: JSValue) !JSValue {
     if (obj.isArray() and key_val.isNumber()) {
-        const arr = &obj.asArray().value;
-        const n = key_val.asNumber();
-        if (n >= 0 and !std.math.isNan(n) and !std.math.isInf(n) and n <= 4294967294.0) {
-            const idx: usize = @intFromFloat(n);
-            if (@as(f64, @floatFromInt(idx)) == n) {
-                if (arr.holey == null) {
-                    if (idx < arr.items.items.len) return arr.items.items[idx].retain();
-                    const has_proto_props = if (frame.interp) |it| it.protos.array.isObject() and it.protos.array.asObject().value.properties.count() > 0 else false;
-                    if (!has_proto_props) return JSValue.UNDEFINED;
-                } else if (arr.holey) |h| {
-                    if (h.sparse == null and !h.has_element_descriptors and idx < arr.items.items.len and !arr.isHole(idx)) {
-                        return arr.items.items[idx].retain();
+        const box = obj.asArray();
+        const has_props = if (frame.interp) |it| it.array_props.get(@intFromPtr(box)) != null else false;
+        if (!has_props) {
+            const arr = &box.value;
+            const n = key_val.asNumber();
+            if (n >= 0 and !std.math.isNan(n) and !std.math.isInf(n) and n <= 4294967294.0) {
+                const idx: usize = @intFromFloat(n);
+                if (@as(f64, @floatFromInt(idx)) == n) {
+                    if (arr.holey == null) {
+                        if (idx < arr.items.items.len) return arr.items.items[idx].retain();
+                        const has_proto_props = if (frame.interp) |it| it.protos.array.isObject() and it.protos.array.asObject().value.properties.count() > 0 else false;
+                        if (!has_proto_props) return JSValue.UNDEFINED;
+                    } else if (arr.holey) |h| {
+                        if (h.sparse == null and !h.has_element_descriptors and idx < arr.items.items.len and !arr.isHole(idx)) {
+                            return arr.items.items[idx].retain();
+                        }
                     }
                 }
             }
@@ -1535,7 +1554,11 @@ noinline fn vmCallDispatch(
             &catch_stack,
             &catch_top,
             prop_ic,
-        ) catch |err| {
+        ) catch |err0| {
+            const err = if (err0 == error.NotImplemented and catch_top > 0 and interp != null)
+                interp.?.throwIfGap(err0)
+            else
+                err0;
             if (err == error.JsThrow and catch_top > 0 and interp != null and interp.?.pending_exception != null) {
                 const thrown = interp.?.pending_exception.?;
                 interp.?.pending_exception = null;
@@ -2299,6 +2322,10 @@ noinline fn vmExecLoop(
                         if (needsDeinit(v)) callee_has_rc = true;
                     }
                 }
+                const local_count: usize = callee_block.local_count;
+                if (param_count < local_count) {
+                    @memset(registers[callee_reg_base + param_count .. callee_reg_base + local_count], JSValue.UNDEFINED);
+                }
                 if (!callee_has_rc and !callee_block.jit_failed) {
                     const mut_cb = @constCast(callee_block);
                     mut_cb.call_count +%= 1;
@@ -2390,6 +2417,10 @@ noinline fn vmExecLoop(
                         registers[callee_reg_base + i] = v;
                         if (needsDeinit(v)) callee_has_rc = true;
                     }
+                }
+                const local_count: usize = callee_block.local_count;
+                if (param_count < local_count) {
+                    @memset(registers[callee_reg_base + param_count .. callee_reg_base + local_count], JSValue.UNDEFINED);
                 }
                 if (!callee_has_rc and !callee_block.jit_failed) {
                     const mut_cb = @constCast(callee_block);
