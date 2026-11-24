@@ -455,6 +455,26 @@ pub const Assembler = struct {
         try self.emitByte(modRM(0b11, 6, divisor.low3()));
     }
 
+    pub fn divReg64(self: *Assembler, divisor: Reg) !void {
+        try self.emitByte(rexW(false, divisor.isExt()));
+        try self.emitByte(0xF7);
+        try self.emitByte(modRM(0b11, 6, divisor.low3()));
+    }
+
+    pub fn btReg64Reg64(self: *Assembler, base: Reg, bit: Reg) !void {
+        try self.emitByte(rexW(bit.isExt(), base.isExt()));
+        try self.emitByte(0x0F);
+        try self.emitByte(0xA3);
+        try self.emitByte(modRM(0b11, bit.low3(), base.low3()));
+    }
+
+    pub fn btrReg64Reg64(self: *Assembler, dst: Reg, bit: Reg) !void {
+        try self.emitByte(rexW(bit.isExt(), dst.isExt()));
+        try self.emitByte(0x0F);
+        try self.emitByte(0xB3);
+        try self.emitByte(modRM(0b11, bit.low3(), dst.low3()));
+    }
+
     pub fn idivReg32(self: *Assembler, divisor: Reg) !void {
         try self.emitRex32(false, divisor.isExt());
         try self.emitByte(0xF7);
@@ -664,6 +684,14 @@ pub const Assembler = struct {
     pub fn cvttsd2siReg32Xmm(self: *Assembler, dst: Reg, src: Xmm) !void {
         try self.emitByte(0xF2);
         if (rexSSE(dst.isExt(), src.isExt())) |r| try self.emitByte(r);
+        try self.emitByte(0x0F);
+        try self.emitByte(0x2C);
+        try self.emitByte(modRM(0b11, dst.low3(), src.low3()));
+    }
+
+    pub fn cvttsd2siqReg64Xmm(self: *Assembler, dst: Reg, src: Xmm) !void {
+        try self.emitByte(0xF2);
+        try self.emitByte(rexW(dst.isExt(), src.isExt()));
         try self.emitByte(0x0F);
         try self.emitByte(0x2C);
         try self.emitByte(modRM(0b11, dst.low3(), src.low3()));

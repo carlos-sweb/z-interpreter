@@ -342,16 +342,45 @@ fn setProp(frame: *CallFrame, allocator: Allocator, obj: JSValue, key: []const u
     } else return error.UnsupportedOpcode;
 }
 
+fn maybeCompactFilledHoleyArray(arr: *zvalue.ZArray(JSValue)) void {
+    const h = arr.holey orelse return;
+    if (h.sparse != null or h.has_element_descriptors or !h.length_writable) return;
+    const len = arr.items.items.len;
+    if (len < h.logical_length) return;
+    if (h.is_holey) {
+        const full_words = len >> 6;
+        const mask_words = h.hole_mask.items;
+        if (mask_words.len < full_words) return;
+        for (mask_words[0..full_words]) |w| {
+            if (w != 0) return;
+        }
+        const rem_bits: u6 = @intCast(len & 63);
+        if (rem_bits != 0) {
+            if (full_words >= mask_words.len) return;
+            const rem_mask = (@as(u64, 1) << rem_bits) - 1;
+            if ((mask_words[full_words] & rem_mask) != 0) return;
+        }
+    }
+    h.deinit(arr.allocator);
+    arr.allocator.destroy(h);
+    arr.holey = null;
+}
+
 noinline fn getElem(frame: *CallFrame, allocator: Allocator, obj: JSValue, key_val: JSValue) !JSValue {
     if (obj.isArray() and key_val.isNumber()) {
         const arr = &obj.asArray().value;
-        if (arr.holey == null) {
-            const n = key_val.asNumber();
-            if (n >= 0 and !std.math.isNan(n) and !std.math.isInf(n)) {
-                const idx: usize = @intFromFloat(n);
-                if (@as(f64, @floatFromInt(idx)) == n) {
-                    if (idx < arr.length()) return arr.get(idx).retain();
-                    return JSValue.UNDEFINED;
+        const n = key_val.asNumber();
+        if (n >= 0 and !std.math.isNan(n) and !std.math.isInf(n) and n <= 4294967294.0) {
+            const idx: usize = @intFromFloat(n);
+            if (@as(f64, @floatFromInt(idx)) == n) {
+                if (arr.holey == null) {
+                    if (idx < arr.items.items.len) return arr.items.items[idx].retain();
+                    const has_proto_props = if (frame.interp) |it| it.protos.array.isObject() and it.protos.array.asObject().value.properties.count() > 0 else false;
+                    if (!has_proto_props) return JSValue.UNDEFINED;
+                } else if (arr.holey) |h| {
+                    if (h.sparse == null and !h.has_element_descriptors and idx < arr.items.items.len and !arr.isHole(idx)) {
+                        return arr.items.items[idx].retain();
+                    }
                 }
             }
         }
@@ -387,19 +416,39 @@ noinline fn setElem(frame: *CallFrame, allocator: Allocator, obj: JSValue, key_v
                 return it.setPropertyOnValue(obj, key, val);
             }
         }
-        if (!frozen and !has_props and arr.holey == null) {
+        if (!frozen and !has_props) {
             const n = key_val.asNumber();
-            if (n >= 0 and !std.math.isNan(n) and !std.math.isInf(n)) {
+            if (n >= 0 and !std.math.isNan(n) and !std.math.isInf(n) and n <= 4294967294.0) {
                 const idx: usize = @intFromFloat(n);
                 if (@as(f64, @floatFromInt(idx)) == n) {
-                    if (idx < arr.items.items.len) {
-                        const old = arr.items.items[idx];
-                        arr.items.items[idx] = if (needsDeinit(val)) val.retain() else val;
-                        if (needsDeinit(old)) old.deinit();
-                        return;
-                    } else if (idx == arr.items.items.len) {
-                        try arr.items.append(arr.allocator, if (needsDeinit(val)) val.retain() else val);
-                        return;
+                    if (arr.holey == null) {
+                        if (idx < arr.items.items.len) {
+                            const old = arr.items.items[idx];
+                            arr.items.items[idx] = if (needsDeinit(val)) val.retain() else val;
+                            if (needsDeinit(old)) old.deinit();
+                            return;
+                        } else if (idx == arr.items.items.len) {
+                            try arr.items.append(arr.allocator, if (needsDeinit(val)) val.retain() else val);
+                            return;
+                        }
+                    } else if (arr.holey) |h| {
+                        if (h.sparse == null and !h.has_element_descriptors and h.length_writable) {
+                            if (idx < arr.items.items.len) {
+                                const was_hole = arr.isHole(idx);
+                                const old = arr.items.items[idx];
+                                const retained = if (needsDeinit(val)) val.retain() else val;
+                                try arr.set(idx, retained);
+                                if (!was_hole and needsDeinit(old)) old.deinit();
+                                maybeCompactFilledHoleyArray(arr);
+                                return;
+                            } else if (idx == arr.items.items.len) {
+                                const retained = if (needsDeinit(val)) val.retain() else val;
+                                errdefer if (needsDeinit(retained)) retained.deinit();
+                                try arr.set(idx, retained);
+                                maybeCompactFilledHoleyArray(arr);
+                                return;
+                            }
+                        }
                     }
                 }
             }
@@ -1091,6 +1140,41 @@ pub fn jitGetElemConst(regs: [*]JSValue, dst: u32, arr_reg: u32, idx: u32) callc
     return 0;
 }
 
+pub fn jitCheckHoleyArray(ctx: *codeblock.OsrContext, box_addr: usize) callconv(.c) u8 {
+    const frame: *CallFrame = @ptrCast(@alignCast(ctx.frame_ptr));
+    const box: *ArrayBox = @ptrFromInt(box_addr);
+    const arr = &box.value;
+    if (@hasField(@TypeOf(arr.*), "is_frozen") and arr.is_frozen) return 1;
+    if (frame.interp) |it| {
+        if (it.array_props.get(box_addr) != null) return 1;
+    }
+    if (arr.holey) |h| {
+        if (h.sparse != null or h.has_element_descriptors or !h.length_writable) return 1;
+    }
+    return 0;
+}
+
+pub fn jitSetElemHoleyOrGrow(ctx: *codeblock.OsrContext, box_addr: usize, idx: u32, val_bits: u64) callconv(.c) u8 {
+    if (jitCheckHoleyArray(ctx, box_addr) != 0) return 1;
+    const box: *ArrayBox = @ptrFromInt(box_addr);
+    const arr = &box.value;
+    const val: JSValue = .{ .bits = val_bits };
+    if (idx < arr.items.items.len) {
+        const was_hole = arr.isHole(idx);
+        const old = arr.items.items[idx];
+        if (!was_hole and needsDeinit(old)) return 1;
+        arr.set(idx, val) catch return 1;
+        maybeCompactFilledHoleyArray(arr);
+        return 0;
+    }
+    if (idx <= arr.items.items.len + 1024) {
+        arr.set(idx, val) catch return 1;
+        maybeCompactFilledHoleyArray(arr);
+        return 0;
+    }
+    return 1;
+}
+
 pub fn jitMoveSlot(ctx: *codeblock.OsrContext, regs: [*]JSValue, dst: u32, src: u32) callconv(.c) u8 {
     const frame: *CallFrame = @ptrCast(@alignCast(ctx.frame_ptr));
     const v = regs[src];
@@ -1300,13 +1384,30 @@ noinline fn tryEnterOsr(
 ) usize {
     @branchHint(.cold);
     const mut_cb = @constCast(frame.block);
-    if (mut_cb.osr_fn == null) {
-        mut_cb.osr_count +%= 1;
-        if (mut_cb.osr_count < baseline_jit.OSR_THRESHOLD) return start_ip;
-        if (!baseline_jit.compileOsr(allocator.*, mut_cb, start_ip, end_ip, prop_ic)) return start_ip;
+    const s_ip: u32 = @intCast(start_ip);
+    const e_ip: u32 = @intCast(end_ip);
+
+    var target_entry: ?*codeblock.OsrEntry = null;
+    for (&mut_cb.osr_entries) |*entry| {
+        if (entry.header_ip == s_ip and entry.end_ip == e_ip) {
+            target_entry = entry;
+            break;
+        }
+        if (entry.header_ip == std.math.maxInt(u32)) {
+            entry.header_ip = s_ip;
+            entry.end_ip = e_ip;
+            target_entry = entry;
+            break;
+        }
     }
-    const ofn = mut_cb.osr_fn orelse return start_ip;
-    if (mut_cb.osr_header_ip != start_ip or mut_cb.osr_end_ip != end_ip) return start_ip;
+    const entry = target_entry orelse return start_ip;
+    if (entry.failed) return start_ip;
+    if (entry.fn_ptr == null) {
+        entry.count +%= 1;
+        if (entry.count < baseline_jit.OSR_THRESHOLD) return start_ip;
+        if (!baseline_jit.compileOsr(allocator.*, mut_cb, entry, start_ip, end_ip, prop_ic)) return start_ip;
+    }
+    const ofn = entry.fn_ptr orelse return start_ip;
     var ctx = codeblock.OsrContext{
         .allocator_ptr = allocator,
         .frame_ptr = frame,
@@ -1316,8 +1417,8 @@ noinline fn tryEnterOsr(
     };
     const next_ip: usize = ofn(frame_regs.ptr, &ctx);
     if (next_ip >= start_ip and next_ip <= end_ip) {
-        mut_cb.osr_fn = null;
-        mut_cb.osr_failed = true;
+        entry.fn_ptr = null;
+        entry.failed = true;
     }
     return next_ip;
 }
@@ -2123,7 +2224,7 @@ noinline fn vmExecLoop(
         },
         .jump => {
             const target_ip: usize = @intCast(try jumpTarget(frame.block, code[ip]));
-            if (target_ip < ip and !frame.block.osr_failed) {
+            if (target_ip < ip) {
                 const remaining_frames = MAX_FRAMES - frame_count;
                 const limit_idx = @min(MAX_REGISTERS, frame.reg_base + remaining_frames * @as(usize, frame.block.register_count));
                 ip = tryEnterOsr(&allocator, frame, frame_regs, prop_ic, target_ip, ip, registers.ptr + limit_idx);
@@ -2428,8 +2529,65 @@ noinline fn vmExecLoop(
             if (ip >= code.len) return error.MissingReturn;
             continue :dispatch code[ip].opcode;
         },
+        .new_value => {
+            try execNewValue(frame, frame_regs, code[ip]);
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
+        .to_prop_key => {
+            const op = code[ip];
+            const obj = frame_regs[op.b];
+            const kv = frame_regs[op.a];
+            if (obj.isUndefined() or obj.isNull() or !(kv.isNumber() or kv.isString() or kv.isSymbol())) {
+                try toPropKeySlow(frame, frame_regs, op);
+            }
+            ip += 1;
+            if (ip >= code.len) return error.MissingReturn;
+            continue :dispatch code[ip].opcode;
+        },
         else => return error.UnsupportedOpcode,
     }
+}
+
+noinline fn execNewValue(frame: *CallFrame, frame_regs: []JSValue, op: codeblock.Op) !void {
+    @branchHint(.cold);
+    defer clearGlobalCache();
+    const it = frame.interp orelse return error.UnsupportedOpcode;
+    const callee = try getRegister(frame_regs, op.b);
+    const start = @as(usize, op.b) + 1;
+    const end = start + op.c;
+    if (end > frame_regs.len) return error.InvalidRegister;
+    const res = try it.constructValue(callee, frame_regs[start..end], "expression");
+    try setRegValue(frame, frame_regs, op.a, res);
+}
+
+noinline fn toPropKeySlow(frame: *CallFrame, frame_regs: []JSValue, op: codeblock.Op) !void {
+    @branchHint(.cold);
+    const it = frame.interp orelse return error.UnsupportedOpcode;
+    const obj = try getRegister(frame_regs, op.b);
+    const kv = try getRegister(frame_regs, op.a);
+    if (obj.isUndefined() or obj.isNull()) {
+        return it.throwError(.type_error, "Cannot read properties of {s}", .{obj.typeOf()});
+    }
+    if (kv.isNumber() or kv.isString() or kv.isSymbol()) return;
+    if (@import("../interpreter.zig").Interpreter.isPrimitiveTag(kv)) {
+        const s = try @import("../coercion.zig").toDisplayString(it.gc_allocator, kv);
+        defer it.gc_allocator.free(s);
+        const sv = try it.gcNewString(s);
+        try setRegValue(frame, frame_regs, op.a, sv);
+        return;
+    }
+    const prim = try it.toPrimitive(kv, .string);
+    if (prim.isSymbol()) {
+        try setRegValue(frame, frame_regs, op.a, prim);
+        return;
+    }
+    defer prim.deinit();
+    const s = try @import("../coercion.zig").toDisplayString(it.gc_allocator, prim);
+    defer it.gc_allocator.free(s);
+    const sv = try it.gcNewString(s);
+    try setRegValue(frame, frame_regs, op.a, sv);
 }
 
 const Arithmetic = enum { add, sub, mul, div, mod, pow };

@@ -1006,38 +1006,42 @@ fn emitSharedOp(a: *Assembler, block: *const codeblock.CodeBlock, op: codeblock.
             try a.movRegMem(.rcx, .r12, @intCast(@as(usize, op.c) * 8));
             try a.cmpRegReg(.rcx, .r15);
             try a.jcc(.ae, bail_lbl);
-            // lhs: positive exact int32 (also rejects -0.0 via sign bit check)
+            // lhs: positive exact integer in [0, 2^53 - 1] (also rejects -0.0 via sign bit)
             try a.movRegReg(.rdx, .rax);
             try a.shrRegImm8(.rdx, 63);
             try a.testRegReg(.rdx, .rdx);
             try a.jcc(.ne, bail_lbl);
             try a.movqXmmReg(.xmm0, .rax);
-            try a.cvttsd2siReg32Xmm(.rax, .xmm0);
-            try a.cmpReg32Imm32(.rax, -0x80000000);
-            try a.jcc(.e, bail_lbl);
-            try a.cvtsi2sdXmmReg32(.xmm2, .rax);
+            try a.cvttsd2siqReg64Xmm(.rax, .xmm0);
+            try a.movRegReg(.rdx, .rax);
+            try a.shrRegImm8(.rdx, 53);
+            try a.testRegReg(.rdx, .rdx);
+            try a.jcc(.ne, bail_lbl);
+            try a.cvtsi2sdqXmmReg64(.xmm2, .rax);
             try a.ucomisd(.xmm0, .xmm2);
             try a.jcc(.p, bail_lbl);
             try a.jcc(.ne, bail_lbl);
-            // rhs: strictly positive exact int32 (> 0)
+            // rhs: strictly positive exact integer in [1, 2^53 - 1]
             try a.movRegReg(.rdx, .rcx);
             try a.shrRegImm8(.rdx, 63);
             try a.testRegReg(.rdx, .rdx);
             try a.jcc(.ne, bail_lbl);
             try a.movqXmmReg(.xmm1, .rcx);
-            try a.cvttsd2siReg32Xmm(.rcx, .xmm1);
-            try a.cmpReg32Imm32(.rcx, -0x80000000);
+            try a.cvttsd2siqReg64Xmm(.rcx, .xmm1);
+            try a.movRegReg(.rdx, .rcx);
+            try a.shrRegImm8(.rdx, 53);
+            try a.testRegReg(.rdx, .rdx);
+            try a.jcc(.ne, bail_lbl);
+            try a.testRegReg(.rcx, .rcx);
             try a.jcc(.e, bail_lbl);
-            try a.testReg32Reg32(.rcx, .rcx);
-            try a.jcc(.e, bail_lbl);
-            try a.cvtsi2sdXmmReg32(.xmm2, .rcx);
+            try a.cvtsi2sdqXmmReg64(.xmm2, .rcx);
             try a.ucomisd(.xmm1, .xmm2);
             try a.jcc(.p, bail_lbl);
             try a.jcc(.ne, bail_lbl);
             if (is_osr and op.a != op.b and op.a != op.c) try emitGuardNonHeapInOsr(a, op.a, bail_lbl);
-            try a.xorReg32Reg32(.rdx, .rdx);
-            try a.divReg32(.rcx);
-            try a.cvtsi2sdXmmReg32(.xmm0, .rdx);
+            try a.xorRegReg64(.rdx, .rdx);
+            try a.divReg64(.rcx);
+            try a.cvtsi2sdqXmmReg64(.xmm0, .rdx);
             try a.movqRegXmm(.rax, .xmm0);
             try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
             return true;
@@ -1747,6 +1751,9 @@ pub fn canCompileOsr(block: *const codeblock.CodeBlock, start_ip: usize, end_ip:
             .set_elem_const => {
                 if (op.a >= block.register_count or op.c >= block.register_count) return false;
             },
+            .to_prop_key => {
+                if (op.a >= block.register_count or op.b >= block.register_count) return false;
+            },
             .get_elem_const => {
                 if (op.a >= block.register_count or op.b >= block.register_count or op.c >= block.constants.len) return false;
                 if (block.constants[op.c] != .number) return false;
@@ -1790,11 +1797,11 @@ pub fn canCompileOsr(block: *const codeblock.CodeBlock, start_ip: usize, end_ip:
     return true;
 }
 
-pub fn compileOsr(allocator: Allocator, block: *codeblock.CodeBlock, start_ip: usize, end_ip: usize, prop_ic_ptr: ?*const anyopaque) bool {
-    if (block.osr_fn != null) return true;
-    if (block.osr_failed) return false;
+pub fn compileOsr(allocator: Allocator, block: *codeblock.CodeBlock, entry: *codeblock.OsrEntry, start_ip: usize, end_ip: usize, prop_ic_ptr: ?*const anyopaque) bool {
+    if (entry.fn_ptr != null) return true;
+    if (entry.failed) return false;
     if (!canCompileOsr(block, start_ip, end_ip)) {
-        block.osr_failed = true;
+        entry.failed = true;
         return false;
     }
 
@@ -1812,13 +1819,13 @@ pub fn compileOsr(allocator: Allocator, block: *codeblock.CodeBlock, start_ip: u
     }
 
     const exec = compileOsrImpl(allocator, block, start_ip, end_ip, prop_ic_ptr) catch {
-        block.osr_failed = true;
+        entry.failed = true;
         return false;
     };
-    block.osr_header_ip = @intCast(start_ip);
-    block.osr_end_ip = @intCast(end_ip);
-    block.osr_code = exec;
-    block.osr_fn = @ptrCast(exec.ptr);
+    entry.header_ip = @intCast(start_ip);
+    entry.end_ip = @intCast(end_ip);
+    entry.code = exec;
+    entry.fn_ptr = @ptrCast(exec.ptr);
     return true;
 }
 
@@ -1862,6 +1869,7 @@ fn analyzePromotedProps(
             .set_elem,
             .get_elem_const,
             .set_elem_const,
+            .to_prop_key,
             => return .{},
             .get_prop, .set_prop => {
                 const is_set = (op.opcode == .set_prop);
@@ -2142,6 +2150,13 @@ fn analyzeOsrLoop(
                     use_count[op.c] += 1;
                 }
             },
+            .to_prop_key => {
+                if (op.b < 64) invalid[op.b] = true;
+                if (op.a < 64) {
+                    if (!written[op.a]) read_before_written[op.a] = true;
+                    use_count[op.a] += 1;
+                }
+            },
             .get_prop => {
                 if (op.b < 64) invalid[op.b] = true;
                 if (op.a < 64) {
@@ -2279,6 +2294,13 @@ fn asExactInt32(val: f64) ?i32 {
     return i;
 }
 
+fn asExactPosUint53(val: f64) ?u64 {
+    if (!std.math.isFinite(val) or val < 1.0 or val > 9007199254740991.0) return null;
+    const u: u64 = @intFromFloat(val);
+    if (@as(f64, @floatFromInt(u)) != val) return null;
+    return u;
+}
+
 fn asPowerOfTwoReciprocal(val: f64) ?u64 {
     if (!std.math.isFinite(val) or val == 0.0) return null;
     const bits: u64 = @bitCast(val);
@@ -2314,8 +2336,7 @@ fn canElideLoadConst(
         },
         .mod_num => {
             if (next_op.c != reg or next_op.b == reg) return false;
-            const rhs_i32 = asExactInt32(c.number) orelse return false;
-            if (rhs_i32 <= 0) return false;
+            if (asExactPosUint53(c.number) == null) return false;
         },
         .div_num => {
             if (next_op.c != reg or next_op.b == reg) return false;
@@ -2608,9 +2629,17 @@ fn compileOsrImpl(
         try a.andRegReg(.rax, .rcx);
         try a.movRegReg(.rbx, .rax); // %rbx = *ArrayBox
 
+        const preheader_arr_ok = try a.createLabel();
         try a.movRegMem(.rcx, .rbx, arr_holey_off);
         try a.testRegReg(.rcx, .rcx);
+        try a.jcc(.e, preheader_arr_ok);
+        try a.movRegReg(.rdi, .r13);
+        try a.movRegReg(.rsi, .rbx);
+        try a.movRegImm64(.rax, @intFromPtr(&vm.jitCheckHoleyArray));
+        try a.callReg(.rax);
+        try a.testRegReg(.rax, .rax);
         try a.jcc(.ne, preheader_bailout);
+        a.bindLabel(preheader_arr_ok);
     }
 
     // Pre-header for cached registers
@@ -2695,6 +2724,7 @@ fn compileOsrImpl(
                 .nop,
                 .set_prop,
                 .set_prop_transition,
+                .to_prop_key,
                 => {},
                 .set_elem => {
                     if (hoisted_arr_reg != null and hoisted_arr_reg.? == op.a) {
@@ -2861,9 +2891,15 @@ fn compileOsrImpl(
                         if (op.a == kvi) known_valid_elem_idx = null;
                     }
                     if (op.a < 64) {
+                        const fits_u31 = if (op.c < 64 and known_f64[op.c] != null) blk: {
+                            if (asExactPosUint53(known_f64[op.c].?)) |rhs_u| {
+                                break :blk (rhs_u <= 0x8000_0000);
+                            }
+                            break :blk false;
+                        } else false;
                         known_f64[op.a] = null;
-                        reg_is_int32[op.a] = true;
-                        reg_is_uint31[op.a] = true;
+                        reg_is_int32[op.a] = fits_u31;
+                        reg_is_uint31[op.a] = fits_u31;
                     }
                 },
                 else => {
@@ -2974,15 +3010,37 @@ fn compileOsrImpl(
                 };
                 try emitCondJump(&a, op.opcode == .jump_if_true, op.a, target_lbl, bail_lbl);
             },
+            .to_prop_key => {
+                if (hoisted_arr_reg == null or hoisted_arr_reg.? != op.b) {
+                    try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
+                    try a.movRegImm64(.rcx, JSValue.UNDEFINED.bits);
+                    try a.cmpRegReg(.rax, .rcx);
+                    try a.jcc(.e, bail_lbl);
+                    try a.movRegImm64(.rcx, JSValue.NULL.bits);
+                    try a.cmpRegReg(.rax, .rcx);
+                    try a.jcc(.e, bail_lbl);
+                }
+                if (!(op.a < 64 and reg_to_xmm[op.a] != null)) {
+                    try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.a) * 8));
+                    try a.cmpRegReg(.rax, .r15);
+                    try a.jcc(.ae, bail_lbl);
+                }
+            },
             .get_elem => {
                 const ArrayBox = zvalue.Rc(zvalue.ZArray(JSValue));
                 const ZArr = zvalue.ZArray(JSValue);
                 const ArrList = @FieldType(ZArr, "items");
+                const HoleyState = ZArr.HoleyState;
+                const HoleMaskList = @FieldType(HoleyState, "hole_mask");
                 const arr_val_off: i32 = @intCast(@offsetOf(ArrayBox, "value"));
                 const arr_holey_off: i32 = arr_val_off + @as(i32, @intCast(@offsetOf(ZArr, "holey")));
                 const arr_list_off: i32 = arr_val_off + @as(i32, @intCast(@offsetOf(ZArr, "items")));
                 const arr_items_ptr_off: i32 = arr_list_off + @as(i32, @intCast(@offsetOf(ArrList, "items")));
                 const arr_items_len_off: i32 = arr_items_ptr_off + 8;
+                const h_mask_off: i32 = @intCast(@offsetOf(HoleyState, "hole_mask"));
+                const h_mask_ptr_off: i32 = h_mask_off + @as(i32, @intCast(@offsetOf(HoleMaskList, "items")));
+                const h_mask_len_off: i32 = h_mask_ptr_off + 8;
+                const h_is_holey_off: i32 = @intCast(@offsetOf(HoleyState, "is_holey"));
 
                 if (hoisted_arr_reg != null and hoisted_arr_reg.? == op.b) {
                     if (last_elem_store) |les| {
@@ -3003,11 +3061,6 @@ fn compileOsrImpl(
                     try a.jcc(.ne, bail_lbl);
                     try a.movRegImm64(.rcx, JSValue.PTR_MASK);
                     try a.andRegReg(.rax, .rcx);
-
-                    // guard box.holey == null
-                    try a.movRegMem(.rcx, .rax, arr_holey_off);
-                    try a.testRegReg(.rcx, .rcx);
-                    try a.jcc(.ne, bail_lbl);
                     // Preserve *ArrayBox in %r9 across emitLoadNumToXmm (which clobbers %rax).
                     try a.movRegReg(.r9, .rax);
                     break :blk .r9;
@@ -3035,6 +3088,44 @@ fn compileOsrImpl(
                 try a.cmpRegReg(.rcx, .rdx);
                 try a.jcc(.ae, bail_lbl);
 
+                // Fast path when box.holey == null; otherwise verify non-hole in hole_mask
+                const dense_ok_lbl = try a.createLabel();
+                try a.movRegMem(.rdx, box_reg, arr_holey_off);
+                try a.testRegReg(.rdx, .rdx);
+                try a.jcc(.e, dense_ok_lbl);
+                if (box_reg != .rbx) {
+                    try a.movRegReg(.r8, .rcx);
+                    if (cached_count > 0) try emitFlushCached(&a, cached_regs, cached_count);
+                    if (promoted.count > 0) try emitFlushPromoted(&a, promoted);
+                    try a.pushReg(.r8);
+                    try a.pushReg(.r9);
+                    try a.movRegReg(.rdi, .r13);
+                    try a.movRegReg(.rsi, box_reg);
+                    try a.movRegImm64(.rax, @intFromPtr(&vm.jitCheckHoleyArray));
+                    try a.callReg(.rax);
+                    try a.popReg(.r9);
+                    try a.popReg(.r8);
+                    if (cached_count > 0) try emitReloadCached(&a, cached_regs, cached_count);
+                    if (promoted.count > 0) try emitReloadPromoted(&a, promoted);
+                    try a.testRegReg(.rax, .rax);
+                    try a.jcc(.ne, bail_lbl);
+                    try a.movRegReg(.rcx, .r8);
+                    try a.movRegMem(.rdx, box_reg, arr_holey_off);
+                }
+                try a.movzxReg64Mem8(.rax, .rdx, h_is_holey_off);
+                try a.testRegReg(.rax, .rax);
+                try a.jcc(.e, dense_ok_lbl);
+                try a.movRegReg(.rax, .rcx);
+                try a.shrRegImm8(.rax, 6);
+                try a.movRegMem(.r11, .rdx, h_mask_len_off);
+                try a.cmpRegReg(.rax, .r11);
+                try a.jcc(.ae, dense_ok_lbl);
+                try a.movRegMem(.r11, .rdx, h_mask_ptr_off);
+                try a.movRegMemIndexed8(.r11, .r11, .rax, 0);
+                try a.btReg64Reg64(.r11, .rcx);
+                try a.jcc(.b, bail_lbl);
+                a.bindLabel(dense_ok_lbl);
+
                 // elem = box.items.ptr[idx]; guard elem < BASE_TAG
                 try a.movRegMem(.rax, box_reg, arr_items_ptr_off);
                 try a.movRegMemIndexed8(.rax, .rax, .rcx, 0);
@@ -3054,12 +3145,18 @@ fn compileOsrImpl(
                 const ArrayBox = zvalue.Rc(zvalue.ZArray(JSValue));
                 const ZArr = zvalue.ZArray(JSValue);
                 const ArrList = @FieldType(ZArr, "items");
+                const HoleyState = ZArr.HoleyState;
+                const HoleMaskList = @FieldType(HoleyState, "hole_mask");
                 const arr_val_off: i32 = @intCast(@offsetOf(ArrayBox, "value"));
                 const arr_holey_off: i32 = arr_val_off + @as(i32, @intCast(@offsetOf(ZArr, "holey")));
                 const arr_list_off: i32 = arr_val_off + @as(i32, @intCast(@offsetOf(ZArr, "items")));
                 const arr_items_ptr_off: i32 = arr_list_off + @as(i32, @intCast(@offsetOf(ArrList, "items")));
                 const arr_items_len_off: i32 = arr_items_ptr_off + 8;
                 const arr_items_cap_off: i32 = arr_list_off + @as(i32, @intCast(@offsetOf(ArrList, "capacity")));
+                const h_mask_off: i32 = @intCast(@offsetOf(HoleyState, "hole_mask"));
+                const h_mask_ptr_off: i32 = h_mask_off + @as(i32, @intCast(@offsetOf(HoleMaskList, "items")));
+                const h_mask_len_off: i32 = h_mask_ptr_off + 8;
+                const h_is_holey_off: i32 = @intCast(@offsetOf(HoleyState, "is_holey"));
 
                 // val = regs[op.c]; guard val < BASE_TAG
                 if (op.c < 64 and reg_to_xmm[op.c] != null) {
@@ -3082,7 +3179,8 @@ fn compileOsrImpl(
                     continue;
                 }
 
-                const append_lbl = try a.createLabel();
+                const grow_or_holey_lbl = try a.createLabel();
+                const helper_lbl = try a.createLabel();
                 const done_lbl = try a.createLabel();
 
                 const box_reg: x64_asm.Reg = if (hoisted_arr_reg != null and hoisted_arr_reg.? == op.a) .rbx else blk: {
@@ -3094,11 +3192,12 @@ fn compileOsrImpl(
                     try a.jcc(.ne, bail_lbl);
                     try a.movRegImm64(.rcx, JSValue.PTR_MASK);
                     try a.andRegReg(.rax, .rcx);
-
-                    // guard box.holey == null
-                    try a.movRegMem(.rcx, .rax, arr_holey_off);
-                    try a.testRegReg(.rcx, .rcx);
-                    try a.jcc(.ne, bail_lbl);
+                    if (@hasField(ZArr, "is_frozen")) {
+                        const arr_frozen_off: i32 = arr_val_off + @as(i32, @intCast(@offsetOf(ZArr, "is_frozen")));
+                        try a.movzxReg64Mem8(.rcx, .rax, arr_frozen_off);
+                        try a.testRegReg(.rcx, .rcx);
+                        try a.jcc(.ne, bail_lbl);
+                    }
                     // Preserve *ArrayBox in %r9 across emitLoadNumToXmm (which clobbers %rax).
                     try a.movRegReg(.r9, .rax);
                     break :blk .r9;
@@ -3123,26 +3222,80 @@ fn compileOsrImpl(
                 // len = box.items.len
                 try a.movRegMem(.rdx, box_reg, arr_items_len_off);
                 try a.cmpRegReg(.rcx, .rdx);
-                try a.jcc(.e, append_lbl);
-                try a.jcc(.a, bail_lbl);
+                try a.jcc(.ae, grow_or_holey_lbl);
 
-                // Overwrite: idx < len; guard old elem < HEAP_BASE (%r14)
+                // Overwrite: idx < len
+                if (box_reg != .rbx) {
+                    const non_hoisted_dense = try a.createLabel();
+                    try a.movRegMem(.rdx, box_reg, arr_holey_off);
+                    try a.testRegReg(.rdx, .rdx);
+                    try a.jcc(.e, non_hoisted_dense);
+                    try a.jmp(helper_lbl);
+                    a.bindLabel(non_hoisted_dense);
+                }
                 try a.movRegMem(.r11, box_reg, arr_items_ptr_off);
                 try a.movRegMemIndexed8(.rdx, .r11, .rcx, 0);
                 try a.cmpRegReg(.rdx, .r14);
                 try a.jcc(.ae, bail_lbl);
                 try a.movMemIndexed8Reg(.r11, .rcx, 0, .r10);
+                // If hoisted array has holey state, clear hole bit in hole_mask
+                if (box_reg == .rbx) {
+                    try a.movRegMem(.rdx, .rbx, arr_holey_off);
+                    try a.testRegReg(.rdx, .rdx);
+                    try a.jcc(.e, done_lbl);
+                    try a.movzxReg64Mem8(.rax, .rdx, h_is_holey_off);
+                    try a.testRegReg(.rax, .rax);
+                    try a.jcc(.e, done_lbl);
+                    try a.movRegReg(.rax, .rcx);
+                    try a.shrRegImm8(.rax, 6);
+                    try a.movRegMem(.r11, .rdx, h_mask_len_off);
+                    try a.cmpRegReg(.rax, .r11);
+                    try a.jcc(.ae, done_lbl);
+                    try a.movRegMem(.r11, .rdx, h_mask_ptr_off);
+                    try a.movRegMemIndexed8(.rdx, .r11, .rax, 0);
+                    try a.btrReg64Reg64(.rdx, .rcx);
+                    try a.movMemIndexed8Reg(.r11, .rax, 0, .rdx);
+                }
                 try a.jmp(done_lbl);
 
-                // Append: idx == len; guard idx < box.items.capacity
-                a.bindLabel(append_lbl);
+                // idx >= len: inline append if dense and within capacity, else helper
+                a.bindLabel(grow_or_holey_lbl);
+                try a.cmpRegReg(.rcx, .rdx);
+                try a.jcc(.ne, helper_lbl);
+                try a.movRegMem(.rax, box_reg, arr_holey_off);
+                try a.testRegReg(.rax, .rax);
+                try a.jcc(.ne, helper_lbl);
                 try a.movRegMem(.r11, box_reg, arr_items_cap_off);
                 try a.cmpRegReg(.rcx, .r11);
-                try a.jcc(.ae, bail_lbl);
+                try a.jcc(.ae, helper_lbl);
                 try a.movRegMem(.r11, box_reg, arr_items_ptr_off);
                 try a.movMemIndexed8Reg(.r11, .rcx, 0, .r10);
                 try a.addRegImm32(.rdx, 1);
                 try a.movMemReg(box_reg, arr_items_len_off, .rdx);
+                try a.jmp(done_lbl);
+
+                a.bindLabel(helper_lbl);
+                try a.movRegReg(.r8, .rcx); // save idx across flush (which clobbers rcx/rdx)
+                if (cached_count > 0) {
+                    try emitFlushCached(&a, cached_regs, cached_count);
+                }
+                if (promoted.count > 0) {
+                    try emitFlushPromoted(&a, promoted);
+                }
+                try a.movRegReg(.rdi, .r13);
+                try a.movRegReg(.rsi, box_reg);
+                try a.movRegReg(.rdx, .r8);
+                try a.movRegReg(.rcx, .r10);
+                try a.movRegImm64(.rax, @intFromPtr(&vm.jitSetElemHoleyOrGrow));
+                try a.callReg(.rax);
+                try a.testRegReg(.rax, .rax);
+                try a.jcc(.ne, bail_lbl);
+                if (cached_count > 0) {
+                    try emitReloadCached(&a, cached_regs, cached_count);
+                }
+                if (promoted.count > 0) {
+                    try emitReloadPromoted(&a, promoted);
+                }
 
                 a.bindLabel(done_lbl);
             },
@@ -3259,52 +3412,61 @@ fn compileOsrImpl(
             },
             .mod_num => {
                 try emitLoadNumToXmm(&a, reg_to_xmm, op.b, .xmm0, bail_lbl);
-                const maybe_rhs_i32: ?i32 = if (op.c < 64 and known_f64[op.c] != null) blk: {
-                    if (asExactInt32(known_f64[op.c].?)) |v| {
-                        if (v > 0) break :blk v;
-                    }
-                    break :blk null;
-                } else null;
-                if (maybe_rhs_i32 == null) {
+                const maybe_rhs_u53: ?u64 = if (op.c < 64 and known_f64[op.c] != null)
+                    asExactPosUint53(known_f64[op.c].?)
+                else
+                    null;
+                if (maybe_rhs_u53 == null) {
                     try emitLoadNumToXmm(&a, reg_to_xmm, op.c, .xmm1, bail_lbl);
                 }
-                // lhs: positive exact int32
+                // lhs: positive exact integer in [0, 2^53 - 1] (also rejects -0.0)
                 try a.movqRegXmm(.rax, .xmm0);
                 try a.movRegReg(.rdx, .rax);
                 try a.shrRegImm8(.rdx, 63);
                 try a.testRegReg(.rdx, .rdx);
                 try a.jcc(.ne, bail_lbl);
-                try a.cvttsd2siReg32Xmm(.rax, .xmm0);
-                try a.cmpReg32Imm32(.rax, -0x80000000);
-                try a.jcc(.e, bail_lbl);
-                try a.cvtsi2sdXmmReg32(.xmm2, .rax);
+                try a.cvttsd2siqReg64Xmm(.rax, .xmm0);
+                try a.movRegReg(.rdx, .rax);
+                try a.shrRegImm8(.rdx, 53);
+                try a.testRegReg(.rdx, .rdx);
+                try a.jcc(.ne, bail_lbl);
+                try a.cvtsi2sdqXmmReg64(.xmm2, .rax);
                 try a.ucomisd(.xmm0, .xmm2);
                 try a.jcc(.p, bail_lbl);
                 try a.jcc(.ne, bail_lbl);
 
-                if (maybe_rhs_i32) |rhs_i32| {
-                    try a.movRegImm32(.rcx, @bitCast(rhs_i32));
+                if (maybe_rhs_u53) |rhs_u| {
+                    if (std.math.isPowerOfTwo(rhs_u)) {
+                        try a.movRegImm64(.rdx, rhs_u - 1);
+                        try a.andRegReg(.rdx, .rax);
+                        try a.cvtsi2sdqXmmReg64(.xmm0, .rdx);
+                        try emitStoreXmmToNum(&a, reg_to_xmm, cached_regs, cached_count, op.a, .xmm0, bail_lbl);
+                        continue;
+                    }
+                    try a.movRegImm64(.rcx, rhs_u);
                 } else {
-                    // rhs: strictly positive exact int32 (> 0)
+                    // rhs: strictly positive exact integer in [1, 2^53 - 1]
                     try a.movqRegXmm(.rcx, .xmm1);
                     try a.movRegReg(.rdx, .rcx);
                     try a.shrRegImm8(.rdx, 63);
                     try a.testRegReg(.rdx, .rdx);
                     try a.jcc(.ne, bail_lbl);
-                    try a.cvttsd2siReg32Xmm(.rcx, .xmm1);
-                    try a.cmpReg32Imm32(.rcx, -0x80000000);
+                    try a.cvttsd2siqReg64Xmm(.rcx, .xmm1);
+                    try a.movRegReg(.rdx, .rcx);
+                    try a.shrRegImm8(.rdx, 53);
+                    try a.testRegReg(.rdx, .rdx);
+                    try a.jcc(.ne, bail_lbl);
+                    try a.testRegReg(.rcx, .rcx);
                     try a.jcc(.e, bail_lbl);
-                    try a.testReg32Reg32(.rcx, .rcx);
-                    try a.jcc(.e, bail_lbl);
-                    try a.cvtsi2sdXmmReg32(.xmm2, .rcx);
+                    try a.cvtsi2sdqXmmReg64(.xmm2, .rcx);
                     try a.ucomisd(.xmm1, .xmm2);
                     try a.jcc(.p, bail_lbl);
                     try a.jcc(.ne, bail_lbl);
                 }
 
-                try a.xorReg32Reg32(.rdx, .rdx);
-                try a.divReg32(.rcx);
-                try a.cvtsi2sdXmmReg32(.xmm0, .rdx);
+                try a.xorRegReg64(.rdx, .rdx);
+                try a.divReg64(.rcx);
+                try a.cvtsi2sdqXmmReg64(.xmm0, .rdx);
                 try emitStoreXmmToNum(&a, reg_to_xmm, cached_regs, cached_count, op.a, .xmm0, bail_lbl);
             },
             .neg => {
@@ -5434,4 +5596,47 @@ test "baseline JIT OSR preserves non-hoisted ArrayBox across uncached index load
     defer res.deinit();
     try std.testing.expect(res.isNumber());
     try std.testing.expectEqual(@as(f64, 3353778030), res.asNumber());
+}
+
+test "baseline JIT Phase J1: new Array(n) bytecode+OSR, member compound assign single-eval, multi-loop OSR, holey arrays, and i64 mod" {
+    const allocator = std.testing.allocator;
+    var writer = std.Io.Writer.Allocating.init(allocator);
+    defer writer.deinit();
+    var interp = try @import("../interpreter.zig").Interpreter.init(allocator, &writer.writer);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+
+    const res = try interp.run(
+        \\function testJ1() {
+        \\    // 1. new Array(n) + multi-loop OSR + i64 PRNG mod (% 2147483648)
+        \\    var n = 200;
+        \\    var arr = new Array(n);
+        \\    var s = 123456789;
+        \\    for (var i = 0; i < n; i++) {
+        \\        s = (s * 1664525 + 1013904223) % 2147483648;
+        \\        arr[i] = s;
+        \\    }
+        \\    // 2. Second sequential OSR loop + member compound assign arr[i] += ...
+        \\    for (var i = 0; i < n; i++) {
+        \\        arr[i] += 1;
+        \\    }
+        \\    // 3. Single evaluation of computed index with side effects in arr[idx()] += v
+        \\    var idxCalls = 0;
+        \\    var box = [10, 20, 30];
+        \\    function getIdx() { idxCalls++; return 1; }
+        \\    box[getIdx()] += 5;
+        \\    if (idxCalls !== 1 || box[1] !== 25) return -1;
+        \\    // 4. Partially holey array in OSR (written elements succeed, real hole bails cleanly)
+        \\    var holey = new Array(150);
+        \\    for (var k = 0; k < 149; k++) holey[k] = k * 2;
+        \\    var hsum = 0;
+        \\    for (var k = 0; k < 149; k++) hsum += holey[k];
+        \\    if (hsum !== 148 * 149 || holey[149] !== undefined) return -2;
+        \\    return arr[0] + arr[n - 1];
+        \\}
+        \\testJ1();
+    );
+    defer res.deinit();
+    try std.testing.expect(res.isNumber());
+    try std.testing.expect(res.asNumber() > 0);
 }

@@ -87,6 +87,7 @@ pub const Opcode = enum(u8) {
     loose_eq,
     loose_ne,
     typeof_global,
+    to_prop_key,
 };
 
 pub const Op = packed struct(u32) {
@@ -155,6 +156,17 @@ pub const OsrContext = extern struct {
 pub const JitFn = *const fn (regs: [*]JSValue, out: *JSValue, regs_limit: [*]JSValue, env: ?*anyopaque) callconv(.c) u8;
 pub const OsrFn = *const fn (regs: [*]JSValue, ctx: *OsrContext) callconv(.c) u32;
 
+pub const MAX_OSR_LOOPS: usize = 12;
+
+pub const OsrEntry = struct {
+    header_ip: u32 = std.math.maxInt(u32),
+    end_ip: u32 = 0,
+    count: u32 = 0,
+    failed: bool = false,
+    code: ?[]align(std.heap.page_size_min) u8 = null,
+    fn_ptr: ?OsrFn = null,
+};
+
 /// Immutable representation emitted by a later compiler pass.
 pub const CodeBlock = struct {
     ops: []const Op = &.{},
@@ -174,12 +186,7 @@ pub const CodeBlock = struct {
     jit_code: ?[]align(std.heap.page_size_min) u8 = null,
     jit_fn: ?JitFn = null,
     jit_global_slots: ?[]JitGlobalSlot = null,
-    osr_count: u32 = 0,
-    osr_header_ip: u32 = 0,
-    osr_end_ip: u32 = 0,
-    osr_failed: bool = false,
-    osr_code: ?[]align(std.heap.page_size_min) u8 = null,
-    osr_fn: ?OsrFn = null,
+    osr_entries: [MAX_OSR_LOOPS]OsrEntry = @splat(.{}),
 
     pub fn deinitJit(self: *CodeBlock, allocator: Allocator) void {
         if (self.jit_code) |jc| {
@@ -187,10 +194,12 @@ pub const CodeBlock = struct {
             self.jit_code = null;
             self.jit_fn = null;
         }
-        if (self.osr_code) |oc| {
-            @import("../jit/x64_asm.zig").freeExecutable(oc);
-            self.osr_code = null;
-            self.osr_fn = null;
+        for (&self.osr_entries) |*entry| {
+            if (entry.code) |oc| {
+                @import("../jit/x64_asm.zig").freeExecutable(oc);
+                entry.code = null;
+                entry.fn_ptr = null;
+            }
         }
         if (self.jit_global_slots) |slots| {
             allocator.free(slots);
