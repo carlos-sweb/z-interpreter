@@ -1044,7 +1044,7 @@ pub const BytecodeEmitter = struct {
             const value = try self.emitExpression(argument);
             if (value == target_slot) {
                 // Already in target slot
-            } else if (value >= self.scope.local_count and self.ops.items.len > 0 and self.ops.items[self.ops.items.len - 1].a == value and isRegisterDefOpcode(self.ops.items[self.ops.items.len - 1].opcode)) {
+            } else if (isSingleDefExpr(argument) and value >= self.scope.local_count and self.ops.items.len > 0 and self.ops.items[self.ops.items.len - 1].a == value and isRegisterDefOpcode(self.ops.items[self.ops.items.len - 1].opcode)) {
                 self.ops.items[self.ops.items.len - 1].a = target_slot;
                 self.freeRegister(value);
             } else {
@@ -1080,7 +1080,7 @@ pub const BytecodeEmitter = struct {
             const value = try self.emitExpression(argument);
             if (value == target_slot) {
                 // Already in target slot
-            } else if (value >= self.scope.local_count and self.ops.items.len > 0 and self.ops.items[self.ops.items.len - 1].a == value and isRegisterDefOpcode(self.ops.items[self.ops.items.len - 1].opcode)) {
+            } else if (isSingleDefExpr(argument) and value >= self.scope.local_count and self.ops.items.len > 0 and self.ops.items[self.ops.items.len - 1].a == value and isRegisterDefOpcode(self.ops.items[self.ops.items.len - 1].opcode)) {
                 self.ops.items[self.ops.items.len - 1].a = target_slot;
                 self.freeRegister(value);
             } else {

@@ -675,6 +675,12 @@ pub const Assembler = struct {
         try self.emitBytes(&.{ 0x0F, 0x5E, modRM(0b11, dst.low3(), src.low3()) });
     }
 
+    pub fn sqrtsd(self: *Assembler, dst: Xmm, src: Xmm) !void {
+        try self.emitByte(0xF2);
+        if (rexSSE(dst.isExt(), src.isExt())) |r| try self.emitByte(r);
+        try self.emitBytes(&.{ 0x0F, 0x51, modRM(0b11, dst.low3(), src.low3()) });
+    }
+
     pub fn xorpd(self: *Assembler, dst: Xmm, src: Xmm) !void {
         try self.emitByte(0x66);
         if (rexSSE(dst.isExt(), src.isExt())) |r| try self.emitByte(r);

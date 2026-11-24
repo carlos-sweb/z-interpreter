@@ -6,6 +6,7 @@ const environment_mod = @import("../environment.zig");
 const Environment = environment_mod.Environment;
 const codeblock = @import("../bytecode/codeblock.zig");
 const vm = @import("../bytecode/vm.zig");
+const math_builtins = @import("../math_builtins.zig");
 const x64_asm = @import("x64_asm.zig");
 const Assembler = x64_asm.Assembler;
 const Label = x64_asm.Label;
@@ -1664,10 +1665,17 @@ fn compileImpl(
     return a.finalizeExecutable();
 }
 
+fn isMathSqrtCall(cs: *const codeblock.CallSiteCache) bool {
+    if (cs.arg_count != 1) return false;
+    const callee = cs.callee orelse return false;
+    if (!callee.isFunction()) return false;
+    return callee.asFunction().value.call == math_builtins.mathSqrt;
+}
+
 pub fn canCompileOsr(block: *const codeblock.CodeBlock, start_ip: usize, end_ip: usize) bool {
     if (!comptime x64_asm.is_supported_host) return false;
     if (block.exception_table.len > 0 or block.flags.has_try) return false;
-    if (block.register_count == 0 or block.register_count > 32) return false;
+    if (block.register_count == 0 or block.register_count > 64) return false;
     if (start_ip >= end_ip or end_ip >= block.ops.len) return false;
     const back_op = block.ops[end_ip];
     if (back_op.opcode != .jump or (((@as(usize, back_op.b) << 8) | back_op.c) != start_ip)) return false;
@@ -1767,6 +1775,10 @@ pub fn canCompileOsr(block: *const codeblock.CodeBlock, start_ip: usize, end_ip:
                 if (op.a >= block.register_count or op.c >= block.register_count) return false;
                 if (constantName(block, op.b) == null) return false;
             },
+            .load_global => {
+                if (op.a >= block.register_count) return false;
+                if (constantName(block, op.b) == null) return false;
+            },
             .get_prop => {
                 if (op.a >= block.register_count or op.b >= block.register_count) return false;
                 if (constantName(block, op.c) == null) return false;
@@ -1775,11 +1787,13 @@ pub fn canCompileOsr(block: *const codeblock.CodeBlock, start_ip: usize, end_ip:
                 if (op.a >= block.register_count or op.b >= block.register_count) return false;
                 if (op.c >= block.call_target_cache.len) return false;
                 const cs = &block.call_target_cache[op.c];
-                if (cs.this_reg != null) return false;
-                const tb = cs.target_block orelse return false;
-                if (tb.param_count != cs.arg_count) return false;
                 if ((@as(usize, op.b) + 1 + cs.arg_count) > block.register_count) return false;
-                if (tb.jit_fn == null and !canCompile(tb)) return false;
+                if (!isMathSqrtCall(cs)) {
+                    if (cs.this_reg != null) return false;
+                    const tb = cs.target_block orelse return false;
+                    if (tb.param_count != cs.arg_count) return false;
+                    if (tb.jit_fn == null and !canCompile(tb)) return false;
+                }
             },
             .call_global => {
                 if (op.a >= block.register_count) return false;
@@ -1943,43 +1957,74 @@ fn analyzePromotedProps(
     return res;
 }
 
-fn analyzeHoistedArray(
+const MAX_HOISTED_ARRAYS = 8;
+
+const HoistedArrays = struct {
+    regs: [MAX_HOISTED_ARRAYS]u8 = @splat(0),
+    count: usize = 0,
+
+    fn find(self: *const HoistedArrays, reg: u8) ?usize {
+        for (0..self.count) |i| {
+            if (self.regs[i] == reg) return i;
+        }
+        return null;
+    }
+};
+
+fn analyzeHoistedArrays(
     block: *const codeblock.CodeBlock,
     start_ip: usize,
     end_ip: usize,
     promoted_count: usize,
-) ?u8 {
-    if (promoted_count > 0) return null;
-    var has_arr = false;
-    var arr_reg: u8 = 0;
+) HoistedArrays {
+    if (promoted_count > 0) return .{};
+    var cands: [MAX_HOISTED_ARRAYS]u8 = @splat(0);
+    var cand_count: usize = 0;
 
     for (start_ip..end_ip + 1) |ip| {
         const op = block.ops[ip];
         switch (op.opcode) {
-            .call, .call_global, .new_array => return null,
+            .call => {
+                if (op.c >= block.call_target_cache.len or !isMathSqrtCall(&block.call_target_cache[op.c])) {
+                    return .{};
+                }
+            },
+            .call_global, .new_array => return .{},
             .get_elem, .get_elem_const => {
-                if (op.a == op.b) return null;
-                if (!has_arr) {
-                    has_arr = true;
-                    arr_reg = op.b;
-                } else if (arr_reg != op.b) {
-                    return null;
+                if (op.a != op.b) {
+                    var seen = false;
+                    for (0..cand_count) |k| {
+                        if (cands[k] == op.b) {
+                            seen = true;
+                            break;
+                        }
+                    }
+                    if (!seen and cand_count < MAX_HOISTED_ARRAYS) {
+                        cands[cand_count] = op.b;
+                        cand_count += 1;
+                    }
                 }
             },
             .set_elem, .set_elem_const => {
-                if (!has_arr) {
-                    has_arr = true;
-                    arr_reg = op.a;
-                } else if (arr_reg != op.a) {
-                    return null;
+                var seen = false;
+                for (0..cand_count) |k| {
+                    if (cands[k] == op.a) {
+                        seen = true;
+                        break;
+                    }
+                }
+                if (!seen and cand_count < MAX_HOISTED_ARRAYS) {
+                    cands[cand_count] = op.a;
+                    cand_count += 1;
                 }
             },
             else => {},
         }
     }
 
-    if (!has_arr) return null;
+    if (cand_count == 0) return .{};
 
+    var valid: [MAX_HOISTED_ARRAYS]bool = @splat(true);
     for (start_ip..end_ip + 1) |ip| {
         const op = block.ops[ip];
         switch (op.opcode) {
@@ -1994,20 +2039,34 @@ fn analyzeHoistedArray(
             .set_elem_const,
             .set_prop,
             .set_prop_transition,
+            .to_prop_key,
             => {},
             .jump_if_false, .jump_if_true => {
-                if (op.a == arr_reg) return null;
+                for (0..cand_count) |k| {
+                    if (op.a == cands[k]) valid[k] = false;
+                }
             },
             .move, .load_local, .store_local => {
-                if (op.a == arr_reg or op.b == arr_reg) return null;
+                for (0..cand_count) |k| {
+                    if (op.a == cands[k]) valid[k] = false;
+                }
             },
             else => {
-                if (op.a == arr_reg) return null;
+                for (0..cand_count) |k| {
+                    if (op.a == cands[k]) valid[k] = false;
+                }
             },
         }
     }
 
-    return arr_reg;
+    var res = HoistedArrays{};
+    for (0..cand_count) |k| {
+        if (valid[k]) {
+            res.regs[res.count] = cands[k];
+            res.count += 1;
+        }
+    }
+    return res;
 }
 
 const OsrCachedAnalysis = struct {
@@ -2016,7 +2075,7 @@ const OsrCachedAnalysis = struct {
     reg_to_xmm: [64]?Xmm = @splat(null),
     read_before_written: [64]bool = @splat(false),
     promoted: PromotedPropsAnalysis = .{},
-    hoisted_arr_reg: ?u8 = null,
+    hoisted_arrs: HoistedArrays = .{},
 };
 
 fn analyzeOsrLoop(
@@ -2027,14 +2086,27 @@ fn analyzeOsrLoop(
 ) OsrCachedAnalysis {
     var result = OsrCachedAnalysis{};
 
-    // 1. Pureza del bucle (is_pure_loop): true solo si ningún opcode en [start_ip .. end_ip]
-    // es .call, .call_global
+    // 1. Pureza del bucle (is_pure_loop): true si ningún opcode en [start_ip .. end_ip]
+    // es una llamada no-intrínseca (.call_global o .call != Math.sqrt)
     var is_pure_loop = true;
+    var loop_mutates_globals_or_props = false;
     for (start_ip..end_ip + 1) |ip| {
-        switch (block.ops[ip].opcode) {
-            .call, .call_global => {
+        const op = block.ops[ip];
+        switch (op.opcode) {
+            .call => {
+                if (op.c >= block.call_target_cache.len or !isMathSqrtCall(&block.call_target_cache[op.c])) {
+                    is_pure_loop = false;
+                    loop_mutates_globals_or_props = true;
+                    break;
+                }
+            },
+            .call_global => {
                 is_pure_loop = false;
+                loop_mutates_globals_or_props = true;
                 break;
+            },
+            .set_prop, .set_prop_transition, .store_global => {
+                loop_mutates_globals_or_props = true;
             },
             else => {},
         }
@@ -2171,6 +2243,26 @@ fn analyzeOsrLoop(
                     use_count[op.c] += 1;
                 }
             },
+            .load_global => {
+                if (op.a < 64) invalid[op.a] = true;
+            },
+            .call => {
+                const arg_reg: usize = @as(usize, op.b) + 1;
+                if (arg_reg < 64) {
+                    if (!written[arg_reg]) read_before_written[arg_reg] = true;
+                    use_count[arg_reg] += 1;
+                }
+                if (loop_mutates_globals_or_props) {
+                    if (op.a < 64) invalid[op.a] = true;
+                    if (op.b < 64) invalid[op.b] = true;
+                } else {
+                    if (op.a != op.b and op.b < 64) invalid[op.b] = true;
+                    if (op.a < 64) {
+                        use_count[op.a] += 1;
+                        written[op.a] = true;
+                    }
+                }
+            },
             .new_array, .new_object => {
                 if (op.a < 64) invalid[op.a] = true;
             },
@@ -2259,7 +2351,7 @@ fn analyzeOsrLoop(
     result.cached_count = max_cached;
     result.read_before_written = read_before_written;
     result.promoted = promoted;
-    result.hoisted_arr_reg = analyzeHoistedArray(block, start_ip, end_ip, promoted.count);
+    result.hoisted_arrs = analyzeHoistedArrays(block, start_ip, end_ip, promoted.count);
 
     return result;
 }
@@ -2481,6 +2573,7 @@ fn compileOsrImpl(
     end_ip: usize,
     prop_ic_ptr: ?*const anyopaque,
 ) ![]align(std.heap.page_size_min) u8 {
+    @setEvalBranchQuota(10_000);
     var a = Assembler.init(allocator);
     defer a.deinit();
     const prop_ic: ?*const [256]PropIC = if (prop_ic_ptr) |p| @ptrCast(@alignCast(p)) else null;
@@ -2490,9 +2583,10 @@ fn compileOsrImpl(
     const cached_count = analysis.cached_count;
     const reg_to_xmm = analysis.reg_to_xmm;
     const promoted = analysis.promoted;
-    const hoisted_arr_reg = analysis.hoisted_arr_reg;
+    const hoisted_arrs = analysis.hoisted_arrs;
+    const single_hoisted_arr: ?u8 = if (hoisted_arrs.count == 1) hoisted_arrs.regs[0] else null;
+    const hoisted_stack_bytes: i32 = if (hoisted_arrs.count > 1) 64 else 0;
     const has_flush = (cached_count > 0 or promoted.count > 0);
-    const has_preheader_bailout = (has_flush or hoisted_arr_reg != null);
 
     const loop_len = end_ip - start_ip + 1;
     var op_labels = try allocator.alloc(Label, loop_len);
@@ -2543,6 +2637,136 @@ fn compileOsrImpl(
     const flush_and_exit = try a.createLabel();
     const osr_epilogue = try a.createLabel();
 
+    var elided_op = try allocator.alloc(bool, loop_len);
+    defer allocator.free(elided_op);
+    @memset(elided_op, false);
+    var elided_math_call = try allocator.alloc(bool, loop_len);
+    defer allocator.free(elided_math_call);
+    @memset(elided_math_call, false);
+    var math_sqrt_guard_bits: ?u64 = null;
+
+    var loop_mutates_globals_or_props = false;
+    for (start_ip..end_ip + 1) |scan_ip| {
+        const scan_op = block.ops[scan_ip];
+        switch (scan_op.opcode) {
+            .set_prop, .set_prop_transition, .store_global, .call_global => {
+                loop_mutates_globals_or_props = true;
+                break;
+            },
+            .call => {
+                if (scan_op.c >= block.call_target_cache.len or !isMathSqrtCall(&block.call_target_cache[scan_op.c])) {
+                    loop_mutates_globals_or_props = true;
+                    break;
+                }
+            },
+            else => {},
+        }
+    }
+
+    if (!loop_mutates_globals_or_props) {
+        for (0..loop_len) |call_idx| {
+            const call_op = block.ops[start_ip + call_idx];
+            if (call_op.opcode != .call) continue;
+            const cs = &block.call_target_cache[call_op.c];
+            if (!isMathSqrtCall(cs)) continue;
+            const this_r = cs.this_reg orelse continue;
+            const expected_bits = cs.callee.?.bits;
+            if (math_sqrt_guard_bits != null and math_sqrt_guard_bits.? != expected_bits) continue;
+
+            var found_gp: ?usize = null;
+            var k = call_idx;
+            while (k > 0) {
+                k -= 1;
+                const cand = block.ops[start_ip + k];
+                if (cand.opcode == .get_prop and cand.a == call_op.b and cand.b == this_r) {
+                    const prop_name = constantName(block, cand.c) orelse break;
+                    if (std.mem.eql(u8, prop_name, "sqrt")) {
+                        found_gp = k;
+                    }
+                    break;
+                }
+                const is_pure_arg_op = switch (cand.opcode) {
+                    .nop,
+                    .move,
+                    .load_local,
+                    .load_const,
+                    .load_true,
+                    .load_false,
+                    .add,
+                    .add_num,
+                    .sub_num,
+                    .mul_num,
+                    .div_num,
+                    .mod_num,
+                    .neg,
+                    .add_local_const,
+                    .sub_local_const,
+                    .lt_num,
+                    .gt_num,
+                    .le_num,
+                    .ge_num,
+                    .eq,
+                    .ne,
+                    .lt_local_const,
+                    .gt_local_const,
+                    .le_local_const,
+                    .ge_local_const,
+                    .eq_local_const,
+                    => cand.a != this_r and cand.a != call_op.b,
+                    .jump, .jump_if_false, .jump_if_true, .jeq_local_const_false, .jlt_local_const_false, .jle_local_const_false, .jgt_local_const_false, .jge_local_const_false => true,
+                    else => false,
+                };
+                if (!is_pure_arg_op) break;
+            }
+            if (found_gp) |gp_idx| {
+                if (gp_idx > 0 and !is_jump_target[gp_idx]) {
+                    // Ensure all jumps inside (gp_idx .. call_idx) stay within (gp_idx .. call_idx]
+                    // and no external jump targets [gp_idx .. call_idx].
+                    var jumps_contained = true;
+                    for (0..loop_len) |j_idx| {
+                        const j_ip = start_ip + j_idx;
+                        const j_op = block.ops[j_ip];
+                        const maybe_tgt: ?usize = switch (j_op.opcode) {
+                            .jump, .jump_if_false, .jump_if_true => (@as(usize, j_op.b) << 8) | j_op.c,
+                            .jeq_local_const_false, .jlt_local_const_false, .jle_local_const_false, .jgt_local_const_false, .jge_local_const_false => j_ip + @as(usize, j_op.c),
+                            else => null,
+                        };
+                        if (maybe_tgt) |tgt| {
+                            const in_arg_span = (j_idx > gp_idx and j_idx < call_idx);
+                            if (in_arg_span) {
+                                if (tgt <= start_ip + gp_idx or tgt > start_ip + call_idx) {
+                                    jumps_contained = false;
+                                    break;
+                                }
+                            } else {
+                                if (tgt >= start_ip + gp_idx and tgt <= start_ip + call_idx) {
+                                    jumps_contained = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    const lg_idx = gp_idx - 1;
+                    const lg_op = block.ops[start_ip + lg_idx];
+                    if (jumps_contained and lg_op.opcode == .load_global and lg_op.a == this_r) {
+                        const gname = constantName(block, lg_op.b) orelse "";
+                        if (std.mem.eql(u8, gname, "Math")) {
+                            math_sqrt_guard_bits = expected_bits;
+                            elided_op[lg_idx] = true;
+                            elided_op[gp_idx] = true;
+                            elided_math_call[call_idx] = true;
+                            for (gp_idx + 1 .. call_idx + 1) |b_idx| {
+                                bailout_target_ips[b_idx] = @intCast(start_ip + lg_idx);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    const has_preheader_bailout = (has_flush or hoisted_arrs.count > 0 or math_sqrt_guard_bits != null);
+
     const ExitStub = struct {
         label: Label,
         target_ip: u32,
@@ -2558,11 +2782,23 @@ fn compileOsrImpl(
     try a.pushReg(.r13);
     try a.pushReg(.r14);
     try a.pushReg(.r15);
+    if (hoisted_stack_bytes > 0) {
+        try a.subRegImm32(.rsp, hoisted_stack_bytes);
+    }
 
     try a.movRegReg(.r12, .rdi); // %r12 = regs
     try a.movRegReg(.r13, .rsi); // %r13 = ctx
     try a.movRegImm64(.r14, JSValue.HEAP_BASE); // %r14 = HEAP_BASE
     try a.movRegImm64(.r15, JSValue.BASE_TAG); // %r15 = BASE_TAG
+
+    if (math_sqrt_guard_bits) |expected_bits| {
+        try a.movRegReg(.rdi, .r13);
+        try a.movRegImm64(.rsi, expected_bits);
+        try a.movRegImm64(.rax, @intFromPtr(&vm.jitCheckMathSqrt));
+        try a.callReg(.rax);
+        try a.testRegReg(.rax, .rax);
+        try a.jcc(.ne, preheader_bailout);
+    }
 
     // Pre-header for promoted invariant object properties (stores prop_array in %rbx)
     if (promoted.count > 0) {
@@ -2613,33 +2849,41 @@ fn compileOsrImpl(
             try a.jcc(.ae, preheader_bailout);
             try a.movqXmmReg(promoted.xmms[p], .rax);
         }
-    } else if (hoisted_arr_reg) |arr_r| {
+    } else if (hoisted_arrs.count > 0) {
         const ArrayBox = zvalue.Rc(zvalue.ZArray(JSValue));
         const ZArr = zvalue.ZArray(JSValue);
         const arr_val_off: i32 = @intCast(@offsetOf(ArrayBox, "value"));
         const arr_holey_off: i32 = arr_val_off + @as(i32, @intCast(@offsetOf(ZArr, "holey")));
 
-        try a.movRegMem(.rax, .r12, @intCast(@as(usize, arr_r) * 8));
-        try a.movRegReg(.rcx, .rax);
-        try a.shrRegImm8(.rcx, 47);
-        try a.cmpRegImm32(.rcx, HEADER_ARRAY);
-        try a.jcc(.ne, preheader_bailout);
+        for (0..hoisted_arrs.count) |h_idx| {
+            const arr_r = hoisted_arrs.regs[h_idx];
+            try a.movRegMem(.rax, .r12, @intCast(@as(usize, arr_r) * 8));
+            try a.movRegReg(.rcx, .rax);
+            try a.shrRegImm8(.rcx, 47);
+            try a.cmpRegImm32(.rcx, HEADER_ARRAY);
+            try a.jcc(.ne, preheader_bailout);
 
-        try a.movRegImm64(.rcx, JSValue.PTR_MASK);
-        try a.andRegReg(.rax, .rcx);
-        try a.movRegReg(.rbx, .rax); // %rbx = *ArrayBox
+            try a.movRegImm64(.rcx, JSValue.PTR_MASK);
+            try a.andRegReg(.rax, .rcx);
+            try a.movRegReg(.rbx, .rax); // %rbx = *ArrayBox
 
-        const preheader_arr_ok = try a.createLabel();
-        try a.movRegMem(.rcx, .rbx, arr_holey_off);
-        try a.testRegReg(.rcx, .rcx);
-        try a.jcc(.e, preheader_arr_ok);
-        try a.movRegReg(.rdi, .r13);
-        try a.movRegReg(.rsi, .rbx);
-        try a.movRegImm64(.rax, @intFromPtr(&vm.jitCheckHoleyArray));
-        try a.callReg(.rax);
-        try a.testRegReg(.rax, .rax);
-        try a.jcc(.ne, preheader_bailout);
-        a.bindLabel(preheader_arr_ok);
+            const preheader_arr_ok = try a.createLabel();
+            try a.movRegMem(.rcx, .rbx, arr_holey_off);
+            try a.testRegReg(.rcx, .rcx);
+            try a.jcc(.e, preheader_arr_ok);
+            try a.movRegReg(.rdi, .r13);
+            try a.movRegReg(.rsi, .rbx);
+            try a.movRegImm64(.rax, @intFromPtr(&vm.jitCheckHoleyArray));
+            try a.callReg(.rax);
+            try a.movzxReg64Reg8(.rax, .rax);
+            try a.testRegReg(.rax, .rax);
+            try a.jcc(.ne, preheader_bailout);
+            a.bindLabel(preheader_arr_ok);
+
+            if (hoisted_arrs.count > 1) {
+                try a.movMemReg(.rsp, @intCast(h_idx * 8), .rbx);
+            }
+        }
     }
 
     // Pre-header for cached registers
@@ -2685,11 +2929,13 @@ fn compileOsrImpl(
     defer allocator.free(incoming_elem_store);
     @memset(incoming_elem_store, null);
 
+    var skip_next_op = false;
     for (0..loop_len) |idx| {
         const ip = start_ip + idx;
         const op = block.ops[ip];
         const bail_lbl = bailout_labels[idx];
         a.bindLabel(op_labels[idx]);
+        if (elided_op[idx]) continue;
         if (is_jump_target[idx]) {
             known_f64 = @splat(null);
             known_valid_elem_idx = null;
@@ -2727,7 +2973,7 @@ fn compileOsrImpl(
                 .to_prop_key,
                 => {},
                 .set_elem => {
-                    if (hoisted_arr_reg != null and hoisted_arr_reg.? == op.a) {
+                    if (single_hoisted_arr != null and single_hoisted_arr.? == op.a) {
                         last_elem_store = .{ .idx_reg = op.b, .val_reg = op.c };
                     } else {
                         last_elem_store = null;
@@ -2906,7 +3152,7 @@ fn compileOsrImpl(
                     if (last_elem_store) |les| {
                         if (op.a == les.idx_reg or op.a == les.val_reg) last_elem_store = null;
                     }
-                    if (op.opcode == .get_elem and hoisted_arr_reg != null and hoisted_arr_reg.? == op.b and op.a != op.c) {
+                    if (op.opcode == .get_elem and single_hoisted_arr != null and single_hoisted_arr.? == op.b and op.a != op.c) {
                         known_valid_elem_idx = op.c;
                     } else if (known_valid_elem_idx) |kvi| {
                         if (op.a == kvi) known_valid_elem_idx = null;
@@ -2918,6 +3164,11 @@ fn compileOsrImpl(
                     }
                 },
             }
+        }
+
+        if (skip_next_op) {
+            skip_next_op = false;
+            continue;
         }
 
         switch (op.opcode) {
@@ -2957,8 +3208,12 @@ fn compileOsrImpl(
                     } else if (a_cached and !b_cached) {
                         try emitLoadNumToXmm(&a, reg_to_xmm, op.b, reg_to_xmm[op.a].?, bail_lbl);
                     } else if (!a_cached and b_cached) {
+                        const xmm_src = reg_to_xmm[op.b].?;
                         try emitReleaseHeapIfRefGt1(&a, op.a, bail_lbl);
-                        try a.movqRegXmm(.rax, reg_to_xmm[op.b].?);
+                        try a.movqRegXmm(.rax, xmm_src);
+                        try a.ucomisd(xmm_src, xmm_src);
+                        try a.movRegImm64(.rcx, JSValue.CANONICAL_NAN);
+                        try a.cmovpRegReg(.rax, .rcx);
                         try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
                     } else {
                         const heap_move_lbl = try a.createLabel();
@@ -3011,7 +3266,7 @@ fn compileOsrImpl(
                 try emitCondJump(&a, op.opcode == .jump_if_true, op.a, target_lbl, bail_lbl);
             },
             .to_prop_key => {
-                if (hoisted_arr_reg == null or hoisted_arr_reg.? != op.b) {
+                if (hoisted_arrs.find(op.b) == null) {
                     try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
                     try a.movRegImm64(.rcx, JSValue.UNDEFINED.bits);
                     try a.cmpRegReg(.rax, .rcx);
@@ -3042,7 +3297,7 @@ fn compileOsrImpl(
                 const h_mask_len_off: i32 = h_mask_ptr_off + 8;
                 const h_is_holey_off: i32 = @intCast(@offsetOf(HoleyState, "is_holey"));
 
-                if (hoisted_arr_reg != null and hoisted_arr_reg.? == op.b) {
+                if (single_hoisted_arr != null and single_hoisted_arr.? == op.b) {
                     if (last_elem_store) |les| {
                         if (les.idx_reg == op.c) {
                             try emitLoadNumToXmm(&a, reg_to_xmm, les.val_reg, .xmm0, bail_lbl);
@@ -3052,7 +3307,13 @@ fn compileOsrImpl(
                     }
                 }
 
-                const box_reg: x64_asm.Reg = if (hoisted_arr_reg != null and hoisted_arr_reg.? == op.b) .rbx else blk: {
+                const hoisted_slot = hoisted_arrs.find(op.b);
+                const is_hoisted = (hoisted_slot != null);
+                const box_reg: x64_asm.Reg = if (hoisted_slot) |slot_idx| blk: {
+                    if (hoisted_arrs.count == 1) break :blk .rbx;
+                    try a.movRegMem(.r9, .rsp, @intCast(slot_idx * 8));
+                    break :blk .r9;
+                } else blk: {
                     // arr = regs[op.b]; guard (arr >> 47) == 0x1FFF4 (HEADER_ARRAY)
                     try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
                     try a.movRegReg(.rcx, .rax);
@@ -3093,7 +3354,7 @@ fn compileOsrImpl(
                 try a.movRegMem(.rdx, box_reg, arr_holey_off);
                 try a.testRegReg(.rdx, .rdx);
                 try a.jcc(.e, dense_ok_lbl);
-                if (box_reg != .rbx) {
+                if (!is_hoisted) {
                     try a.movRegReg(.r8, .rcx);
                     if (cached_count > 0) try emitFlushCached(&a, cached_regs, cached_count);
                     if (promoted.count > 0) try emitFlushPromoted(&a, promoted);
@@ -3107,6 +3368,7 @@ fn compileOsrImpl(
                     try a.popReg(.r8);
                     if (cached_count > 0) try emitReloadCached(&a, cached_regs, cached_count);
                     if (promoted.count > 0) try emitReloadPromoted(&a, promoted);
+                    try a.movzxReg64Reg8(.rax, .rax);
                     try a.testRegReg(.rax, .rax);
                     try a.jcc(.ne, bail_lbl);
                     try a.movRegReg(.rcx, .r8);
@@ -3171,7 +3433,7 @@ fn compileOsrImpl(
                     try a.jcc(.ae, bail_lbl);
                 }
 
-                if (hoisted_arr_reg != null and hoisted_arr_reg.? == op.a and known_valid_elem_idx != null and known_valid_elem_idx.? == op.b) {
+                if (single_hoisted_arr != null and single_hoisted_arr.? == op.a and known_valid_elem_idx != null and known_valid_elem_idx.? == op.b) {
                     try emitLoadNumToXmm(&a, reg_to_xmm, op.b, .xmm0, bail_lbl);
                     try a.cvttsd2siReg32Xmm(.rcx, .xmm0);
                     try a.movRegMem(.r11, .rbx, arr_items_ptr_off);
@@ -3183,7 +3445,13 @@ fn compileOsrImpl(
                 const helper_lbl = try a.createLabel();
                 const done_lbl = try a.createLabel();
 
-                const box_reg: x64_asm.Reg = if (hoisted_arr_reg != null and hoisted_arr_reg.? == op.a) .rbx else blk: {
+                const hoisted_slot = hoisted_arrs.find(op.a);
+                const is_hoisted = (hoisted_slot != null);
+                const box_reg: x64_asm.Reg = if (hoisted_slot) |slot_idx| blk: {
+                    if (hoisted_arrs.count == 1) break :blk .rbx;
+                    try a.movRegMem(.r9, .rsp, @intCast(slot_idx * 8));
+                    break :blk .r9;
+                } else blk: {
                     // arr = regs[op.a]; guard (arr >> 47) == HEADER_ARRAY
                     try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.a) * 8));
                     try a.movRegReg(.rcx, .rax);
@@ -3225,7 +3493,7 @@ fn compileOsrImpl(
                 try a.jcc(.ae, grow_or_holey_lbl);
 
                 // Overwrite: idx < len
-                if (box_reg != .rbx) {
+                if (!is_hoisted) {
                     const non_hoisted_dense = try a.createLabel();
                     try a.movRegMem(.rdx, box_reg, arr_holey_off);
                     try a.testRegReg(.rdx, .rdx);
@@ -3239,8 +3507,8 @@ fn compileOsrImpl(
                 try a.jcc(.ae, bail_lbl);
                 try a.movMemIndexed8Reg(.r11, .rcx, 0, .r10);
                 // If hoisted array has holey state, clear hole bit in hole_mask
-                if (box_reg == .rbx) {
-                    try a.movRegMem(.rdx, .rbx, arr_holey_off);
+                if (is_hoisted) {
+                    try a.movRegMem(.rdx, box_reg, arr_holey_off);
                     try a.testRegReg(.rdx, .rdx);
                     try a.jcc(.e, done_lbl);
                     try a.movzxReg64Mem8(.rax, .rdx, h_is_holey_off);
@@ -3288,14 +3556,15 @@ fn compileOsrImpl(
                 try a.movRegReg(.rcx, .r10);
                 try a.movRegImm64(.rax, @intFromPtr(&vm.jitSetElemHoleyOrGrow));
                 try a.callReg(.rax);
-                try a.testRegReg(.rax, .rax);
-                try a.jcc(.ne, bail_lbl);
                 if (cached_count > 0) {
                     try emitReloadCached(&a, cached_regs, cached_count);
                 }
                 if (promoted.count > 0) {
                     try emitReloadPromoted(&a, promoted);
                 }
+                try a.movzxReg64Reg8(.rax, .rax);
+                try a.testRegReg(.rax, .rax);
+                try a.jcc(.ne, bail_lbl);
 
                 a.bindLabel(done_lbl);
             },
@@ -3505,14 +3774,15 @@ fn compileOsrImpl(
                 try a.movRegImm32(.r8, 6);
                 try a.movRegImm64(.rax, @intFromPtr(&vm.jitBitwise));
                 try a.callReg(.rax);
-                try a.testRegReg(.rax, .rax);
-                try a.jcc(.ne, bail_lbl);
                 if (cached_count > 0) {
                     try emitReloadCached(&a, cached_regs, cached_count);
                 }
                 if (promoted.count > 0) {
                     try emitReloadPromoted(&a, promoted);
                 }
+                try a.movzxReg64Reg8(.rax, .rax);
+                try a.testRegReg(.rax, .rax);
+                try a.jcc(.ne, bail_lbl);
                 a.bindLabel(done_lbl);
             },
             .and_bits, .or_bits, .xor_bits, .shl, .shr, .ushr => {
@@ -3632,22 +3902,85 @@ fn compileOsrImpl(
                 try a.movRegImm32(.r8, kind_u32);
                 try a.movRegImm64(.rax, @intFromPtr(&vm.jitBitwise));
                 try a.callReg(.rax);
-                try a.testRegReg(.rax, .rax);
-                try a.jcc(.ne, bail_lbl);
                 if (cached_count > 0) {
                     try emitReloadCached(&a, cached_regs, cached_count);
                 }
                 if (promoted.count > 0) {
                     try emitReloadPromoted(&a, promoted);
                 }
+                try a.movzxReg64Reg8(.rax, .rax);
+                try a.testRegReg(.rax, .rax);
+                try a.jcc(.ne, bail_lbl);
                 a.bindLabel(done_lbl);
             },
             .lt_num, .gt_num, .le_num, .ge_num, .eq, .ne, .loose_eq, .loose_ne => {
                 try emitLoadNumToXmm(&a, reg_to_xmm, op.b, .xmm0, bail_lbl);
                 try emitLoadNumToXmm(&a, reg_to_xmm, op.c, .xmm1, bail_lbl);
-                try emitReleaseHeapIfRefGt1(&a, op.a, bail_lbl);
-                try emitCmpToBool(&a, op.opcode);
-                try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+                const can_fuse = (op.opcode != .loose_eq and op.opcode != .loose_ne and
+                    idx + 1 < loop_len and !is_jump_target[idx + 1] and
+                    op.a >= block.local_count and
+                    (block.ops[ip + 1].opcode == .jump_if_false or block.ops[ip + 1].opcode == .jump_if_true) and
+                    block.ops[ip + 1].a == op.a);
+                if (can_fuse) {
+                    const next_op = block.ops[ip + 1];
+                    const target_pc = (@as(usize, next_op.b) << 8) | next_op.c;
+                    const target_lbl = if (target_pc >= start_ip and target_pc <= end_ip)
+                        op_labels[target_pc - start_ip]
+                    else blk: {
+                        const el = try a.createLabel();
+                        try exit_stubs.append(allocator, .{ .label = el, .target_ip = @intCast(target_pc) });
+                        break :blk el;
+                    };
+                    const jump_if_true = (next_op.opcode == .jump_if_true);
+                    switch (op.opcode) {
+                        .lt_num => {
+                            try a.ucomisd(.xmm1, .xmm0);
+                            try a.jcc(if (jump_if_true) .a else .be, target_lbl);
+                        },
+                        .le_num => {
+                            try a.ucomisd(.xmm1, .xmm0);
+                            try a.jcc(if (jump_if_true) .ae else .b, target_lbl);
+                        },
+                        .gt_num => {
+                            try a.ucomisd(.xmm0, .xmm1);
+                            try a.jcc(if (jump_if_true) .a else .be, target_lbl);
+                        },
+                        .ge_num => {
+                            try a.ucomisd(.xmm0, .xmm1);
+                            try a.jcc(if (jump_if_true) .ae else .b, target_lbl);
+                        },
+                        .eq => {
+                            try a.ucomisd(.xmm0, .xmm1);
+                            if (jump_if_true) {
+                                const fall_lbl = try a.createLabel();
+                                try a.jcc(.p, fall_lbl);
+                                try a.jcc(.e, target_lbl);
+                                a.bindLabel(fall_lbl);
+                            } else {
+                                try a.jcc(.p, target_lbl);
+                                try a.jcc(.ne, target_lbl);
+                            }
+                        },
+                        .ne => {
+                            try a.ucomisd(.xmm0, .xmm1);
+                            if (jump_if_true) {
+                                try a.jcc(.p, target_lbl);
+                                try a.jcc(.ne, target_lbl);
+                            } else {
+                                const fall_lbl = try a.createLabel();
+                                try a.jcc(.p, fall_lbl);
+                                try a.jcc(.e, target_lbl);
+                                a.bindLabel(fall_lbl);
+                            }
+                        },
+                        else => unreachable,
+                    }
+                    skip_next_op = true;
+                } else {
+                    try emitReleaseHeapIfRefGt1(&a, op.a, bail_lbl);
+                    try emitCmpToBool(&a, op.opcode);
+                    try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+                }
             },
             .lt_local_const, .gt_local_const, .le_local_const, .ge_local_const, .eq_local_const => {
                 const c_bits = JSValue.fromNumber(block.constants[op.c].number).bits;
@@ -3739,11 +4072,12 @@ fn compileOsrImpl(
                 try a.movRegImm32(.rcx, op.b);
                 try a.movRegImm64(.rax, @intFromPtr(&vm.jitNewArray));
                 try a.callReg(.rax);
-                try a.testRegReg(.rax, .rax);
-                try a.jcc(.ne, bail_lbl);
                 if (cached_count > 0) {
                     try emitReloadCached(&a, cached_regs, cached_count);
                 }
+                try a.movzxReg64Reg8(.rax, .rax);
+                try a.testRegReg(.rax, .rax);
+                try a.jcc(.ne, bail_lbl);
                 a.bindLabel(done_lbl);
             },
             .set_elem_const => {
@@ -3814,11 +4148,12 @@ fn compileOsrImpl(
                 try a.movRegImm32(.rcx, op.c);
                 try a.movRegImm64(.rax, @intFromPtr(&vm.jitSetElemConst));
                 try a.callReg(.rax);
-                try a.testRegReg(.rax, .rax);
-                try a.jcc(.ne, bail_lbl);
                 if (cached_count > 0) {
                     try emitReloadCached(&a, cached_regs, cached_count);
                 }
+                try a.movzxReg64Reg8(.rax, .rax);
+                try a.testRegReg(.rax, .rax);
+                try a.jcc(.ne, bail_lbl);
 
                 a.bindLabel(done_lbl);
             },
@@ -3881,11 +4216,12 @@ fn compileOsrImpl(
                 try a.movRegImm32(.rcx, elem_idx);
                 try a.movRegImm64(.rax, @intFromPtr(&vm.jitGetElemConst));
                 try a.callReg(.rax);
-                try a.testRegReg(.rax, .rax);
-                try a.jcc(.ne, bail_lbl);
                 if (cached_count > 0) {
                     try emitReloadCached(&a, cached_regs, cached_count);
                 }
+                try a.movzxReg64Reg8(.rax, .rax);
+                try a.testRegReg(.rax, .rax);
+                try a.jcc(.ne, bail_lbl);
 
                 a.bindLabel(done_lbl);
             },
@@ -3996,11 +4332,12 @@ fn compileOsrImpl(
                 try a.movRegImm32(.rdx, op.a);
                 try a.movRegImm64(.rax, @intFromPtr(&vm.jitNewObject));
                 try a.callReg(.rax);
-                try a.testRegReg(.rax, .rax);
-                try a.jcc(.ne, bail_lbl);
                 if (cached_count > 0) {
                     try emitReloadCached(&a, cached_regs, cached_count);
                 }
+                try a.movzxReg64Reg8(.rax, .rax);
+                try a.testRegReg(.rax, .rax);
+                try a.jcc(.ne, bail_lbl);
                 a.bindLabel(done_lbl);
             },
             .set_prop, .set_prop_transition => {
@@ -4380,11 +4717,12 @@ fn compileOsrImpl(
                 try a.movRegImm64(.rcx, expected_key_ptr);
                 try a.movRegImm64(.rax, @intFromPtr(&vm.jitSetProp));
                 try a.callReg(.rax);
-                try a.testRegReg(.rax, .rax);
-                try a.jcc(.ne, bail_lbl);
                 if (cached_count > 0) {
                     try emitReloadCached(&a, cached_regs, cached_count);
                 }
+                try a.movzxReg64Reg8(.rax, .rax);
+                try a.testRegReg(.rax, .rax);
+                try a.jcc(.ne, bail_lbl);
                 a.bindLabel(done_lbl);
             },
             .get_prop => {
@@ -4405,7 +4743,8 @@ fn compileOsrImpl(
                 }
                 const key = constantName(block, op.c).?;
                 const expected_key_ptr = @intFromPtr(key.ptr);
-                const packed_info: u64 = (@as(u64, @intCast(ip)) << 32) | (@as(u64, ic_idx) << 16) | (@as(u64, op.b) << 8) | @as(u64, op.a);
+                const allow_non_num_flag: u64 = if (!(op.a < 64 and reg_to_xmm[op.a] != null)) (@as(u64, 1) << 24) else 0;
+                const packed_info: u64 = (@as(u64, @intCast(ip)) << 32) | allow_non_num_flag | (@as(u64, ic_idx) << 16) | (@as(u64, op.b) << 8) | @as(u64, op.a);
 
                 const slow_path = try a.createLabel();
                 const done_lbl = try a.createLabel();
@@ -4543,6 +4882,10 @@ fn compileOsrImpl(
                 try a.movRegImm64(.rcx, expected_key_ptr);
                 try a.movRegImm64(.rax, @intFromPtr(&vm.jitGetProp));
                 try a.callReg(.rax);
+                if (cached_count > 0) {
+                    try emitReloadCached(&a, cached_regs, cached_count);
+                }
+                try a.movzxReg64Reg8(.rax, .rax);
                 try a.testRegReg(.rax, .rax);
                 try a.jcc(.ne, bail_lbl);
                 if (op.a < 64 and reg_to_xmm[op.a] != null) {
@@ -4550,13 +4893,48 @@ fn compileOsrImpl(
                     try a.cmpRegReg(.rax, .r15);
                     try a.jcc(.ae, bail_lbl);
                 }
+                a.bindLabel(done_lbl);
+            },
+            .load_global => {
+                const name = constantName(block, op.b).?;
+                if (cached_count > 0) {
+                    try emitFlushCached(&a, cached_regs, cached_count);
+                }
+                if (promoted.count > 0) {
+                    try emitFlushPromoted(&a, promoted);
+                }
+                try a.movRegReg(.rdi, .r13);
+                try a.movRegReg(.rsi, .r12);
+                try a.movRegImm32(.rdx, op.a);
+                try a.movRegImm64(.rcx, @intFromPtr(name.ptr));
+                try a.movRegImm64(.r8, name.len);
+                try a.movRegImm64(.rax, @intFromPtr(&vm.jitLoadGlobal));
+                try a.callReg(.rax);
                 if (cached_count > 0) {
                     try emitReloadCached(&a, cached_regs, cached_count);
                 }
-                a.bindLabel(done_lbl);
+                if (promoted.count > 0) {
+                    try emitReloadPromoted(&a, promoted);
+                }
+                try a.testRegReg(.rax, .rax);
+                try a.jcc(.ne, bail_lbl);
             },
             .call, .call_global => {
                 const cs = &block.call_target_cache[op.c];
+                if (op.opcode == .call and isMathSqrtCall(cs)) {
+                    if (!elided_math_call[idx]) {
+                        const expected_callee = cs.callee orelse return error.CannotCompile;
+                        try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
+                        try a.movRegImm64(.rcx, expected_callee.bits);
+                        try a.cmpRegReg(.rax, .rcx);
+                        try a.jcc(.ne, bail_lbl);
+                    }
+                    const arg_reg: u8 = op.b + 1;
+                    try emitLoadNumToXmm(&a, reg_to_xmm, arg_reg, .xmm0, bail_lbl);
+                    try a.sqrtsd(.xmm0, .xmm0);
+                    try emitStoreXmmToNum(&a, reg_to_xmm, cached_regs, cached_count, op.a, .xmm0, bail_lbl);
+                    continue;
+                }
                 const cache_addr: u64 = @intFromPtr(cs);
                 const tb = cs.target_block.?;
                 const target_addr: u64 = @intFromPtr(tb);
@@ -4730,6 +5108,9 @@ fn compileOsrImpl(
     }
 
     a.bindLabel(osr_epilogue);
+    if (hoisted_stack_bytes > 0) {
+        try a.addRegImm32(.rsp, hoisted_stack_bytes);
+    }
     try a.popReg(.r15);
     try a.popReg(.r14);
     try a.popReg(.r13);
@@ -5694,4 +6075,88 @@ test "bytecode VM regressions: array defineProperty accessor, omitted params res
     defer res.deinit();
     try std.testing.expect(res.isNumber());
     try std.testing.expectEqual(@as(f64, 22104), res.asNumber());
+}
+
+test "baseline JIT Phase J2.1: Math.sqrt OSR intrinsic (IEEE-754 + monkey-patch bailout) and multi-array hoisting" {
+    if (!comptime x64_asm.is_supported_host) return;
+    const allocator = std.testing.allocator;
+    var writer = std.Io.Writer.Allocating.init(allocator);
+    defer writer.deinit();
+    var interp = try @import("../interpreter.zig").Interpreter.init(allocator, &writer.writer);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+
+    const res = try interp.run(
+        \\// 1. Math.sqrt OSR: positive, 0, negative -> NaN
+        \\function sumSqrt(n) {
+        \\    var s = 0;
+        \\    for (var i = 0; i < n; i++) {
+        \\        s += Math.sqrt(i * i);
+        \\    }
+        \\    return s;
+        \\}
+        \\var r1 = sumSqrt(200);
+        \\if (r1 !== 19900) throw new Error("bad sumSqrt: " + r1);
+        \\
+        \\function checkNegSqrt(n) {
+        \\    var nanCount = 0;
+        \\    for (var i = 0; i < n; i++) {
+        \\        var v = Math.sqrt(i === 150 ? -1 : 0);
+        \\        if (v !== v) nanCount++;
+        \\    }
+        \\    return nanCount;
+        \\}
+        \\if (checkNegSqrt(200) !== 1) throw new Error("bad neg sqrt");
+        \\
+        \\// 2. Monkey-patch Math.sqrt BEFORE re-entering compiled OSR loop
+        \\var origSqrt = Math.sqrt;
+        \\Math.sqrt = function() { return 99; };
+        \\var rPatchedBefore = sumSqrt(10);
+        \\Math.sqrt = origSqrt;
+        \\if (rPatchedBefore !== 990) throw new Error("bad patch before: " + rPatchedBefore);
+        \\
+        \\// 3. Monkey-patch Math.sqrt INSIDE hot OSR loop
+        \\function patchInside() {
+        \\    var fn99 = function() { return 99; };
+        \\    var last = 0;
+        \\    for (var i = 0; i < 200; i++) {
+        \\        if (i === 150) Math.sqrt = fn99;
+        \\        last = Math.sqrt(16);
+        \\    }
+        \\    return last;
+        \\}
+        \\var rPatchedInside = patchInside();
+        \\Math.sqrt = origSqrt;
+        \\if (rPatchedInside !== 99) throw new Error("bad patch inside: " + rPatchedInside);
+        \\
+        \\// 4. Multi-array hoisting (5 simultaneous arrays: read + write)
+        \\function multiArr(n) {
+        \\    var a = new Array(n);
+        \\    var b = new Array(n);
+        \\    var c = new Array(n);
+        \\    var d = new Array(n);
+        \\    var e = new Array(n);
+        \\    for (var i = 0; i < n; i++) {
+        \\        a[i] = i;
+        \\        b[i] = i * 2;
+        \\        c[i] = i * 3;
+        \\        d[i] = 1;
+        \\        e[i] = 0;
+        \\    }
+        \\    for (var i = 0; i < n; i++) {
+        \\        e[i] = a[i] + b[i] + c[i] + d[i];
+        \\        d[i] += 2;
+        \\    }
+        \\    var total = 0;
+        \\    for (var i = 0; i < n; i++) total += e[i] + d[i];
+        \\    return total;
+        \\}
+        \\var rMulti = multiArr(150);
+        \\// sum_{i=0..149} (6*i + 1 + 3) = 6 * (149*150/2) + 4*150 = 67050 + 600 = 67650
+        \\if (rMulti !== 67650) throw new Error("bad multiArr: " + rMulti);
+        \\rMulti;
+    );
+    defer res.deinit();
+    try std.testing.expect(res.isNumber());
+    try std.testing.expectEqual(@as(f64, 67650), res.asNumber());
 }

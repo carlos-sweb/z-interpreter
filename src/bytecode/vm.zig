@@ -1173,6 +1173,48 @@ pub fn jitCheckHoleyArray(ctx: *codeblock.OsrContext, box_addr: usize) callconv(
     return 0;
 }
 
+pub fn jitLoadGlobal(ctx: *codeblock.OsrContext, regs: [*]JSValue, dst: u32, name_ptr: [*]const u8, name_len: usize) callconv(.c) u64 {
+    const frame: *CallFrame = @ptrCast(@alignCast(ctx.frame_ptr));
+    const env = frame.closure_env orelse return 1;
+    const name = name_ptr[0..name_len];
+    var cur: ?*Environment = env;
+    while (cur) |e| : (cur = e.parent) {
+        if (e.tdz.contains(name)) return 1;
+        if (e.bindingIndex(name)) |idx| {
+            const v = e.bindings.items[idx].value;
+            const slot = &regs[dst];
+            if (!needsDeinit(v)) {
+                if (needsDeinit(slot.*)) deinitSlot(slot);
+                slot.* = v;
+            } else {
+                const retained = v.retain();
+                if (needsDeinit(slot.*)) deinitSlot(slot);
+                slot.* = retained;
+                frame.has_rc = true;
+            }
+            return 0;
+        }
+    }
+    return 1;
+}
+
+pub fn jitCheckMathSqrt(ctx: *codeblock.OsrContext, expected_bits: u64) callconv(.c) u64 {
+    const frame: *CallFrame = @ptrCast(@alignCast(ctx.frame_ptr));
+    const env = frame.closure_env orelse return 1;
+    var cur: ?*Environment = env;
+    while (cur) |e| : (cur = e.parent) {
+        if (e.tdz.contains("Math")) return 1;
+        if (e.bindingIndex("Math")) |idx| {
+            const math_val = e.bindings.items[idx].value;
+            if (!math_val.isObject()) return 1;
+            const rec = math_val.asObject().value.getOwnRecord("sqrt") orelse return 1;
+            if (rec.isAccessor()) return 1;
+            return if (rec.value.bits == expected_bits) 0 else 1;
+        }
+    }
+    return 1;
+}
+
 pub fn jitSetElemHoleyOrGrow(ctx: *codeblock.OsrContext, box_addr: usize, idx: u32, val_bits: u64) callconv(.c) u8 {
     if (jitCheckHoleyArray(ctx, box_addr) != 0) return 1;
     const box: *ArrayBox = @ptrFromInt(box_addr);
@@ -1366,6 +1408,7 @@ pub fn jitGetProp(ctx: *codeblock.OsrContext, regs: [*]JSValue, packed_info: u64
     const dst_reg: u8 = @truncate(packed_info);
     const obj_reg: u8 = @truncate(packed_info >> 8);
     const ic_idx: u8 = @truncate(packed_info >> 16);
+    const allow_non_num = ((packed_info >> 24) & 1) != 0;
     const op_pc: u32 = @truncate(packed_info >> 32);
     const frame: *CallFrame = @ptrCast(@alignCast(ctx.frame_ptr));
     const prop_ic: *[256]PropIC = @ptrCast(@alignCast(ctx.prop_ic_ptr));
@@ -1382,7 +1425,20 @@ pub fn jitGetProp(ctx: *codeblock.OsrContext, regs: [*]JSValue, packed_info: u64
         const rec = &box.value.properties.entries.items(.value)[ic.slot_idx];
         if (!rec.isAccessor()) {
             const v = rec.value;
-            if (!v.isNumber()) return 1;
+            if (!v.isNumber()) {
+                if (!allow_non_num) return 1;
+                const slot = &regs[dst_reg];
+                if (!needsDeinit(v)) {
+                    if (needsDeinit(slot.*)) deinitSlot(slot);
+                    slot.* = v;
+                } else {
+                    const retained = v.retain();
+                    if (needsDeinit(slot.*)) deinitSlot(slot);
+                    slot.* = retained;
+                    frame.has_rc = true;
+                }
+                return 0;
+            }
             const slot = &regs[dst_reg];
             if (needsDeinit(slot.*)) deinitSlot(slot);
             slot.* = v;
