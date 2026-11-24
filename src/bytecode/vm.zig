@@ -357,7 +357,7 @@ fn setProp(frame: *CallFrame, allocator: Allocator, obj: JSValue, key: []const u
     } else return error.UnsupportedOpcode;
 }
 
-fn maybeCompactFilledHoleyArray(arr: *zvalue.ZArray(JSValue)) void {
+pub fn maybeCompactFilledHoleyArray(arr: *zvalue.ZArray(JSValue)) void {
     const h = arr.holey orelse return;
     if (h.sparse != null or h.has_element_descriptors or !h.length_writable) return;
     const len = arr.items.items.len;
@@ -1173,6 +1173,27 @@ pub fn jitCheckHoleyArray(ctx: *codeblock.OsrContext, box_addr: usize) callconv(
     return 0;
 }
 
+pub fn jitPrepareHoistedArray(ctx: *codeblock.OsrContext, box_addr: usize, flags: u64) callconv(.c) u64 {
+    const require_dense = (flags & 1) != 0;
+    const is_written = (flags & 2) != 0;
+    const frame: *CallFrame = @ptrCast(@alignCast(ctx.frame_ptr));
+    const box: *ArrayBox = @ptrFromInt(box_addr);
+    const arr = &box.value;
+    if (is_written and @hasField(@TypeOf(arr.*), "is_frozen") and arr.is_frozen) return 1;
+    if (frame.interp) |it| {
+        if (it.array_props.get(box_addr) != null) return 1;
+    }
+    if (arr.holey != null) {
+        maybeCompactFilledHoleyArray(arr);
+    }
+    if (arr.holey) |h| {
+        if (require_dense) return 1;
+        if (h.sparse != null or h.has_element_descriptors or !h.length_writable) return 1;
+    }
+    if (arr.items.items.len > 0x7FFF_F000) return 1;
+    return 0;
+}
+
 pub fn jitLoadGlobal(ctx: *codeblock.OsrContext, regs: [*]JSValue, dst: u32, name_ptr: [*]const u8, name_len: usize) callconv(.c) u64 {
     const frame: *CallFrame = @ptrCast(@alignCast(ctx.frame_ptr));
     const env = frame.closure_env orelse return 1;
@@ -1480,7 +1501,7 @@ noinline fn tryEnterOsr(
     if (entry.fn_ptr == null) {
         entry.count +%= 1;
         if (entry.count < baseline_jit.OSR_THRESHOLD) return start_ip;
-        if (!baseline_jit.compileOsr(allocator.*, mut_cb, entry, start_ip, end_ip, prop_ic)) return start_ip;
+        if (!baseline_jit.compileOsr(allocator.*, mut_cb, entry, start_ip, end_ip, prop_ic, frame_regs)) return start_ip;
     }
     const ofn = entry.fn_ptr orelse return start_ip;
     var ctx = codeblock.OsrContext{
