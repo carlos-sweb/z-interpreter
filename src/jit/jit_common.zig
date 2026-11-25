@@ -48,14 +48,12 @@ pub const HEADER_TYPED_ARRAY_BITS: u64 = blk: {
 };
 
 pub const str_val_off: i32 = @intCast(@offsetOf(StringBox, "value"));
-pub const str_data_ptr_off: i32 = blk: {
-    const dummy: *ZStr = @ptrFromInt(0x1000);
-    break :blk str_val_off + @as(i32, @intCast(@intFromPtr(&dummy.data.ptr) - 0x1000));
-};
-pub const str_data_len_off: i32 = blk: {
-    const dummy: *ZStr = @ptrFromInt(0x1000);
-    break :blk str_val_off + @as(i32, @intCast(@intFromPtr(&dummy.data.len) - 0x1000));
-};
+pub const str_data_ptr_off: i32 = str_val_off + @as(i32, @intCast(@offsetOf(ZStr, "data")));
+pub const str_data_len_off: i32 = str_data_ptr_off + @as(i32, @intCast(@sizeOf(usize)));
+comptime {
+    std.debug.assert(@sizeOf([]const u8) == 2 * @sizeOf(usize));
+    std.debug.assert(str_data_len_off == str_data_ptr_off + @as(i32, @intCast(@sizeOf(usize))));
+}
 
 pub const ObjectBox = zvalue.Rc(zvalue.ZObject(JSValue));
 pub const ZObj = zvalue.ZObject(JSValue);

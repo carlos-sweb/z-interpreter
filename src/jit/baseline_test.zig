@@ -1835,3 +1835,86 @@ test "baseline JIT Phase J2.4B: FastIntAscii tier for rut_dv, borrowed string ar
     }
     try std.testing.expect(has_compiled_osr);
 }
+
+test "baseline JIT string layout offsets, charCodeAt bounds-check NaN, and OSR 8-byte fast-path" {
+    if (!comptime x64_asm.is_supported_host) return;
+    const jit_common = @import("jit_common.zig");
+    const Interpreter = @import("../interpreter.zig").Interpreter;
+
+    // 1. Runtime validation of str_data_ptr_off and str_data_len_off against a real StringBox
+    try std.testing.expect(jit_common.str_data_len_off != jit_common.str_data_ptr_off);
+    try std.testing.expectEqual(jit_common.str_data_ptr_off + @as(i32, @intCast(@sizeOf(usize))), jit_common.str_data_len_off);
+    {
+        const sample = "12345678";
+        var sval = try JSValue.newString(std.testing.allocator, sample);
+        defer sval.deinit();
+        const box = sval.asString();
+        const base_addr = @intFromPtr(box);
+        const ptr_field: *const [*]const u8 = @ptrFromInt(base_addr + @as(usize, @intCast(jit_common.str_data_ptr_off)));
+        const len_field: *const usize = @ptrFromInt(base_addr + @as(usize, @intCast(jit_common.str_data_len_off)));
+        try std.testing.expectEqual(box.value.data.ptr, ptr_field.*);
+        try std.testing.expectEqual(@as(usize, 8), len_field.*);
+        try std.testing.expectEqual(box.value.data.len, len_field.*);
+    }
+
+    // 2. Whole-function JIT (FastIntAscii & general float tier) + OSR bounds checks and 8-byte fast paths
+    var allocating = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(std.testing.allocator, &allocating.writer);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+
+    const res = try interp.run(
+        \\// Whole-function JIT: out-of-bounds charCodeAt (>= len and < 0) must return NaN
+        \\function wholeFnOobSum(s) {
+        \\    var t = 0;
+        \\    for (var i = 0; i < 12; i++) {
+        \\        t = t + s.charCodeAt(i);
+        \\    }
+        \\    return t;
+        \\}
+        \\function wholeFnAt(s, idx) {
+        \\    return s.charCodeAt(idx);
+        \\}
+        \\var wRes = 0;
+        \\for (var k = 0; k < 100; k++) {
+        \\    wRes = wholeFnOobSum("12345678");
+        \\    if (wholeFnAt("12345678", 7) !== 56) throw new Error("bad idx 7");
+        \\    if (!Number.isNaN(wholeFnAt("12345678", 8))) throw new Error("idx 8 must be NaN");
+        \\    if (!Number.isNaN(wholeFnAt("12345678", -1))) throw new Error("idx -1 must be NaN");
+        \\    if (!Number.isNaN(wholeFnAt("1234", 4))) throw new Error("idx 4 on len 4 must be NaN");
+        \\}
+        \\if (!Number.isNaN(wRes)) throw new Error("wholeFnOobSum must be NaN, got " + wRes);
+        \\
+        \\// OSR s.length and s.charCodeAt across 8-byte ASCII (fast path), non-8-byte ASCII, UTF-16, and OOB
+        \\function osrStringOps() {
+        \\    var s8 = "12345678";
+        \\    var s5 = "ABCDE";
+        \\    var sUtf16 = "a\u00e9\u20ac12345";
+        \\    var lenAcc = 0;
+        \\    var codeAcc = 0;
+        \\    var nanCount = 0;
+        \\    for (var i = 0; i < 300; i++) {
+        \\        lenAcc += s8.length + s5.length + sUtf16.length;
+        \\        codeAcc += s8.charCodeAt(i & 7) + s5.charCodeAt(i % 5) + sUtf16.charCodeAt(2);
+        \\        if (Number.isNaN(s8.charCodeAt(8))) nanCount++;
+        \\        if (Number.isNaN(s8.charCodeAt(-1))) nanCount++;
+        \\        if (Number.isNaN(s5.charCodeAt(5))) nanCount++;
+        \\    }
+        \\    if (lenAcc !== 300 * (8 + 5 + 8)) throw new Error("bad lenAcc: " + lenAcc);
+        \\    if (nanCount !== 900) throw new Error("bad nanCount: " + nanCount);
+        \\    return codeAcc;
+        \\}
+        \\// 300 iterations:
+        \\// s8: 37 full cycles of 8 digits (49..56, sum=420) + 4 digits (49..52, sum=202) = 15540 + 202 = 15742
+        \\// s5: 60 full cycles of 5 chars (65..69, sum=335) = 20100
+        \\// sUtf16.charCodeAt(2) = 0x20ac (8364) * 300 = 2509200
+        \\var totalCode = osrStringOps();
+        \\if (totalCode !== 15742 + 20100 + 2509200) throw new Error("bad totalCode: " + totalCode);
+        \\1;
+    );
+    defer res.deinit();
+    try std.testing.expect(res.isNumber());
+    try std.testing.expectEqual(@as(f64, 1), res.asNumber());
+}
+
