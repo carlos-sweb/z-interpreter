@@ -1918,3 +1918,88 @@ test "baseline JIT string layout offsets, charCodeAt bounds-check NaN, and OSR 8
     try std.testing.expectEqual(@as(f64, 1), res.asNumber());
 }
 
+test "baseline JIT FastIntAscii micro-optimizations: reverse loop bounds elision, OOB non-pattern, -0 mul, magic mod 11, and cmov ternary" {
+    if (!comptime x64_asm.is_supported_host) return;
+    const Interpreter = @import("../interpreter.zig").Interpreter;
+
+    var allocating = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(std.testing.allocator, &allocating.writer);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+
+    const res = try interp.run(
+        \\// 1. Canonical rut_dv (reverse loop i = s.length - 1; i >= 0; i--, ASCII sub 48, non-neg mul, ternary cmov, % 11)
+        \\function rut_dv(s) {
+        \\    var m = 2;
+        \\    var t = 0;
+        \\    for (var i = s.length - 1; i >= 0; i--) {
+        \\        t = t + (s.charCodeAt(i) - 48) * m;
+        \\        m = (m === 7) ? 2 : (m + 1);
+        \\    }
+        \\    var dvNum = 11 - (t % 11);
+        \\    if (dvNum === 11) return 48;
+        \\    if (dvNum === 10) return 75;
+        \\    return 48 + dvNum;
+        \\}
+        \\// 2. Non-canonical reverse loop (starts at s.length instead of s.length - 1 -> must NOT elide bounds check and must return NaN)
+        \\function nonCanonicalOobReverse(s) {
+        \\    var t = 0;
+        \\    for (var i = s.length; i >= 0; i--) {
+        \\        t = t + s.charCodeAt(i);
+        \\    }
+        \\    return t;
+        \\}
+        \\// 3. Reverse loop that mutates i inside body -> must NOT elide bounds check
+        \\function mutatedIdxReverse(s) {
+        \\    var t = 0;
+        \\    for (var i = s.length - 1; i >= 0; i--) {
+        \\        t = t + s.charCodeAt(i + 5);
+        \\    }
+        \\    return t;
+        \\}
+        \\// 4. Negative * zero multiplication in FastIntAscii candidate must preserve -0.0 via fallback
+        \\function negZeroMul(s) {
+        \\    var c = s.charCodeAt(0) - 48; // 0 for "0"
+        \\    var neg = c - 1; // -1 for "0"
+        \\    return neg * c; // -1 * 0 => -0.0
+        \\}
+        \\// 5. % 11 edge values (0, 10, 11, 12, 100000, and negative dividend)
+        \\function mod11Edge(s) {
+        \\    var base = s.charCodeAt(0) - 48; // 0 for "0", 1 for "1"
+        \\    var r0 = (base * 0) % 11;
+        \\    var r10 = (base * 10) % 11;
+        \\    var r11 = (base * 11) % 11;
+        \\    var r12 = (base * 12) % 11;
+        \\    var rBig = (base * 100000) % 11; // 100000 = 9090 * 11 + 10 => 10
+        \\    return r0 * 10000 + r10 * 1000 + r11 * 100 + r12 * 10 + rBig;
+        \\}
+        \\function mod11Negative(s) {
+        \\    var v = (s.charCodeAt(0) - 60); // '0'(48) - 60 = -12
+        \\    return v % 11; // -12 % 11 = -1
+        \\}
+        \\
+        \\var rutAcc = 0;
+        \\for (var k = 0; k < 120; k++) {
+        \\    rutAcc += rut_dv("16521526");
+        \\    if (!Number.isNaN(nonCanonicalOobReverse("12345678"))) throw new Error("nonCanonicalOobReverse must be NaN");
+        \\    if (!Number.isNaN(mutatedIdxReverse("12345678"))) throw new Error("mutatedIdxReverse must be NaN");
+        \\    var nz = negZeroMul("0");
+        \\    if (nz !== 0 || (1 / nz) !== -Infinity) throw new Error("negZeroMul must return -0.0");
+        \\    var posMul = negZeroMul("2"); // c=2, neg=1 => 2
+        \\    if (posMul !== 2) throw new Error("bad posMul: " + posMul);
+        \\    var mEdge = mod11Edge("1");
+        \\    if (mEdge !== 10020) throw new Error("bad mod11Edge: " + mEdge);
+        \\    if (mod11Edge("0") !== 0) throw new Error("bad mod11Edge(0)");
+        \\    var mNeg = mod11Negative("0");
+        \\    if (mNeg !== -1) throw new Error("bad mod11Negative: " + mNeg);
+        \\}
+        \\if (rut_dv("") !== 48) throw new Error("empty string rut_dv must be 48");
+        \\rutAcc;
+    );
+    defer res.deinit();
+    try std.testing.expect(res.isNumber());
+    try std.testing.expectEqual(@as(f64, 120 * 53), res.asNumber());
+}
+
+

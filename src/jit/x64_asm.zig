@@ -355,6 +355,13 @@ pub const Assembler = struct {
         try self.emitByte(modRM(0b11, dst.low3(), src.low3()));
     }
 
+    pub noinline fn cmovccReg32Reg32(self: *Assembler, cond: Cond, dst: Reg, src: Reg) !void {
+        try self.emitRex32(dst.isExt(), src.isExt());
+        try self.emitByte(0x0F);
+        try self.emitByte(0x40 + @as(u8, @intFromEnum(cond)));
+        try self.emitByte(modRM(0b11, dst.low3(), src.low3()));
+    }
+
     pub noinline fn andRegImm8(self: *Assembler, dst: Reg, imm: i8) !void {
         try self.emitByte(rexW(false, dst.isExt()));
         try self.emitByte(0x83);
