@@ -193,6 +193,7 @@ pub const CodeBlock = struct {
     name: ?[]const u8 = null,
     call_count: u32 = 0,
     jit_failed: bool = false,
+    jit_pure_leaf: bool = false,
     jit_string_param_mask: u32 = 0,
     jit_interp: ?*anyopaque = null,
     jit_code: ?[]align(std.heap.page_size_min) u8 = null,

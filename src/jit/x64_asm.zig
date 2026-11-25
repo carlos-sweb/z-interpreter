@@ -67,8 +67,14 @@ pub const Cond = enum(u4) {
     ne = 0x5, // !=          (ZF=0)
     be = 0x6, // unsigned <= (CF=1 or ZF=1)
     a = 0x7, // unsigned >  (CF=0 and ZF=0)
+    s = 0x8, // negative    (SF=1)
+    ns = 0x9, // non-neg     (SF=0)
     p = 0xA, // parity / unordered NaN (PF=1)
     np = 0xB, // not parity / ordered (PF=0)
+    l = 0xC, // signed <    (SF != OF)
+    ge = 0xD, // signed >=   (SF == OF)
+    le = 0xE, // signed <=   (ZF=1 or SF != OF)
+    g = 0xF, // signed >    (ZF=0 and SF == OF)
 };
 
 pub const Label = u32;
@@ -377,6 +383,25 @@ pub const Assembler = struct {
         try self.emitRex32(src.isExt(), dst.isExt());
         try self.emitByte(0x89);
         try self.emitByte(modRM(0b11, src.low3(), dst.low3()));
+    }
+
+    pub noinline fn addReg32Reg32(self: *Assembler, dst: Reg, src: Reg) !void {
+        try self.emitRex32(src.isExt(), dst.isExt());
+        try self.emitByte(0x01);
+        try self.emitByte(modRM(0b11, src.low3(), dst.low3()));
+    }
+
+    pub noinline fn subReg32Reg32(self: *Assembler, dst: Reg, src: Reg) !void {
+        try self.emitRex32(src.isExt(), dst.isExt());
+        try self.emitByte(0x29);
+        try self.emitByte(modRM(0b11, src.low3(), dst.low3()));
+    }
+
+    pub noinline fn imulReg32Reg32(self: *Assembler, dst: Reg, src: Reg) !void {
+        try self.emitRex32(dst.isExt(), src.isExt());
+        try self.emitByte(0x0F);
+        try self.emitByte(0xAF);
+        try self.emitByte(modRM(0b11, dst.low3(), src.low3()));
     }
 
     pub noinline fn addReg32Imm32(self: *Assembler, dst: Reg, imm: i32) !void {

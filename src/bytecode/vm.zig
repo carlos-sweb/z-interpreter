@@ -1370,6 +1370,54 @@ pub noinline fn jitCheckStringCharCodeAtInterp(interp_ptr: ?*anyopaque) callconv
     return 1;
 }
 
+pub const StringCharCodeAtGuard = extern struct {
+    sproto_box_addr: u64 = 0,
+    expected_shape_id: u32 = 0,
+    _pad: u32 = 0,
+    expected_bytes_addr: u64 = 0,
+    rec_addr: u64 = 0,
+    expected_val_bits: u64 = 0,
+};
+
+pub noinline fn jitGetStringCharCodeAtGuard(
+    block_ptr: *const codeblock.CodeBlock,
+    out_guard: *StringCharCodeAtGuard,
+) callconv(.c) u8 {
+    var interp_ptr: ?*anyopaque = block_ptr.jit_interp;
+    if (interp_ptr == null) {
+        for (block_ptr.call_target_cache) |*cs| {
+            if (cs.interp) |it_ptr| {
+                interp_ptr = it_ptr;
+                break;
+            }
+            if (cs.callee) |cal| {
+                if (cal.isFunction() and cal.asFunction().value.call == string_builtins.stringCharCodeAt) {
+                    interp_ptr = cal.asFunction().value.ctx;
+                    break;
+                }
+            }
+        }
+    }
+    const it: *interpreter_mod.Interpreter = @ptrCast(@alignCast(interp_ptr orelse return 1));
+    if (!it.protos.string.isObject()) return 1;
+    const box = it.protos.string.asObject();
+    const sproto = &box.value;
+    if (sproto.cached_len != 0) return 1;
+    const slot_idx = sproto.properties.getIndex("charCodeAt") orelse return 1;
+    const rec = &sproto.properties.entries.items(.value)[slot_idx];
+    if (rec.isAccessor() or !rec.value.isFunction() or rec.value.asFunction().value.call != string_builtins.stringCharCodeAt) {
+        return 1;
+    }
+    out_guard.* = .{
+        .sproto_box_addr = @intFromPtr(box),
+        .expected_shape_id = sproto.shape_id,
+        .expected_bytes_addr = @intFromPtr(sproto.properties.entries.bytes),
+        .rec_addr = @intFromPtr(rec),
+        .expected_val_bits = rec.value.bits,
+    };
+    return 0;
+}
+
 pub noinline fn jitCheckStringCharCodeAtBlock(block_ptr: *const codeblock.CodeBlock) callconv(.c) u64 {
     if (block_ptr.jit_interp) |it_ptr| {
         return jitCheckStringCharCodeAtInterp(it_ptr);
