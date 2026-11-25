@@ -165,7 +165,7 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             // real methods (charAt, slice, ...) already go through
             // zstring's UTF-16-aware helpers; this raw property-access
             // path just never did.
-            if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(zstring.utf16.lengthUtf16(box.value.data)));
+            if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.length()));
             if (std.fmt.parseInt(usize, key, 10)) |idx| {
                 // Indexed access: the one-char string at that UTF-16
                 // position, or undefined past the end (real JS string

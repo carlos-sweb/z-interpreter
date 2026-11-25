@@ -4,6 +4,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const zvalue = @import("zvalue");
 const zmath = @import("zmath");
+const zstring = @import("zstring");
 const JSValue = zvalue.JSValue;
 const environment_mod = @import("../environment.zig");
 const Environment = environment_mod.Environment;
@@ -11,6 +12,8 @@ const codeblock = @import("codeblock.zig");
 const baseline_jit = @import("../jit/baseline.zig");
 const interpreter_class = @import("../interpreter_class.zig");
 const interpreter_mod = @import("../interpreter.zig");
+const string_builtins = @import("../string_builtins.zig");
+const math_builtins = @import("../math_builtins.zig");
 const zparser = @import("zparser");
 const ClosureCtx = interpreter_mod.ClosureCtx;
 
@@ -103,6 +106,7 @@ fn getBytecodeTarget(callee: JSValue) ?BytecodeTarget {
     if (cc.private_ctx != null or cc.super_proto != null or cc.home_object != null or cc.closure_env.resolvePrivateCtx() != null) return null;
     if (!cc.interp.compile_options.use_bytecode_vm) return null;
     const cb = interpreter_class.getOrCompileBytecode(cc.interp, cc.function_node) orelse return null;
+    cb.block.jit_interp = cc.interp;
     return .{
         .block = &cb.block,
         .closure_env = cc.closure_env,
@@ -291,10 +295,19 @@ fn getProp(frame: *CallFrame, allocator: Allocator, obj: JSValue, key: []const u
     } else if (obj.isString()) {
         const box = obj.asString();
         if (std.mem.eql(u8, key, "length")) {
-            return JSValue.fromNumber(@floatFromInt(box.value.data.len));
+            return JSValue.fromNumber(@floatFromInt(box.value.length()));
         }
-        const idx = std.fmt.parseInt(usize, key, 10) catch return if (frame.interp) |it| it.getProperty(obj, key) else JSValue.UNDEFINED;
-        if (idx >= box.value.data.len) return if (frame.interp) |it| it.getProperty(obj, key) else JSValue.UNDEFINED;
+        if (frame.interp) |it| {
+            if (it.protos.string.isObject()) {
+                const sproto = &it.protos.string.asObject().value;
+                if (sproto.getOwnRecord(key)) |rec| {
+                    if (!rec.isAccessor()) return rec.value.retain();
+                }
+            }
+            return it.getProperty(obj, key);
+        }
+        const idx = std.fmt.parseInt(usize, key, 10) catch return JSValue.UNDEFINED;
+        if (idx >= box.value.data.len) return JSValue.UNDEFINED;
         return try JSValue.newString(allocator, box.value.data[idx .. idx + 1]);
     } else if (frame.interp) |it| {
         return it.getProperty(obj, key);
@@ -763,8 +776,33 @@ noinline fn resolveCallGlobalCache(frame: *CallFrame, cache: *codeblock.CallSite
     return error.UnsupportedOpcode;
 }
 
+inline fn isPurePrimitiveVal(v: JSValue) bool {
+    return v.isNumber() or v.isString() or v.isBool() or v.isUndefined() or v.isNull();
+}
+
 noinline fn callNativeFallback(allocator: Allocator, frame: *CallFrame, frame_regs: []JSValue, op_a: u8, callee: JSValue, this_value: JSValue, args_slice: []const JSValue) !void {
     @branchHint(.cold);
+    if (callee.isFunction() and isPurePrimitiveVal(this_value)) {
+        const fn_val = &callee.asFunction().value;
+        const call_ptr = fn_val.call;
+        if (call_ptr == string_builtins.stringCharCodeAt or
+            call_ptr == string_builtins.stringCodePointAt or
+            call_ptr == math_builtins.mathSqrt)
+        {
+            var all_prim = true;
+            for (args_slice) |a| {
+                if (!isPurePrimitiveVal(a)) {
+                    all_prim = false;
+                    break;
+                }
+            }
+            if (all_prim) {
+                const result = try call_ptr(fn_val.ctx, allocator, this_value, args_slice);
+                try setRegValue(frame, frame_regs, op_a, result);
+                return;
+            }
+        }
+    }
     defer clearGlobalCache();
     const result = try callFallback(frame, allocator, callee, this_value, args_slice);
     try setRegValue(frame, frame_regs, op_a, result);
@@ -1036,8 +1074,11 @@ noinline fn tryInvokeJitTopLevel(
     }
     const jfn = mut_cb.jit_fn orelse return null;
     if (args.len != mut_cb.param_count) return null;
-    for (args) |a| {
-        if (needsDeinit(a)) return null;
+    const str_mask = mut_cb.jit_string_param_mask;
+    for (args, 0..) |a, i| {
+        if (needsDeinit(a)) {
+            if (!a.isString() or i >= 32 or (str_mask & (@as(u32, 1) << @intCast(i))) == 0) return null;
+        }
     }
     if (!checkSelfRecursionGuard(mut_cb, cenv)) return null;
     for (0..mut_cb.param_count) |i| {
@@ -1045,7 +1086,11 @@ noinline fn tryInvokeJitTopLevel(
     }
     const limit_idx = @min(MAX_REGISTERS, MAX_FRAMES * @as(usize, mut_cb.register_count));
     var jit_out: JSValue = JSValue.UNDEFINED;
-    if (jfn(registers.ptr, &jit_out, registers.ptr + limit_idx, cenv) == 0) {
+    const status = jfn(registers.ptr, &jit_out, registers.ptr + limit_idx, cenv);
+    if (str_mask != 0) {
+        @memset(registers[0..mut_cb.param_count], JSValue.UNDEFINED);
+    }
+    if (status == 0) {
         return jit_out;
     }
     return null;
@@ -1063,6 +1108,7 @@ noinline fn tryInvokeJit(
     arg_count: usize,
     param_count: usize,
     dst_reg: u8,
+    callee_has_rc: bool,
 ) bool {
     @branchHint(.cold);
     if (dst_reg >= frame_regs.len) return false;
@@ -1071,18 +1117,38 @@ noinline fn tryInvokeJit(
     }
     const jfn = mut_cb.jit_fn orelse return false;
     if (arg_count != mut_cb.param_count or param_count != mut_cb.param_count) return false;
+    if (callee_has_rc) {
+        const str_mask = mut_cb.jit_string_param_mask;
+        if (str_mask == 0) return false;
+        for (0..param_count) |i| {
+            const v = frame_regs[arg_start + i];
+            if (needsDeinit(v)) {
+                if (!v.isString() or i >= 32 or (str_mask & (@as(u32, 1) << @intCast(i))) == 0) return false;
+            }
+        }
+    }
     if (!checkSelfRecursionGuard(mut_cb, cenv)) return false;
     const remaining_frames = MAX_FRAMES - frame_count;
     const limit_idx = @min(MAX_REGISTERS, callee_reg_base + remaining_frames * @as(usize, mut_cb.register_count));
     var jit_out: JSValue = JSValue.UNDEFINED;
     if (jfn(registers.ptr + callee_reg_base, &jit_out, registers.ptr + limit_idx, cenv) == 0) {
+        if (callee_has_rc) {
+            for (0..param_count) |i| {
+                deinitSlot(&registers[callee_reg_base + i]);
+            }
+        }
         const slot = &frame_regs[dst_reg];
         if (needsDeinit(slot.*)) deinitSlot(slot);
         slot.* = jit_out;
         return true;
     }
     for (0..param_count) |i| {
-        registers[callee_reg_base + i] = frame_regs[arg_start + i];
+        if (!needsDeinit(frame_regs[arg_start + i])) {
+            registers[callee_reg_base + i] = frame_regs[arg_start + i];
+        }
+    }
+    if (param_count < mut_cb.local_count) {
+        @memset(registers[callee_reg_base + param_count .. callee_reg_base + mut_cb.local_count], JSValue.UNDEFINED);
     }
     if (frame_count > 64) {
         mut_cb.jit_fn = null;
@@ -1275,6 +1341,102 @@ pub fn jitCheckMathSqrt(ctx: *codeblock.OsrContext, expected_bits: u64) callconv
         }
     }
     return 1;
+}
+
+threadlocal var tl_sproto_box: ?*ObjectBox = null;
+threadlocal var tl_sproto_shape_id: u32 = 0;
+threadlocal var tl_sproto_charcodeat_slot: u32 = 0;
+
+pub noinline fn jitCheckStringCharCodeAtInterp(interp_ptr: ?*anyopaque) callconv(.c) u64 {
+    const it: *interpreter_mod.Interpreter = @ptrCast(@alignCast(interp_ptr orelse return 1));
+    if (!it.protos.string.isObject()) return 1;
+    const box = it.protos.string.asObject();
+    const sproto = &box.value;
+    if (tl_sproto_box == box and sproto.shape_id == tl_sproto_shape_id and tl_sproto_charcodeat_slot < sproto.properties.entries.len) {
+        const rec = &sproto.properties.entries.items(.value)[tl_sproto_charcodeat_slot];
+        if (!rec.isAccessor() and rec.value.isFunction() and rec.value.asFunction().value.call == string_builtins.stringCharCodeAt) {
+            return 0;
+        }
+    }
+    if (sproto.properties.getIndex("charCodeAt")) |slot_idx| {
+        const rec = &sproto.properties.entries.items(.value)[slot_idx];
+        if (!rec.isAccessor() and rec.value.isFunction() and rec.value.asFunction().value.call == string_builtins.stringCharCodeAt) {
+            tl_sproto_box = box;
+            tl_sproto_shape_id = sproto.shape_id;
+            tl_sproto_charcodeat_slot = @intCast(slot_idx);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+pub noinline fn jitCheckStringCharCodeAtBlock(block_ptr: *const codeblock.CodeBlock) callconv(.c) u64 {
+    if (block_ptr.jit_interp) |it_ptr| {
+        return jitCheckStringCharCodeAtInterp(it_ptr);
+    }
+    for (block_ptr.call_target_cache) |*cs| {
+        if (cs.interp) |it_ptr| {
+            return jitCheckStringCharCodeAtInterp(it_ptr);
+        }
+        if (cs.callee) |cal| {
+            if (cal.isFunction() and cal.asFunction().value.call == string_builtins.stringCharCodeAt) {
+                return jitCheckStringCharCodeAtInterp(cal.asFunction().value.ctx);
+            }
+        }
+    }
+    return 1;
+}
+
+pub noinline fn jitCheckStringCharCodeAt(ctx: *codeblock.OsrContext) callconv(.c) u64 {
+    const frame: *CallFrame = @ptrCast(@alignCast(ctx.frame_ptr));
+    return jitCheckStringCharCodeAtInterp(frame.interp);
+}
+
+pub noinline fn jitStringLength(box_addr: usize) callconv(.c) usize {
+    const box: *zvalue.Rc(zstring.ZString) = @ptrFromInt(box_addr);
+    return box.value.length();
+}
+
+pub noinline fn jitPrepareWholeFnString(
+    block_ptr: *const codeblock.CodeBlock,
+    str_bits: u64,
+    check_char_code_at: u64,
+) callconv(.c) u64 {
+    if (check_char_code_at != 0) {
+        if (jitCheckStringCharCodeAtBlock(block_ptr) != 0) return std.math.maxInt(u64);
+    }
+    const val: JSValue = .{ .bits = str_bits };
+    if (!val.isString()) return std.math.maxInt(u64);
+    const box = val.asString();
+    const clen = box.value.length();
+    if (clen > 0x3FFF_FFFF_FFFF_FFFF) return std.math.maxInt(u64);
+    const is_1byte: u64 = if (clen == box.value.data.len) (@as(u64, 1) << 62) else 0;
+    return is_1byte | @as(u64, clen);
+}
+
+pub noinline fn jitStringCharCodeAt(box_addr: usize, idx_bits: u64) callconv(.c) u64 {
+    const box: *zvalue.Rc(zstring.ZString) = @ptrFromInt(box_addr);
+    const clen = box.value.length();
+    const num: f64 = @bitCast(idx_bits);
+    var u_pos: usize = 0;
+    if (!std.math.isNan(num) and num != 0) {
+        if (std.math.isInf(num)) return JSValue.CANONICAL_NAN;
+        const trunc = @trunc(num);
+        if (trunc != 0) {
+            if (trunc < 0 or trunc >= @as(f64, @floatFromInt(clen))) return JSValue.CANONICAL_NAN;
+            u_pos = @intFromFloat(trunc);
+        } else {
+            if (clen == 0) return JSValue.CANONICAL_NAN;
+        }
+    } else {
+        if (clen == 0) return JSValue.CANONICAL_NAN;
+    }
+    const data = box.value.data;
+    if (clen == data.len and data[u_pos] < 0x80) {
+        return JSValue.fromNumberFast(@floatFromInt(data[u_pos])).bits;
+    }
+    const code = zstring.access.charCodeAt(data, @intCast(u_pos)) orelse return JSValue.CANONICAL_NAN;
+    return JSValue.fromNumberFast(@floatFromInt(code)).bits;
 }
 
 pub fn jitSetElemHoleyOrGrow(ctx: *codeblock.OsrContext, box_addr: usize, idx: u32, val_bits: u64) callconv(.c) u8 {
@@ -1785,6 +1947,7 @@ pub fn vmCall(allocator: Allocator, block: *const codeblock.CodeBlock, closure_e
 
     if (!block.jit_failed) {
         const mut_cb = @constCast(block);
+        if (interp) |itp| mut_cb.jit_interp = itp;
         mut_cb.call_count +%= 1;
         if (mut_cb.jit_fn != null or mut_cb.call_count >= baseline_jit.HOT_THRESHOLD) {
             if (tryInvokeJitTopLevel(allocator, mut_cb, closure_env, args, registers)) |res| {
@@ -2649,12 +2812,12 @@ noinline fn vmExecLoop(
                 if (param_count < local_count) {
                     @memset(registers[callee_reg_base + param_count .. callee_reg_base + local_count], JSValue.UNDEFINED);
                 }
-                if (!callee_has_rc and !callee_block.jit_failed) {
+                if (!callee_block.jit_failed) {
                     const mut_cb = @constCast(callee_block);
                     mut_cb.call_count +%= 1;
                     if (mut_cb.jit_fn != null or mut_cb.call_count >= baseline_jit.HOT_THRESHOLD) {
                         const cenv: ?*Environment = if (cache.closure_env) |ce| @ptrCast(@alignCast(ce)) else frame.closure_env;
-                        if (tryInvokeJit(allocator, mut_cb, cenv, registers, callee_reg_base, frame_count, frame_regs, start, arg_count, param_count, op.a)) {
+                        if (tryInvokeJit(allocator, mut_cb, cenv, registers, callee_reg_base, frame_count, frame_regs, start, arg_count, param_count, op.a, callee_has_rc)) {
                             ip += 1;
                             if (ip >= code.len) return error.MissingReturn;
                             continue :dispatch code[ip].opcode;
@@ -2745,12 +2908,12 @@ noinline fn vmExecLoop(
                 if (param_count < local_count) {
                     @memset(registers[callee_reg_base + param_count .. callee_reg_base + local_count], JSValue.UNDEFINED);
                 }
-                if (!callee_has_rc and !callee_block.jit_failed) {
+                if (!callee_block.jit_failed) {
                     const mut_cb = @constCast(callee_block);
                     mut_cb.call_count +%= 1;
                     if (mut_cb.jit_fn != null or mut_cb.call_count >= baseline_jit.HOT_THRESHOLD) {
                         const cenv: ?*Environment = if (cache.closure_env) |ce| @ptrCast(@alignCast(ce)) else frame.closure_env;
-                        if (tryInvokeJit(allocator, mut_cb, cenv, registers, callee_reg_base, frame_count, frame_regs, start, arg_count, param_count, op.a)) {
+                        if (tryInvokeJit(allocator, mut_cb, cenv, registers, callee_reg_base, frame_count, frame_regs, start, arg_count, param_count, op.a, callee_has_rc)) {
                             ip += 1;
                             if (ip >= code.len) return error.MissingReturn;
                             continue :dispatch code[ip].opcode;

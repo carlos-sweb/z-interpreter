@@ -1,12 +1,14 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const zvalue = @import("zvalue");
+const zstring = @import("zstring");
 const JSValue = zvalue.JSValue;
 const environment_mod = @import("../environment.zig");
 const Environment = environment_mod.Environment;
 const codeblock = @import("../bytecode/codeblock.zig");
 const vm = @import("../bytecode/vm.zig");
 const math_builtins = @import("../math_builtins.zig");
+const string_builtins = @import("../string_builtins.zig");
 const x64_asm = @import("x64_asm.zig");
 const Assembler = x64_asm.Assembler;
 const Label = x64_asm.Label;
@@ -29,9 +31,25 @@ const HEADER_OBJECT: u32 = blk: {
     const dummy: JSValue = JSValue.fromHeap(.object, @as(*zvalue.Rc(zvalue.ZObject(JSValue)), @ptrFromInt(8)));
     break :blk @intCast(dummy.bits >> 47);
 };
+const StringBox = zvalue.Rc(zstring.ZString);
+const ZStr = zstring.ZString;
+const HEADER_STRING: u32 = blk: {
+    const dummy: JSValue = JSValue.fromHeap(.string, @as(*StringBox, @ptrFromInt(8)));
+    break :blk @intCast(dummy.bits >> 47);
+};
 const HEADER_TYPED_ARRAY_BITS: u64 = blk: {
     const dummy: JSValue = JSValue.fromHeap(.typed_array, @as(*zvalue.Rc(zvalue.TypedArrayBox), @ptrFromInt(8)));
     break :blk dummy.bits & JSValue.TAG15_MASK;
+};
+
+const str_val_off: i32 = @intCast(@offsetOf(StringBox, "value"));
+const str_data_ptr_off: i32 = blk: {
+    const dummy: *ZStr = @ptrFromInt(0x1000);
+    break :blk str_val_off + @as(i32, @intCast(@intFromPtr(&dummy.data.ptr) - 0x1000));
+};
+const str_data_len_off: i32 = blk: {
+    const dummy: *ZStr = @ptrFromInt(0x1000);
+    break :blk str_val_off + @as(i32, @intCast(@intFromPtr(&dummy.data.len) - 0x1000));
 };
 
 const ObjectBox = zvalue.Rc(zvalue.ZObject(JSValue));
@@ -244,6 +262,262 @@ pub fn canUseFastSelfRec(block: *const codeblock.CodeBlock) bool {
     return has_self_call;
 }
 
+const MAX_WHOLE_FN_STRING_OPS = 256;
+
+const WholeFnStringAnalysis = struct {
+    param_mask: u32 = 0,
+    has_char_code_at: bool = false,
+    elided: [MAX_WHOLE_FN_STRING_OPS]bool = @splat(false),
+    char_code_at_str: [MAX_WHOLE_FN_STRING_OPS]?u8 = @splat(null),
+    get_prop_len_str: [MAX_WHOLE_FN_STRING_OPS]?u8 = @splat(null),
+};
+
+const CharCodeAtSpan = struct {
+    gp_ip: usize,
+    ld_ip: ?usize,
+    str_reg: u8,
+};
+
+noinline fn findCharCodeAtGetProp(
+    block: *const codeblock.CodeBlock,
+    start_ip: usize,
+    end_ip: usize,
+    call_ip: usize,
+) ?CharCodeAtSpan {
+    const call_op = block.ops[call_ip];
+    if (call_op.opcode != .call or call_op.c >= block.call_target_cache.len) return null;
+    const cs = &block.call_target_cache[call_op.c];
+    if (cs.arg_count != 1) return null;
+    const this_r = cs.this_reg orelse return null;
+    if (cs.callee) |cal| {
+        if (!cal.isFunction() or cal.asFunction().value.call != string_builtins.stringCharCodeAt) return null;
+    }
+
+    var found_gp: ?usize = null;
+    var k = call_ip;
+    while (k > start_ip) {
+        k -= 1;
+        const cand = block.ops[k];
+        if (cand.opcode == .get_prop and cand.a == call_op.b and cand.b == this_r) {
+            const prop_name = constantName(block, cand.c) orelse break;
+            if (std.mem.eql(u8, prop_name, "charCodeAt")) {
+                found_gp = k;
+            }
+            break;
+        }
+        const is_pure_arg_op = switch (cand.opcode) {
+            .nop => true,
+            .move,
+            .load_local,
+            .load_const,
+            .load_true,
+            .load_false,
+            .neg,
+            .not_bits,
+            .add_local_const,
+            .sub_local_const,
+            .lt_local_const,
+            .gt_local_const,
+            .le_local_const,
+            .ge_local_const,
+            .eq_local_const,
+            .get_prop,
+            .get_elem_const,
+            => cand.a != this_r and cand.a != call_op.b and cand.b != call_op.b,
+            .add,
+            .add_num,
+            .sub_num,
+            .mul_num,
+            .div_num,
+            .mod_num,
+            .and_bits,
+            .or_bits,
+            .xor_bits,
+            .shl,
+            .shr,
+            .ushr,
+            .lt_num,
+            .gt_num,
+            .le_num,
+            .ge_num,
+            .eq,
+            .ne,
+            .get_elem,
+            => cand.a != this_r and cand.a != call_op.b and cand.b != call_op.b and cand.c != call_op.b,
+            else => false,
+        };
+        if (!is_pure_arg_op) break;
+    }
+
+    const gp_ip = found_gp orelse return null;
+    var ld_ip: ?usize = null;
+    var str_reg: u8 = this_r;
+    if (gp_ip > start_ip and this_r >= block.local_count) {
+        const prev = block.ops[gp_ip - 1];
+        if ((prev.opcode == .load_local or prev.opcode == .move) and prev.a == this_r and prev.b != this_r) {
+            var used_in_span = false;
+            for (gp_ip + 1 .. call_ip) |m_ip| {
+                const m_op = block.ops[m_ip];
+                const ud = opUseDefMasks(block, m_op);
+                if ((ud.use & regBit64(this_r)) != 0 or (ud.def & regBit64(prev.b)) != 0) {
+                    used_in_span = true;
+                    break;
+                }
+            }
+            if (!used_in_span) {
+                ld_ip = gp_ip - 1;
+                str_reg = prev.b;
+            }
+        }
+    }
+
+    const span_first = ld_ip orelse gp_ip;
+    for (start_ip..end_ip + 1) |j_ip| {
+        const j_op = block.ops[j_ip];
+        const maybe_tgt: ?usize = switch (j_op.opcode) {
+            .jump, .jump_if_false, .jump_if_true, .jump_if_not_nullish, .setup_catch => (@as(usize, j_op.b) << 8) | j_op.c,
+            .jeq_local_const_false, .jlt_local_const_false, .jle_local_const_false, .jgt_local_const_false, .jge_local_const_false => j_ip + @as(usize, j_op.c),
+            else => null,
+        };
+        if (maybe_tgt) |tgt| {
+            if (tgt > span_first and tgt <= call_ip) return null;
+        }
+    }
+
+    return .{
+        .gp_ip = gp_ip,
+        .ld_ip = ld_ip,
+        .str_reg = str_reg,
+    };
+}
+
+noinline fn isTempDeadOutsideSpan(
+    block: *const codeblock.CodeBlock,
+    span_start: usize,
+    span_end: usize,
+    temp_reg: u8,
+) bool {
+    if (temp_reg < block.local_count or temp_reg >= 64) return false;
+    const t_bit = regBit64(temp_reg);
+    var jump_targets: [MAX_WHOLE_FN_STRING_OPS]bool = @splat(false);
+    for (block.ops, 0..) |op, ip| {
+        const maybe_t: ?usize = switch (op.opcode) {
+            .jump, .jump_if_false, .jump_if_true, .jump_if_not_nullish, .setup_catch => (@as(usize, op.b) << 8) | op.c,
+            .jeq_local_const_false, .jlt_local_const_false, .jle_local_const_false, .jgt_local_const_false, .jge_local_const_false => ip + @as(usize, op.c),
+            else => null,
+        };
+        if (maybe_t) |t| {
+            if (t < block.ops.len) jump_targets[t] = true;
+        }
+    }
+
+    var written_in_bb = false;
+    for (block.ops, 0..) |op, ip| {
+        if (jump_targets[ip]) written_in_bb = false;
+        if (ip >= span_start and ip <= span_end) {
+            if (ip == span_end) written_in_bb = (op.opcode == .call and op.a == temp_reg) or (op.opcode == .get_prop and op.a == temp_reg);
+            continue;
+        }
+        const ud = opUseDefMasks(block, op);
+        if ((ud.use & t_bit) != 0 and !written_in_bb) return false;
+        if ((ud.def & t_bit) != 0) written_in_bb = true;
+        switch (op.opcode) {
+            .jump, .jump_if_false, .jump_if_true, .jump_if_not_nullish, .jeq_local_const_false, .jlt_local_const_false, .jle_local_const_false, .jgt_local_const_false, .jge_local_const_false, .return_value, .return_undefined => {
+                written_in_bb = false;
+            },
+            else => {},
+        }
+    }
+    return true;
+}
+
+noinline fn analyzeWholeFnStrings(block: *const codeblock.CodeBlock) ?WholeFnStringAnalysis {
+    var has_str_op = false;
+    for (block.ops) |op| {
+        if (op.opcode == .get_prop or op.opcode == .call) {
+            has_str_op = true;
+            break;
+        }
+    }
+    var res = WholeFnStringAnalysis{};
+    if (!has_str_op) return res;
+    if (block.param_count == 0 or block.ops.len == 0 or block.ops.len > MAX_WHOLE_FN_STRING_OPS) return null;
+
+    for (block.ops, 0..) |op, ip| {
+        if (op.opcode == .call) {
+            const span = findCharCodeAtGetProp(block, 0, block.ops.len - 1, ip) orelse return null;
+            if (span.str_reg >= block.param_count or span.str_reg >= 32) return null;
+            const gp_op = block.ops[span.gp_ip];
+            if (gp_op.a < block.local_count) return null;
+            if (span.ld_ip) |ld| {
+                if (!isTempDeadOutsideSpan(block, ld, ip, gp_op.b)) return null;
+                res.elided[ld] = true;
+            }
+            if (!isTempDeadOutsideSpan(block, span.gp_ip, ip, gp_op.a)) return null;
+            res.elided[span.gp_ip] = true;
+            res.char_code_at_str[ip] = span.str_reg;
+            res.has_char_code_at = true;
+            res.param_mask |= (@as(u32, 1) << @intCast(span.str_reg));
+        }
+    }
+
+    for (block.ops, 0..) |op, ip| {
+        if (op.opcode == .get_prop and !res.elided[ip]) {
+            const kname = constantName(block, op.c) orelse return null;
+            if (!std.mem.eql(u8, kname, "length")) return null;
+            var s_reg: u8 = op.b;
+            if (s_reg >= block.param_count) {
+                if (ip > 0 and !res.elided[ip - 1] and s_reg >= block.local_count) {
+                    const prev = block.ops[ip - 1];
+                    if ((prev.opcode == .load_local or prev.opcode == .move) and prev.a == s_reg and prev.b < block.param_count) {
+                        var is_tgt = false;
+                        for (block.ops, 0..) |jop, j_ip| {
+                            const maybe_t: ?usize = switch (jop.opcode) {
+                                .jump, .jump_if_false, .jump_if_true, .jump_if_not_nullish, .setup_catch => (@as(usize, jop.b) << 8) | jop.c,
+                                .jeq_local_const_false, .jlt_local_const_false, .jle_local_const_false, .jgt_local_const_false, .jge_local_const_false => j_ip + @as(usize, jop.c),
+                                else => null,
+                            };
+                            if (maybe_t != null and maybe_t.? == ip) {
+                                is_tgt = true;
+                                break;
+                            }
+                        }
+                        if (!is_tgt and isTempDeadOutsideSpan(block, ip - 1, ip, s_reg)) {
+                            res.elided[ip - 1] = true;
+                            s_reg = prev.b;
+                        }
+                    }
+                }
+            }
+            if (s_reg >= block.param_count or s_reg >= 32 or op.a == s_reg) return null;
+            res.get_prop_len_str[ip] = s_reg;
+            res.param_mask |= (@as(u32, 1) << @intCast(s_reg));
+        }
+    }
+
+    if (res.param_mask == 0) return null;
+
+    for (block.ops, 0..) |op, ip| {
+        if (res.elided[ip]) continue;
+        if (op.opcode == .store_global or op.opcode == .call_global) return null;
+        if (res.get_prop_len_str[ip] != null) {
+            if (op.a < 32 and (res.param_mask & (@as(u32, 1) << @intCast(op.a))) != 0) return null;
+            continue;
+        }
+        if (res.char_code_at_str[ip] != null) {
+            const arg_r = @as(usize, op.b) + 1;
+            if (arg_r >= block.register_count) return null;
+            if (op.a < 32 and (res.param_mask & (@as(u32, 1) << @intCast(op.a))) != 0) return null;
+            if (arg_r < 32 and (res.param_mask & (@as(u32, 1) << @intCast(arg_r))) != 0) return null;
+            continue;
+        }
+        const ud = opUseDefMasks(block, op);
+        if (((ud.use | ud.def) & @as(u64, res.param_mask)) != 0) return null;
+    }
+
+    return res;
+}
+
 pub fn canCompile(block: *const codeblock.CodeBlock) bool {
     if (!comptime x64_asm.is_supported_host) return false;
     if (block.exception_table.len > 0 or block.flags.has_try) return false;
@@ -252,6 +526,8 @@ pub fn canCompile(block: *const codeblock.CodeBlock) bool {
     if (block.param_count > block.register_count or block.local_count > block.register_count) return false;
     if (block.ops.len == 0) return false;
 
+    const str_analysis = analyzeWholeFnStrings(block) orelse return false;
+
     var seen_store_global = false;
     var store_global_ip: usize = 0;
     var last_stored_global_name: ?[]const u8 = null;
@@ -259,9 +535,20 @@ pub fn canCompile(block: *const codeblock.CodeBlock) bool {
     var max_jump_target: usize = 0;
 
     for (block.ops, 0..) |op, ip| {
+        if (ip < MAX_WHOLE_FN_STRING_OPS and str_analysis.elided[ip]) continue;
         const reg_bit = if (op.a < 32) (@as(u32, 1) << @intCast(op.a)) else 0;
         switch (op.opcode) {
             .nop, .return_undefined => {},
+            .get_prop => {
+                if (seen_store_global or op.a >= block.register_count) return false;
+                if (ip >= MAX_WHOLE_FN_STRING_OPS or str_analysis.get_prop_len_str[ip] == null) return false;
+                num_validated_regs |= reg_bit;
+            },
+            .call => {
+                if (seen_store_global or op.a >= block.register_count or op.b >= block.register_count) return false;
+                if (ip >= MAX_WHOLE_FN_STRING_OPS or str_analysis.char_code_at_str[ip] == null) return false;
+                num_validated_regs |= reg_bit;
+            },
             .load_undefined, .load_null, .load_true, .load_false => {
                 if (op.a >= block.register_count or seen_store_global) return false;
                 num_validated_regs &= ~reg_bit;
@@ -796,11 +1083,17 @@ pub noinline fn compile(allocator: Allocator, block: *codeblock.CodeBlock) bool 
         slots = s;
     }
 
+    const str_analysis = analyzeWholeFnStrings(block) orelse {
+        block.jit_failed = true;
+        return false;
+    };
+
     const exec = compileImpl(allocator, block, slots) catch {
         if (slots) |s| allocator.free(s);
         block.jit_failed = true;
         return false;
     };
+    block.jit_string_param_mask = str_analysis.param_mask;
     block.jit_global_slots = slots;
     block.jit_code = exec;
     block.jit_fn = @ptrCast(exec.ptr);
@@ -1250,11 +1543,105 @@ fn clearReg(reg: u8, known_num: *u64, known_non_heap: *u64) void {
     }
 }
 
+noinline fn emitStringLengthToXmm0(
+    a: *Assembler,
+    str_reg: u8,
+    use_r14_prepared: bool,
+    bail_lbl: Label,
+) !void {
+    if (use_r14_prepared) {
+        try a.movRegReg(.rax, .r14);
+        try a.movRegImm64(.rcx, 0x3FFF_FFFF_FFFF_FFFF);
+        try a.andRegReg(.rax, .rcx);
+        try a.cvtsi2sdqXmmReg64(.xmm0, .rax);
+        return;
+    }
+
+    try a.movRegMem(.rax, .r12, @intCast(@as(usize, str_reg) * 8));
+    try a.movRegReg(.rcx, .rax);
+    try a.shrRegImm8(.rcx, 47);
+    try a.cmpRegImm32(.rcx, HEADER_STRING);
+    try a.jcc(.ne, bail_lbl);
+
+    try a.movRegImm64(.rcx, JSValue.PTR_MASK);
+    try a.andRegReg(.rax, .rcx);
+
+    try a.movRegReg(.rdi, .rax);
+    try a.movRegImm64(.rax, @intFromPtr(&vm.jitStringLength));
+    try a.movRegReg(.rbx, .rsp);
+    try a.andRegImm8(.rsp, -16);
+    try a.callReg(.rax);
+    try a.movRegReg(.rsp, .rbx);
+    try a.cvtsi2sdqXmmReg64(.xmm0, .rax);
+}
+
+noinline fn emitStringCharCodeAtFromXmm0(
+    a: *Assembler,
+    str_reg: u8,
+    use_r14_prepared: bool,
+    idx_is_exact_int: bool,
+    bail_lbl: Label,
+) !void {
+    const slow_lbl = try a.createLabel();
+    const done_lbl = try a.createLabel();
+
+    try a.movRegMem(.rax, .r12, @intCast(@as(usize, str_reg) * 8));
+    if (!use_r14_prepared) {
+        try a.movRegReg(.rcx, .rax);
+        try a.shrRegImm8(.rcx, 47);
+        try a.cmpRegImm32(.rcx, HEADER_STRING);
+        try a.jcc(.ne, bail_lbl);
+    }
+
+    try a.movRegImm64(.rcx, JSValue.PTR_MASK);
+    try a.andRegReg(.rax, .rcx);
+
+    if (use_r14_prepared) {
+        try a.movRegReg(.rcx, .r14);
+        try a.shrRegImm8(.rcx, 62);
+        try a.testRegReg(.rcx, .rcx);
+        try a.jcc(.e, slow_lbl);
+
+        try a.cvttsd2siqReg64Xmm(.rdx, .xmm0);
+        if (!idx_is_exact_int) {
+            try a.cvtsi2sdqXmmReg64(.xmm1, .rdx);
+            try a.ucomisd(.xmm0, .xmm1);
+            try a.jcc(.p, slow_lbl);
+            try a.jcc(.ne, slow_lbl);
+        }
+
+        try a.cmpRegMem(.rdx, .rax, str_data_len_off);
+        try a.jcc(.ae, slow_lbl);
+
+        try a.movRegMem(.rcx, .rax, str_data_ptr_off);
+        try a.addRegReg(.rcx, .rdx);
+        try a.movzxReg64Mem8(.rcx, .rcx, 0);
+        try a.cmpRegImm32(.rcx, 0x80);
+        try a.jcc(.ae, slow_lbl);
+
+        try a.cvtsi2sdXmmReg32(.xmm0, .rcx);
+        try a.jmp(done_lbl);
+    }
+
+    a.bindLabel(slow_lbl);
+    try a.movRegReg(.rdi, .rax);
+    try a.movqRegXmm(.rsi, .xmm0);
+    try a.movRegImm64(.rax, @intFromPtr(&vm.jitStringCharCodeAt));
+    try a.movRegReg(.rbx, .rsp);
+    try a.andRegImm8(.rsp, -16);
+    try a.callReg(.rax);
+    try a.movRegReg(.rsp, .rbx);
+    try a.movqXmmReg(.xmm0, .rax);
+
+    a.bindLabel(done_lbl);
+}
+
 noinline fn compileImpl(
     allocator: Allocator,
     block: *const codeblock.CodeBlock,
     slots_opt: ?[]JitGlobalSlot,
 ) ![]align(std.heap.page_size_min) u8 {
+    const str_analysis = analyzeWholeFnStrings(block) orelse return error.CannotCompile;
     var a = Assembler.init(allocator);
     defer a.deinit();
 
@@ -1310,6 +1697,35 @@ noinline fn compileImpl(
         while (slot < block.local_count) : (slot += 1) {
             try a.movMemReg(.r12, @intCast(slot * 8), .r15);
         }
+    }
+
+    const single_str_param: ?u8 = if (@popCount(str_analysis.param_mask) == 1 and slots_opt == null)
+        @intCast(@ctz(str_analysis.param_mask))
+    else
+        null;
+
+    if (single_str_param) |sp| {
+        try a.movRegImm64(.rdi, @intFromPtr(block));
+        try a.movRegMem(.rsi, .r12, @intCast(@as(usize, sp) * 8));
+        try a.movRegImm32(.rdx, @intFromBool(str_analysis.has_char_code_at));
+        try a.movRegImm64(.rax, @intFromPtr(&vm.jitPrepareWholeFnString));
+        try a.movRegReg(.rbx, .rsp);
+        try a.andRegImm8(.rsp, -16);
+        try a.callReg(.rax);
+        try a.movRegReg(.rsp, .rbx);
+        try a.movRegReg(.r14, .rax);
+        try a.shrRegImm8(.rax, 63);
+        try a.testRegReg(.rax, .rax);
+        try a.jcc(.ne, bailout_label);
+    } else if (str_analysis.has_char_code_at) {
+        try a.movRegImm64(.rdi, @intFromPtr(block));
+        try a.movRegImm64(.rax, @intFromPtr(&vm.jitCheckStringCharCodeAtBlock));
+        try a.movRegReg(.rbx, .rsp);
+        try a.andRegImm8(.rsp, -16);
+        try a.callReg(.rax);
+        try a.movRegReg(.rsp, .rbx);
+        try a.testRegReg(.rax, .rax);
+        try a.jcc(.ne, bailout_label);
     }
 
     const ver_addr: u64 = @intFromPtr(&environment_mod.env_struct_version);
@@ -1392,9 +1808,34 @@ noinline fn compileImpl(
             global_ver_checked = false;
         }
         a.bindLabel(op_labels[ip]);
+        if (ip < MAX_WHOLE_FN_STRING_OPS and str_analysis.elided[ip]) continue;
         const op = block.ops[ip];
         switch (op.opcode) {
             .nop => {},
+            .get_prop => {
+                const s_reg = str_analysis.get_prop_len_str[ip].?;
+                const use_r14 = (single_str_param != null and single_str_param.? == s_reg);
+                try emitStringLengthToXmm0(&a, s_reg, use_r14, bailout_label);
+                try a.movqRegXmm(.rax, .xmm0);
+                try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+                markNum(op.a, &known_num, &known_non_heap);
+            },
+            .call => {
+                const s_reg = str_analysis.char_code_at_str[ip].?;
+                const use_r14 = (single_str_param != null and single_str_param.? == s_reg);
+                const arg_r: u8 = op.b + 1;
+                try a.movRegMem(.rax, .r12, @intCast(@as(usize, arg_r) * 8));
+                if (!isKnownNum(known_num, arg_r)) {
+                    try a.cmpRegReg(.rax, .r15);
+                    try a.jcc(.ae, bailout_label);
+                    markNum(arg_r, &known_num, &known_non_heap);
+                }
+                try a.movqXmmReg(.xmm0, .rax);
+                try emitStringCharCodeAtFromXmm0(&a, s_reg, use_r14, false, bailout_label);
+                try a.movqRegXmm(.rax, .xmm0);
+                try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+                markNum(op.a, &known_num, &known_non_heap);
+            },
             .load_undefined => {
                 try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .r15);
                 clearReg(op.a, &known_num, &known_non_heap);
@@ -1822,7 +2263,7 @@ pub noinline fn canCompileOsr(block: *const codeblock.CodeBlock, start_ip: usize
                 if (op.c >= block.call_target_cache.len) return false;
                 const cs = &block.call_target_cache[op.c];
                 if ((@as(usize, op.b) + 1 + cs.arg_count) > block.register_count) return false;
-                if (!isMathSqrtCall(cs)) {
+                if (!isMathSqrtCall(cs) and findCharCodeAtGetProp(block, start_ip, end_ip, ip) == null) {
                     if (cs.this_reg != null) return false;
                     const tb = cs.target_block orelse return false;
                     if (tb.param_count != cs.arg_count) return false;
@@ -2249,10 +2690,10 @@ noinline fn computeBlockLiveOut(allocator: Allocator, block: *const codeblock.Co
     return live_out;
 }
 
-fn opMayMutateMathSqrt(block: *const codeblock.CodeBlock, op: codeblock.Op) bool {
+fn opMayMutateMathSqrt(block: *const codeblock.CodeBlock, start_ip: usize, end_ip: usize, ip: usize, op: codeblock.Op) bool {
     return switch (op.opcode) {
         .call_global => true,
-        .call => (op.c >= block.call_target_cache.len or !isMathSqrtCall(&block.call_target_cache[op.c])),
+        .call => (op.c >= block.call_target_cache.len or (!isMathSqrtCall(&block.call_target_cache[op.c]) and findCharCodeAtGetProp(block, start_ip, end_ip, ip) == null)),
         .store_global => blk: {
             const k = constantName(block, op.b) orelse break :blk true;
             break :blk std.mem.eql(u8, k, "Math");
@@ -2260,6 +2701,18 @@ fn opMayMutateMathSqrt(block: *const codeblock.CodeBlock, op: codeblock.Op) bool
         .set_prop, .set_prop_transition => blk: {
             const k = constantName(block, op.b) orelse break :blk true;
             break :blk (std.mem.eql(u8, k, "sqrt") or std.mem.eql(u8, k, "Math"));
+        },
+        else => false,
+    };
+}
+
+fn opMayMutateStringCharCodeAt(block: *const codeblock.CodeBlock, start_ip: usize, end_ip: usize, ip: usize, op: codeblock.Op) bool {
+    return switch (op.opcode) {
+        .call_global => true,
+        .call => (op.c >= block.call_target_cache.len or (!isMathSqrtCall(&block.call_target_cache[op.c]) and findCharCodeAtGetProp(block, start_ip, end_ip, ip) == null)),
+        .set_prop, .set_prop_transition => blk: {
+            const k = constantName(block, op.b) orelse break :blk true;
+            break :blk (std.mem.eql(u8, k, "charCodeAt") or std.mem.eql(u8, k, "prototype"));
         },
         else => false,
     };
@@ -2276,7 +2729,9 @@ const OsrPrePass = struct {
     compound_span_start: []?u32,
     fused_idx_delta: []?i32,
     elided_math_call: []bool,
+    char_code_at_str_reg: []?u8,
     math_sqrt_guard_bits: ?u64 = null,
+    has_char_code_at_guard: bool = false,
 
     noinline fn init(allocator: Allocator, block: *const codeblock.CodeBlock, start_ip: usize, end_ip: usize) !OsrPrePass {
         const loop_len = end_ip - start_ip + 1;
@@ -2495,6 +2950,10 @@ const OsrPrePass = struct {
         errdefer allocator.free(elided_math_call);
         @memset(elided_math_call, false);
 
+        const char_code_at_str_reg = try allocator.alloc(?u8, loop_len);
+        errdefer allocator.free(char_code_at_str_reg);
+        @memset(char_code_at_str_reg, null);
+
         return .{
             .live_out = live_out,
             .fused_cmps = fused_cmps,
@@ -2506,6 +2965,7 @@ const OsrPrePass = struct {
             .compound_span_start = compound_span_start,
             .fused_idx_delta = fused_idx_delta,
             .elided_math_call = elided_math_call,
+            .char_code_at_str_reg = char_code_at_str_reg,
         };
     }
 
@@ -2520,6 +2980,7 @@ const OsrPrePass = struct {
         allocator.free(self.compound_span_start);
         allocator.free(self.fused_idx_delta);
         allocator.free(self.elided_math_call);
+        allocator.free(self.char_code_at_str_reg);
     }
 
     noinline fn populateArrayElisions(
@@ -2742,7 +3203,7 @@ const OsrPrePass = struct {
         end_ip: usize,
     ) void {
         for (start_ip..end_ip + 1) |scan_ip| {
-            if (opMayMutateMathSqrt(block, block.ops[scan_ip])) return;
+            if (opMayMutateMathSqrt(block, start_ip, end_ip, scan_ip, block.ops[scan_ip])) return;
         }
         const loop_len = end_ip - start_ip + 1;
         for (0..loop_len) |call_idx| {
@@ -2846,6 +3307,49 @@ const OsrPrePass = struct {
             }
         }
     }
+
+    noinline fn populateCharCodeAtElisions(
+        self: *OsrPrePass,
+        block: *const codeblock.CodeBlock,
+        start_ip: usize,
+        end_ip: usize,
+    ) void {
+        for (start_ip..end_ip + 1) |scan_ip| {
+            if (opMayMutateStringCharCodeAt(block, start_ip, end_ip, scan_ip, block.ops[scan_ip])) return;
+        }
+        const loop_len = end_ip - start_ip + 1;
+        for (0..loop_len) |call_idx| {
+            const call_ip = start_ip + call_idx;
+            const call_op = block.ops[call_ip];
+            if (call_op.opcode != .call) continue;
+            const span = findCharCodeAtGetProp(block, start_ip, end_ip, call_ip) orelse continue;
+            const gp_idx = span.gp_ip - start_ip;
+            if (self.is_jump_target[gp_idx] or self.elided_compound_op[gp_idx]) continue;
+            const gp_op = block.ops[span.gp_ip];
+            if (call_op.a != gp_op.a and (self.live_out[call_ip] & regBit64(gp_op.a)) != 0) continue;
+
+            var eff_str_reg: u8 = gp_op.b;
+            var first_idx: usize = gp_idx;
+            if (span.ld_ip) |ld_ip| {
+                const ld_idx = ld_ip - start_ip;
+                if (!self.is_jump_target[ld_idx] and !self.elided_compound_op[ld_idx] and
+                    (self.live_out[call_ip] & regBit64(gp_op.b)) == 0)
+                {
+                    self.elided_compound_op[ld_idx] = true;
+                    eff_str_reg = span.str_reg;
+                    first_idx = ld_idx;
+                }
+            }
+            self.has_char_code_at_guard = true;
+            self.elided_compound_op[gp_idx] = true;
+            self.char_code_at_str_reg[call_idx] = eff_str_reg;
+            for (first_idx + 1 .. call_idx + 1) |b_idx| {
+                if (self.compound_span_start[b_idx] == null) {
+                    self.compound_span_start[b_idx] = @intCast(start_ip + first_idx);
+                }
+            }
+        }
+    }
 };
 
 noinline fn analyzeHoistedArrays(
@@ -2901,9 +3405,12 @@ noinline fn analyzeHoistedArrays(
         const w = prepass.loop_weights[idx];
         switch (op.opcode) {
             .call => {
-                if (op.c >= block.call_target_cache.len or !isMathSqrtCall(&block.call_target_cache[op.c])) {
-                    return .{};
-                }
+                if (op.c >= block.call_target_cache.len) return .{};
+                const cs = &block.call_target_cache[op.c];
+                const allowed = isMathSqrtCall(cs) or
+                    findCharCodeAtGetProp(block, start_ip, end_ip, ip) != null or
+                    (cs.this_reg == null and cs.target_block != null);
+                if (!allowed) return .{};
                 if (op.a < 64) {
                     cur_copy_src[op.a] = null;
                     for (0..64) |m| if (cur_copy_src[m] == op.a) {
@@ -2911,7 +3418,18 @@ noinline fn analyzeHoistedArrays(
                     };
                 }
             },
-            .call_global, .new_array => return .{},
+            .call_global => {
+                if (op.c >= block.call_target_cache.len) return .{};
+                const cs = &block.call_target_cache[op.c];
+                if (cs.this_reg != null or cs.target_block == null) return .{};
+                if (op.a < 64) {
+                    cur_copy_src[op.a] = null;
+                    for (0..64) |m| if (cur_copy_src[m] == op.a) {
+                        cur_copy_src[m] = null;
+                    };
+                }
+            },
+            .new_array => return .{},
             .move, .load_local, .store_local => {
                 const resolved_src: ?u8 = if (op.b < 64) (cur_copy_src[op.b] orelse op.b) else null;
                 if (op.a < 64) {
@@ -3143,34 +3661,56 @@ noinline fn analyzeOsrLoop(
     // 1. Pureza del bucle (is_pure_loop): true si ningún opcode en [start_ip .. end_ip]
     // es una llamada no-intrínseca (.call_global o .call != Math.sqrt)
     var is_pure_loop = true;
+    var can_hoist_arrays = true;
     var loop_mutates_math_sqrt = false;
     for (start_ip..end_ip + 1) |ip| {
         const op = block.ops[ip];
         switch (op.opcode) {
             .call => {
-                if (op.c >= block.call_target_cache.len or !isMathSqrtCall(&block.call_target_cache[op.c])) {
+                if (op.c >= block.call_target_cache.len) {
                     is_pure_loop = false;
+                    can_hoist_arrays = false;
                     loop_mutates_math_sqrt = true;
                     break;
+                }
+                const cs = &block.call_target_cache[op.c];
+                if (!isMathSqrtCall(cs) and findCharCodeAtGetProp(block, start_ip, end_ip, ip) == null) {
+                    is_pure_loop = false;
+                    loop_mutates_math_sqrt = true;
+                    if (cs.this_reg != null or cs.target_block == null) {
+                        can_hoist_arrays = false;
+                        break;
+                    }
                 }
             },
             .call_global => {
                 is_pure_loop = false;
                 loop_mutates_math_sqrt = true;
-                break;
+                if (op.c >= block.call_target_cache.len or block.call_target_cache[op.c].this_reg != null or block.call_target_cache[op.c].target_block == null) {
+                    can_hoist_arrays = false;
+                    break;
+                }
             },
             else => {
-                if (opMayMutateMathSqrt(block, op)) loop_mutates_math_sqrt = true;
+                if (opMayMutateMathSqrt(block, start_ip, end_ip, ip, op)) loop_mutates_math_sqrt = true;
             },
         }
     }
-    if (!is_pure_loop) return result;
+    if (!is_pure_loop) {
+        if (can_hoist_arrays) {
+            const hoisted_arrs = analyzeHoistedArrays(block, start_ip, end_ip, 0, prepass, frame_regs_opt);
+            prepass.populateArrayElisions(block, start_ip, end_ip, &hoisted_arrs);
+            result.hoisted_arrs = hoisted_arrs;
+        }
+        return result;
+    }
 
     prepass.populatePropElisions(block, start_ip, end_ip);
     var promoted = analyzePromotedProps(block, start_ip, end_ip, prop_ic, prepass);
     const hoisted_arrs = analyzeHoistedArrays(block, start_ip, end_ip, promoted.count, prepass, frame_regs_opt);
     prepass.populateArrayElisions(block, start_ip, end_ip, &hoisted_arrs);
     prepass.populateMathSqrtElisions(block, start_ip, end_ip);
+    prepass.populateCharCodeAtElisions(block, start_ip, end_ip);
 
     var invalid: [64]bool = @splat(false);
     var written: [64]bool = @splat(false);
@@ -3369,7 +3909,13 @@ noinline fn analyzeOsrLoop(
                     if (!written[arg_reg]) read_before_written[arg_reg] = true;
                     use_count[arg_reg] +%= w;
                 }
-                if (prepass.elided_math_call[idx]) {
+                if (prepass.char_code_at_str_reg[idx]) |s_reg| {
+                    if (s_reg < 64) invalid[s_reg] = true;
+                    if (op.a < 64) {
+                        use_count[op.a] +%= w;
+                        written[op.a] = true;
+                    }
+                } else if (prepass.elided_math_call[idx]) {
                     if (op.a < 64) {
                         use_count[op.a] +%= w;
                         written[op.a] = true;
@@ -3637,6 +4183,8 @@ noinline fn emitReleaseHeapIfRefGt1(
     try a.jcc(.e, is_ref_lbl);
     try a.cmpRegImm32(.rcx, HEADER_OBJECT);
     try a.jcc(.e, is_ref_lbl);
+    try a.cmpRegImm32(.rcx, HEADER_STRING);
+    try a.jcc(.e, is_ref_lbl);
     try a.movRegReg(.rdx, .rax);
     try a.movRegImm64(.rcx, JSValue.TAG15_MASK);
     try a.andRegReg(.rdx, .rcx);
@@ -3686,6 +4234,8 @@ noinline fn emitStoreBoxedValToUncached(
     try a.cmpRegImm32(.rcx, HEADER_ARRAY);
     try a.jcc(.e, retain_val_lbl);
     try a.cmpRegImm32(.rcx, HEADER_FUNCTION);
+    try a.jcc(.e, retain_val_lbl);
+    try a.cmpRegImm32(.rcx, HEADER_STRING);
     try a.jcc(.e, retain_val_lbl);
     try a.movRegReg(.rdx, .r10);
     try a.movRegImm64(.rcx, JSValue.TAG15_MASK);
@@ -3888,6 +4438,7 @@ const OsrCompiler = struct {
     elided_op: []bool,
     elided_math_call: []bool,
     math_sqrt_guard_bits: ?u64 = null,
+    has_char_code_at_guard: bool = false,
     exit_stubs: std.ArrayListUnmanaged(ExitStub) = .empty,
     known_f64: [64]?f64 = @splat(null),
     reg_is_int32: [64]bool = @splat(false),
@@ -4045,7 +4596,7 @@ const OsrCompiler = struct {
                     }
                 },
                 .call => {
-                    if (ck.c < self.block.call_target_cache.len and isMathSqrtCall(&self.block.call_target_cache[ck.c])) {
+                    if ((ck.c < self.block.call_target_cache.len and isMathSqrtCall(&self.block.call_target_cache[ck.c])) or self.prepass.char_code_at_str_reg[k] != null) {
                         if (ck.a == eff_obj) break;
                         if (ck.a < 64) {
                             scan_copy_src[ck.a] = null;
@@ -4125,6 +4676,14 @@ const OsrCompiler = struct {
             try a.movRegReg(.rdi, .r13);
             try a.movRegImm64(.rsi, expected_bits);
             try a.movRegImm64(.rax, @intFromPtr(&vm.jitCheckMathSqrt));
+            try a.callReg(.rax);
+            try a.testRegReg(.rax, .rax);
+            try a.jcc(.ne, preheader_bailout);
+        }
+
+        if (self.has_char_code_at_guard) {
+            try a.movRegReg(.rdi, .r13);
+            try a.movRegImm64(.rax, @intFromPtr(&vm.jitCheckStringCharCodeAt));
             try a.callReg(.rax);
             try a.testRegReg(.rax, .rax);
             try a.jcc(.ne, preheader_bailout);
@@ -4665,6 +5224,8 @@ const OsrCompiler = struct {
                         try a.cmpRegImm32(.rcx, HEADER_FUNCTION);
                         try a.jcc(.e, inc_rc_lbl);
                         try a.cmpRegImm32(.rcx, HEADER_OBJECT);
+                        try a.jcc(.e, inc_rc_lbl);
+                        try a.cmpRegImm32(.rcx, HEADER_STRING);
                         try a.jcc(.e, inc_rc_lbl);
                         try a.movRegReg(.rdx, .rax);
                         try a.movRegImm64(.rcx, JSValue.TAG15_MASK);
@@ -6775,6 +7336,32 @@ const OsrCompiler = struct {
             }
             try a.jmp(done_lbl);
             a.bindLabel(not_arr_lbl);
+
+            const not_str_lbl = try a.createLabel();
+            try a.cmpRegImm32(.rcx, HEADER_STRING);
+            try a.jcc(.ne, not_str_lbl);
+            try a.movRegImm64(.rcx, JSValue.PTR_MASK);
+            try a.andRegReg(.rax, .rcx);
+
+            if (cached_count > 0) try emitFlushCached(a, cached_regs, cached_count);
+            if (promoted.count > 0) try emitFlushPromoted(a, promoted);
+            try a.movRegReg(.rdi, .rax);
+            try a.movRegImm64(.rax, @intFromPtr(&vm.jitStringLength));
+            try a.callReg(.rax);
+            if (cached_count > 0) try emitReloadCached(a, cached_regs, cached_count);
+            if (promoted.count > 0) try emitReloadPromoted(a, promoted);
+            if (self.cached_obj_ptrs[0] != null) try a.xorReg32Reg32(.r10, .r10);
+            if (self.cached_obj_ptrs[1] != null) try a.xorReg32Reg32(.r11, .r11);
+
+            try a.cvtsi2sdqXmmReg64(dst_xmm, .rax);
+            if (!dst_cached) {
+                try emitStoreXmmToNum(a, reg_to_xmm, op.a, .xmm0, bail_lbl);
+                if (forward_xmm3) {
+                    try a.movsdXmmXmm(.xmm3, .xmm0);
+                }
+            }
+            try a.jmp(done_lbl);
+            a.bindLabel(not_str_lbl);
         }
 
         if (self.findCachedObjPtr(eff_obj, compile_ic.shape_id, compile_ic.slot_idx, false)) |ptr_reg| {
@@ -6981,6 +7568,39 @@ const OsrCompiler = struct {
         }
     }
 
+    noinline fn emitOsrStringCharCodeAt(
+        self: *OsrCompiler,
+        str_reg: u8,
+        _: bool,
+        bail_lbl: Label,
+    ) !void {
+        const a = self.a;
+        const cached_regs = &self.analysis.cached_regs;
+        const cached_count = self.analysis.cached_count;
+        const promoted = &self.analysis.promoted;
+
+        try a.movRegMem(.rax, .r12, @intCast(@as(usize, str_reg) * 8));
+        try a.movRegReg(.rcx, .rax);
+        try a.shrRegImm8(.rcx, 47);
+        try a.cmpRegImm32(.rcx, HEADER_STRING);
+        try a.jcc(.ne, bail_lbl);
+
+        try a.movRegImm64(.rcx, JSValue.PTR_MASK);
+        try a.andRegReg(.rax, .rcx);
+
+        try a.movRegReg(.rdi, .rax);
+        try a.movqRegXmm(.rsi, .xmm0);
+        if (cached_count > 0) try emitFlushCached(a, cached_regs, cached_count);
+        if (promoted.count > 0) try emitFlushPromoted(a, promoted);
+        try a.movRegImm64(.rax, @intFromPtr(&vm.jitStringCharCodeAt));
+        try a.callReg(.rax);
+        if (cached_count > 0) try emitReloadCached(a, cached_regs, cached_count);
+        if (promoted.count > 0) try emitReloadPromoted(a, promoted);
+        if (self.cached_obj_ptrs[0] != null) try a.xorReg32Reg32(.r10, .r10);
+        if (self.cached_obj_ptrs[1] != null) try a.xorReg32Reg32(.r11, .r11);
+        try a.movqXmmReg(.xmm0, .rax);
+    }
+
     noinline fn emitCallOp(
         self: *OsrCompiler,
         idx: usize,
@@ -6991,6 +7611,18 @@ const OsrCompiler = struct {
         const a = self.a;
         const block = self.block;
         const cs = &block.call_target_cache[op.c];
+
+        if (op.opcode == .call and self.prepass.char_code_at_str_reg[idx] != null) {
+            const raw_str_r = self.prepass.char_code_at_str_reg[idx].?;
+            const eff_str_r = if (raw_str_r < 64) (self.cur_copy_src[raw_str_r] orelse raw_str_r) else raw_str_r;
+            const arg_reg: u8 = op.b + 1;
+            try self.loadNumToXmm(arg_reg, .xmm0, bail_lbl);
+            const idx_exact = (arg_reg < 64 and (self.reg_is_int32[arg_reg] or self.reg_is_exact_idx[arg_reg]));
+            try self.emitOsrStringCharCodeAt(eff_str_r, idx_exact, bail_lbl);
+            try self.storeXmmToNum(op.a, .xmm0, bail_lbl);
+            if (self.live_r8_i32 != null and self.live_r8_i32.? != op.a) next_live_r8_i32.* = self.live_r8_i32;
+            return;
+        }
 
         if (op.opcode == .call and isMathSqrtCall(cs)) {
             if (!self.elided_math_call[idx]) {
@@ -7043,10 +7675,22 @@ const OsrCompiler = struct {
         try a.jcc(.e, bail_lbl);
 
         const arg_start = @as(usize, op.b) + 1;
+        const str_mask = tb.jit_string_param_mask;
         for (0..arg_count) |i_arg| {
             try a.movRegMem(.rax, .r12, @intCast((arg_start + i_arg) * 8));
-            try a.cmpRegReg(.rax, .r14);
-            try a.jcc(.ae, bail_lbl);
+            if (i_arg < 32 and (str_mask & (@as(u32, 1) << @intCast(i_arg))) != 0) {
+                const arg_ok_lbl = try a.createLabel();
+                try a.cmpRegReg(.rax, .r14);
+                try a.jcc(.b, arg_ok_lbl);
+                try a.movRegReg(.rcx, .rax);
+                try a.shrRegImm8(.rcx, 47);
+                try a.cmpRegImm32(.rcx, HEADER_STRING);
+                try a.jcc(.ne, bail_lbl);
+                a.bindLabel(arg_ok_lbl);
+            } else {
+                try a.cmpRegReg(.rax, .r14);
+                try a.jcc(.ae, bail_lbl);
+            }
         }
 
         try a.lea(.rax, .r12, total_bytes);
@@ -7068,6 +7712,14 @@ const OsrCompiler = struct {
         try a.movRegReg(.rsi, .rsp);
         try a.callReg(.r11);
 
+        if (str_mask != 0) {
+            for (0..arg_count) |i_arg| {
+                if (i_arg < 32 and (str_mask & (@as(u32, 1) << @intCast(i_arg))) != 0) {
+                    try a.movMemReg(.r12, callee_regs_off + @as(i32, @intCast(i_arg * 8)), .r15);
+                }
+            }
+        }
+
         try a.testRegReg(.rax, .rax);
         const call_ok_lbl = try a.createLabel();
         try a.jcc(.e, call_ok_lbl);
@@ -7076,9 +7728,6 @@ const OsrCompiler = struct {
         try a.jmp(bail_lbl);
 
         a.bindLabel(call_ok_lbl);
-        try a.movRegMem(.rbx, .rsp, 0);
-        try a.addRegImm32(.rsp, 16);
-
         const write_out_lbl = try a.createLabel();
         const heap_old_lbl = try a.createLabel();
         const deinit_call_lbl = try a.createLabel();
@@ -7112,7 +7761,9 @@ const OsrCompiler = struct {
         try a.callReg(.rax);
 
         a.bindLabel(write_out_lbl);
-        try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rbx);
+        try a.movRegMem(.rax, .rsp, 0);
+        try a.addRegImm32(.rsp, 16);
+        try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
     }
 
     noinline fn emitLoopOp(
@@ -7179,7 +7830,8 @@ const OsrCompiler = struct {
                 try self.emitGetPropOrGlobal(ip, op, bail_lbl, next_live_r8_i32);
             },
             .call, .call_global => {
-                if (op.opcode != .call or op.c >= self.block.call_target_cache.len or !isMathSqrtCall(&self.block.call_target_cache[op.c])) {
+                const is_intrinsic = op.opcode == .call and ((op.c < self.block.call_target_cache.len and isMathSqrtCall(&self.block.call_target_cache[op.c])) or self.prepass.char_code_at_str_reg[idx] != null);
+                if (!is_intrinsic) {
                     self.cached_obj_ptrs = .{ null, null };
                 }
                 try self.emitCallOp(idx, op, bail_lbl, next_live_r8_i32);
@@ -7199,7 +7851,7 @@ const OsrCompiler = struct {
         const cached_regs = &self.analysis.cached_regs;
         const cached_count = self.analysis.cached_count;
         const promoted = &self.analysis.promoted;
-        const has_preheader_bailout = (self.has_flush or self.analysis.hoisted_arrs.count > 0 or self.math_sqrt_guard_bits != null);
+        const has_preheader_bailout = (self.has_flush or self.analysis.hoisted_arrs.count > 0 or self.math_sqrt_guard_bits != null or self.has_char_code_at_guard);
 
         for (self.exit_stubs.items) |stub| {
             a.bindLabel(stub.label);
@@ -7392,6 +8044,7 @@ noinline fn compileOsrImpl(
         .elided_op = elided_op,
         .elided_math_call = elided_math_call,
         .math_sqrt_guard_bits = prepass.math_sqrt_guard_bits,
+        .has_char_code_at_guard = prepass.has_char_code_at_guard,
         .incoming_has_edge = incoming_has_edge,
         .incoming_int32 = incoming_int32,
         .incoming_uint31 = incoming_uint31,
@@ -9010,4 +9663,117 @@ test "baseline JIT Phase J2.3: OSR object property IC (nbody object array, polym
     defer res.deinit();
     try std.testing.expect(res.isNumber());
     try std.testing.expectEqual(@as(f64, 32220), res.asNumber());
+}
+
+test "baseline JIT Phase J2.4: String .length and .charCodeAt intrinsics in whole-function JIT + OSR, read-only String args, UTF-16 surrogates, edge indices, and prototype mutation" {
+    if (!comptime x64_asm.is_supported_host) return;
+    const Interpreter = @import("../interpreter.zig").Interpreter;
+
+    var allocating = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(std.testing.allocator, &allocating.writer);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+
+    const res = try interp.run(
+        \\// 1. rut_dv style whole-function JIT called from hot OSR loop with read-only String arguments
+        \\function rut_dv(s) {
+        \\    var m = 2;
+        \\    var t = 0;
+        \\    for (var i = s.length - 1; i >= 0; i--) {
+        \\        t = t + (s.charCodeAt(i) - 48) * m;
+        \\        m = (m === 7) ? 2 : (m + 1);
+        \\    }
+        \\    var dvNum = 11 - (t % 11);
+        \\    if (dvNum === 11) return 48;
+        \\    if (dvNum === 10) return 75;
+        \\    return 48 + dvNum;
+        \\}
+        \\function runRutLoop(N) {
+        \\    const ruts = [
+        \\        "12345678", "11111111", "22222222", "24967103", "15432987",
+        \\        "76543210", "9876543", "19283746", "30123456", "17463829"
+        \\    ];
+        \\    let acc = 0;
+        \\    let kCount = 0;
+        \\    for (let i = 0; i < N; i++) {
+        \\        const dv = rut_dv(ruts[i % 10]);
+        \\        if (dv === 75) kCount = kCount + 1;
+        \\        acc = (acc + dv) % 1000000007;
+        \\    }
+        \\    return acc + kCount;
+        \\}
+        \\const rutRes = runRutLoop(300);
+        \\if (rutRes !== 15270) throw new Error("bad rutRes: " + rutRes);
+        \\
+        \\// Force bailout inside JIT-compiled rut_dv by passing a non-string/number or triggering fallback, ensuring 0 refcount leaks
+        \\let bailCaught = 0;
+        \\try { rut_dv(null); } catch (e) { if (e instanceof TypeError) bailCaught++; }
+        \\if (bailCaught !== 1) throw new Error("null did not throw TypeError in rut_dv");
+        \\if (rut_dv("12345678") !== 53) throw new Error("rut_dv after bailout failed");
+        \\
+        \\// 2. Direct OSR loop using s.length and s.charCodeAt(i) on ASCII and UTF-16 / surrogate pairs ("😀", "ñáé")
+        \\function sumCharCodesOsr(str, rounds) {
+        \\    let total = 0;
+        \\    for (let r = 0; r < rounds; r++) {
+        \\        const len = str.length;
+        \\        for (let i = 0; i < len; i++) {
+        \\            total += str.charCodeAt(i);
+        \\        }
+        \\    }
+        \\    return total;
+        \\}
+        \\// "😀" is U+1F600 => high surrogate 0xD83D (55357) + low surrogate 0xDE00 (56832), length 2
+        \\// "ñáé" => 241 + 225 + 233 = 699, length 3
+        \\const emojiStr = "A😀B"; // 65 + 55357 + 56832 + 66 = 112320, length 4
+        \\const latinStr = "ñáé";
+        \\if (emojiStr.length !== 4 || latinStr.length !== 3) throw new Error("bad UTF-16 length");
+        \\if (sumCharCodesOsr(emojiStr, 100) !== 11232000) throw new Error("bad emoji OSR sum");
+        \\if (sumCharCodesOsr(latinStr, 100) !== 69900) throw new Error("bad latin OSR sum");
+        \\if (rut_dv(emojiStr) < 0) throw new Error("bad emoji in whole-fn JIT");
+        \\
+        \\// 3. Edge-case indices: negative, >= length, NaN, -0, fractional (1.9 -> 1)
+        \\function testEdgeIndices(s) {
+        \\    let nanCount = 0;
+        \\    let validSum = 0;
+        \\    const nanVal = 0.0 / 0.0;
+        \\    for (let i = 0; i < 120; i++) {
+        \\        const cNeg = s.charCodeAt(-1);
+        \\        const cOob = s.charCodeAt(s.length);
+        \\        const cNan = s.charCodeAt(nanVal);
+        \\        const cNegZero = s.charCodeAt(-0.0);
+        \\        const cNegFrac = s.charCodeAt(-0.5);
+        \\        const cFrac = s.charCodeAt(1.9);
+        \\        if (cNeg !== cNeg && cOob !== cOob) nanCount++;
+        \\        validSum += cNan + cNegZero + cNegFrac + cFrac;
+        \\    }
+        \\    return nanCount * 1000000 + validSum;
+        \\}
+        \\// For "XYZ": charCodeAt(0) = 88 (cNan, cNegZero, cNegFrac), charCodeAt(1) = 89 (cFrac)
+        \\// Per iteration: 88 + 88 + 88 + 89 = 353; 120 * 353 = 42360; nanCount = 120 => 120042360
+        \\const edgeRes = testEdgeIndices("XYZ");
+        \\if (edgeRes !== 120042360) throw new Error("bad edgeRes: " + edgeRes);
+        \\
+        \\// 4. Dynamic strings allocated in loop passed to JIT function (verifies 0 leaks / 0 double-free)
+        \\let dynSum = 0;
+        \\for (let i = 0; i < 150; i++) {
+        \\    const dynS = "12345" + (100 + i);
+        \\    dynSum += rut_dv(dynS);
+        \\}
+        \\
+        \\// 5. Mutating String.prototype.charCodeAt mid-execution invalidates intrinsic and respects override
+        \\const origCharCodeAt = String.prototype.charCodeAt;
+        \\String.prototype.charCodeAt = function(idx) { return 48; };
+        \\const mutatedDv = rut_dv("12345678"); // all digits become '0' (48) => t = 0 => dvNum = 11 => returns 48
+        \\const mutatedOsr = sumCharCodesOsr("ABC", 80); // 80 * 3 * 48 = 11520
+        \\String.prototype.charCodeAt = origCharCodeAt;
+        \\if (mutatedDv !== 48) throw new Error("Whole-fn JIT ignored String.prototype.charCodeAt override: " + mutatedDv);
+        \\if (mutatedOsr !== 11520) throw new Error("OSR ignored String.prototype.charCodeAt override: " + mutatedOsr);
+        \\if (rut_dv("12345678") !== 53) throw new Error("Restored String.prototype.charCodeAt failed");
+        \\
+        \\rutRes + mutatedDv + (dynSum > 0 ? 1 : 0);
+    );
+    defer res.deinit();
+    try std.testing.expect(res.isNumber());
+    try std.testing.expectEqual(@as(f64, 15319), res.asNumber());
 }

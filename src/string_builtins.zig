@@ -271,17 +271,45 @@ fn stringTrimEnd(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     return interp(ctx).gcNewString(out);
 }
 
-fn stringCharCodeAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+pub fn stringCharCodeAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const a0 = arg(args, 0);
+    if (this_value.isString() and (a0.isNumber() or a0.isUndefined())) {
+        const sbox = this_value.asString();
+        const data = sbox.value.data;
+        const idx: isize = if (a0.isUndefined()) 0 else toIntSat(a0.asNumber());
+        if (idx < 0) return JSValue.fromNumber(std.math.nan(f64));
+        const u_idx: usize = @intCast(idx);
+        const clen = sbox.value.length();
+        if (u_idx >= clen) return JSValue.fromNumber(std.math.nan(f64));
+        if (clen == data.len and data[u_idx] < 0x80) {
+            return JSValue.fromNumber(@floatFromInt(data[u_idx]));
+        }
+        return if (zstring.access.charCodeAt(data, idx)) |c| JSValue.fromNumber(@floatFromInt(c)) else JSValue.fromNumber(std.math.nan(f64));
+    }
     const data = try requireString(ctx, allocator, this_value, "charCodeAt");
     defer allocator.free(data);
-    const idx: isize = toIntSat(if (arg(args, 0).tag() == .undefined) 0 else try interp(ctx).toNumberJS(arg(args, 0)));
+    const idx: isize = toIntSat(if (a0.tag() == .undefined) 0 else try interp(ctx).toNumberJS(a0));
     return if (zstring.access.charCodeAt(data, idx)) |c| JSValue.fromNumber(@floatFromInt(c)) else JSValue.fromNumber(std.math.nan(f64));
 }
 
-fn stringCodePointAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+pub fn stringCodePointAt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const a0 = arg(args, 0);
+    if (this_value.isString() and (a0.isNumber() or a0.isUndefined())) {
+        const sbox = this_value.asString();
+        const data = sbox.value.data;
+        const idx: isize = if (a0.isUndefined()) 0 else toIntSat(a0.asNumber());
+        if (idx < 0) return JSValue.UNDEFINED;
+        const u_idx: usize = @intCast(idx);
+        const clen = sbox.value.length();
+        if (u_idx >= clen) return JSValue.UNDEFINED;
+        if (clen == data.len and data[u_idx] < 0x80) {
+            return JSValue.fromNumber(@floatFromInt(data[u_idx]));
+        }
+        return if (zstring.access.codePointAt(data, idx)) |c| JSValue.fromNumber(@floatFromInt(c)) else JSValue.UNDEFINED;
+    }
     const data = try requireString(ctx, allocator, this_value, "codePointAt");
     defer allocator.free(data);
-    const idx: isize = toIntSat(if (arg(args, 0).tag() == .undefined) 0 else try interp(ctx).toNumberJS(arg(args, 0)));
+    const idx: isize = toIntSat(if (a0.tag() == .undefined) 0 else try interp(ctx).toNumberJS(a0));
     return if (zstring.access.codePointAt(data, idx)) |c| JSValue.fromNumber(@floatFromInt(c)) else JSValue.UNDEFINED;
 }
 
