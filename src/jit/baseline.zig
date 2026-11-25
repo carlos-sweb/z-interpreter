@@ -398,36 +398,69 @@ noinline fn isTempDeadOutsideSpan(
     temp_reg: u8,
 ) bool {
     if (temp_reg < block.local_count or temp_reg >= 64) return false;
+    const len = block.ops.len;
+    if (len == 0 or len > MAX_WHOLE_FN_STRING_OPS) return false;
     const t_bit = regBit64(temp_reg);
-    var jump_targets: [MAX_WHOLE_FN_STRING_OPS]bool = @splat(false);
-    for (block.ops, 0..) |op, ip| {
-        const maybe_t: ?usize = switch (op.opcode) {
-            .jump, .jump_if_false, .jump_if_true, .jump_if_not_nullish, .setup_catch => (@as(usize, op.b) << 8) | op.c,
-            .jeq_local_const_false, .jlt_local_const_false, .jle_local_const_false, .jgt_local_const_false, .jge_local_const_false => ip + @as(usize, op.c),
-            else => null,
-        };
-        if (maybe_t) |t| {
-            if (t < block.ops.len) jump_targets[t] = true;
-        }
-    }
 
-    var written_in_bb = false;
+    var use_t: [MAX_WHOLE_FN_STRING_OPS]bool = @splat(false);
+    var def_t: [MAX_WHOLE_FN_STRING_OPS]bool = @splat(false);
     for (block.ops, 0..) |op, ip| {
-        if (jump_targets[ip]) written_in_bb = false;
         if (ip >= span_start and ip <= span_end) {
-            if (ip == span_end) written_in_bb = (op.opcode == .call and op.a == temp_reg) or (op.opcode == .get_prop and op.a == temp_reg);
+            if (ip == span_end) {
+                def_t[ip] = (op.opcode == .call and op.a == temp_reg) or (op.opcode == .get_prop and op.a == temp_reg);
+            }
             continue;
         }
         const ud = opUseDefMasks(block, op);
-        if ((ud.use & t_bit) != 0 and !written_in_bb) return false;
-        if ((ud.def & t_bit) != 0) written_in_bb = true;
-        switch (op.opcode) {
-            .jump, .jump_if_false, .jump_if_true, .jump_if_not_nullish, .jeq_local_const_false, .jlt_local_const_false, .jle_local_const_false, .jgt_local_const_false, .jge_local_const_false, .return_value, .return_undefined => {
-                written_in_bb = false;
-            },
-            else => {},
+        use_t[ip] = (ud.use & t_bit) != 0;
+        def_t[ip] = (ud.def & t_bit) != 0;
+    }
+
+    var live_in: [MAX_WHOLE_FN_STRING_OPS]bool = @splat(false);
+    var live_out: [MAX_WHOLE_FN_STRING_OPS]bool = @splat(false);
+    var changed = true;
+    while (changed) {
+        changed = false;
+        var pc = len;
+        while (pc > 0) {
+            pc -= 1;
+            const op = block.ops[pc];
+            const out: bool = switch (op.opcode) {
+                .return_value, .return_undefined, .throw_value => false,
+                .jump => blk: {
+                    const t = (@as(usize, op.b) << 8) | op.c;
+                    break :blk if (t < len) live_in[t] else false;
+                },
+                .jump_if_false, .jump_if_true, .jump_if_not_nullish, .setup_catch => blk: {
+                    const t = (@as(usize, op.b) << 8) | op.c;
+                    const fall = if (pc + 1 < len) live_in[pc + 1] else false;
+                    const br = if (t < len) live_in[t] else false;
+                    break :blk fall or br;
+                },
+                .jeq_local_const_false,
+                .jlt_local_const_false,
+                .jle_local_const_false,
+                .jgt_local_const_false,
+                .jge_local_const_false,
+                => blk: {
+                    const t = pc + @as(usize, op.c);
+                    const fall = if (pc + 1 < len) live_in[pc + 1] else false;
+                    const br = if (t < len) live_in[t] else false;
+                    break :blk fall or br;
+                },
+                else => if (pc + 1 < len) live_in[pc + 1] else false,
+            };
+            const inp = use_t[pc] or (out and !def_t[pc]);
+            if (out != live_out[pc] or inp != live_in[pc]) {
+                live_out[pc] = out;
+                live_in[pc] = inp;
+                changed = true;
+            }
         }
     }
+
+    if (live_in[0] or live_in[span_start]) return false;
+    if (!def_t[span_end] and live_out[span_end]) return false;
     return true;
 }
 
@@ -1654,7 +1687,7 @@ noinline fn canCompileFastIntAscii(
     for (block.ops, 0..) |op, ip| {
         if (str_analysis.elided[ip]) continue;
         switch (op.opcode) {
-            .nop => {},
+            .nop, .return_undefined => {},
             .load_const => {
                 if (op.a == 0 or op.a >= block.register_count or op.b >= block.constants.len) return false;
                 if (block.constants[op.b] != .number) return false;
@@ -1708,7 +1741,33 @@ noinline fn canCompileFastIntAscii(
     defer allocator.free(live_out);
     const ud0 = opUseDefMasks(block, block.ops[0]);
     const live_in_0 = ud0.use | (live_out[0] & ~ud0.def);
-    if ((live_in_0 & ~@as(u64, 1)) != 0) return false;
+    var init_allowed_mask: u64 = 1;
+    var scan_ip: usize = 0;
+    while (scan_ip < block.ops.len) : (scan_ip += 1) {
+        if (str_analysis.elided[scan_ip]) continue;
+        const sop = block.ops[scan_ip];
+        switch (sop.opcode) {
+            .nop => {},
+            .load_const => {
+                if (sop.a < 64) init_allowed_mask |= (@as(u64, 1) << @intCast(sop.a));
+            },
+            .get_prop => {
+                if (sop.a < 64) init_allowed_mask |= (@as(u64, 1) << @intCast(sop.a));
+            },
+            .move, .load_local, .store_local => {
+                if (sop.b < 64 and (init_allowed_mask & (@as(u64, 1) << @intCast(sop.b))) != 0) {
+                    if (sop.a < 64) init_allowed_mask |= (@as(u64, 1) << @intCast(sop.a));
+                } else break;
+            },
+            .add_local_const, .sub_local_const => {
+                if (sop.b < 64 and (init_allowed_mask & (@as(u64, 1) << @intCast(sop.b))) != 0) {
+                    if (sop.a < 64) init_allowed_mask |= (@as(u64, 1) << @intCast(sop.a));
+                } else break;
+            },
+            else => break,
+        }
+    }
+    if ((live_in_0 & ~init_allowed_mask) != 0) return false;
 
     return true;
 }
@@ -1938,6 +1997,18 @@ noinline fn emitFastIntAsciiTier(
                 const ra = fast_int_gprs[op.a - 1];
                 try a.cvtsi2sdXmmReg32(.xmm0, ra);
                 try a.movsdMemXmm(.rsi, 0, .xmm0);
+                var rev_i: usize = callee_saved_used;
+                while (rev_i > 0) {
+                    rev_i -= 1;
+                    try a.popReg(fast_int_gprs[4 + rev_i]);
+                }
+                try a.xorReg32Reg32(.rax, .rax);
+                try a.ret();
+            },
+            .return_undefined => {
+                try a.movRegImm64(.rax, JSValue.UNDEFINED.bits);
+                try a.movMemReg(.rsi, 0, .rax);
+                try a.movqXmmReg(.xmm0, .rax);
                 var rev_i: usize = callee_saved_used;
                 while (rev_i > 0) {
                     rev_i -= 1;
@@ -10472,4 +10543,25 @@ test "baseline JIT Phase J2.4B: FastIntAscii tier for rut_dv, borrowed string ar
     defer res.deinit();
     try std.testing.expect(res.isNumber());
     try std.testing.expectEqual(@as(f64, 1), res.asNumber());
+
+    const s_env = interp.script_env.?;
+    const rut_val = switch (s_env.lookup("rut_dv")) {
+        .value => |v| v,
+        else => unreachable,
+    };
+    const rut_cb = vm.getBytecodeTarget(rut_val).?.block;
+    try std.testing.expect(rut_cb.jit_fn != null);
+    try std.testing.expect(rut_cb.jit_pure_leaf);
+    try std.testing.expectEqual(@as(u32, 1), rut_cb.jit_string_param_mask);
+
+    const bench_val = switch (s_env.lookup("bench_rut_mini")) {
+        .value => |v| v,
+        else => unreachable,
+    };
+    const bench_cb = vm.getBytecodeTarget(bench_val).?.block;
+    var has_compiled_osr = false;
+    for (bench_cb.osr_entries) |oe| {
+        if (oe.fn_ptr != null and !oe.failed) has_compiled_osr = true;
+    }
+    try std.testing.expect(has_compiled_osr);
 }

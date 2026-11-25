@@ -92,13 +92,13 @@ inline fn setRegValue(frame: *CallFrame, registers: []JSValue, index: u8, val: J
 
 const setRegTracked = setRegValue;
 
-const BytecodeTarget = struct {
+pub const BytecodeTarget = struct {
     block: *const codeblock.CodeBlock,
     closure_env: ?*Environment,
     interp: ?*interpreter_mod.Interpreter = null,
 };
 
-fn getBytecodeTarget(callee: JSValue) ?BytecodeTarget {
+pub fn getBytecodeTarget(callee: JSValue) ?BytecodeTarget {
     if (!callee.isFunction()) return null;
     if (callee.asFunction().value.call != interpreter_class.closureCall) return null;
     const cc: *ClosureCtx = @ptrCast(@alignCast(callee.asFunction().value.ctx));
