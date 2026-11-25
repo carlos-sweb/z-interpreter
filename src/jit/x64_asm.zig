@@ -269,6 +269,32 @@ pub const Assembler = struct {
         try self.emitByte(modRM(0b11, rhs.low3(), lhs.low3()));
     }
 
+    pub noinline fn cmpRegMem(self: *Assembler, lhs: Reg, base: Reg, disp: i32) !void {
+        try self.emitByte(rexW(lhs.isExt(), base.isExt()));
+        try self.emitByte(0x3B);
+        try self.emitMemOperand(lhs.low3(), base, disp);
+    }
+
+    pub noinline fn cmpMemImm32(self: *Assembler, base: Reg, disp: i32, imm: i32) !void {
+        try self.emitByte(rexW(false, base.isExt()));
+        if (imm >= -128 and imm <= 127) {
+            try self.emitByte(0x83);
+            try self.emitMemOperand(7, base, disp);
+            try self.emitByte(@bitCast(@as(i8, @intCast(imm))));
+        } else {
+            try self.emitByte(0x81);
+            try self.emitMemOperand(7, base, disp);
+            try self.emitI32(imm);
+        }
+    }
+
+    pub noinline fn testMem32Imm32(self: *Assembler, base: Reg, disp: i32, imm: u32) !void {
+        if (base.isExt()) try self.emitByte(0x41);
+        try self.emitByte(0xF7);
+        try self.emitMemOperand(0, base, disp);
+        try self.emitU32(imm);
+    }
+
     pub noinline fn cmpRegImm32(self: *Assembler, lhs: Reg, imm: i32) !void {
         try self.emitByte(rexW(false, lhs.isExt()));
         if (imm >= -128 and imm <= 127) {

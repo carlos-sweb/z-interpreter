@@ -339,12 +339,16 @@ fn setProp(frame: *CallFrame, allocator: Allocator, obj: JSValue, key: []const u
             }
         }
         const old = box.value.getOwn(key);
-        box.value.set(key, val.retain()) catch |err| switch (err) {
-            error.ObjectIsFrozen, error.ObjectNotExtensible, error.PropertyNotWritable => {
-                if (frame.interp) |it| return it.setPropertyOnValue(obj, key, val);
-                return err;
-            },
-            else => return err,
+        const retained = val.retain();
+        box.value.set(key, retained) catch |err| {
+            retained.deinit();
+            switch (err) {
+                error.ObjectIsFrozen, error.ObjectNotExtensible, error.PropertyNotWritable => {
+                    if (frame.interp) |it| return it.setPropertyOnValue(obj, key, val);
+                    return err;
+                },
+                else => return err,
+            }
         };
         if (old) |o| o.deinit();
     } else if (obj.isArray()) {
@@ -1403,6 +1407,205 @@ pub fn jitNewObject(ctx: *codeblock.OsrContext, regs: [*]JSValue, dst: u32) call
     return 0;
 }
 
+pub noinline fn jitSetPropOsr(ctx: *codeblock.OsrContext, regs: [*]JSValue, packed_info: u64, ic: *codeblock.OsrPropIC) callconv(.c) u8 {
+    const obj_reg: u8 = @truncate(packed_info);
+    const val_reg: u8 = @truncate(packed_info >> 8);
+    const key_const_idx: u8 = @truncate(packed_info >> 16);
+    const is_transition = ((packed_info >> 24) & 1) != 0;
+    const frame: *CallFrame = @ptrCast(@alignCast(ctx.frame_ptr));
+    if (key_const_idx >= frame.block.constants.len or frame.block.constants[key_const_idx] != .property_key) return 1;
+    const key = frame.block.constants[key_const_idx].property_key;
+    if (std.mem.eql(u8, key, "__proto__")) return 1;
+
+    const obj = regs[obj_reg];
+    if (!obj.isObject()) return 1;
+    const box = obj.asObject();
+    if (@intFromPtr(box) == ctx.global_obj_box_ptr) return 1;
+    if (box.value.is_frozen) return 1;
+
+    const val = regs[val_reg];
+    const ZObj = zvalue.ZObject(JSValue);
+    const PropEntry = @TypeOf(@as(ZObj, undefined).properties).Data;
+    const PropT = @TypeOf(@as(PropEntry, undefined).value);
+
+    if (box.value.cached_len > 0) {
+        if (ic.next_shape != 0 and
+            box.value.shape_id == ic.shape_id and
+            box.value.active_len == ic.slot_idx and
+            ic.slot_idx < box.value.cached_len and
+            box.value.is_extensible)
+        {
+            const prev_cached_shape = box.value.cached_shape_id;
+            const prop_keys = box.value.properties.keys();
+            if (std.mem.eql(u8, prop_keys[ic.slot_idx], key)) {
+                const slot_val = &box.value.properties.values()[ic.slot_idx].value;
+                const old = slot_val.*;
+                slot_val.* = if (needsDeinit(val)) val.retain() else val;
+                if (needsDeinit(old)) old.deinit();
+                box.value.active_len += 1;
+                box.value.shape_id = ic.next_shape;
+                if (box.value.active_len == box.value.cached_len) {
+                    box.value.cached_len = 0;
+                    box.value.cached_shape_id = 0;
+                    box.value.active_len = 0;
+                }
+                if (is_transition and prev_cached_shape != 0) {
+                    ic.cached_shape_id = prev_cached_shape;
+                }
+                return 0;
+            }
+        }
+        box.value.syncPartialRecycle();
+    }
+
+    if (box.value.properties.getIndex(key)) |slot_idx| {
+        const rec = &box.value.properties.entries.items(.value)[slot_idx];
+        if (rec.isAccessor() or !rec.descriptor.writable) return 1;
+        const old = rec.value;
+        rec.value = if (needsDeinit(val)) val.retain() else val;
+        if (needsDeinit(old)) old.deinit();
+        ic.* = .{
+            .shape_id = box.value.shape_id,
+            .slot_idx = @intCast(slot_idx),
+            .slot_byte_off = @as(u64, @intCast(slot_idx)) * @sizeOf(PropT),
+        };
+        return 0;
+    }
+
+    if (!box.value.is_extensible) return 1;
+
+    var last_obj: *const ZObj = &box.value;
+    var cur = box.value.getPrototype();
+    while (cur) |p| : (cur = p.getPrototype()) {
+        last_obj = p;
+        if (p.getOwnRecord(key)) |rec| {
+            if (rec.isAccessor() or !rec.descriptor.writable) return 1;
+            break;
+        }
+    }
+    if (frame.interp) |itp| {
+        const last_box: *const ObjectBox = @fieldParentPtr("value", last_obj);
+        if (itp.proto_refs.get(@intFromPtr(last_box)) != null) return 1;
+        const proto_is_obj_proto = if (box.value.prototype) |p| (itp.protos.object.isObject() and p == &itp.protos.object.asObject().value) else true;
+        if (proto_is_obj_proto) {
+            const prev_shape = box.value.shape_id;
+            const prev_count = box.value.properties.count();
+            const interned = itp.internPropKey(key) catch return 1;
+            const val_to_store = if (needsDeinit(val)) val.retain() else val;
+            box.value.setBorrowedKey(interned, val_to_store) catch {
+                if (needsDeinit(val)) val_to_store.deinit();
+                return 1;
+            };
+            if (is_transition) {
+                ic.* = .{
+                    .shape_id = prev_shape,
+                    .slot_idx = @intCast(prev_count),
+                    .slot_byte_off = @as(u64, @intCast(prev_count)) * @sizeOf(PropT),
+                    .next_shape = box.value.shape_id,
+                    .cached_shape_id = 0,
+                };
+            } else {
+                ic.* = .{
+                    .shape_id = box.value.shape_id,
+                    .slot_idx = @intCast(prev_count),
+                    .slot_byte_off = @as(u64, @intCast(prev_count)) * @sizeOf(PropT),
+                };
+            }
+            return 0;
+        }
+    }
+
+    const val_to_store = if (needsDeinit(val)) val.retain() else val;
+    box.value.set(key, val_to_store) catch {
+        if (needsDeinit(val)) val_to_store.deinit();
+        return 1;
+    };
+    if (box.value.properties.getIndex(key)) |slot_idx| {
+        ic.* = .{
+            .shape_id = box.value.shape_id,
+            .slot_idx = @intCast(slot_idx),
+            .slot_byte_off = @as(u64, @intCast(slot_idx)) * @sizeOf(PropT),
+        };
+    }
+    return 0;
+}
+
+pub noinline fn jitGetPropOsr(ctx: *codeblock.OsrContext, regs: [*]JSValue, packed_info: u64, ic: *codeblock.OsrPropIC) callconv(.c) u8 {
+    const dst_reg: u8 = @truncate(packed_info);
+    const obj_reg: u8 = @truncate(packed_info >> 8);
+    const key_const_idx: u8 = @truncate(packed_info >> 16);
+    const allow_non_num = ((packed_info >> 24) & 1) != 0;
+    const frame: *CallFrame = @ptrCast(@alignCast(ctx.frame_ptr));
+    if (key_const_idx >= frame.block.constants.len or frame.block.constants[key_const_idx] != .property_key) return 1;
+    const key = frame.block.constants[key_const_idx].property_key;
+
+    const obj = regs[obj_reg];
+    if (obj.isObject()) {
+        const box = obj.asObject();
+        if (@intFromPtr(box) != ctx.global_obj_box_ptr) {
+            const ZObj = zvalue.ZObject(JSValue);
+            const PropEntry = @TypeOf(@as(ZObj, undefined).properties).Data;
+            const PropT = @TypeOf(@as(PropEntry, undefined).value);
+            if (box.value.cached_len > 0) box.value.syncPartialRecycle();
+            if (box.value.properties.getIndex(key)) |slot_idx| {
+                const rec = &box.value.properties.entries.items(.value)[slot_idx];
+                if (rec.isAccessor()) return 1;
+                ic.* = .{
+                    .shape_id = box.value.shape_id,
+                    .slot_idx = @intCast(slot_idx),
+                    .slot_byte_off = @as(u64, @intCast(slot_idx)) * @sizeOf(PropT),
+                };
+                const v = rec.value;
+                if (!v.isNumber() and !allow_non_num) return 1;
+                const slot = &regs[dst_reg];
+                if (!needsDeinit(v)) {
+                    if (needsDeinit(slot.*)) deinitSlot(slot);
+                    slot.* = v;
+                } else {
+                    const retained = v.retain();
+                    if (needsDeinit(slot.*)) deinitSlot(slot);
+                    slot.* = retained;
+                    frame.has_rc = true;
+                }
+                return 0;
+            }
+            var last_obj: *const ZObj = &box.value;
+            var cur = box.value.getPrototype();
+            while (cur) |p| : (cur = p.getPrototype()) {
+                last_obj = p;
+                if (p.getOwnRecord(key)) |rec| {
+                    if (rec.isAccessor()) return 1;
+                    const v = rec.value;
+                    if (!v.isNumber() and !allow_non_num) return 1;
+                    const slot = &regs[dst_reg];
+                    if (!needsDeinit(v)) {
+                        if (needsDeinit(slot.*)) deinitSlot(slot);
+                        slot.* = v;
+                    } else {
+                        const retained = v.retain();
+                        if (needsDeinit(slot.*)) deinitSlot(slot);
+                        slot.* = retained;
+                        frame.has_rc = true;
+                    }
+                    return 0;
+                }
+            }
+            const has_ext_proto = if (frame.interp) |it| blk: {
+                const last_box: *const ObjectBox = @fieldParentPtr("value", last_obj);
+                break :blk (it.proto_refs.get(@intFromPtr(last_box)) != null);
+            } else false;
+            if (!has_ext_proto) {
+                if (!allow_non_num) return 1;
+                const slot = &regs[dst_reg];
+                if (needsDeinit(slot.*)) deinitSlot(slot);
+                slot.* = JSValue.UNDEFINED;
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
 pub fn jitSetProp(ctx: *codeblock.OsrContext, regs: [*]JSValue, packed_info: u64, key_ptr: [*]const u8) callconv(.c) u8 {
     const obj_reg: u8 = @truncate(packed_info);
     const val_reg: u8 = @truncate(packed_info >> 8);
@@ -1541,12 +1744,18 @@ noinline fn tryEnterOsr(
         if (!baseline_jit.compileOsr(allocator.*, mut_cb, entry, start_ip, end_ip, prop_ic, frame_regs)) return start_ip;
     }
     const ofn = entry.fn_ptr orelse return start_ip;
+    frame.has_rc = true;
+    const global_obj_box_ptr: usize = if (frame.interp) |it|
+        (if (it.global_object) |go| (if (go.isObject()) @intFromPtr(go.asObject()) else 0) else 0)
+    else
+        0;
     var ctx = codeblock.OsrContext{
         .allocator_ptr = allocator,
         .frame_ptr = frame,
         .prop_ic_ptr = prop_ic,
         .regs_limit = regs_limit,
         .global_version_ptr = &global_version,
+        .global_obj_box_ptr = global_obj_box_ptr,
     };
     const next_ip: usize = ofn(frame_regs.ptr, &ctx);
     if (next_ip >= start_ip and next_ip <= end_ip) {

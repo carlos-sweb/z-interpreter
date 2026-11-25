@@ -151,6 +151,15 @@ pub const OsrContext = extern struct {
     prop_ic_ptr: *anyopaque,
     regs_limit: [*]JSValue,
     global_version_ptr: *const u64,
+    global_obj_box_ptr: usize = 0,
+};
+
+pub const OsrPropIC = extern struct {
+    shape_id: u32 = 0,
+    slot_idx: u32 = 0,
+    slot_byte_off: u64 = 0,
+    next_shape: u32 = 0,
+    cached_shape_id: u32 = 0,
 };
 
 pub const JitFn = *const fn (regs: [*]JSValue, out: *JSValue, regs_limit: [*]JSValue, env: ?*anyopaque) callconv(.c) u8;
@@ -165,6 +174,7 @@ pub const OsrEntry = struct {
     failed: bool = false,
     code: ?[]align(std.heap.page_size_min) u8 = null,
     fn_ptr: ?OsrFn = null,
+    prop_ics: ?[]OsrPropIC = null,
 };
 
 /// Immutable representation emitted by a later compiler pass.
@@ -199,6 +209,10 @@ pub const CodeBlock = struct {
                 @import("../jit/x64_asm.zig").freeExecutable(oc);
                 entry.code = null;
                 entry.fn_ptr = null;
+            }
+            if (entry.prop_ics) |pics| {
+                allocator.free(pics);
+                entry.prop_ics = null;
             }
         }
         if (self.jit_global_slots) |slots| {
