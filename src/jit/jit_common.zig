@@ -104,6 +104,10 @@ pub const zobj_cached_len_offset: i32 = box_val_offset + @offsetOf(ZObj, "cached
 pub const zobj_active_len_offset: i32 = box_val_offset + @offsetOf(ZObj, "active_len");
 pub const zobj_is_frozen_offset: i32 = box_val_offset + @offsetOf(ZObj, "is_frozen");
 pub const zobj_is_extensible_offset: i32 = box_val_offset + @offsetOf(ZObj, "is_extensible");
+pub const zobj_prototype_offset: i32 = box_val_offset + @offsetOf(ZObj, "prototype");
+pub const raw_zobj_shape_id_offset: i32 = @offsetOf(ZObj, "shape_id");
+pub const raw_zobj_cached_len_offset: i32 = @offsetOf(ZObj, "cached_len");
+pub const raw_zobj_entries_bytes_offset: i32 = @offsetOf(ZObj, "properties") + @offsetOf(PropMap, "entries") + @offsetOf(PropDataList, "bytes");
 pub const zobj_entries_offset: i32 = box_val_offset + @offsetOf(ZObj, "properties") + @offsetOf(PropMap, "entries");
 pub const zobj_entries_bytes_offset: i32 = zobj_entries_offset + @offsetOf(PropDataList, "bytes");
 pub const zobj_entries_len_offset: i32 = zobj_entries_offset + @offsetOf(PropDataList, "len");
@@ -152,6 +156,59 @@ pub noinline fn jitCheckMathIntrinsic(
             const rec = math_val.asObject().value.getOwnRecord(prop_name) orelse return 1;
             if (rec.isAccessor()) return 1;
             return if (rec.value.bits == expected_bits) 0 else 1;
+        }
+    }
+    return 1;
+}
+
+pub noinline fn jitGetPropInlinedOsr(
+    ctx: *codeblock.OsrContext,
+    obj_bits: u64,
+    key_ptr: [*]const u8,
+    key_len: usize,
+    ic: *codeblock.OsrPropIC,
+    out_val: *u64,
+) callconv(.c) u8 {
+    const key = key_ptr[0..key_len];
+    const obj: JSValue = .{ .bits = obj_bits };
+    if (obj.isObject()) {
+        const box = obj.asObject();
+        if (@intFromPtr(box) != ctx.global_obj_box_ptr) {
+            if (box.value.cached_len > 0) box.value.syncPartialRecycle();
+            if (box.value.properties.getIndex(key)) |slot_idx| {
+                const rec = &box.value.properties.entries.items(.value)[slot_idx];
+                if (rec.isAccessor()) return 1;
+                if (!rec.value.isNumber()) return 1;
+                ic.* = .{
+                    .shape_id = box.value.shape_id,
+                    .slot_idx = @intCast(slot_idx),
+                    .slot_byte_off = @as(u64, @intCast(slot_idx)) * @sizeOf(Prop),
+                };
+                out_val.* = rec.value.bits;
+                return 0;
+            }
+            var cur = box.value.getPrototype();
+            while (cur) |p| : (cur = p.getPrototype()) {
+                if (p.getOwnRecord(key)) |rec| {
+                    if (rec.isAccessor()) return 1;
+                    if (!rec.value.isNumber()) return 1;
+                    out_val.* = rec.value.bits;
+                    return 0;
+                }
+            }
+        }
+    } else if (obj.isArray()) {
+        if (std.mem.eql(u8, key, "length")) {
+            const box = obj.asArray();
+            if (box.value.holey != null) return 1;
+            out_val.* = JSValue.fromNumber(@floatFromInt(box.value.items.items.len)).bits;
+            return 0;
+        }
+    } else if (obj.isString()) {
+        if (std.mem.eql(u8, key, "length")) {
+            const box = obj.asString();
+            out_val.* = JSValue.fromNumber(@floatFromInt(box.value.length())).bits;
+            return 0;
         }
     }
     return 1;

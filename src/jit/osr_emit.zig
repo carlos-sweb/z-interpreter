@@ -36,6 +36,8 @@ const isMathSqrtCall = @import("osr_analysis.zig").isMathSqrtCall;
 const isMathImulCall = @import("osr_analysis.zig").isMathImulCall;
 const isMathIntrinsicCall = @import("osr_analysis.zig").isMathIntrinsicCall;
 const classifyMathIntrinsicCall = @import("osr_analysis.zig").classifyMathIntrinsicCall;
+const canInlineCalleeInOsr = @import("osr_analysis.zig").canInlineCalleeInOsr;
+const MAX_INLINED_CALLEE_OPS = @import("osr_analysis.zig").MAX_INLINED_CALLEE_OPS;
 const PromotedPropsAnalysis = @import("osr_analysis.zig").PromotedPropsAnalysis;
 const MAX_HOISTED_ARRAYS = @import("osr_analysis.zig").MAX_HOISTED_ARRAYS;
 const HoistedElemKind = @import("osr_analysis.zig").HoistedElemKind;
@@ -515,6 +517,8 @@ pub const OsrCompiler = struct {
     prop_ic: ?*const [256]PropIC,
     prop_ic_addrs: []const u64,
     prop_ics_init: []const codeblock.OsrPropIC,
+    inlined_prop_ic_addrs: []const [MAX_INLINED_CALLEE_OPS]u64,
+    inlined_prop_ics_init: []const [MAX_INLINED_CALLEE_OPS]codeblock.OsrPropIC,
     global_slot_addrs: []const u64,
     prepass: *const OsrPrePass,
     analysis: OsrCachedAnalysis,
@@ -689,7 +693,7 @@ pub const OsrCompiler = struct {
                     }
                 },
                 .call => {
-                    if ((ck.c < self.block.call_target_cache.len and isMathIntrinsicCall(&self.block.call_target_cache[ck.c])) or self.prepass.char_code_at_str_reg[k] != null) {
+                    if ((ck.c < self.block.call_target_cache.len and isMathIntrinsicCall(&self.block.call_target_cache[ck.c])) or self.prepass.char_code_at_str_reg[k] != null or self.prepass.inlined_calls[k]) {
                         if (ck.a == eff_obj) break;
                         if (ck.a < 64) {
                             scan_copy_src[ck.a] = null;
@@ -1372,47 +1376,30 @@ pub const OsrCompiler = struct {
                         const callee_regs_off: i32 = @intCast(@as(usize, self.block.register_count) * 8);
                         try a.movMemReg(.r12, callee_regs_off, .rax);
                     } else {
-                        const heap_move_lbl = try a.createLabel();
+                        const slow_move_lbl = try a.createLabel();
                         const done_move_lbl = try a.createLabel();
 
-                        // Release old regs[dst] if it's a heap ref with rc > 1
-                        try emitReleaseHeapIfRefGt1(a, op.a, bail_lbl);
-
-                        // Load val = regs[src]
                         try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
-                        try a.cmpRegReg(.rax, .r14);
-                        try a.jcc(.ae, heap_move_lbl);
-
-                        // val < HEAP_BASE: write regs[dst] = val
-                        try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+                        try emitStoreSlotValOrSlow(a, .r12, @intCast(@as(usize, op.a) * 8), .rax, slow_move_lbl);
                         try a.jmp(done_move_lbl);
 
-                        // val >= HEAP_BASE: check if (val >> 47) == HEADER_ARRAY, HEADER_FUNCTION, HEADER_OBJECT, or TypedArray
-                        a.bindLabel(heap_move_lbl);
-                        try a.movRegReg(.rcx, .rax);
-                        try a.shrRegImm8(.rcx, 47);
-                        const inc_rc_lbl = try a.createLabel();
-                        try a.cmpRegImm32(.rcx, HEADER_ARRAY);
-                        try a.jcc(.e, inc_rc_lbl);
-                        try a.cmpRegImm32(.rcx, HEADER_FUNCTION);
-                        try a.jcc(.e, inc_rc_lbl);
-                        try a.cmpRegImm32(.rcx, HEADER_OBJECT);
-                        try a.jcc(.e, inc_rc_lbl);
-                        try a.cmpRegImm32(.rcx, HEADER_STRING);
-                        try a.jcc(.e, inc_rc_lbl);
-                        try a.movRegReg(.rdx, .rax);
-                        try a.movRegImm64(.rcx, JSValue.TAG15_MASK);
-                        try a.andRegReg(.rdx, .rcx);
-                        try a.movRegImm64(.rcx, HEADER_TYPED_ARRAY_BITS);
-                        try a.cmpRegReg(.rdx, .rcx);
-                        try a.jcc(.ne, bail_lbl);
-
-                        // Retain: ptr = val & PTR_MASK; ptr._count += 1
-                        a.bindLabel(inc_rc_lbl);
-                        try a.movRegImm64(.rcx, JSValue.PTR_MASK);
-                        try a.andRegReg(.rcx, .rax);
-                        try a.incMem64(.rcx, 0);
-                        try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
+                        a.bindLabel(slow_move_lbl);
+                        if (self.analysis.cached_count > 0) try emitFlushCached(a, &self.analysis.cached_regs, self.analysis.cached_count);
+                        if (self.analysis.promoted.count > 0) try emitFlushPromoted(a, &self.analysis.promoted);
+                        try a.movRegReg(.rdi, .r13);
+                        try a.movRegReg(.rsi, .r12);
+                        try a.movRegImm32(.rdx, op.a);
+                        try a.movRegImm32(.rcx, op.b);
+                        try a.movRegImm64(.rax, @intFromPtr(&vm.jitMoveSlot));
+                        try a.callReg(.rax);
+                        if (self.analysis.cached_count > 0) try emitReloadCached(a, &self.analysis.cached_regs, self.analysis.cached_count);
+                        if (self.analysis.promoted.count > 0) try emitReloadPromoted(a, &self.analysis.promoted);
+                        if (self.cached_obj_ptrs[0] != null) try a.xorReg32Reg32(.r10, .r10);
+                        if (self.cached_obj_ptrs[1] != null) try a.xorReg32Reg32(.r11, .r11);
+                        if (self.live_r8_i32 != null and self.live_r8_i32.? != op.a) {
+                            try self.loadNumToXmm(self.live_r8_i32.?, .xmm0, bail_lbl);
+                            try a.cvttsd2siReg32Xmm(.r8, .xmm0);
+                        }
 
                         a.bindLabel(done_move_lbl);
                     }
@@ -1679,6 +1666,7 @@ pub const OsrCompiler = struct {
     pub const emitGetPropOrGlobal = @import("osr_emit_ops.zig").emitGetPropOrGlobal;
     pub const emitOsrStringCharCodeAt = @import("osr_emit_ops.zig").emitOsrStringCharCodeAt;
     pub const emitCallOp = @import("osr_emit_ops.zig").emitCallOp;
+    pub const emitInlinedCall = @import("osr_emit_ops.zig").emitInlinedCall;
     pub const emitLoopOp = @import("osr_emit_ops.zig").emitLoopOp;
     pub const emitExitsAndEpilogue = @import("osr_emit_ops.zig").emitExitsAndEpilogue;
 };

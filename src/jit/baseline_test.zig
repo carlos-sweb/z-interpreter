@@ -2261,6 +2261,68 @@ test "baseline JIT Phase J3.1 & J3.2: OSR heap property ICs, inline load_global 
     try std.testing.expectEqual(@as(f64, 1), res.asNumber());
 }
 
+test "baseline JIT Phase J3.3: OSR inlining of small leaf functions and prototype methods, mutation bailout, getters, and sloppy this" {
+    if (!comptime x64_asm.is_supported_host) return;
+    const Interpreter = @import("../interpreter.zig").Interpreter;
+
+    var allocating = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(std.testing.allocator, &allocating.writer);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+
+    const res = try interp.run(
+        \\function Point(x, y) { this.x = x; this.y = y; }
+        \\Point.prototype.distSq = function(other) {
+        \\    var dx = this.x - other.x;
+        \\    var dy = this.y - other.y;
+        \\    return dx * dx + dy * dy;
+        \\};
+        \\function clamp(v, lo, hi) {
+        \\    if (v < lo) return lo;
+        \\    if (v > hi) return hi;
+        \\    return v;
+        \\}
+        \\function getX(p) { return p.x; }
+        \\Number.prototype.numBias = 7;
+        \\Number.prototype.addBias = function(delta) {
+        \\    return this.numBias + delta;
+        \\};
+        \\function runInlinedOsr() {
+        \\    var pts = [new Point(3, 4), new Point(6, 8), new Point(9, 12), new Point(12, 16)];
+        \\    var origin = new Point(0, 0);
+        \\    var sum = 0;
+        \\    for (var i = 0; i < 400; i++) {
+        \\        var p = pts[i & 3];
+        \\        var d = p.distSq(origin);
+        \\        sum += clamp(d, 10, 200) + getX(p);
+        \\        if (i === 250) {
+        \\            Point.prototype.distSq = function(other) { return 1000; };
+        \\        }
+        \\        if (i === 320) {
+        \\            Object.defineProperty(pts[0], "x", { get: function() { return 50; }, configurable: true });
+        \\        }
+        \\    }
+        \\    // Verify primitive receiver sloppy-mode `this` boxing and global helper mutation bailout
+        \\    var primSum = 0;
+        \\    for (var j = 0; j < 200; j++) {
+        \\        var n = 5;
+        \\        primSum += n.addBias(3) + getX(origin);
+        \\        if (j === 150) {
+        \\            getX = function(p) { return 10; };
+        \\        }
+        \\    }
+        \\    if (primSum !== 200 * 10 + 49 * 10) throw new Error("bad primSum: " + primSum);
+        \\    return sum;
+        \\}
+        \\runInlinedOsr();
+    );
+    defer res.deinit();
+    try std.testing.expect(res.isNumber());
+    try std.testing.expectEqual(@as(f64, 66568), res.asNumber());
+}
+
+
 
 
 

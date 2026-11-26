@@ -27,6 +27,8 @@ const canCompileFastIntAscii = @import("fast_int_ascii.zig").canCompileFastIntAs
 const isMathSqrtCall = @import("osr_analysis.zig").isMathSqrtCall;
 const isMathImulCall = @import("osr_analysis.zig").isMathImulCall;
 const isMathIntrinsicCall = @import("osr_analysis.zig").isMathIntrinsicCall;
+const canInlineCalleeInOsr = @import("osr_analysis.zig").canInlineCalleeInOsr;
+const MAX_INLINED_CALLEE_OPS = @import("osr_analysis.zig").MAX_INLINED_CALLEE_OPS;
 const OsrPrePass = @import("osr_analysis.zig").OsrPrePass;
 const analyzeOsrLoop = @import("osr_analysis.zig").analyzeOsrLoop;
 const OsrCompiler = @import("osr_emit.zig").OsrCompiler;
@@ -204,7 +206,7 @@ pub noinline fn canCompileOsr(block: *const codeblock.CodeBlock, start_ip: usize
                 if (op.c >= block.call_target_cache.len) return false;
                 const cs = &block.call_target_cache[op.c];
                 if ((@as(usize, op.b) + 1 + cs.arg_count) > block.register_count) return false;
-                if (!isMathIntrinsicCall(cs) and findCharCodeAtGetProp(block, start_ip, end_ip, ip) == null) {
+                if (!isMathIntrinsicCall(cs) and !canInlineCalleeInOsr(cs) and findCharCodeAtGetProp(block, start_ip, end_ip, ip) == null) {
                     if (cs.this_reg != null) return false;
                     const tb = cs.target_block orelse return false;
                     if (tb.param_count != cs.arg_count) return false;
@@ -215,11 +217,13 @@ pub noinline fn canCompileOsr(block: *const codeblock.CodeBlock, start_ip: usize
                 if (op.a >= block.register_count) return false;
                 if (op.c >= block.call_target_cache.len) return false;
                 const cs = &block.call_target_cache[op.c];
-                if (cs.this_reg != null) return false;
-                const tb = cs.target_block orelse return false;
-                if (tb.param_count != cs.arg_count) return false;
                 if ((@as(usize, op.b) + 1 + cs.arg_count) > block.register_count) return false;
-                if (tb.jit_fn == null and !canCompile(tb)) return false;
+                if (!canInlineCalleeInOsr(cs)) {
+                    if (cs.this_reg != null) return false;
+                    const tb = cs.target_block orelse return false;
+                    if (tb.param_count != cs.arg_count) return false;
+                    if (tb.jit_fn == null and !canCompile(tb)) return false;
+                }
             },
             else => return false,
         }
@@ -240,9 +244,11 @@ pub noinline fn compileOsr(allocator: Allocator, block: *codeblock.CodeBlock, en
         const op = block.ops[ip];
         if (op.opcode == .call or op.opcode == .call_global) {
             const cs = &block.call_target_cache[op.c];
-            if (cs.target_block) |tb| {
-                if (tb.jit_fn == null) {
-                    _ = compile(allocator, @constCast(tb));
+            if (!canInlineCalleeInOsr(cs)) {
+                if (cs.target_block) |tb| {
+                    if (tb.jit_fn == null) {
+                        _ = compile(allocator, @constCast(tb));
+                    }
                 }
             }
         }
@@ -290,6 +296,14 @@ pub noinline fn compileOsrImpl(
             const op = block.ops[start_ip + idx];
             switch (op.opcode) {
                 .get_prop, .set_prop, .set_prop_transition => prop_site_count += 1,
+                .call, .call_global => {
+                    if (prepass.inlined_calls[idx]) {
+                        const tb = block.call_target_cache[op.c].target_block.?;
+                        for (tb.ops) |c_op| {
+                            if (c_op.opcode == .get_prop) prop_site_count += 1;
+                        }
+                    }
+                },
                 else => {},
             }
         }
@@ -337,6 +351,14 @@ pub noinline fn compileOsrImpl(
     defer allocator.free(prop_ics_init);
     @memset(prop_ics_init, .{});
 
+    const inlined_prop_ic_addrs = try allocator.alloc([MAX_INLINED_CALLEE_OPS]u64, loop_len);
+    defer allocator.free(inlined_prop_ic_addrs);
+    @memset(inlined_prop_ic_addrs, @splat(0));
+
+    const inlined_prop_ics_init = try allocator.alloc([MAX_INLINED_CALLEE_OPS]codeblock.OsrPropIC, loop_len);
+    defer allocator.free(inlined_prop_ics_init);
+    @memset(inlined_prop_ics_init, @splat(.{}));
+
     if (osr_ics) |pics| {
         var site_k: usize = 0;
         for (0..loop_len) |idx| {
@@ -362,6 +384,32 @@ pub noinline fn compileOsrImpl(
                     }
                     prop_ic_addrs[idx] = @intFromPtr(&pics[site_k]);
                     site_k += 1;
+                },
+                .call, .call_global => {
+                    if (prepass.inlined_calls[idx]) {
+                        const tb = block.call_target_cache[op.c].target_block.?;
+                        for (tb.ops, 0..) |c_op, c_ip| {
+                            if (c_op.opcode == .get_prop) {
+                                if (prop_ic) |table| {
+                                    const c_ic_idx: u8 = @intCast(((@intFromPtr(tb) >> 4) +% c_ip) & 255);
+                                    const entry = table[c_ic_idx];
+                                    const k_opt = constantName(tb, c_op.c);
+                                    if (k_opt != null and entry.block == tb and entry.pc == c_ip and @intFromPtr(entry.key_ptr) == @intFromPtr(k_opt.?.ptr) and entry.shape_id != 0) {
+                                        pics[site_k] = .{
+                                            .shape_id = entry.shape_id,
+                                            .slot_idx = entry.slot_idx,
+                                            .slot_byte_off = @as(u64, entry.slot_idx) * @as(u64, @intCast(prop_size)),
+                                            .next_shape = entry.next_shape,
+                                            .cached_shape_id = entry.cached_shape_id,
+                                        };
+                                        inlined_prop_ics_init[idx][c_ip] = pics[site_k];
+                                    }
+                                }
+                                inlined_prop_ic_addrs[idx][c_ip] = @intFromPtr(&pics[site_k]);
+                                site_k += 1;
+                            }
+                        }
+                    }
                 },
                 else => {},
             }
@@ -421,6 +469,8 @@ pub noinline fn compileOsrImpl(
         .prop_ic = prop_ic,
         .prop_ic_addrs = prop_ic_addrs,
         .prop_ics_init = prop_ics_init,
+        .inlined_prop_ic_addrs = inlined_prop_ic_addrs,
+        .inlined_prop_ics_init = inlined_prop_ics_init,
         .global_slot_addrs = global_slot_addrs,
         .prepass = &prepass,
         .analysis = analysis,

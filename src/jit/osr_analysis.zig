@@ -10,9 +10,179 @@ const math_builtins = @import("jit_common.zig").math_builtins;
 const Xmm = @import("jit_common.zig").Xmm;
 const PropIC = @import("jit_common.zig").PropIC;
 const constantName = @import("jit_common.zig").constantName;
+const Prop = @import("jit_common.zig").Prop;
 const MathIntrinsicGuard = @import("jit_common.zig").MathIntrinsicGuard;
 const findCharCodeAtGetProp = @import("whole_fn.zig").findCharCodeAtGetProp;
 const asExactInt32 = @import("osr_emit.zig").asExactInt32;
+
+pub const MAX_INLINED_CALLEE_OPS: usize = 16;
+pub const MAX_INLINED_CALLEE_REGS: usize = 16;
+pub const MAX_INLINED_CALLEE_PARAMS: usize = 4;
+
+pub const InlinedMethodElision = struct {
+    eff_this_reg: u8 = 0,
+    receiver_shape_id: u32 = 0,
+    is_proto: bool = false,
+    own_slot_idx: u32 = 0,
+    own_slot_byte_off: u64 = 0,
+    proto_ptr: u64 = 0,
+    proto_shape_id: u32 = 0,
+    proto_bytes_ptr: u64 = 0,
+    proto_rec_addr: u64 = 0,
+    expected_callee_bits: u64 = 0,
+};
+
+pub fn canInlineCalleeInOsr(cs: *const codeblock.CallSiteCache) bool {
+    const tb = cs.target_block orelse return false;
+    if (cs.callee == null) return false;
+    if (tb.param_count != cs.arg_count or tb.param_count > MAX_INLINED_CALLEE_PARAMS) return false;
+    if (tb.register_count == 0 or tb.register_count > MAX_INLINED_CALLEE_REGS) return false;
+    if (tb.local_count > tb.register_count or tb.param_count > tb.local_count) return false;
+    if (tb.ops.len == 0 or tb.ops.len > MAX_INLINED_CALLEE_OPS) return false;
+    if (tb.exception_table.len > 0 or tb.flags.has_try) return false;
+    if (tb.flags.is_generator or tb.flags.is_async or tb.flags.needs_arguments) return false;
+    if (tb.flags.lexical_this or tb.flags.has_super or tb.capture_count > 0) return false;
+
+    const param_mask: u64 = if (tb.param_count > 0) ((@as(u64, 1) << @intCast(tb.param_count)) - 1) else 0;
+    var has_return_value = false;
+
+    for (tb.ops, 0..) |op, ip| {
+        const ud = opUseDefMasks(tb, op);
+        if ((ud.def & param_mask) != 0) return false;
+
+        switch (op.opcode) {
+            .nop => {},
+            .load_this => {
+                if (cs.this_reg == null or op.a >= tb.register_count) return false;
+            },
+            .load_undefined, .load_null, .load_true, .load_false => {
+                if (op.a >= tb.register_count) return false;
+            },
+            .load_const => {
+                if (op.a >= tb.register_count or op.b >= tb.constants.len) return false;
+                switch (tb.constants[op.b]) {
+                    .number, .boolean => {},
+                    else => return false,
+                }
+            },
+            .move, .load_local, .store_local, .neg, .not, .not_bits => {
+                if (op.a >= tb.register_count or op.b >= tb.register_count) return false;
+            },
+            .add,
+            .add_num,
+            .sub_num,
+            .mul_num,
+            .div_num,
+            .mod_num,
+            .and_bits,
+            .or_bits,
+            .xor_bits,
+            .shl,
+            .shr,
+            .ushr,
+            .lt_num,
+            .gt_num,
+            .le_num,
+            .ge_num,
+            .eq,
+            .ne,
+            .loose_eq,
+            .loose_ne,
+            .get_elem,
+            => {
+                if (op.a >= tb.register_count or op.b >= tb.register_count or op.c >= tb.register_count) return false;
+            },
+            .get_elem_const => {
+                if (op.a >= tb.register_count or op.b >= tb.register_count or op.c >= tb.constants.len) return false;
+                if (tb.constants[op.c] != .number) return false;
+                const n = tb.constants[op.c].number;
+                if (n < 0 or n > 255 or @as(f64, @floatFromInt(@as(usize, @intFromFloat(n)))) != n) return false;
+            },
+            .get_prop => {
+                if (op.a >= tb.register_count or op.b >= tb.register_count) return false;
+                if (constantName(tb, op.c) == null) return false;
+            },
+            .add_local_const,
+            .sub_local_const,
+            .lt_local_const,
+            .gt_local_const,
+            .le_local_const,
+            .ge_local_const,
+            .eq_local_const,
+            => {
+                if (op.a >= tb.register_count or op.b >= tb.register_count or op.c >= tb.constants.len) return false;
+                if (tb.constants[op.c] != .number) return false;
+            },
+            .jeq_local_const_false,
+            .jlt_local_const_false,
+            .jle_local_const_false,
+            .jgt_local_const_false,
+            .jge_local_const_false,
+            => {
+                if (op.a >= tb.register_count or op.b >= tb.constants.len) return false;
+                if (tb.constants[op.b] != .number) return false;
+                if (op.c == 0) return false;
+                const target = ip + @as(usize, op.c);
+                if (target >= tb.ops.len) return false;
+            },
+            .jump_if_false, .jump_if_true => {
+                if (op.a >= tb.register_count) return false;
+                const target = (@as(usize, op.b) << 8) | op.c;
+                if (target <= ip or target >= tb.ops.len) return false;
+            },
+            .jump => {
+                const target = (@as(usize, op.b) << 8) | op.c;
+                if (target <= ip or target >= tb.ops.len) return false;
+            },
+            .return_value => {
+                if (op.a >= tb.register_count) return false;
+                has_return_value = true;
+            },
+            .return_undefined => {
+                if (!has_return_value) return false;
+            },
+            else => return false,
+        }
+    }
+    return has_return_value;
+}
+
+pub fn inlinedCalleeNonNumParamMask(tb: *const codeblock.CodeBlock) u32 {
+    var mask: u32 = 0;
+    var alias_param: [MAX_INLINED_CALLEE_REGS]?u8 = @splat(null);
+    const pcount = @min(@as(usize, tb.param_count), MAX_INLINED_CALLEE_PARAMS);
+    for (0..pcount) |p| {
+        alias_param[p] = @intCast(p);
+    }
+    for (tb.ops) |op| {
+        switch (op.opcode) {
+            .move, .load_local, .store_local => {
+                if (op.a < MAX_INLINED_CALLEE_REGS) {
+                    alias_param[op.a] = if (op.b < MAX_INLINED_CALLEE_REGS) alias_param[op.b] else null;
+                }
+            },
+            .get_prop, .get_elem, .get_elem_const => {
+                if (op.b < MAX_INLINED_CALLEE_REGS) {
+                    if (alias_param[op.b]) |p| {
+                        mask |= (@as(u32, 1) << @intCast(p));
+                    }
+                }
+                if (op.a < MAX_INLINED_CALLEE_REGS and op.a >= tb.param_count) {
+                    alias_param[op.a] = null;
+                }
+            },
+            else => {
+                const ud = opUseDefMasks(tb, op);
+                if (ud.def != 0) {
+                    for (tb.param_count..MAX_INLINED_CALLEE_REGS) |r| {
+                        if ((ud.def & (@as(u64, 1) << @intCast(r))) != 0) alias_param[r] = null;
+                    }
+                }
+            },
+        }
+    }
+    return mask;
+}
 
 pub const MathIntrinsicKind = enum {
     sqrt,
@@ -458,8 +628,8 @@ pub noinline fn computeBlockLiveOut(allocator: Allocator, block: *const codebloc
 
 pub fn opMayMutateMathSqrt(block: *const codeblock.CodeBlock, start_ip: usize, end_ip: usize, ip: usize, op: codeblock.Op) bool {
     return switch (op.opcode) {
-        .call_global => true,
-        .call => (op.c >= block.call_target_cache.len or (!isMathIntrinsicCall(&block.call_target_cache[op.c]) and findCharCodeAtGetProp(block, start_ip, end_ip, ip) == null)),
+        .call_global => (op.c >= block.call_target_cache.len or !canInlineCalleeInOsr(&block.call_target_cache[op.c])),
+        .call => (op.c >= block.call_target_cache.len or (!isMathIntrinsicCall(&block.call_target_cache[op.c]) and !canInlineCalleeInOsr(&block.call_target_cache[op.c]) and findCharCodeAtGetProp(block, start_ip, end_ip, ip) == null)),
         .store_global => blk: {
             const k = constantName(block, op.b) orelse break :blk true;
             break :blk std.mem.eql(u8, k, "Math");
@@ -482,8 +652,8 @@ pub fn opMayMutateMathSqrt(block: *const codeblock.CodeBlock, start_ip: usize, e
 
 pub fn opMayMutateStringCharCodeAt(block: *const codeblock.CodeBlock, start_ip: usize, end_ip: usize, ip: usize, op: codeblock.Op) bool {
     return switch (op.opcode) {
-        .call_global => true,
-        .call => (op.c >= block.call_target_cache.len or (!isMathIntrinsicCall(&block.call_target_cache[op.c]) and findCharCodeAtGetProp(block, start_ip, end_ip, ip) == null)),
+        .call_global => (op.c >= block.call_target_cache.len or !canInlineCalleeInOsr(&block.call_target_cache[op.c])),
+        .call => (op.c >= block.call_target_cache.len or (!isMathIntrinsicCall(&block.call_target_cache[op.c]) and !canInlineCalleeInOsr(&block.call_target_cache[op.c]) and findCharCodeAtGetProp(block, start_ip, end_ip, ip) == null)),
         .set_prop, .set_prop_transition => blk: {
             const k = constantName(block, op.b) orelse break :blk true;
             break :blk (std.mem.eql(u8, k, "charCodeAt") or std.mem.eql(u8, k, "prototype"));
@@ -509,6 +679,8 @@ pub const OsrPrePass = struct {
     borrowed_str_arg_call: []bool,
     exact_int_mul_at: []bool,
     elided_mul_f64_store: []bool,
+    inlined_calls: []bool,
+    inlined_method_elision: []?InlinedMethodElision,
     loop_safe_i32_mask: u64 = 0,
     loop_safe_u31_mask: u64 = 0,
     math_sqrt_guard_bits: ?u64 = null,
@@ -765,6 +937,14 @@ pub const OsrPrePass = struct {
         errdefer allocator.free(elided_mul_f64_store);
         @memset(elided_mul_f64_store, false);
 
+        const inlined_calls = try allocator.alloc(bool, loop_len);
+        errdefer allocator.free(inlined_calls);
+        @memset(inlined_calls, false);
+
+        const inlined_method_elision = try allocator.alloc(?InlinedMethodElision, loop_len);
+        errdefer allocator.free(inlined_method_elision);
+        @memset(inlined_method_elision, null);
+
         return .{
             .live_out = live_out,
             .fused_cmps = fused_cmps,
@@ -780,6 +960,8 @@ pub const OsrPrePass = struct {
             .borrowed_str_arg_call = borrowed_str_arg_call,
             .exact_int_mul_at = exact_int_mul_at,
             .elided_mul_f64_store = elided_mul_f64_store,
+            .inlined_calls = inlined_calls,
+            .inlined_method_elision = inlined_method_elision,
         };
     }
 
@@ -798,6 +980,8 @@ pub const OsrPrePass = struct {
         allocator.free(self.borrowed_str_arg_call);
         allocator.free(self.exact_int_mul_at);
         allocator.free(self.elided_mul_f64_store);
+        allocator.free(self.inlined_calls);
+        allocator.free(self.inlined_method_elision);
     }
 
     pub noinline fn populateArrayElisions(
@@ -1244,6 +1428,192 @@ pub const OsrPrePass = struct {
         }
     }
 
+    pub noinline fn populateInlinedCallsAndMethodElisions(
+        self: *OsrPrePass,
+        block: *const codeblock.CodeBlock,
+        start_ip: usize,
+        end_ip: usize,
+        frame_regs_opt: ?[]const JSValue,
+    ) void {
+        const loop_len = end_ip - start_ip + 1;
+        for (0..loop_len) |call_idx| {
+            const call_ip = start_ip + call_idx;
+            const call_op = block.ops[call_ip];
+            if (call_op.opcode != .call and call_op.opcode != .call_global) continue;
+            if (call_op.c >= block.call_target_cache.len) continue;
+            const cs = &block.call_target_cache[call_op.c];
+            if (call_op.opcode == .call and (isMathIntrinsicCall(cs) or findCharCodeAtGetProp(block, start_ip, end_ip, call_ip) != null)) continue;
+            if (!canInlineCalleeInOsr(cs)) continue;
+            self.inlined_calls[call_idx] = true;
+
+            if (call_op.opcode != .call) continue;
+            const this_r = cs.this_reg orelse continue;
+            const fregs = frame_regs_opt orelse continue;
+
+            var found_gp: ?usize = null;
+            var k = call_idx;
+            while (k > 0) {
+                k -= 1;
+                const cand = block.ops[start_ip + k];
+                if (cand.opcode == .get_prop and cand.a == call_op.b and cand.b == this_r) {
+                    found_gp = k;
+                    break;
+                }
+                const is_pure_arg_op = switch (cand.opcode) {
+                    .nop,
+                    .load_const,
+                    .load_true,
+                    .load_false,
+                    .load_undefined,
+                    .load_null,
+                    => cand.a != this_r and cand.a != call_op.b,
+                    .move,
+                    .load_local,
+                    .neg,
+                    .not_bits,
+                    .add_local_const,
+                    .sub_local_const,
+                    .lt_local_const,
+                    .gt_local_const,
+                    .le_local_const,
+                    .ge_local_const,
+                    .eq_local_const,
+                    .get_prop,
+                    .get_elem_const,
+                    => cand.a != this_r and cand.a != call_op.b and cand.b != call_op.b,
+                    .add,
+                    .add_num,
+                    .sub_num,
+                    .mul_num,
+                    .div_num,
+                    .mod_num,
+                    .and_bits,
+                    .or_bits,
+                    .xor_bits,
+                    .shl,
+                    .shr,
+                    .ushr,
+                    .lt_num,
+                    .gt_num,
+                    .le_num,
+                    .ge_num,
+                    .eq,
+                    .ne,
+                    .get_elem,
+                    => cand.a != this_r and cand.a != call_op.b and cand.b != call_op.b and cand.c != call_op.b,
+                    else => false,
+                };
+                if (!is_pure_arg_op) break;
+            }
+            const gp_idx = found_gp orelse continue;
+            if (self.is_jump_target[gp_idx] or self.elided_compound_op[gp_idx]) continue;
+            if (call_op.a != call_op.b and (self.live_out[call_ip] & regBit64(call_op.b)) != 0) continue;
+
+            const gp_op = block.ops[start_ip + gp_idx];
+            const prop_name = constantName(block, gp_op.c) orelse continue;
+
+            var eff_this_reg: u8 = this_r;
+            var first_idx: usize = gp_idx;
+            if (gp_idx > 0 and this_r >= block.local_count and !self.is_jump_target[gp_idx - 1] and !self.elided_compound_op[gp_idx - 1]) {
+                const prev = block.ops[start_ip + gp_idx - 1];
+                if ((prev.opcode == .load_local or prev.opcode == .move) and prev.a == this_r and prev.b != this_r) {
+                    if ((self.live_out[call_ip] & regBit64(this_r)) == 0) {
+                        var used_in_span = false;
+                        for (gp_idx + 1 .. call_idx) |m_idx| {
+                            const m_op = block.ops[start_ip + m_idx];
+                            const ud = opUseDefMasks(block, m_op);
+                            if ((ud.use & regBit64(this_r)) != 0 or (ud.def & regBit64(prev.b)) != 0) {
+                                used_in_span = true;
+                                break;
+                            }
+                        }
+                        if (!used_in_span) {
+                            eff_this_reg = prev.b;
+                            first_idx = gp_idx - 1;
+                        }
+                    }
+                }
+            }
+
+            var jumps_ok = true;
+            for (0..loop_len) |j_idx| {
+                const j_ip = start_ip + j_idx;
+                const j_op = block.ops[j_ip];
+                const maybe_tgt: ?usize = switch (j_op.opcode) {
+                    .jump, .jump_if_false, .jump_if_true => (@as(usize, j_op.b) << 8) | j_op.c,
+                    .jeq_local_const_false, .jlt_local_const_false, .jle_local_const_false, .jgt_local_const_false, .jge_local_const_false => j_ip + @as(usize, j_op.c),
+                    else => null,
+                };
+                if (maybe_tgt) |tgt| {
+                    if (tgt > start_ip + first_idx and tgt <= start_ip + call_idx) {
+                        jumps_ok = false;
+                        break;
+                    }
+                }
+            }
+            if (!jumps_ok) continue;
+
+            const recv_val_opt: ?JSValue = if (eff_this_reg < fregs.len and fregs[eff_this_reg].isObject())
+                fregs[eff_this_reg]
+            else if (this_r < fregs.len and fregs[this_r].isObject())
+                fregs[this_r]
+            else if (gp_idx > 0 and (block.ops[start_ip + gp_idx - 1].opcode == .load_local or block.ops[start_ip + gp_idx - 1].opcode == .move) and block.ops[start_ip + gp_idx - 1].a == this_r and block.ops[start_ip + gp_idx - 1].b < fregs.len and fregs[block.ops[start_ip + gp_idx - 1].b].isObject())
+                fregs[block.ops[start_ip + gp_idx - 1].b]
+            else
+                null;
+            const recv_val = recv_val_opt orelse continue;
+            const box = recv_val.asObject();
+            if (box.value.cached_len != 0 or box.value.shape_id == 0 or (box.value.shape_id & 0x8000_0000) != 0) continue;
+
+            const expected_bits = cs.callee.?.bits;
+            var elision: ?InlinedMethodElision = null;
+            if (box.value.properties.getIndex(prop_name)) |slot_idx| {
+                const rec = &box.value.properties.entries.items(.value)[slot_idx];
+                if (!rec.isAccessor() and rec.value.bits == expected_bits) {
+                    elision = .{
+                        .eff_this_reg = eff_this_reg,
+                        .receiver_shape_id = box.value.shape_id,
+                        .is_proto = false,
+                        .own_slot_idx = @intCast(slot_idx),
+                        .own_slot_byte_off = @as(u64, @intCast(slot_idx)) * @sizeOf(Prop),
+                        .expected_callee_bits = expected_bits,
+                    };
+                }
+            } else if (box.value.getPrototype()) |proto| {
+                if (proto.cached_len == 0 and proto.shape_id != 0 and (proto.shape_id & 0x8000_0000) == 0) {
+                    if (proto.properties.getIndex(prop_name)) |slot_idx| {
+                        const rec = &proto.properties.entries.items(.value)[slot_idx];
+                        if (!rec.isAccessor() and rec.value.bits == expected_bits) {
+                            elision = .{
+                                .eff_this_reg = eff_this_reg,
+                                .receiver_shape_id = box.value.shape_id,
+                                .is_proto = true,
+                                .proto_ptr = @intFromPtr(proto),
+                                .proto_shape_id = proto.shape_id,
+                                .proto_bytes_ptr = @intFromPtr(proto.properties.entries.bytes),
+                                .proto_rec_addr = @intFromPtr(rec),
+                                .expected_callee_bits = expected_bits,
+                            };
+                        }
+                    }
+                }
+            }
+
+            if (elision) |ime| {
+                self.inlined_method_elision[call_idx] = ime;
+                self.elided_compound_op[gp_idx] = true;
+                if (first_idx < gp_idx) {
+                    self.elided_compound_op[first_idx] = true;
+                }
+                for (first_idx + 1 .. call_idx + 1) |b_idx| {
+                    if (self.compound_span_start[b_idx] == null) {
+                        self.compound_span_start[b_idx] = @intCast(start_ip + first_idx);
+                    }
+                }
+            }
+        }
+    }
+
     pub noinline fn populateInt32AndMulAnalysis(
         self: *OsrPrePass,
         block: *const codeblock.CodeBlock,
@@ -1449,6 +1819,7 @@ pub noinline fn analyzeHoistedArrays(
                 if (op.c >= block.call_target_cache.len) return .{};
                 const cs = &block.call_target_cache[op.c];
                 const allowed = isMathIntrinsicCall(cs) or
+                    canInlineCalleeInOsr(cs) or
                     findCharCodeAtGetProp(block, start_ip, end_ip, ip) != null or
                     (cs.this_reg == null and cs.target_block != null);
                 if (!allowed) return .{};
@@ -1715,7 +2086,7 @@ pub noinline fn analyzeOsrLoop(
                     break;
                 }
                 const cs = &block.call_target_cache[op.c];
-                if (!isMathIntrinsicCall(cs) and findCharCodeAtGetProp(block, start_ip, end_ip, ip) == null) {
+                if (!isMathIntrinsicCall(cs) and !canInlineCalleeInOsr(cs) and findCharCodeAtGetProp(block, start_ip, end_ip, ip) == null) {
                     const is_pure_leaf = (cs.this_reg == null and cs.target_block != null and cs.target_block.?.jit_pure_leaf);
                     if (!is_pure_leaf) {
                         is_pure_loop = false;
@@ -1735,7 +2106,7 @@ pub noinline fn analyzeOsrLoop(
                     break;
                 }
                 const cs = &block.call_target_cache[op.c];
-                if (!cs.target_block.?.jit_pure_leaf) {
+                if (!cs.target_block.?.jit_pure_leaf and !canInlineCalleeInOsr(cs)) {
                     is_pure_loop = false;
                     loop_mutates_math_sqrt = true;
                 }
@@ -1761,6 +2132,7 @@ pub noinline fn analyzeOsrLoop(
     prepass.populateArrayElisions(block, start_ip, end_ip, &hoisted_arrs);
     prepass.populateMathSqrtElisions(block, start_ip, end_ip);
     prepass.populateCharCodeAtElisions(block, start_ip, end_ip);
+    prepass.populateInlinedCallsAndMethodElisions(block, start_ip, end_ip, frame_regs_opt);
     prepass.populateBorrowedStrArgElisions(block, start_ip, end_ip, &hoisted_arrs);
     prepass.populateInt32AndMulAnalysis(block, start_ip, end_ip, &hoisted_arrs, frame_regs_opt);
 
@@ -2001,6 +2373,41 @@ pub noinline fn analyzeOsrLoop(
                             }
                         }
                     }
+                } else if (prepass.inlined_calls[idx]) {
+                    const tb = cs.target_block.?;
+                    const non_num_mask = inlinedCalleeNonNumParamMask(tb);
+                    if (prepass.inlined_method_elision[idx]) |ime| {
+                        if (ime.eff_this_reg < 64) invalid[ime.eff_this_reg] = true;
+                    } else if (cs.this_reg) |tr| {
+                        if (tr < 64) invalid[tr] = true;
+                    }
+                    for (0..cs.arg_count) |ai| {
+                        const ar = @as(usize, op.b) + 1 + ai;
+                        if (ar < 64) {
+                            if (ai < 32 and (non_num_mask & (@as(u32, 1) << @intCast(ai))) != 0) {
+                                invalid[ar] = true;
+                            } else {
+                                if (!written[ar]) read_before_written[ar] = true;
+                                use_count[ar] +%= w;
+                            }
+                        }
+                    }
+                    if (prepass.inlined_method_elision[idx] != null) {
+                        if (op.a < 64) {
+                            use_count[op.a] +%= w;
+                            written[op.a] = true;
+                        }
+                    } else {
+                        if (op.b < 64) invalid[op.b] = true;
+                        if (op.a < 64) {
+                            if (op.a == op.b) {
+                                invalid[op.a] = true;
+                            } else {
+                                use_count[op.a] +%= w;
+                                written[op.a] = true;
+                            }
+                        }
+                    }
                 } else {
                     if (op.b < 64) invalid[op.b] = true;
                     if (op.a < 64) invalid[op.a] = true;
@@ -2020,11 +2427,16 @@ pub noinline fn analyzeOsrLoop(
             },
             .call_global => {
                 const cs = &block.call_target_cache[op.c];
-                const str_mask = if (cs.target_block) |tb| tb.jit_string_param_mask else 0;
+                const non_num_mask: u32 = if (prepass.inlined_calls[idx])
+                    inlinedCalleeNonNumParamMask(cs.target_block.?)
+                else if (cs.target_block) |tb|
+                    tb.jit_string_param_mask
+                else
+                    0;
                 for (0..cs.arg_count) |ai| {
                     const ar = @as(usize, op.b) + 1 + ai;
                     if (ar < 64) {
-                        if (ai < 32 and (str_mask & (@as(u32, 1) << @intCast(ai))) != 0) {
+                        if (ai < 32 and (non_num_mask & (@as(u32, 1) << @intCast(ai))) != 0) {
                             invalid[ar] = true;
                         } else {
                             if (!written[ar]) read_before_written[ar] = true;
@@ -2032,7 +2444,7 @@ pub noinline fn analyzeOsrLoop(
                         }
                     }
                 }
-                if (cs.target_block != null and cs.target_block.?.jit_pure_leaf) {
+                if ((cs.target_block != null and cs.target_block.?.jit_pure_leaf) or prepass.inlined_calls[idx]) {
                     if (op.a < 64) {
                         use_count[op.a] +%= w;
                         written[op.a] = true;

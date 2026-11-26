@@ -21,6 +21,10 @@ const zobj_cached_len_offset = @import("jit_common.zig").zobj_cached_len_offset;
 const zobj_active_len_offset = @import("jit_common.zig").zobj_active_len_offset;
 const zobj_is_frozen_offset = @import("jit_common.zig").zobj_is_frozen_offset;
 const zobj_is_extensible_offset = @import("jit_common.zig").zobj_is_extensible_offset;
+const zobj_prototype_offset = @import("jit_common.zig").zobj_prototype_offset;
+const raw_zobj_shape_id_offset = @import("jit_common.zig").raw_zobj_shape_id_offset;
+const raw_zobj_cached_len_offset = @import("jit_common.zig").raw_zobj_cached_len_offset;
+const raw_zobj_entries_bytes_offset = @import("jit_common.zig").raw_zobj_entries_bytes_offset;
 const zobj_entries_bytes_offset = @import("jit_common.zig").zobj_entries_bytes_offset;
 const zobj_entries_len_offset = @import("jit_common.zig").zobj_entries_len_offset;
 const zobj_entries_cap_offset = @import("jit_common.zig").zobj_entries_cap_offset;
@@ -42,9 +46,11 @@ const zobj_is_sealed_offset = @import("jit_common.zig").zobj_is_sealed_offset;
 const zobj_is_error_data_offset = @import("jit_common.zig").zobj_is_error_data_offset;
 const HoleyState = @import("jit_common.zig").HoleyState;
 const arr_holey_off = @import("jit_common.zig").arr_holey_off;
+const arr_items_ptr_off = @import("jit_common.zig").arr_items_ptr_off;
 const arr_items_len_off = @import("jit_common.zig").arr_items_len_off;
 const h_log_len_off = @import("jit_common.zig").h_log_len_off;
 const constantName = @import("jit_common.zig").constantName;
+const jitGetPropInlinedOsr = @import("jit_common.zig").jitGetPropInlinedOsr;
 const emitCmpToBool = @import("jit_common.zig").emitCmpToBool;
 const emitCondJump = @import("jit_common.zig").emitCondJump;
 const emitSharedOp = @import("jit_common.zig").emitSharedOp;
@@ -52,6 +58,10 @@ const isMathSqrtCall = @import("osr_analysis.zig").isMathSqrtCall;
 const isMathImulCall = @import("osr_analysis.zig").isMathImulCall;
 const isMathIntrinsicCall = @import("osr_analysis.zig").isMathIntrinsicCall;
 const classifyMathIntrinsicCall = @import("osr_analysis.zig").classifyMathIntrinsicCall;
+const MAX_INLINED_CALLEE_OPS = @import("osr_analysis.zig").MAX_INLINED_CALLEE_OPS;
+const MAX_INLINED_CALLEE_REGS = @import("osr_analysis.zig").MAX_INLINED_CALLEE_REGS;
+const asExactInt32 = @import("osr_emit.zig").asExactInt32;
+const asExactPosUint53 = @import("osr_emit.zig").asExactPosUint53;
 const emitFlushPromoted = @import("osr_emit.zig").emitFlushPromoted;
 const emitReloadPromoted = @import("osr_emit.zig").emitReloadPromoted;
 const emitFlushCached = @import("osr_emit.zig").emitFlushCached;
@@ -1306,6 +1316,11 @@ pub noinline fn emitCallOp(
         }
     }
 
+    if (self.prepass.inlined_calls[idx]) {
+        try emitInlinedCall(self, idx, op, bail_lbl, next_live_r8_i32);
+        return;
+    }
+
     const cache_addr: u64 = @intFromPtr(cs);
     const tb = cs.target_block.?;
     const target_addr: u64 = @intFromPtr(tb);
@@ -1473,6 +1488,751 @@ pub noinline fn emitCallOp(
     try a.movMemReg(.r12, @intCast(@as(usize, op.a) * 8), .rax);
 }
 
+pub noinline fn emitInlinedCall(
+    self: *OsrCompiler,
+    idx: usize,
+    op: codeblock.Op,
+    bail_lbl: Label,
+    next_live_r8_i32: *?u8,
+) !void {
+    const a = self.a;
+    const block = self.block;
+    const reg_to_xmm = &self.analysis.reg_to_xmm;
+    const cached_regs = &self.analysis.cached_regs;
+    const cached_count = self.analysis.cached_count;
+    const promoted = &self.analysis.promoted;
+    const hoisted_arrs = &self.analysis.hoisted_arrs;
+    const cs = &block.call_target_cache[op.c];
+    const tb = cs.target_block.?;
+    const caller_regs: usize = block.register_count;
+    const total_regs = caller_regs + tb.register_count;
+    const total_bytes: i32 = @intCast(total_regs * 8);
+
+    const regs_limit_off: i32 = @intCast(@offsetOf(codeblock.OsrContext, "regs_limit"));
+    const global_ver_ptr_off: i32 = @intCast(@offsetOf(codeblock.OsrContext, "global_version_ptr"));
+
+    try a.lea(.rax, .r12, total_bytes);
+    try a.movRegMem(.rcx, .r13, regs_limit_off);
+    try a.cmpRegReg(.rax, .rcx);
+    try a.jcc(.a, bail_lbl);
+
+    const this_caller_reg: ?u8 = if (self.prepass.inlined_method_elision[idx]) |ime|
+        (if (ime.eff_this_reg < 64) (self.cur_copy_src[ime.eff_this_reg] orelse ime.eff_this_reg) else ime.eff_this_reg)
+    else if (cs.this_reg) |tr|
+        (if (tr < 64) (self.cur_copy_src[tr] orelse tr) else tr)
+    else
+        null;
+
+    if (op.opcode == .call_global) {
+        try a.movRegMem(.rcx, .r13, global_ver_ptr_off);
+        try a.movRegMem(.rax, .rcx, 0);
+        try a.movRegImm64(.rdx, @intFromPtr(cs));
+        try a.movRegMem(.rdx, .rdx, @intCast(@offsetOf(codeblock.CallSiteCache, "global_version")));
+        try a.cmpRegReg(.rax, .rdx);
+        try a.jcc(.ne, bail_lbl);
+    } else if (self.prepass.inlined_method_elision[idx]) |ime| {
+        const eff_tr = this_caller_reg.?;
+        if (eff_tr < 64 and reg_to_xmm[eff_tr] != null) return error.CannotCompile;
+        try a.movRegMem(.rax, .r12, @intCast(@as(usize, eff_tr) * 8));
+        try a.movRegReg(.rcx, .rax);
+        try a.shrRegImm8(.rcx, 47);
+        try a.cmpRegImm32(.rcx, @intCast(HEADER_OBJECT));
+        try a.jcc(.ne, bail_lbl);
+
+        try a.movRegImm64(.rcx, JSValue.PTR_MASK);
+        try a.andRegReg(.rax, .rcx);
+        try a.cmpRegMem(.rax, .r13, ctx_global_obj_offset);
+        try a.jcc(.e, bail_lbl);
+
+        try a.movzxReg64Mem16(.rcx, .rax, zobj_cached_len_offset);
+        try a.testRegReg(.rcx, .rcx);
+        try a.jcc(.ne, bail_lbl);
+
+        try a.movReg32Mem(.rcx, .rax, zobj_shape_id_offset);
+        try a.cmpReg32Imm32(.rcx, @bitCast(ime.receiver_shape_id));
+        try a.jcc(.ne, bail_lbl);
+
+        if (ime.is_proto) {
+            try a.movRegMem(.rcx, .rax, zobj_prototype_offset);
+            try a.movRegImm64(.rdx, ime.proto_ptr);
+            try a.cmpRegReg(.rcx, .rdx);
+            try a.jcc(.ne, bail_lbl);
+
+            try a.movzxReg64Mem16(.rdx, .rcx, raw_zobj_cached_len_offset);
+            try a.testRegReg(.rdx, .rdx);
+            try a.jcc(.ne, bail_lbl);
+
+            try a.movReg32Mem(.rdx, .rcx, raw_zobj_shape_id_offset);
+            try a.cmpReg32Imm32(.rdx, @bitCast(ime.proto_shape_id));
+            try a.jcc(.ne, bail_lbl);
+
+            try a.movRegMem(.rdx, .rcx, raw_zobj_entries_bytes_offset);
+            try a.movRegImm64(.rsi, ime.proto_bytes_ptr);
+            try a.cmpRegReg(.rdx, .rsi);
+            try a.jcc(.ne, bail_lbl);
+
+            try a.movRegImm64(.rdx, ime.proto_rec_addr);
+            try a.testMem32Imm32(.rdx, prop_desc_offset, 8);
+            try a.jcc(.ne, bail_lbl);
+
+            try a.movRegMem(.rax, .rdx, prop_val_offset);
+            try a.movRegImm64(.rcx, ime.expected_callee_bits);
+            try a.cmpRegReg(.rax, .rcx);
+            try a.jcc(.ne, bail_lbl);
+        } else {
+            try a.movRegMem(.rcx, .rax, zobj_entries_len_offset);
+            try a.cmpRegImm32(.rcx, @intCast(ime.own_slot_idx));
+            try a.jcc(.be, bail_lbl);
+
+            try a.movRegMem(.rdx, .rax, zobj_entries_bytes_offset);
+            try a.movRegMem(.rcx, .rax, zobj_entries_cap_offset);
+            if (comptime value_byte_offset_multiplier == 16) {
+                try a.shlRegImm8(.rcx, 4);
+            } else {
+                try a.imulRegRegImm32(.rcx, .rcx, @intCast(value_byte_offset_multiplier));
+            }
+            try a.addRegReg(.rdx, .rcx);
+
+            const slot_off: i32 = @intCast(ime.own_slot_byte_off);
+            try a.testMem32Imm32(.rdx, slot_off + prop_desc_offset, 8);
+            try a.jcc(.ne, bail_lbl);
+
+            try a.movRegMem(.rax, .rdx, slot_off + prop_val_offset);
+            try a.movRegImm64(.rcx, ime.expected_callee_bits);
+            try a.cmpRegReg(.rax, .rcx);
+            try a.jcc(.ne, bail_lbl);
+        }
+    } else {
+        const expected_callee = cs.callee orelse return error.CannotCompile;
+        try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
+        try a.movRegImm64(.rcx, expected_callee.bits);
+        try a.cmpRegReg(.rax, .rcx);
+        try a.jcc(.ne, bail_lbl);
+
+        if (this_caller_reg) |eff_tr| {
+            if (eff_tr < 64 and reg_to_xmm[eff_tr] != null) return error.CannotCompile;
+            try a.movRegMem(.rax, .r12, @intCast(@as(usize, eff_tr) * 8));
+            try a.movRegReg(.rcx, .rax);
+            try a.shrRegImm8(.rcx, 47);
+            try a.cmpRegImm32(.rcx, @intCast(HEADER_OBJECT));
+            try a.jcc(.ne, bail_lbl);
+
+            try a.movRegImm64(.rcx, JSValue.PTR_MASK);
+            try a.andRegReg(.rax, .rcx);
+            try a.cmpRegMem(.rax, .r13, ctx_global_obj_offset);
+            try a.jcc(.e, bail_lbl);
+        }
+    }
+
+    var callee_is_jump_target: [MAX_INLINED_CALLEE_OPS]bool = @splat(false);
+    var c_labels: [MAX_INLINED_CALLEE_OPS]Label = undefined;
+    for (0..tb.ops.len) |c_i| {
+        c_labels[c_i] = try a.createLabel();
+        const cop = tb.ops[c_i];
+        const maybe_t: ?usize = switch (cop.opcode) {
+            .jump, .jump_if_false, .jump_if_true => (@as(usize, cop.b) << 8) | cop.c,
+            .jeq_local_const_false, .jlt_local_const_false, .jle_local_const_false, .jgt_local_const_false, .jge_local_const_false => c_i + @as(usize, cop.c),
+            else => null,
+        };
+        if (maybe_t) |t| {
+            if (t < tb.ops.len) callee_is_jump_target[t] = true;
+        }
+    }
+    const inlined_done_lbl = try a.createLabel();
+
+    var reg_alias: [MAX_INLINED_CALLEE_REGS]?u8 = @splat(null);
+    for (0..tb.param_count) |p| {
+        const raw_ar: u8 = @intCast(@as(usize, op.b) + 1 + p);
+        reg_alias[p] = if (raw_ar < 64) (self.cur_copy_src[raw_ar] orelse raw_ar) else raw_ar;
+    }
+
+    if (tb.local_count > tb.param_count) {
+        for (tb.param_count..tb.local_count) |loc_r| {
+            try a.movMemReg(.r12, @intCast((caller_regs + loc_r) * 8), .r15);
+        }
+    }
+
+    const loadCalleeNumToXmm = struct {
+        fn call(
+            oc: *OsrCompiler,
+            aliases: *const [MAX_INLINED_CALLEE_REGS]?u8,
+            c_base: usize,
+            c_reg: u8,
+            target_xmm: Xmm,
+            b_lbl: Label,
+        ) !void {
+            if (aliases[c_reg]) |cr| {
+                try oc.loadNumToXmm(cr, target_xmm, b_lbl);
+            } else {
+                try oc.a.movRegMem(.rax, .r12, @intCast((c_base + c_reg) * 8));
+                try oc.a.cmpRegReg(.rax, .r15);
+                try oc.a.jcc(.ae, b_lbl);
+                try oc.a.movqXmmReg(target_xmm, .rax);
+            }
+        }
+    }.call;
+
+    const storeXmmToCallee = struct {
+        fn call(
+            asm_a: *x64_asm.Assembler,
+            aliases: *[MAX_INLINED_CALLEE_REGS]?u8,
+            c_base: usize,
+            c_reg: u8,
+            src_xmm: Xmm,
+        ) !void {
+            aliases[c_reg] = null;
+            try asm_a.movqRegXmm(.rax, src_xmm);
+            try asm_a.ucomisd(src_xmm, src_xmm);
+            try asm_a.movRegImm64(.rcx, JSValue.CANONICAL_NAN);
+            try asm_a.cmovpRegReg(.rax, .rcx);
+            try asm_a.movMemReg(.r12, @intCast((c_base + c_reg) * 8), .rax);
+        }
+    }.call;
+
+    var c_skip: u8 = 0;
+    for (0..tb.ops.len) |c_ip| {
+        a.bindLabel(c_labels[c_ip]);
+        if (callee_is_jump_target[c_ip]) {
+            for (tb.param_count..MAX_INLINED_CALLEE_REGS) |r| {
+                reg_alias[r] = null;
+            }
+        }
+        if (c_skip > 0) {
+            c_skip -= 1;
+            continue;
+        }
+        const c_op = tb.ops[c_ip];
+        const next_is_ret_self = (c_ip + 1 < tb.ops.len and !callee_is_jump_target[c_ip + 1] and tb.ops[c_ip + 1].opcode == .return_value and tb.ops[c_ip + 1].a == c_op.a);
+
+        switch (c_op.opcode) {
+            .nop => {},
+            .load_this => {
+                const tr = this_caller_reg.?;
+                if (c_op.a >= tb.local_count) {
+                    reg_alias[c_op.a] = tr;
+                } else {
+                    try a.movRegMem(.rax, .r12, @intCast(@as(usize, tr) * 8));
+                    try a.movMemReg(.r12, @intCast((caller_regs + c_op.a) * 8), .rax);
+                    reg_alias[c_op.a] = null;
+                }
+            },
+            .load_undefined => {
+                reg_alias[c_op.a] = null;
+                try a.movMemReg(.r12, @intCast((caller_regs + c_op.a) * 8), .r15);
+            },
+            .load_null => {
+                reg_alias[c_op.a] = null;
+                try a.movRegImm64(.rax, JSValue.NULL.bits);
+                try a.movMemReg(.r12, @intCast((caller_regs + c_op.a) * 8), .rax);
+            },
+            .load_true => {
+                reg_alias[c_op.a] = null;
+                try a.movRegImm64(.rax, JSValue.fromBool(true).bits);
+                try a.movMemReg(.r12, @intCast((caller_regs + c_op.a) * 8), .rax);
+            },
+            .load_false => {
+                reg_alias[c_op.a] = null;
+                try a.movRegImm64(.rax, JSValue.fromBool(false).bits);
+                try a.movMemReg(.r12, @intCast((caller_regs + c_op.a) * 8), .rax);
+            },
+            .load_const => {
+                const c = tb.constants[c_op.b];
+                const bits: u64 = switch (c) {
+                    .number => |n| JSValue.fromNumber(n).bits,
+                    .boolean => |b| JSValue.fromBool(b).bits,
+                    else => unreachable,
+                };
+                if (c == .number and next_is_ret_self) {
+                    try a.movRegImm64(.rax, bits);
+                    try a.movqXmmReg(.xmm0, .rax);
+                    try a.jmp(inlined_done_lbl);
+                    c_skip = 1;
+                } else {
+                    reg_alias[c_op.a] = null;
+                    try a.movRegImm64(.rax, bits);
+                    try a.movMemReg(.r12, @intCast((caller_regs + c_op.a) * 8), .rax);
+                }
+            },
+            .move, .load_local, .store_local => {
+                if (c_op.a >= tb.local_count and reg_alias[c_op.b] != null) {
+                    reg_alias[c_op.a] = reg_alias[c_op.b];
+                } else {
+                    if (reg_alias[c_op.b]) |cr| {
+                        if (cr < 64 and reg_to_xmm[cr] != null) {
+                            const x = reg_to_xmm[cr].?;
+                            try a.movqRegXmm(.rax, x);
+                            try a.ucomisd(x, x);
+                            try a.movRegImm64(.rcx, JSValue.CANONICAL_NAN);
+                            try a.cmovpRegReg(.rax, .rcx);
+                        } else if (self.live_xmm3_reg != null and self.live_xmm3_reg.? == cr) {
+                            try a.movqRegXmm(.rax, .xmm3);
+                            try a.ucomisd(.xmm3, .xmm3);
+                            try a.movRegImm64(.rcx, JSValue.CANONICAL_NAN);
+                            try a.cmovpRegReg(.rax, .rcx);
+                        } else {
+                            try a.movRegMem(.rax, .r12, @intCast(@as(usize, cr) * 8));
+                        }
+                    } else {
+                        try a.movRegMem(.rax, .r12, @intCast((caller_regs + c_op.b) * 8));
+                    }
+                    reg_alias[c_op.a] = null;
+                    try a.movMemReg(.r12, @intCast((caller_regs + c_op.a) * 8), .rax);
+                }
+            },
+            .get_prop => {
+                const key = constantName(tb, c_op.c).?;
+                const maybe_cr = reg_alias[c_op.b];
+                if (maybe_cr != null and maybe_cr.? < 64 and reg_to_xmm[maybe_cr.?] != null) {
+                    try a.jmp(bail_lbl);
+                    continue;
+                }
+                const obj_byte_off: i32 = if (maybe_cr) |cr|
+                    @intCast(@as(usize, cr) * 8)
+                else
+                    @intCast((caller_regs + c_op.b) * 8);
+
+                if (std.mem.eql(u8, key, "length") and maybe_cr != null) {
+                    if (hoisted_arrs.find(maybe_cr.?)) |h_slot| {
+                        if (hoisted_arrs.kinds[h_slot].isPtrLen()) {
+                            if (h_slot == 0 and hoisted_arrs.primary_in_regs) {
+                                try a.cvtsi2sdqXmmReg64(.xmm0, .rbp);
+                            } else {
+                                try a.movRegMem(.rax, .rsp, @intCast(h_slot * 16 + 8));
+                                try a.cvtsi2sdqXmmReg64(.xmm0, .rax);
+                            }
+                            if (next_is_ret_self) {
+                                try a.jmp(inlined_done_lbl);
+                                c_skip = 1;
+                            } else {
+                                try storeXmmToCallee(a, &reg_alias, caller_regs, c_op.a, .xmm0);
+                            }
+                            continue;
+                        }
+                    }
+                }
+
+                const c_ic_addr = self.inlined_prop_ic_addrs[idx][c_ip];
+                const c_ic_init = self.inlined_prop_ics_init[idx][c_ip];
+                const gp_slow_lbl = try a.createLabel();
+                const gp_done_lbl = try a.createLabel();
+
+                if (maybe_cr != null and self.findCachedObjPtr(maybe_cr.?, c_ic_init.shape_id, c_ic_init.slot_idx, false) != null) {
+                    const ptr_reg = self.findCachedObjPtr(maybe_cr.?, c_ic_init.shape_id, c_ic_init.slot_idx, false).?;
+                    try a.testRegReg(ptr_reg, ptr_reg);
+                    try a.jcc(.e, gp_slow_lbl);
+
+                    const slot_off: i32 = @intCast(c_ic_init.slot_byte_off);
+                    try a.testMem32Imm32(ptr_reg, slot_off + prop_desc_offset, 8);
+                    try a.jcc(.ne, gp_slow_lbl);
+
+                    try a.movRegMem(.rax, ptr_reg, slot_off + prop_val_offset);
+                    try a.cmpRegReg(.rax, .r15);
+                    try a.jcc(.ae, gp_slow_lbl);
+                    try a.movqXmmReg(.xmm0, .rax);
+                    try a.jmp(gp_done_lbl);
+                } else {
+                    try a.movRegMem(.rax, .r12, obj_byte_off);
+                    try a.movRegReg(.rcx, .rax);
+                    try a.shrRegImm8(.rcx, 47);
+                    try a.cmpRegImm32(.rcx, @intCast(HEADER_OBJECT));
+                    try a.jcc(.ne, gp_slow_lbl);
+
+                    try a.movRegImm64(.rcx, JSValue.PTR_MASK);
+                    try a.andRegReg(.rax, .rcx);
+
+                    try a.cmpRegMem(.rax, .r13, ctx_global_obj_offset);
+                    try a.jcc(.e, gp_slow_lbl);
+
+                    try a.movzxReg64Mem16(.rcx, .rax, zobj_cached_len_offset);
+                    try a.testRegReg(.rcx, .rcx);
+                    try a.jcc(.ne, gp_slow_lbl);
+
+                    try a.movRegImm64(.rsi, c_ic_addr);
+                    try a.movReg32Mem(.rcx, .rsi, osr_ic_shape_off);
+                    try a.movReg32Mem(.rdx, .rax, zobj_shape_id_offset);
+                    try a.cmpReg32Reg32(.rdx, .rcx);
+                    try a.jcc(.ne, gp_slow_lbl);
+
+                    try a.movReg32Mem(.rcx, .rsi, osr_ic_slot_off);
+                    try a.movRegMem(.rdx, .rax, zobj_entries_len_offset);
+                    try a.cmpRegReg(.rcx, .rdx);
+                    try a.jcc(.ae, gp_slow_lbl);
+
+                    try a.movRegMem(.rdx, .rax, zobj_entries_bytes_offset);
+                    try a.movRegMem(.rcx, .rax, zobj_entries_cap_offset);
+                    if (comptime value_byte_offset_multiplier == 16) {
+                        try a.shlRegImm8(.rcx, 4);
+                    } else {
+                        try a.imulRegRegImm32(.rcx, .rcx, @intCast(value_byte_offset_multiplier));
+                    }
+                    try a.addRegReg(.rdx, .rcx);
+                    try a.movRegMem(.rcx, .rsi, osr_ic_slot_byte_off);
+                    try a.addRegReg(.rdx, .rcx);
+
+                    try a.testMem32Imm32(.rdx, prop_desc_offset, 8);
+                    try a.jcc(.ne, gp_slow_lbl);
+
+                    try a.movRegMem(.rax, .rdx, prop_val_offset);
+                    try a.cmpRegReg(.rax, .r15);
+                    try a.jcc(.ae, gp_slow_lbl);
+                    try a.movqXmmReg(.xmm0, .rax);
+                    try a.jmp(gp_done_lbl);
+                }
+
+                a.bindLabel(gp_slow_lbl);
+                if (cached_count > 0) try emitFlushCached(a, cached_regs, cached_count);
+                if (promoted.count > 0) try emitFlushPromoted(a, promoted);
+                try a.movRegReg(.rdi, .r13);
+                try a.movRegMem(.rsi, .r12, obj_byte_off);
+                try a.movRegImm64(.rdx, @intFromPtr(key.ptr));
+                try a.movRegImm64(.rcx, key.len);
+                try a.movRegImm64(.r8, c_ic_addr);
+                try a.lea(.r9, .r12, @intCast((caller_regs + c_op.a) * 8));
+                try a.movRegImm64(.rax, @intFromPtr(&jitGetPropInlinedOsr));
+                try a.callReg(.rax);
+                if (cached_count > 0) try emitReloadCached(a, cached_regs, cached_count);
+                if (promoted.count > 0) try emitReloadPromoted(a, promoted);
+                if (self.cached_obj_ptrs[0] != null) try a.xorReg32Reg32(.r10, .r10);
+                if (self.cached_obj_ptrs[1] != null) try a.xorReg32Reg32(.r11, .r11);
+                try a.movzxReg64Reg8(.rax, .rax);
+                try a.testRegReg(.rax, .rax);
+                try a.jcc(.ne, bail_lbl);
+                if (self.live_r8_i32 != null and self.live_r8_i32.? != op.a) {
+                    try self.loadNumToXmm(self.live_r8_i32.?, .xmm0, bail_lbl);
+                    try a.cvttsd2siReg32Xmm(.r8, .xmm0);
+                }
+                if (self.live_xmm3_reg != null) {
+                    try a.movsdXmmMem(.xmm3, .r12, @intCast(@as(usize, self.live_xmm3_reg.?) * 8));
+                }
+                try a.movsdXmmMem(.xmm0, .r12, @intCast((caller_regs + c_op.a) * 8));
+
+                a.bindLabel(gp_done_lbl);
+                if (next_is_ret_self) {
+                    try a.jmp(inlined_done_lbl);
+                    c_skip = 1;
+                } else {
+                    try storeXmmToCallee(a, &reg_alias, caller_regs, c_op.a, .xmm0);
+                }
+            },
+            .get_elem_const, .get_elem => {
+                const maybe_arr_cr = reg_alias[c_op.b];
+                if (maybe_arr_cr != null and maybe_arr_cr.? < 64 and reg_to_xmm[maybe_arr_cr.?] != null) {
+                    try a.jmp(bail_lbl);
+                    continue;
+                }
+                const arr_byte_off: i32 = if (maybe_arr_cr) |cr|
+                    @intCast(@as(usize, cr) * 8)
+                else
+                    @intCast((caller_regs + c_op.b) * 8);
+
+                if (c_op.opcode == .get_elem_const) {
+                    const elem_idx: u32 = @intFromFloat(tb.constants[c_op.c].number);
+                    try a.movRegImm32(.rcx, elem_idx);
+                } else {
+                    try loadCalleeNumToXmm(self, &reg_alias, caller_regs, c_op.c, .xmm0, bail_lbl);
+                    try a.cvttsd2siReg32Xmm(.rcx, .xmm0);
+                    try a.cvtsi2sdXmmReg32(.xmm1, .rcx);
+                    try a.ucomisd(.xmm0, .xmm1);
+                    try a.jcc(.p, bail_lbl);
+                    try a.jcc(.ne, bail_lbl);
+                    try a.testReg32Reg32(.rcx, .rcx);
+                    try a.jcc(.s, bail_lbl);
+                }
+
+                if (maybe_arr_cr != null and hoisted_arrs.find(maybe_arr_cr.?) != null and hoisted_arrs.dense[hoisted_arrs.find(maybe_arr_cr.?).?]) {
+                    const h_slot = hoisted_arrs.find(maybe_arr_cr.?).?;
+                    if (h_slot == 0 and hoisted_arrs.primary_in_regs) {
+                        try a.cmpRegReg(.rcx, .rbp);
+                        try a.jcc(.ae, bail_lbl);
+                        try a.movRegMemIndexed8(.rax, .rbx, .rcx, 0);
+                    } else {
+                        try a.movRegMem(.rdx, .rsp, @intCast(h_slot * 16 + 8));
+                        try a.cmpRegReg(.rcx, .rdx);
+                        try a.jcc(.ae, bail_lbl);
+                        try a.movRegMem(.r9, .rsp, @intCast(h_slot * 16));
+                        try a.movRegMemIndexed8(.rax, .r9, .rcx, 0);
+                    }
+                } else {
+                    try a.movRegMem(.rax, .r12, arr_byte_off);
+                    try a.movRegReg(.rdx, .rax);
+                    try a.shrRegImm8(.rdx, 47);
+                    try a.cmpRegImm32(.rdx, HEADER_ARRAY);
+                    try a.jcc(.ne, bail_lbl);
+
+                    try a.movRegImm64(.rdx, JSValue.PTR_MASK);
+                    try a.andRegReg(.rax, .rdx);
+
+                    try a.movRegMem(.rdx, .rax, arr_holey_off);
+                    try a.testRegReg(.rdx, .rdx);
+                    try a.jcc(.ne, bail_lbl);
+
+                    try a.movRegMem(.rdx, .rax, arr_items_len_off);
+                    try a.cmpRegReg(.rcx, .rdx);
+                    try a.jcc(.ae, bail_lbl);
+
+                    try a.movRegMem(.rax, .rax, arr_items_ptr_off);
+                    try a.movRegMemIndexed8(.rax, .rax, .rcx, 0);
+                }
+
+                try a.cmpRegReg(.rax, .r15);
+                try a.jcc(.ae, bail_lbl);
+                try a.movqXmmReg(.xmm0, .rax);
+                if (next_is_ret_self) {
+                    try a.jmp(inlined_done_lbl);
+                    c_skip = 1;
+                } else {
+                    try storeXmmToCallee(a, &reg_alias, caller_regs, c_op.a, .xmm0);
+                }
+            },
+            .add, .add_num, .sub_num, .mul_num, .div_num => {
+                try loadCalleeNumToXmm(self, &reg_alias, caller_regs, c_op.b, .xmm0, bail_lbl);
+                try loadCalleeNumToXmm(self, &reg_alias, caller_regs, c_op.c, .xmm1, bail_lbl);
+                switch (c_op.opcode) {
+                    .add, .add_num => try a.addsd(.xmm0, .xmm1),
+                    .sub_num => try a.subsd(.xmm0, .xmm1),
+                    .mul_num => try a.mulsd(.xmm0, .xmm1),
+                    .div_num => try a.divsd(.xmm0, .xmm1),
+                    else => unreachable,
+                }
+                if (next_is_ret_self) {
+                    try a.jmp(inlined_done_lbl);
+                    c_skip = 1;
+                } else {
+                    try storeXmmToCallee(a, &reg_alias, caller_regs, c_op.a, .xmm0);
+                }
+            },
+            .mod_num => {
+                try loadCalleeNumToXmm(self, &reg_alias, caller_regs, c_op.b, .xmm0, bail_lbl);
+                try loadCalleeNumToXmm(self, &reg_alias, caller_regs, c_op.c, .xmm1, bail_lbl);
+                try a.movqRegXmm(.rax, .xmm0);
+                try a.shrRegImm8(.rax, 63);
+                try a.testRegReg(.rax, .rax);
+                try a.jcc(.ne, bail_lbl);
+                try a.cvttsd2siqReg64Xmm(.rax, .xmm0);
+                try a.movRegReg(.rdx, .rax);
+                try a.shrRegImm8(.rdx, 53);
+                try a.testRegReg(.rdx, .rdx);
+                try a.jcc(.ne, bail_lbl);
+                try a.cvtsi2sdqXmmReg64(.xmm2, .rax);
+                try a.ucomisd(.xmm0, .xmm2);
+                try a.jcc(.p, bail_lbl);
+                try a.jcc(.ne, bail_lbl);
+
+                try a.movqRegXmm(.rcx, .xmm1);
+                try a.shrRegImm8(.rcx, 63);
+                try a.testRegReg(.rcx, .rcx);
+                try a.jcc(.ne, bail_lbl);
+                try a.cvttsd2siqReg64Xmm(.rcx, .xmm1);
+                try a.movRegReg(.rdx, .rcx);
+                try a.shrRegImm8(.rdx, 53);
+                try a.testRegReg(.rdx, .rdx);
+                try a.jcc(.ne, bail_lbl);
+                try a.testRegReg(.rcx, .rcx);
+                try a.jcc(.e, bail_lbl);
+                try a.cvtsi2sdqXmmReg64(.xmm2, .rcx);
+                try a.ucomisd(.xmm1, .xmm2);
+                try a.jcc(.p, bail_lbl);
+                try a.jcc(.ne, bail_lbl);
+
+                try a.xorRegReg64(.rdx, .rdx);
+                try a.divReg64(.rcx);
+                try a.cvtsi2sdqXmmReg64(.xmm0, .rdx);
+                if (next_is_ret_self) {
+                    try a.jmp(inlined_done_lbl);
+                    c_skip = 1;
+                } else {
+                    try storeXmmToCallee(a, &reg_alias, caller_regs, c_op.a, .xmm0);
+                }
+            },
+            .add_local_const, .sub_local_const => {
+                const c_bits = JSValue.fromNumber(tb.constants[c_op.c].number).bits;
+                try loadCalleeNumToXmm(self, &reg_alias, caller_regs, c_op.b, .xmm0, bail_lbl);
+                try a.movRegImm64(.rcx, c_bits);
+                try a.movqXmmReg(.xmm1, .rcx);
+                if (c_op.opcode == .add_local_const) {
+                    try a.addsd(.xmm0, .xmm1);
+                } else {
+                    try a.subsd(.xmm0, .xmm1);
+                }
+                if (next_is_ret_self) {
+                    try a.jmp(inlined_done_lbl);
+                    c_skip = 1;
+                } else {
+                    try storeXmmToCallee(a, &reg_alias, caller_regs, c_op.a, .xmm0);
+                }
+            },
+            .neg => {
+                try loadCalleeNumToXmm(self, &reg_alias, caller_regs, c_op.b, .xmm0, bail_lbl);
+                try a.movqRegXmm(.rax, .xmm0);
+                try a.movRegImm64(.rcx, 0x8000_0000_0000_0000);
+                try a.xorRegReg64(.rax, .rcx);
+                try a.movqXmmReg(.xmm0, .rax);
+                if (next_is_ret_self) {
+                    try a.jmp(inlined_done_lbl);
+                    c_skip = 1;
+                } else {
+                    try storeXmmToCallee(a, &reg_alias, caller_regs, c_op.a, .xmm0);
+                }
+            },
+            .not_bits => {
+                try loadCalleeNumToXmm(self, &reg_alias, caller_regs, c_op.b, .xmm0, bail_lbl);
+                try a.cvttsd2siqReg64Xmm(.rax, .xmm0);
+                try a.movRegImm64(.rdx, 0x8000_0000_0000_0000);
+                try a.cmpRegReg(.rax, .rdx);
+                try a.jcc(.e, bail_lbl);
+                try a.notReg32(.rax);
+                try a.cvtsi2sdXmmReg32(.xmm0, .rax);
+                if (next_is_ret_self) {
+                    try a.jmp(inlined_done_lbl);
+                    c_skip = 1;
+                } else {
+                    try storeXmmToCallee(a, &reg_alias, caller_regs, c_op.a, .xmm0);
+                }
+            },
+            .and_bits, .or_bits, .xor_bits, .shl, .shr, .ushr => {
+                try loadCalleeNumToXmm(self, &reg_alias, caller_regs, c_op.b, .xmm0, bail_lbl);
+                try loadCalleeNumToXmm(self, &reg_alias, caller_regs, c_op.c, .xmm1, bail_lbl);
+                try a.cvttsd2siqReg64Xmm(.rax, .xmm0);
+                try a.movRegImm64(.rdx, 0x8000_0000_0000_0000);
+                try a.cmpRegReg(.rax, .rdx);
+                try a.jcc(.e, bail_lbl);
+                try a.cvttsd2siqReg64Xmm(.rcx, .xmm1);
+                try a.cmpRegReg(.rcx, .rdx);
+                try a.jcc(.e, bail_lbl);
+                switch (c_op.opcode) {
+                    .and_bits => {
+                        try a.andReg32Reg32(.rax, .rcx);
+                        try a.cvtsi2sdXmmReg32(.xmm0, .rax);
+                    },
+                    .or_bits => {
+                        try a.orReg32Reg32(.rax, .rcx);
+                        try a.cvtsi2sdXmmReg32(.xmm0, .rax);
+                    },
+                    .xor_bits => {
+                        try a.xorReg32Reg32(.rax, .rcx);
+                        try a.cvtsi2sdXmmReg32(.xmm0, .rax);
+                    },
+                    .shl => {
+                        try a.shlReg32Cl(.rax);
+                        try a.cvtsi2sdXmmReg32(.xmm0, .rax);
+                    },
+                    .shr => {
+                        try a.sarReg32Cl(.rax);
+                        try a.cvtsi2sdXmmReg32(.xmm0, .rax);
+                    },
+                    .ushr => {
+                        try a.shrReg32Cl(.rax);
+                        try a.cvtsi2sdqXmmReg64(.xmm0, .rax);
+                    },
+                    else => unreachable,
+                }
+                if (next_is_ret_self) {
+                    try a.jmp(inlined_done_lbl);
+                    c_skip = 1;
+                } else {
+                    try storeXmmToCallee(a, &reg_alias, caller_regs, c_op.a, .xmm0);
+                }
+            },
+            .lt_num, .gt_num, .le_num, .ge_num, .eq, .ne, .loose_eq, .loose_ne => {
+                try loadCalleeNumToXmm(self, &reg_alias, caller_regs, c_op.b, .xmm0, bail_lbl);
+                try loadCalleeNumToXmm(self, &reg_alias, caller_regs, c_op.c, .xmm1, bail_lbl);
+                if (c_ip + 1 < tb.ops.len and !callee_is_jump_target[c_ip + 1] and
+                    (tb.ops[c_ip + 1].opcode == .jump_if_false or tb.ops[c_ip + 1].opcode == .jump_if_true) and
+                    tb.ops[c_ip + 1].a == c_op.a)
+                {
+                    const jop = tb.ops[c_ip + 1];
+                    const t_pc = (@as(usize, jop.b) << 8) | jop.c;
+                    const eff_cmp_op: codeblock.Opcode = switch (c_op.opcode) {
+                        .loose_eq => .eq,
+                        .loose_ne => .ne,
+                        else => c_op.opcode,
+                    };
+                    try emitFusedCmpBranch(a, eff_cmp_op, jop.opcode == .jump_if_true, c_labels[t_pc]);
+                    c_skip = 1;
+                } else {
+                    reg_alias[c_op.a] = null;
+                    try emitCmpToBool(a, c_op.opcode);
+                    try a.movMemReg(.r12, @intCast((caller_regs + c_op.a) * 8), .rax);
+                }
+            },
+            .lt_local_const, .gt_local_const, .le_local_const, .ge_local_const, .eq_local_const => {
+                const c_bits = JSValue.fromNumber(tb.constants[c_op.c].number).bits;
+                try loadCalleeNumToXmm(self, &reg_alias, caller_regs, c_op.b, .xmm0, bail_lbl);
+                try a.movRegImm64(.rcx, c_bits);
+                try a.movqXmmReg(.xmm1, .rcx);
+                if (c_ip + 1 < tb.ops.len and !callee_is_jump_target[c_ip + 1] and
+                    (tb.ops[c_ip + 1].opcode == .jump_if_false or tb.ops[c_ip + 1].opcode == .jump_if_true) and
+                    tb.ops[c_ip + 1].a == c_op.a)
+                {
+                    const jop = tb.ops[c_ip + 1];
+                    const t_pc = (@as(usize, jop.b) << 8) | jop.c;
+                    try emitFusedCmpBranch(a, c_op.opcode, jop.opcode == .jump_if_true, c_labels[t_pc]);
+                    c_skip = 1;
+                } else {
+                    reg_alias[c_op.a] = null;
+                    try emitCmpToBool(a, c_op.opcode);
+                    try a.movMemReg(.r12, @intCast((caller_regs + c_op.a) * 8), .rax);
+                }
+            },
+            .jeq_local_const_false,
+            .jlt_local_const_false,
+            .jle_local_const_false,
+            .jgt_local_const_false,
+            .jge_local_const_false,
+            => {
+                const c_bits = JSValue.fromNumber(tb.constants[c_op.b].number).bits;
+                const t_pc = c_ip + @as(usize, c_op.c);
+                try loadCalleeNumToXmm(self, &reg_alias, caller_regs, c_op.a, .xmm0, bail_lbl);
+                try a.movRegImm64(.rcx, c_bits);
+                try a.movqXmmReg(.xmm1, .rcx);
+                try emitFusedCmpBranch(a, switch (c_op.opcode) {
+                    .jeq_local_const_false => .eq_local_const,
+                    .jlt_local_const_false => .lt_local_const,
+                    .jle_local_const_false => .le_local_const,
+                    .jgt_local_const_false => .gt_local_const,
+                    .jge_local_const_false => .ge_local_const,
+                    else => unreachable,
+                }, false, c_labels[t_pc]);
+            },
+            .not => {
+                if (reg_alias[c_op.b]) |cr| {
+                    if (cr < 64 and reg_to_xmm[cr] != null) return error.CannotCompile;
+                    _ = try emitSharedOp(a, tb, .{ .opcode = .not, .a = @intCast(caller_regs + c_op.a), .b = cr }, true, bail_lbl);
+                } else {
+                    _ = try emitSharedOp(a, tb, .{ .opcode = .not, .a = @intCast(caller_regs + c_op.a), .b = @intCast(caller_regs + c_op.b) }, true, bail_lbl);
+                }
+                reg_alias[c_op.a] = null;
+            },
+            .jump_if_false, .jump_if_true => {
+                const t_pc = (@as(usize, c_op.b) << 8) | c_op.c;
+                const cond_slot: u8 = if (reg_alias[c_op.a]) |cr| blk: {
+                    if (cr < 64 and reg_to_xmm[cr] != null) return error.CannotCompile;
+                    break :blk cr;
+                } else @intCast(caller_regs + c_op.a);
+                try emitCondJump(a, c_op.opcode == .jump_if_true, cond_slot, c_labels[t_pc], bail_lbl);
+            },
+            .jump => {
+                const t_pc = (@as(usize, c_op.b) << 8) | c_op.c;
+                try a.jmp(c_labels[t_pc]);
+            },
+            .return_value => {
+                try loadCalleeNumToXmm(self, &reg_alias, caller_regs, c_op.a, .xmm0, bail_lbl);
+                try a.jmp(inlined_done_lbl);
+            },
+            .return_undefined => {
+                try a.jmp(bail_lbl);
+            },
+            else => unreachable,
+        }
+    }
+
+    a.bindLabel(inlined_done_lbl);
+    try self.storeXmmToNum(op.a, .xmm0, bail_lbl);
+    if (self.live_r8_i32 != null and self.live_r8_i32.? != op.a) {
+        next_live_r8_i32.* = self.live_r8_i32;
+    }
+}
+
 pub noinline fn emitLoopOp(
     self: *OsrCompiler,
     idx: usize,
@@ -1534,7 +2294,7 @@ pub noinline fn emitLoopOp(
             try self.emitGetPropOrGlobal(ip, op, bail_lbl, next_live_r8_i32);
         },
         .call, .call_global => {
-            const is_intrinsic = op.opcode == .call and ((op.c < self.block.call_target_cache.len and isMathIntrinsicCall(&self.block.call_target_cache[op.c])) or self.prepass.char_code_at_str_reg[idx] != null);
+            const is_intrinsic = (op.opcode == .call and ((op.c < self.block.call_target_cache.len and isMathIntrinsicCall(&self.block.call_target_cache[op.c])) or self.prepass.char_code_at_str_reg[idx] != null)) or self.prepass.inlined_calls[idx];
             if (!is_intrinsic) {
                 self.cached_obj_ptrs = .{ null, null };
             }
