@@ -1869,12 +1869,12 @@ fn readDurationCompareOptions(self: *Interpreter, options: JSValue) anyerror!?zt
     if (v.tag() == .string) {
         if (relativeToHasTimeZoneAnnotation(v.asString().value.data))
             return .{ .zonedDateTime = try coerceZonedDateTime(self, self.gc_allocator, v, .constrain, .compatible, .reject) };
-        return .{ .plainDateTime = try coercePlainDateTime(self, v, .constrain) };
+        return .{ .plainDate = try coercePlainDate(self, v, .constrain) };
     }
     if (v.tag() == .object or v.tag() == .proxy) {
         return try relativeToZonedDateTimeFromObservedBag(self, v);
     }
-    return .{ .plainDateTime = try coercePlainDateTime(self, v, .constrain) };
+    return .{ .plainDate = try coercePlainDate(self, v, .constrain) };
 }
 
 fn durField(comptime field: []const u8) NativeFn {
@@ -2012,14 +2012,14 @@ fn readRelativeTo(self: *Interpreter, options: JSValue) anyerror!?ztemporal.Dura
     };
     if (v.tag() == .string) {
         // A bracket annotation without '=' is a time-zone annotation. A
-        // calendar annotation remains a PlainDateTime relativeTo.
+        // calendar annotation remains a PlainDate relativeTo.
         if (relativeToHasTimeZoneAnnotation(v.asString().value.data))
             return .{ .zonedDateTime = try coerceZonedDateTime(self, self.gc_allocator, v, .constrain, .compatible, .reject) };
-        return .{ .plainDateTime = try coercePlainDateTime(self, v, .constrain) };
+        return .{ .plainDate = try coercePlainDate(self, v, .constrain) };
     }
     // The shared selector observes a property bag incrementally, then chooses
-    // PlainDateTime or ZonedDateTime only after reading timeZone and year.
-    if (v.tag() == .object) {
+    // PlainDate or ZonedDateTime only after reading timeZone and year.
+    if (v.tag() == .object or v.tag() == .proxy) {
         return try relativeToZonedDateTimeFromObservedBag(self, v);
     }
     // temporal-argument-coercion.md: `relativeTo` accepts a string or
@@ -2030,7 +2030,7 @@ fn readRelativeTo(self: *Interpreter, options: JSValue) anyerror!?ztemporal.Dura
     // from an options object, not directly from `args`). Confirmed
     // against Node: `Duration.round({smallestUnit:"week", relativeTo:
     // "2024-01-01"})` and the property-bag form both work.
-    return .{ .plainDateTime = try coercePlainDateTime(self, v, .constrain) };
+    return .{ .plainDate = try coercePlainDate(self, v, .constrain) };
 }
 
 fn relativeToHasTimeZoneAnnotation(text: []const u8) bool {
@@ -2056,19 +2056,14 @@ fn relativeToZonedDateTimeFromObservedBag(self: *Interpreter, fields: JSValue) a
     const nanosecond = try observedTemporalIntegerField(self, fields, "nanosecond");
     const offset_value = try self.getProperty(fields, "offset");
     defer offset_value.deinit();
-    const offset = if (offset_value.tag() == .undefined) null else try self.toDisplayStringJS(self.gc_allocator, offset_value);
+    const offset = try zonedDateTimeOffsetFromValue(self, offset_value, true);
     defer if (offset) |text| self.gc_allocator.free(text);
     const second = try observedTemporalIntegerField(self, fields, "second");
     const time_zone_value = try self.getProperty(fields, "timeZone");
     defer time_zone_value.deinit();
     const year = try observedTemporalIntegerField(self, fields, "year");
     if (time_zone_value.tag() == .undefined) {
-        const plain_date_time = ztemporal.PlainDateTime.from(.{ .fields = .{
-            .year = year orelse return self.throwError(.type_error, "year is required", .{}),
-            .month = month,
-            .monthCode = month_code,
-            .day = day orelse return self.throwError(.type_error, "day is required", .{}),
-            .calendar = calendar,
+        _ = ztemporal.PlainTime.from(.{ .fields = .{
             .hour = hour orelse 0,
             .minute = minute orelse 0,
             .second = second orelse 0,
@@ -2076,7 +2071,14 @@ fn relativeToZonedDateTimeFromObservedBag(self: *Interpreter, fields: JSValue) a
             .microsecond = microsecond orelse 0,
             .nanosecond = nanosecond orelse 0,
         } }, .{ .overflow = .constrain }) catch |e| return temporalErr(self, e);
-        return .{ .plainDateTime = plain_date_time };
+        const plain_date = ztemporal.PlainDate.from(.{ .fields = .{
+            .year = year orelse return self.throwError(.type_error, "year is required", .{}),
+            .month = month,
+            .monthCode = month_code,
+            .day = day orelse return self.throwError(.type_error, "day is required", .{}),
+            .calendar = calendar,
+        } }, .{ .overflow = .constrain }) catch |e| return temporalErr(self, e);
+        return .{ .plainDate = plain_date };
     }
     const time_zone = try surfaceZoneArgument(self, time_zone_value);
     defer self.gc_allocator.free(time_zone);
@@ -2138,6 +2140,7 @@ fn readDurationRoundOptions(self: *Interpreter, options: JSValue, allocator: All
 
     var out: ztemporal.Duration.RoundOptions = .{
         .relativeTo = relative_to,
+        .hasLargestUnit = raw.largest_unit != null,
         .allocator = allocator,
         .io = ioHandle(),
     };
@@ -2763,8 +2766,10 @@ fn zonedDateTimeIntegerFromValue(self: *Interpreter, value: JSValue, key: []cons
 fn zonedDateTimeMonthCodeFromValue(self: *Interpreter, value: JSValue, strict_month_code: bool) anyerror!?[]u8 {
     if (value.tag() == .undefined) return null;
     const code = if (strict_month_code) blk: {
-        if (value.tag() != .string) return self.throwError(.type_error, "monthCode must be a string", .{});
-        break :blk try self.gc_allocator.dupe(u8, value.asString().value.data);
+        const primitive = try self.toPrimitive(value, .string);
+        defer primitive.deinit();
+        if (primitive.tag() != .string) return self.throwError(.type_error, "monthCode must be a string", .{});
+        break :blk try self.gc_allocator.dupe(u8, primitive.asString().value.data);
     } else try self.toDisplayStringJS(self.gc_allocator, value);
     errdefer self.gc_allocator.free(code);
     // Month-code syntax is checked before later field conversions. Its
@@ -2778,15 +2783,17 @@ fn zonedDateTimeMonthCodeFromValue(self: *Interpreter, value: JSValue, strict_mo
     return code;
 }
 
-/// Offset fields in a direct ZonedDateTime.from() property bag use ToString
-/// for objects, but reject primitive values other than strings.  The generic
-/// ToTemporalZonedDateTime paths used by compare()/equals() require a string
-/// outright.  Keep that distinction at this local coercion boundary.
+/// Offset fields in a ZonedDateTime property bag use ToPrimitive(..., string)
+/// for objects, but reject primitive values other than strings.
 fn zonedDateTimeOffsetFromValue(self: *Interpreter, value: JSValue, coerce_objects: bool) anyerror!?[]u8 {
     if (value.tag() == .undefined) return null;
     if (value.tag() == .string) return try self.gc_allocator.dupe(u8, value.asString().value.data);
-    if (coerce_objects and !Interpreter.isPrimitiveTag(value))
-        return try self.toDisplayStringJS(self.gc_allocator, value);
+    if (coerce_objects and !Interpreter.isPrimitiveTag(value)) {
+        const primitive = try self.toPrimitive(value, .string);
+        defer primitive.deinit();
+        if (primitive.tag() != .string) return self.throwError(.type_error, "Temporal offset must be a string", .{});
+        return try self.gc_allocator.dupe(u8, primitive.asString().value.data);
+    }
     return self.throwError(.type_error, "Temporal offset must be a string", .{});
 }
 
@@ -2886,7 +2893,7 @@ fn coerceZonedDateTime(self: *Interpreter, allocator: Allocator, v: JSValue, ove
     if (Interpreter.isPrimitiveTag(v)) return self.throwError(.type_error, "Temporal.ZonedDateTime.from requires a string or an object", .{});
     var raw = try readZonedDateTimeBagRaw(self, v);
     defer raw.deinit();
-    return zonedDateTimeFromRawBag(self, allocator, &raw, .{ .overflow = overflow, .disambiguation = disambiguation, .offset = offset_option }, false, false);
+    return zonedDateTimeFromRawBag(self, allocator, &raw, .{ .overflow = overflow, .disambiguation = disambiguation, .offset = offset_option }, false, true);
 }
 
 fn zonedDateTimeFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -3445,7 +3452,9 @@ fn surfaceString(self: *Interpreter, object: JSValue, key: []const u8) anyerror!
         const identifier = try calendarFromValue(self, value) orelse return null;
         return try self.gc_allocator.dupe(u8, identifier);
     }
-    if (std.mem.eql(u8, key, "offset") and value.tag() != .string) return self.throwError(.type_error, "Temporal offset must be a string", .{});
+    if (std.mem.eql(u8, key, "offset")) {
+        return try zonedDateTimeOffsetFromValue(self, value, true);
+    }
     if (std.mem.eql(u8, key, "timeZone")) return try surfaceZoneArgument(self, value);
     return try self.toDisplayStringJS(self.gc_allocator, value);
 }
@@ -3775,8 +3784,13 @@ fn surfaceZdtWith(ctx: *anyopaque, allocator: Allocator, receiver: JSValue, args
     if (zone.tag() != .undefined) return self.throwError(.type_error, "with forbids timeZone", .{});
     const fields = try surfaceFieldsMode(self, item, ztemporal.ZonedDateTime.Fields, true);
     defer freeSurfaceFields(self, fields);
-    _ = dt.with(allocator, ioHandle(), fields, .{}) catch |e| return temporalErr(self, e);
+    if ((dt.calendar == .iso8601 or (fields.era == null and fields.eraYear == null)) and fields.year == null and fields.month == null and fields.monthCode == null and fields.day == null and fields.hour == null and fields.minute == null and fields.second == null and fields.millisecond == null and fields.microsecond == null and fields.nanosecond == null and fields.offset == null) {
+        return self.throwError(.type_error, "Invalid or missing Temporal field", .{});
+    }
     const options = arg(args, 1);
+    if (options.tag() != .undefined and Interpreter.isPrimitiveTag(options))
+        _ = dt.with(allocator, ioHandle(), fields, .{}) catch |e| return temporalErr(self, e);
+    try surfaceOptions(self, options);
     const disambiguation = try surfaceEnum(self, options, "disambiguation", ztemporal.Disambiguation, .compatible);
     const offset = try surfaceEnum(self, options, "offset", ztemporal.OffsetOption, .prefer);
     const overflow = try surfaceEnum(self, options, "overflow", Overflow, .constrain);
