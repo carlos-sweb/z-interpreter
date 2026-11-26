@@ -2002,4 +2002,124 @@ test "baseline JIT FastIntAscii micro-optimizations: reverse loop bounds elision
     try std.testing.expectEqual(@as(f64, 120 * 53), res.asNumber());
 }
 
+test "baseline JIT Phase J2.5: OSR binary search i32 index elision, nested matmul hoisted arrays, and hash i32 mul/Math.imul fast paths" {
+    if (!comptime x64_asm.is_supported_host) return;
+    const Interpreter = @import("../interpreter.zig").Interpreter;
+
+    var allocating = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(std.testing.allocator, &allocating.writer);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+
+    const res = try interp.run(
+        \\// 1. Binary search with >> 1 and >>> 1, boundary indices (0, n-1), and not-found keys
+        \\function bsearchAll(n, queries) {
+        \\    var arr = new Array(n);
+        \\    for (var i = 0; i < n; i++) arr[i] = i * 3;
+        \\    var sum = 0;
+        \\    var misses = 0;
+        \\    for (var q = 0; q < queries; q++) {
+        \\        var isMiss = (q & 7) === 7;
+        \\        var key = isMiss ? (((q * 7919) % n) * 3 + 1) : (((q * 7919) % n) * 3);
+        \\        var lo = 0;
+        \\        var hi = n - 1;
+        \\        var found = -1;
+        \\        while (lo <= hi) {
+        \\            var mid = (q & 1) ? ((lo + hi) >>> 1) : ((lo + hi) >> 1);
+        \\            var v = arr[mid];
+        \\            if (v === key) {
+        \\                found = mid;
+        \\                break;
+        \\            } else if (v < key) {
+        \\                lo = mid + 1;
+        \\            } else {
+        \\                hi = mid - 1;
+        \\            }
+        \\        }
+        \\        if (found >= 0) sum += found;
+        \\        else misses++;
+        \\    }
+        \\    return sum * 1000 + misses;
+        \\}
+        \\var bsRes = bsearchAll(256, 400);
+        \\if ((bsRes % 1000) !== 50) throw new Error("bad bsearch misses: " + (bsRes % 1000));
+        \\
+        \\// 2. Matrix multiplication with 3 hoisted invariant arrays (a, b, c) and row offsets
+        \\function miniMatmul(n) {
+        \\    var nn = n * n;
+        \\    var a = new Array(nn);
+        \\    var b = new Array(nn);
+        \\    var c = new Array(nn);
+        \\    for (var i = 0; i < n; i++) {
+        \\        for (var j = 0; j < n; j++) {
+        \\            a[i * n + j] = (i + 1) * 2 + j;
+        \\            b[i * n + j] = (j + 1) * 3 - i;
+        \\            c[i * n + j] = 0.0;
+        \\        }
+        \\    }
+        \\    for (var i = 0; i < n; i++) {
+        \\        var row = i * n;
+        \\        for (var k = 0; k < n; k++) {
+        \\            var aik = a[row + k];
+        \\            var brow = k * n;
+        \\            for (var j = 0; j < n; j++) {
+        \\                c[row + j] += aik * b[brow + j];
+        \\            }
+        \\        }
+        \\    }
+        \\    var sum = 0;
+        \\    for (var i = 0; i < nn; i++) sum += c[i];
+        \\    return sum;
+        \\}
+        \\var mmRes = miniMatmul(12);
+        \\if (mmRes !== 426960) throw new Error("bad miniMatmul(12): " + mmRes);
+        \\
+        \\// 3. Hash with i32 * 33 + bitwise XOR/AND + Math.imul with 32-bit overflow and negatives
+        \\function imulRef(a, b) {
+        \\    var ah = (a >>> 16) & 0xffff;
+        \\    var al = a & 0xffff;
+        \\    var bh = (b >>> 16) & 0xffff;
+        \\    var bl = b & 0xffff;
+        \\    return ((al * bl) + (((ah * bl + al * bh) << 16) >>> 0)) | 0;
+        \\}
+        \\function hashAndImul(n) {
+        \\    var buf = new Array(n);
+        \\    for (var i = 0; i < n; i++) buf[i] = (i * 31 + 17) & 255;
+        \\    var h = 5381;
+        \\    var imulAcc = 0;
+        \\    for (var r = 0; r < 3; r++) {
+        \\        for (var i = 0; i < n; i++) {
+        \\            h = ((h * 33) ^ buf[i]) & 0x7fffffff;
+        \\            imulAcc = (imulAcc + Math.imul(h, -2654435761)) | 0;
+        \\        }
+        \\    }
+        \\    // Verify against chunked non-OSR reference (< 64 iterations per inner loop)
+        \\    var refH = 5381;
+        \\    var refAcc = 0;
+        \\    for (var r = 0; r < 3; r++) {
+        \\        for (var c = 0; c < n; c += 10) {
+        \\            for (var j = 0; j < 10; j++) {
+        \\                refH = ((refH * 33) ^ buf[c + j]) & 0x7fffffff;
+        \\                refAcc = (refAcc + imulRef(refH, -2654435761)) | 0;
+        \\            }
+        \\        }
+        \\    }
+        \\    // Verify Math.imul 32-bit wrap-around on large unsigned/negative numbers
+        \\    if (Math.imul(0xffffffff, 5) !== -5) throw new Error("bad imul(-1, 5)");
+        \\    if (Math.imul(0x7fffffff, 2) !== -2) throw new Error("bad imul(INT_MAX, 2)");
+        \\    if (h !== refH) throw new Error("bad h: " + h + " vs " + refH);
+        \\    if (imulAcc !== refAcc) throw new Error("bad imulAcc: " + imulAcc + " vs " + refAcc);
+        \\    return (h ^ imulAcc) | 0;
+        \\}
+        \\var hRes = hashAndImul(300);
+        \\if (hRes === 0) throw new Error("unexpected zero hashAndImul");
+        \\1;
+    );
+    defer res.deinit();
+    try std.testing.expect(res.isNumber());
+    try std.testing.expectEqual(@as(f64, 1), res.asNumber());
+}
+
+
 

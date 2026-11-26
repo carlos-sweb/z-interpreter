@@ -88,7 +88,7 @@ fn mathBinary(comptime f: fn (f64, f64) f64) NativeFn {
 }
 
 const mathAtan2 = mathBinary(zmath.atan2);
-const mathImul = mathBinary(zmath.imul);
+pub const mathImul = mathBinary(zmath.imul);
 
 fn mathVariadic(ctx: *anyopaque, allocator: Allocator, args: []const JSValue, comptime f: fn ([]const f64) f64) anyerror!JSValue {
     const self = interp(ctx);

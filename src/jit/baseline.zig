@@ -25,6 +25,7 @@ const compileFastSelfRec = @import("whole_fn.zig").compileFastSelfRec;
 const compileImpl = @import("whole_fn.zig").compileImpl;
 const canCompileFastIntAscii = @import("fast_int_ascii.zig").canCompileFastIntAscii;
 const isMathSqrtCall = @import("osr_analysis.zig").isMathSqrtCall;
+const isMathImulCall = @import("osr_analysis.zig").isMathImulCall;
 const OsrPrePass = @import("osr_analysis.zig").OsrPrePass;
 const analyzeOsrLoop = @import("osr_analysis.zig").analyzeOsrLoop;
 const OsrCompiler = @import("osr_emit.zig").OsrCompiler;
@@ -202,7 +203,7 @@ pub noinline fn canCompileOsr(block: *const codeblock.CodeBlock, start_ip: usize
                 if (op.c >= block.call_target_cache.len) return false;
                 const cs = &block.call_target_cache[op.c];
                 if ((@as(usize, op.b) + 1 + cs.arg_count) > block.register_count) return false;
-                if (!isMathSqrtCall(cs) and findCharCodeAtGetProp(block, start_ip, end_ip, ip) == null) {
+                if (!isMathSqrtCall(cs) and !isMathImulCall(cs) and findCharCodeAtGetProp(block, start_ip, end_ip, ip) == null) {
                     if (cs.this_reg != null) return false;
                     const tb = cs.target_block orelse return false;
                     if (tb.param_count != cs.arg_count) return false;

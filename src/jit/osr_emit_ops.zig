@@ -45,6 +45,7 @@ const emitCmpToBool = @import("jit_common.zig").emitCmpToBool;
 const emitCondJump = @import("jit_common.zig").emitCondJump;
 const emitSharedOp = @import("jit_common.zig").emitSharedOp;
 const isMathSqrtCall = @import("osr_analysis.zig").isMathSqrtCall;
+const isMathImulCall = @import("osr_analysis.zig").isMathImulCall;
 const emitFlushPromoted = @import("osr_emit.zig").emitFlushPromoted;
 const emitReloadPromoted = @import("osr_emit.zig").emitReloadPromoted;
 const emitFlushCached = @import("osr_emit.zig").emitFlushCached;
@@ -945,6 +946,9 @@ pub noinline fn emitGetPropOrGlobal(
     if (cached_count > 0) {
         try emitFlushCached(a, cached_regs, cached_count);
     }
+    if (promoted.count > 0) {
+        try emitFlushPromoted(a, promoted);
+    }
     try a.movRegReg(.rdi, .r13);
     try a.movRegReg(.rsi, .r12);
     try a.movRegImm64(.rdx, packed_info);
@@ -954,15 +958,24 @@ pub noinline fn emitGetPropOrGlobal(
     if (cached_count > 0) {
         try emitReloadCached(a, cached_regs, cached_count);
     }
+    if (promoted.count > 0) {
+        try emitReloadPromoted(a, promoted);
+    }
     if (self.cached_obj_ptrs[0] != null) try a.xorReg32Reg32(.r10, .r10);
     if (self.cached_obj_ptrs[1] != null) try a.xorReg32Reg32(.r11, .r11);
+    if (self.live_r8_i32 != null and !dst_cached and !forward_xmm3) {
+        try self.loadNumToXmm(self.live_r8_i32.?, .xmm0, bail_lbl);
+        try a.cvttsd2siReg32Xmm(.r8, .xmm0);
+    }
     try a.movzxReg64Reg8(.rax, .rax);
     try a.testRegReg(.rax, .rax);
     try a.jcc(.ne, bail_lbl);
     if (dst_cached) {
+        const xmm_dst = reg_to_xmm[op.a].?;
         try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.a) * 8));
         try a.cmpRegReg(.rax, .r15);
         try a.jcc(.ae, bail_lbl);
+        try a.movqXmmReg(xmm_dst, .rax);
         if (keep_prev_xmm3) {
             try a.movsdXmmMem(.xmm3, .r12, @intCast(@as(usize, self.live_xmm3_reg.?) * 8));
         }
@@ -973,6 +986,9 @@ pub noinline fn emitGetPropOrGlobal(
         try a.movqXmmReg(.xmm3, .rax);
     }
     a.bindLabel(done_lbl);
+    if (self.live_r8_i32 != null and self.live_r8_i32.? != op.a) {
+        next_live_r8_i32.* = self.live_r8_i32;
+    }
     if (forward_xmm3) {
         self.next_live_xmm3 = op.a;
     } else if (keep_prev_xmm3) {
@@ -1079,6 +1095,131 @@ pub noinline fn emitCallOp(
         try a.sqrtsd(.xmm0, .xmm0);
         try self.storeXmmToNum(op.a, .xmm0, bail_lbl);
         if (self.live_r8_i32 != null and self.live_r8_i32.? != op.a) next_live_r8_i32.* = self.live_r8_i32;
+        return;
+    }
+
+    if (op.opcode == .call and isMathImulCall(cs)) {
+        const expected_callee = cs.callee orelse return error.CannotCompile;
+        try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.b) * 8));
+        try a.movRegImm64(.rcx, expected_callee.bits);
+        try a.cmpRegReg(.rax, .rcx);
+        try a.jcc(.ne, bail_lbl);
+
+        const arg0_reg: u8 = op.b + 1;
+        const arg1_reg: u8 = op.b + 2;
+        const arg0_ok_lbl = try a.createLabel();
+        const arg1_ok_lbl = try a.createLabel();
+        const cached_regs = &self.analysis.cached_regs;
+        const cached_count = self.analysis.cached_count;
+        const promoted = &self.analysis.promoted;
+
+        if (arg0_reg < 64 and self.reg_is_int32[arg0_reg]) {
+            try self.loadNumToXmm(arg0_reg, .xmm0, bail_lbl);
+            try a.cvttsd2siReg32Xmm(.rax, .xmm0);
+        } else {
+            try self.loadNumToXmm(arg0_reg, .xmm0, bail_lbl);
+            try a.cvttsd2siqReg64Xmm(.rax, .xmm0);
+            try a.movRegImm64(.rdx, 0x8000_0000_0000_0000);
+            try a.cmpRegReg(.rax, .rdx);
+            try a.jcc(.ne, arg0_ok_lbl);
+            try a.movqRegXmm(.rdi, .xmm0);
+            if (cached_count > 0) try emitFlushCached(a, cached_regs, cached_count);
+            if (promoted.count > 0) try emitFlushPromoted(a, promoted);
+            try a.movRegImm64(.rax, @intFromPtr(&vm.jitF64ToInt32));
+            try a.callReg(.rax);
+            if (cached_count > 0) try emitReloadCached(a, cached_regs, cached_count);
+            if (promoted.count > 0) try emitReloadPromoted(a, promoted);
+            if (self.cached_obj_ptrs[0] != null) try a.xorReg32Reg32(.r10, .r10);
+            if (self.cached_obj_ptrs[1] != null) try a.xorReg32Reg32(.r11, .r11);
+            a.bindLabel(arg0_ok_lbl);
+        }
+
+        if (arg1_reg < 64 and self.reg_is_int32[arg1_reg]) {
+            try a.movReg32Reg32(.rcx, .rax);
+            try self.loadNumToXmm(arg1_reg, .xmm1, bail_lbl);
+            try a.movReg32Reg32(.rax, .rcx);
+            try a.cvttsd2siReg32Xmm(.rcx, .xmm1);
+        } else {
+            try a.movReg32Reg32(.rcx, .rax);
+            try self.loadNumToXmm(arg1_reg, .xmm1, bail_lbl);
+            try a.movReg32Reg32(.rax, .rcx);
+            try a.cvttsd2siqReg64Xmm(.rcx, .xmm1);
+            try a.movRegImm64(.rdx, 0x8000_0000_0000_0000);
+            try a.cmpRegReg(.rcx, .rdx);
+            try a.jcc(.ne, arg1_ok_lbl);
+
+            try a.pushReg(.rax);
+            try a.subRegImm32(.rsp, 8);
+            try a.movqRegXmm(.rdi, .xmm1);
+            if (cached_count > 0) try emitFlushCached(a, cached_regs, cached_count);
+            if (promoted.count > 0) try emitFlushPromoted(a, promoted);
+            try a.movRegImm64(.rax, @intFromPtr(&vm.jitF64ToInt32));
+            try a.callReg(.rax);
+            if (cached_count > 0) try emitReloadCached(a, cached_regs, cached_count);
+            if (promoted.count > 0) try emitReloadPromoted(a, promoted);
+            if (self.cached_obj_ptrs[0] != null) try a.xorReg32Reg32(.r10, .r10);
+            if (self.cached_obj_ptrs[1] != null) try a.xorReg32Reg32(.r11, .r11);
+            try a.movReg32Reg32(.rcx, .rax);
+            try a.addRegImm32(.rsp, 8);
+            try a.popReg(.rax);
+            a.bindLabel(arg1_ok_lbl);
+        }
+
+        try a.imulReg32Reg32(.rax, .rcx);
+        try a.movReg32Reg32(.r8, .rax);
+        try a.cvtsi2sdXmmReg32(.xmm0, .rax);
+        if (op.a < 64 and reg_to_xmm[op.a] != null) {
+            try self.storeXmmToNum(op.a, .xmm0, bail_lbl);
+        } else {
+            const write_imul_lbl = try a.createLabel();
+            const heap_imul_lbl = try a.createLabel();
+            const deinit_imul_lbl = try a.createLabel();
+
+            try a.movRegMem(.rax, .r12, @intCast(@as(usize, op.a) * 8));
+            try a.cmpRegReg(.rax, .r14);
+            try a.jcc(.ae, heap_imul_lbl);
+            try a.jmp(write_imul_lbl);
+
+            a.bindLabel(heap_imul_lbl);
+            try a.movRegReg(.rcx, .rax);
+            try a.shrRegImm8(.rcx, 47);
+            try a.cmpRegImm32(.rcx, HEADER_FUNCTION);
+            try a.jcc(.ne, deinit_imul_lbl);
+
+            try a.movRegImm64(.rcx, JSValue.PTR_MASK);
+            try a.andRegReg(.rcx, .rax);
+            const rc_off: i32 = @intCast(@offsetOf(zvalue.Rc(zvalue.Callable), "_count"));
+            try a.movRegMem(.rdx, .rcx, rc_off);
+            try a.cmpRegImm32(.rdx, 1);
+            try a.jcc(.be, deinit_imul_lbl);
+            try a.subRegImm32(.rdx, 1);
+            try a.movMemReg(.rcx, rc_off, .rdx);
+            try a.jmp(write_imul_lbl);
+
+            a.bindLabel(deinit_imul_lbl);
+            try a.pushReg(.r8);
+            try a.subRegImm32(.rsp, 8);
+            try a.movsdMemXmm(.rsp, 0, .xmm0);
+            if (cached_count > 0) try emitFlushCached(a, cached_regs, cached_count);
+            if (promoted.count > 0) try emitFlushPromoted(a, promoted);
+            try a.lea(.rdi, .r12, @intCast(@as(usize, op.a) * 8));
+            try a.movRegImm64(.rax, @intFromPtr(&vm.jitDeinitSlot));
+            try a.callReg(.rax);
+            if (cached_count > 0) try emitReloadCached(a, cached_regs, cached_count);
+            if (promoted.count > 0) try emitReloadPromoted(a, promoted);
+            if (self.cached_obj_ptrs[0] != null) try a.xorReg32Reg32(.r10, .r10);
+            if (self.cached_obj_ptrs[1] != null) try a.xorReg32Reg32(.r11, .r11);
+            try a.movsdXmmMem(.xmm0, .rsp, 0);
+            try a.addRegImm32(.rsp, 8);
+            try a.popReg(.r8);
+
+            a.bindLabel(write_imul_lbl);
+            try a.movsdMemXmm(.r12, @intCast(@as(usize, op.a) * 8), .xmm0);
+            if (self.live_xmm3_reg != null and self.live_xmm3_reg.? != op.a) {
+                self.next_live_xmm3 = self.live_xmm3_reg;
+            }
+        }
+        if (op.a < 64) next_live_r8_i32.* = op.a;
         return;
     }
 
@@ -1313,7 +1454,7 @@ pub noinline fn emitLoopOp(
             try self.emitGetPropOrGlobal(ip, op, bail_lbl, next_live_r8_i32);
         },
         .call, .call_global => {
-            const is_intrinsic = op.opcode == .call and ((op.c < self.block.call_target_cache.len and isMathSqrtCall(&self.block.call_target_cache[op.c])) or self.prepass.char_code_at_str_reg[idx] != null);
+            const is_intrinsic = op.opcode == .call and ((op.c < self.block.call_target_cache.len and (isMathSqrtCall(&self.block.call_target_cache[op.c]) or isMathImulCall(&self.block.call_target_cache[op.c]))) or self.prepass.char_code_at_str_reg[idx] != null);
             if (!is_intrinsic) {
                 self.cached_obj_ptrs = .{ null, null };
             }

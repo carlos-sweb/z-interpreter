@@ -32,6 +32,7 @@ const arr_items_ptr_off = @import("jit_common.zig").arr_items_ptr_off;
 const arr_items_len_off = @import("jit_common.zig").arr_items_len_off;
 const constantName = @import("jit_common.zig").constantName;
 const isMathSqrtCall = @import("osr_analysis.zig").isMathSqrtCall;
+const isMathImulCall = @import("osr_analysis.zig").isMathImulCall;
 const PromotedPropsAnalysis = @import("osr_analysis.zig").PromotedPropsAnalysis;
 const MAX_HOISTED_ARRAYS = @import("osr_analysis.zig").MAX_HOISTED_ARRAYS;
 const HoistedElemKind = @import("osr_analysis.zig").HoistedElemKind;
@@ -840,6 +841,21 @@ pub const OsrCompiler = struct {
                 try a.xorpd(xmm_k, xmm_k);
                 a.bindLabel(done_lbl);
             }
+            for (0..cached_count) |k| {
+                const r = cached_regs[k];
+                if (r < 64 and (self.prepass.loop_safe_i32_mask & (@as(u64, 1) << @intCast(r))) != 0) {
+                    const xmm_k = @as(Xmm, @enumFromInt(4 + k));
+                    try a.cvttsd2siReg32Xmm(.rcx, xmm_k);
+                    try a.cvtsi2sdXmmReg32(.xmm1, .rcx);
+                    try a.ucomisd(xmm_k, .xmm1);
+                    try a.jcc(.p, preheader_bailout);
+                    try a.jcc(.ne, preheader_bailout);
+                    if ((self.prepass.loop_safe_u31_mask & (@as(u64, 1) << @intCast(r))) != 0) {
+                        try a.testReg32Reg32(.rcx, .rcx);
+                        try a.jcc(.s, preheader_bailout);
+                    }
+                }
+            }
         }
     }
 
@@ -854,9 +870,15 @@ pub const OsrCompiler = struct {
             self.cached_obj_ptrs = .{ null, null };
         }
         if (self.prepass.is_back_target[idx]) {
-            self.reg_is_int32 = @splat(false);
-            self.reg_is_uint31 = @splat(false);
-            self.reg_is_exact_idx = @splat(false);
+            for (0..64) |r_i| {
+                const r_bit = @as(u64, 1) << @intCast(r_i);
+                const is_cached = (self.analysis.reg_to_xmm[r_i] != null);
+                const safe_i32 = is_cached and ((self.prepass.loop_safe_i32_mask & r_bit) != 0);
+                const safe_u31 = safe_i32 and ((self.prepass.loop_safe_u31_mask & r_bit) != 0);
+                self.reg_is_int32[r_i] = safe_i32;
+                self.reg_is_uint31[r_i] = safe_u31;
+                self.reg_is_exact_idx[r_i] = safe_i32;
+            }
             self.last_elem_store = null;
         } else if (self.incoming_has_edge[idx]) {
             const prev_uncond_jump = idx > 0 and self.block.ops[self.start_ip + idx - 1].opcode == .jump;
@@ -1082,10 +1104,33 @@ pub const OsrCompiler = struct {
                         (ci >= -0x4000_0000 and ci <= 0x4000_0000)
                     else
                         false;
+                    const a_bit = @as(u64, 1) << @intCast(op.a);
+                    const safe_i32 = (self.analysis.reg_to_xmm[op.a] != null) and ((self.prepass.loop_safe_i32_mask & a_bit) != 0);
+                    const safe_u31 = safe_i32 and ((self.prepass.loop_safe_u31_mask & a_bit) != 0);
                     self.known_f64[op.a] = null;
-                    self.reg_is_int32[op.a] = false;
+                    self.reg_is_int32[op.a] = safe_i32;
+                    self.reg_is_uint31[op.a] = safe_u31;
+                    self.reg_is_exact_idx[op.a] = (base_i32 and small_c) or safe_i32;
+                }
+            },
+            .add, .add_num, .sub_num, .mul_num => {
+                self.invalidateKilledReg(op.a);
+                if (op.a < 64) {
+                    const is_exact_mul = (op.opcode == .mul_num and self.prepass.exact_int_mul_at[idx] and next_live_r8_i32 == op.a);
+                    self.known_f64[op.a] = null;
+                    self.reg_is_int32[op.a] = is_exact_mul;
                     self.reg_is_uint31[op.a] = false;
-                    self.reg_is_exact_idx[op.a] = base_i32 and small_c;
+                    self.reg_is_exact_idx[op.a] = is_exact_mul;
+                }
+            },
+            .call => {
+                self.invalidateKilledReg(op.a);
+                if (op.a < 64) {
+                    const is_imul = (op.c < block.call_target_cache.len and isMathImulCall(&block.call_target_cache[op.c]));
+                    self.known_f64[op.a] = null;
+                    self.reg_is_int32[op.a] = is_imul;
+                    self.reg_is_uint31[op.a] = false;
+                    self.reg_is_exact_idx[op.a] = is_imul;
                 }
             },
             .get_prop => {

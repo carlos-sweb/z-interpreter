@@ -162,6 +162,17 @@ pub noinline fn emitGetElem(
     }
     if (hoisted_slot != null and hoisted_arrs.dense[hoisted_slot.?]) {
         const h_slot = hoisted_slot.?;
+        const keep_prev_r8 = if (self.live_r8_i32) |prev_r8| blk: {
+            if (prev_r8 != op.c and prev_r8 != op.a and idx + 1 < self.loop_len and !self.prepass.is_jump_target[idx + 1]) {
+                const next_op = self.block.ops[self.start_ip + idx + 1];
+                break :blk switch (next_op.opcode) {
+                    .and_bits, .or_bits, .xor_bits, .shl, .shr, .ushr, .mul_num => (next_op.b == prev_r8 or next_op.c == prev_r8) and (next_op.b != op.c and next_op.c != op.c),
+                    else => false,
+                };
+            }
+            break :blk false;
+        } else false;
+
         if (self.live_r8_i32 != null and self.live_r8_i32.? == op.c) {
             try a.movReg32Reg32(.rcx, .r8);
         } else {
@@ -173,7 +184,9 @@ pub noinline fn emitGetElem(
                 try a.jcc(.p, bail_lbl);
                 try a.jcc(.ne, bail_lbl);
             }
-            try a.movReg32Reg32(.r8, .rcx);
+            if (!keep_prev_r8) {
+                try a.movReg32Reg32(.r8, .rcx);
+            }
         }
 
         const skip_bounds = (self.known_dense_valid_idx[h_slot] != null and self.known_dense_valid_idx[h_slot].? == op.c);
@@ -213,7 +226,9 @@ pub noinline fn emitGetElem(
             self.reg_is_uint31[op.c] = true;
             self.reg_is_exact_idx[op.c] = true;
             self.known_dense_valid_idx[h_slot] = op.c;
-            next_live_r8_i32.* = op.c;
+            next_live_r8_i32.* = if (keep_prev_r8) self.live_r8_i32 else op.c;
+        } else if (keep_prev_r8) {
+            next_live_r8_i32.* = self.live_r8_i32;
         }
         return;
     }
@@ -238,13 +253,18 @@ pub noinline fn emitGetElem(
     };
 
     // key = regs[op.c]; guard key < BASE_TAG and exact int32 >= 0
-    try emitLoadNumToXmm(a, reg_to_xmm, op.c, .xmm0, bail_lbl);
-    try a.cvttsd2siReg32Xmm(.rcx, .xmm0);
-    if (!(op.c < 64 and self.reg_is_int32[op.c])) {
-        try a.cvtsi2sdXmmReg32(.xmm1, .rcx);
-        try a.ucomisd(.xmm0, .xmm1);
-        try a.jcc(.p, bail_lbl);
-        try a.jcc(.ne, bail_lbl);
+    if (self.live_r8_i32 != null and self.live_r8_i32.? == op.c) {
+        try a.movReg32Reg32(.rcx, .r8);
+    } else {
+        try emitLoadNumToXmm(a, reg_to_xmm, op.c, .xmm0, bail_lbl);
+        try a.cvttsd2siReg32Xmm(.rcx, .xmm0);
+        if (!(op.c < 64 and (self.reg_is_int32[op.c] or self.reg_is_exact_idx[op.c]))) {
+            try a.cvtsi2sdXmmReg32(.xmm1, .rcx);
+            try a.ucomisd(.xmm0, .xmm1);
+            try a.jcc(.p, bail_lbl);
+            try a.jcc(.ne, bail_lbl);
+        }
+        try a.movReg32Reg32(.r8, .rcx);
     }
     if (!(op.c < 64 and self.reg_is_uint31[op.c])) {
         // sign check on 32-bit int: (rcx >> 31) == 0
@@ -591,13 +611,18 @@ pub noinline fn emitSetElem(
     }
 
     if (self.single_hoisted_arr != null and self.single_hoisted_arr.? == eff_arr and self.known_valid_elem_idx != null and self.known_valid_elem_idx.? == op.b) {
-        try emitLoadNumToXmm(a, reg_to_xmm, op.b, .xmm0, bail_lbl);
-        try a.cvttsd2siReg32Xmm(.rcx, .xmm0);
+        if (self.live_r8_i32 != null and self.live_r8_i32.? == op.b) {
+            try a.movReg32Reg32(.rcx, .r8);
+        } else {
+            try emitLoadNumToXmm(a, reg_to_xmm, op.b, .xmm0, bail_lbl);
+            try a.cvttsd2siReg32Xmm(.rcx, .xmm0);
+        }
         try a.movRegMem(.r11, .rbx, arr_items_ptr_off);
         try a.movRegMemIndexed8(.rdx, .r11, .rcx, 0);
         try a.cmpRegReg(.rdx, .r14);
         try a.jcc(.ae, bail_lbl);
         try a.movMemIndexed8Reg(.r11, .rcx, 0, .r10);
+        if (op.b < 64) next_live_r8_i32.* = op.b;
         return;
     }
 
@@ -631,13 +656,18 @@ pub noinline fn emitSetElem(
     };
 
     // key = regs[op.b]; guard key < BASE_TAG and exact int32 >= 0
-    try emitLoadNumToXmm(a, reg_to_xmm, op.b, .xmm0, bail_lbl);
-    try a.cvttsd2siReg32Xmm(.rcx, .xmm0);
-    if (!(op.b < 64 and self.reg_is_int32[op.b])) {
-        try a.cvtsi2sdXmmReg32(.xmm1, .rcx);
-        try a.ucomisd(.xmm0, .xmm1);
-        try a.jcc(.p, bail_lbl);
-        try a.jcc(.ne, bail_lbl);
+    if (self.live_r8_i32 != null and self.live_r8_i32.? == op.b) {
+        try a.movReg32Reg32(.rcx, .r8);
+    } else {
+        try emitLoadNumToXmm(a, reg_to_xmm, op.b, .xmm0, bail_lbl);
+        try a.cvttsd2siReg32Xmm(.rcx, .xmm0);
+        if (!(op.b < 64 and (self.reg_is_int32[op.b] or self.reg_is_exact_idx[op.b]))) {
+            try a.cvtsi2sdXmmReg32(.xmm1, .rcx);
+            try a.ucomisd(.xmm0, .xmm1);
+            try a.jcc(.p, bail_lbl);
+            try a.jcc(.ne, bail_lbl);
+        }
+        try a.movReg32Reg32(.r8, .rcx);
     }
     if (!(op.b < 64 and self.reg_is_uint31[op.b])) {
         try a.movRegReg(.rdx, .rcx);
@@ -826,6 +856,41 @@ pub noinline fn emitArithAndMod(
     const reg_to_xmm = &self.analysis.reg_to_xmm;
     switch (op.opcode) {
         .add, .add_num, .sub_num, .mul_num => {
+            if (op.opcode == .mul_num and self.prepass.exact_int_mul_at[idx]) {
+                const b_i32 = (op.b < 64 and self.reg_is_int32[op.b]);
+                const c_i32 = (op.c < 64 and self.reg_is_int32[op.c]);
+                if (b_i32 and c_i32) {
+                    const lhs_in_r8 = (self.live_r8_i32 != null and self.live_r8_i32.? == op.b);
+                    const rhs_in_r8 = (self.live_r8_i32 != null and self.live_r8_i32.? == op.c);
+                    if (lhs_in_r8) {
+                        try a.movReg32Reg32(.rax, .r8);
+                    } else {
+                        try self.loadNumToXmm(op.b, .xmm0, bail_lbl);
+                        try a.cvttsd2siReg32Xmm(.rax, .xmm0);
+                    }
+                    if (op.c < 64 and self.known_f64[op.c] != null and asExactInt32(self.known_f64[op.c].?) != null and asExactInt32(self.known_f64[op.c].?).? > 0) {
+                        const c_imm = asExactInt32(self.known_f64[op.c].?).?;
+                        try a.imulReg32Reg32Imm32(.rax, .rax, c_imm);
+                    } else if (rhs_in_r8) {
+                        try a.imulReg32Reg32(.rax, .r8);
+                    } else {
+                        try a.movReg32Reg32(.rcx, .rax);
+                        try self.loadNumToXmm(op.c, .xmm1, bail_lbl);
+                        try a.movReg32Reg32(.rax, .rcx);
+                        try a.cvttsd2siReg32Xmm(.rcx, .xmm1);
+                        try a.imulReg32Reg32(.rax, .rcx);
+                    }
+                    try a.movReg32Reg32(.r8, .rax);
+                    if (self.prepass.elided_mul_f64_store[idx]) {
+                        if (op.a < 64) next_live_r8_i32.* = op.a;
+                        return;
+                    }
+                    try a.cvtsi2sdXmmReg32(.xmm0, .rax);
+                    try self.storeXmmToNum(op.a, .xmm0, bail_lbl);
+                    if (op.a < 64) next_live_r8_i32.* = op.a;
+                    return;
+                }
+            }
             if (op.a < 64 and reg_to_xmm[op.a] != null and op.a == op.b) {
                 const xmm_a = reg_to_xmm[op.a].?;
                 try self.loadNumToXmm(op.c, .xmm1, bail_lbl);

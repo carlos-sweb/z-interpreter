@@ -411,6 +411,19 @@ pub const Assembler = struct {
         try self.emitByte(modRM(0b11, dst.low3(), src.low3()));
     }
 
+    pub noinline fn imulReg32Reg32Imm32(self: *Assembler, dst: Reg, src: Reg, imm: i32) !void {
+        try self.emitRex32(dst.isExt(), src.isExt());
+        if (imm >= -128 and imm <= 127) {
+            try self.emitByte(0x6B);
+            try self.emitByte(modRM(0b11, dst.low3(), src.low3()));
+            try self.emitByte(@bitCast(@as(i8, @intCast(imm))));
+        } else {
+            try self.emitByte(0x69);
+            try self.emitByte(modRM(0b11, dst.low3(), src.low3()));
+            try self.emitI32(imm);
+        }
+    }
+
     pub noinline fn addReg32Imm32(self: *Assembler, dst: Reg, imm: i32) !void {
         try self.emitRex32(false, dst.isExt());
         if (imm >= -128 and imm <= 127) {
@@ -624,6 +637,12 @@ pub const Assembler = struct {
         try self.emitByte(0x0F);
         try self.emitByte(0xB7);
         try self.emitMemOperand(dst.low3(), base, disp);
+    }
+
+    pub noinline fn movsxdReg64Reg32(self: *Assembler, dst: Reg, src: Reg) !void {
+        try self.emitByte(rexW(dst.isExt(), src.isExt()));
+        try self.emitByte(0x63);
+        try self.emitByte(modRM(0b11, dst.low3(), src.low3()));
     }
 
     pub noinline fn movReg32Mem(self: *Assembler, dst: Reg, base: Reg, disp: i32) !void {

@@ -20,6 +20,13 @@ pub fn isMathSqrtCall(cs: *const codeblock.CallSiteCache) bool {
     return callee.asFunction().value.call == math_builtins.mathSqrt;
 }
 
+pub fn isMathImulCall(cs: *const codeblock.CallSiteCache) bool {
+    if (cs.arg_count != 2) return false;
+    const callee = cs.callee orelse return false;
+    if (!callee.isFunction()) return false;
+    return callee.asFunction().value.call == math_builtins.mathImul;
+}
+
 pub const PromotedPropsAnalysis = struct {
     count: usize = 0,
     obj_reg: u8 = 0,
@@ -392,14 +399,14 @@ pub noinline fn computeBlockLiveOut(allocator: Allocator, block: *const codebloc
 pub fn opMayMutateMathSqrt(block: *const codeblock.CodeBlock, start_ip: usize, end_ip: usize, ip: usize, op: codeblock.Op) bool {
     return switch (op.opcode) {
         .call_global => true,
-        .call => (op.c >= block.call_target_cache.len or (!isMathSqrtCall(&block.call_target_cache[op.c]) and findCharCodeAtGetProp(block, start_ip, end_ip, ip) == null)),
+        .call => (op.c >= block.call_target_cache.len or (!isMathSqrtCall(&block.call_target_cache[op.c]) and !isMathImulCall(&block.call_target_cache[op.c]) and findCharCodeAtGetProp(block, start_ip, end_ip, ip) == null)),
         .store_global => blk: {
             const k = constantName(block, op.b) orelse break :blk true;
             break :blk std.mem.eql(u8, k, "Math");
         },
         .set_prop, .set_prop_transition => blk: {
             const k = constantName(block, op.b) orelse break :blk true;
-            break :blk (std.mem.eql(u8, k, "sqrt") or std.mem.eql(u8, k, "Math"));
+            break :blk (std.mem.eql(u8, k, "sqrt") or std.mem.eql(u8, k, "imul") or std.mem.eql(u8, k, "Math"));
         },
         else => false,
     };
@@ -408,7 +415,7 @@ pub fn opMayMutateMathSqrt(block: *const codeblock.CodeBlock, start_ip: usize, e
 pub fn opMayMutateStringCharCodeAt(block: *const codeblock.CodeBlock, start_ip: usize, end_ip: usize, ip: usize, op: codeblock.Op) bool {
     return switch (op.opcode) {
         .call_global => true,
-        .call => (op.c >= block.call_target_cache.len or (!isMathSqrtCall(&block.call_target_cache[op.c]) and findCharCodeAtGetProp(block, start_ip, end_ip, ip) == null)),
+        .call => (op.c >= block.call_target_cache.len or (!isMathSqrtCall(&block.call_target_cache[op.c]) and !isMathImulCall(&block.call_target_cache[op.c]) and findCharCodeAtGetProp(block, start_ip, end_ip, ip) == null)),
         .set_prop, .set_prop_transition => blk: {
             const k = constantName(block, op.b) orelse break :blk true;
             break :blk (std.mem.eql(u8, k, "charCodeAt") or std.mem.eql(u8, k, "prototype"));
@@ -430,7 +437,12 @@ pub const OsrPrePass = struct {
     elided_math_call: []bool,
     char_code_at_str_reg: []?u8,
     borrowed_str_arg_call: []bool,
+    exact_int_mul_at: []bool,
+    elided_mul_f64_store: []bool,
+    loop_safe_i32_mask: u64 = 0,
+    loop_safe_u31_mask: u64 = 0,
     math_sqrt_guard_bits: ?u64 = null,
+    math_imul_guard_bits: ?u64 = null,
     has_char_code_at_guard: bool = false,
 
     pub noinline fn init(allocator: Allocator, block: *const codeblock.CodeBlock, start_ip: usize, end_ip: usize) !OsrPrePass {
@@ -658,6 +670,14 @@ pub const OsrPrePass = struct {
         errdefer allocator.free(borrowed_str_arg_call);
         @memset(borrowed_str_arg_call, false);
 
+        const exact_int_mul_at = try allocator.alloc(bool, loop_len);
+        errdefer allocator.free(exact_int_mul_at);
+        @memset(exact_int_mul_at, false);
+
+        const elided_mul_f64_store = try allocator.alloc(bool, loop_len);
+        errdefer allocator.free(elided_mul_f64_store);
+        @memset(elided_mul_f64_store, false);
+
         return .{
             .live_out = live_out,
             .fused_cmps = fused_cmps,
@@ -671,6 +691,8 @@ pub const OsrPrePass = struct {
             .elided_math_call = elided_math_call,
             .char_code_at_str_reg = char_code_at_str_reg,
             .borrowed_str_arg_call = borrowed_str_arg_call,
+            .exact_int_mul_at = exact_int_mul_at,
+            .elided_mul_f64_store = elided_mul_f64_store,
         };
     }
 
@@ -687,6 +709,8 @@ pub const OsrPrePass = struct {
         allocator.free(self.elided_math_call);
         allocator.free(self.char_code_at_str_reg);
         allocator.free(self.borrowed_str_arg_call);
+        allocator.free(self.exact_int_mul_at);
+        allocator.free(self.elided_mul_f64_store);
     }
 
     pub noinline fn populateArrayElisions(
@@ -916,10 +940,17 @@ pub const OsrPrePass = struct {
             const call_op = block.ops[start_ip + call_idx];
             if (call_op.opcode != .call) continue;
             const cs = &block.call_target_cache[call_op.c];
-            if (!isMathSqrtCall(cs)) continue;
+            const is_sqrt = isMathSqrtCall(cs);
+            const is_imul = isMathImulCall(cs);
+            if (!is_sqrt and !is_imul) continue;
+            const expected_prop = if (is_sqrt) "sqrt" else "imul";
             const this_r = cs.this_reg orelse continue;
             const expected_bits = cs.callee.?.bits;
-            if (self.math_sqrt_guard_bits != null and self.math_sqrt_guard_bits.? != expected_bits) continue;
+            if (is_sqrt) {
+                if (self.math_sqrt_guard_bits != null and self.math_sqrt_guard_bits.? != expected_bits) continue;
+            } else {
+                if (self.math_imul_guard_bits != null and self.math_imul_guard_bits.? != expected_bits) continue;
+            }
 
             var found_gp: ?usize = null;
             var k = call_idx;
@@ -928,7 +959,7 @@ pub const OsrPrePass = struct {
                 const cand = block.ops[start_ip + k];
                 if (cand.opcode == .get_prop and cand.a == call_op.b and cand.b == this_r) {
                     const prop_name = constantName(block, cand.c) orelse break;
-                    if (std.mem.eql(u8, prop_name, "sqrt")) {
+                    if (std.mem.eql(u8, prop_name, expected_prop)) {
                         found_gp = k;
                     }
                     break;
@@ -998,13 +1029,15 @@ pub const OsrPrePass = struct {
                     if (jumps_contained and lg_op.opcode == .load_global and lg_op.a == this_r) {
                         const gname = constantName(block, lg_op.b) orelse "";
                         if (std.mem.eql(u8, gname, "Math")) {
-                            self.math_sqrt_guard_bits = expected_bits;
-                            self.elided_compound_op[lg_idx] = true;
-                            self.elided_compound_op[gp_idx] = true;
-                            self.elided_math_call[call_idx] = true;
-                            for (gp_idx + 1 .. call_idx + 1) |b_idx| {
-                                if (self.compound_span_start[b_idx] == null) {
-                                    self.compound_span_start[b_idx] = @intCast(start_ip + lg_idx);
+                            if (is_sqrt) {
+                                self.math_sqrt_guard_bits = expected_bits;
+                                self.elided_compound_op[lg_idx] = true;
+                                self.elided_compound_op[gp_idx] = true;
+                                self.elided_math_call[call_idx] = true;
+                                for (gp_idx + 1 .. call_idx + 1) |b_idx| {
+                                    if (self.compound_span_start[b_idx] == null) {
+                                        self.compound_span_start[b_idx] = @intCast(start_ip + lg_idx);
+                                    }
                                 }
                             }
                         }
@@ -1116,6 +1149,154 @@ pub const OsrPrePass = struct {
             }
         }
     }
+
+    pub noinline fn populateInt32AndMulAnalysis(
+        self: *OsrPrePass,
+        block: *const codeblock.CodeBlock,
+        start_ip: usize,
+        end_ip: usize,
+        hoisted_arrs: *const HoistedArrays,
+        frame_regs_opt: ?[]const JSValue,
+    ) void {
+        _ = hoisted_arrs;
+        const loop_len = end_ip - start_ip + 1;
+
+        // 1. Detect mul_num sites where both operands are exact i32 and the product fits in safe i32 (or is immediately consumed by a bitwise op and dead after)
+        var const_i32: [64]?i32 = @splat(null);
+        for (0..loop_len) |idx| {
+            if (self.is_jump_target[idx]) {
+                const_i32 = @splat(null);
+            }
+            if (self.elided_compound_op[idx]) continue;
+            const ip = start_ip + idx;
+            const op = block.ops[ip];
+            switch (op.opcode) {
+                .load_const => {
+                    if (op.a < 64) {
+                        const_i32[op.a] = if (block.constants[op.b] == .number) asExactInt32(block.constants[op.b].number) else null;
+                    }
+                },
+                .move, .load_local, .store_local => {
+                    if (op.a < 64) {
+                        const_i32[op.a] = if (op.b < 64) const_i32[op.b] else null;
+                    }
+                },
+                .mul_num => {
+                    if (op.a < 64) const_i32[op.a] = null;
+                    const rhs_c = if (op.c < 64) const_i32[op.c] else null;
+                    const lhs_c = if (op.b < 64) const_i32[op.b] else null;
+                    if ((rhs_c != null or lhs_c != null) and op.a >= block.local_count and op.a < 64 and idx + 1 < loop_len and !self.is_jump_target[idx + 1]) {
+                        const c_val = rhs_c orelse lhs_c.?;
+                        if (c_val > 0 and c_val <= 65536) {
+                            // Check if op.a is consumed only by an immediate bitwise op (or load_elem + bitwise op) and dead after
+                            var bit_consumer_idx: ?usize = null;
+                            const next1 = block.ops[ip + 1];
+                            switch (next1.opcode) {
+                                .and_bits, .or_bits, .xor_bits, .shl, .shr, .ushr => {
+                                    if (next1.b == op.a or next1.c == op.a) bit_consumer_idx = idx + 1;
+                                },
+                                .get_elem, .get_elem_const => {
+                                    if (next1.a != op.a and next1.b != op.a and (next1.opcode != .get_elem or next1.c != op.a) and
+                                        idx + 2 < loop_len and !self.is_jump_target[idx + 2])
+                                    {
+                                        const next2 = block.ops[ip + 2];
+                                        switch (next2.opcode) {
+                                            .and_bits, .or_bits, .xor_bits, .shl, .shr, .ushr => {
+                                                if (next2.b == op.a or next2.c == op.a) bit_consumer_idx = idx + 2;
+                                            },
+                                            else => {},
+                                        }
+                                    }
+                                },
+                                else => {},
+                            }
+                            if (bit_consumer_idx) |bc_idx| {
+                                if ((self.live_out[start_ip + bc_idx] & regBit64(op.a)) == 0) {
+                                    self.exact_int_mul_at[idx] = true;
+                                }
+                            }
+                        }
+                    }
+                },
+                else => {
+                    const ud = opUseDefMasks(block, op);
+                    if (ud.def != 0) {
+                        for (0..64) |r| {
+                            if ((ud.def & (@as(u64, 1) << @intCast(r))) != 0) const_i32[r] = null;
+                        }
+                    }
+                },
+            }
+        }
+
+        // 2. Compute loop-invariant exact i32 & u31 registers across back-edges:
+        //    Only registers that are NEVER written inside the loop (`~written_in_loop`)
+        //    AND are read before any write (`read_before_write_in_loop`) can be verified once in the preheader!
+        const fregs = frame_regs_opt orelse return;
+        var cand_i32: u64 = 0;
+        var cand_u31: u64 = 0;
+        const limit = @min(@min(block.register_count, 64), fregs.len);
+        for (0..limit) |r| {
+            if (fregs[r].isNumber()) {
+                if (asExactInt32(fregs[r].asNumber())) |iv| {
+                    if (iv >= -0x3FFF_FFFF and iv <= 0x3FFF_FFFF) {
+                        cand_i32 |= (@as(u64, 1) << @intCast(r));
+                        if (iv >= 0) cand_u31 |= (@as(u64, 1) << @intCast(r));
+                    }
+                }
+            }
+        }
+
+        var written_in_loop: u64 = 0;
+        for (0..loop_len) |idx| {
+            if (self.elided_compound_op[idx]) continue;
+            const ud = opUseDefMasks(block, block.ops[start_ip + idx]);
+            written_in_loop |= ud.def;
+        }
+        cand_i32 &= ~written_in_loop;
+        cand_u31 &= ~written_in_loop;
+
+        // Also include registers whose ONLY writes inside the loop are i32-producing bitwise ops (.and_bits, .or_bits, .xor_bits, .shl, .shr)
+        var non_bitwise_written: u64 = 0;
+        var non_u31_bitwise_written: u64 = 0;
+        for (0..loop_len) |idx| {
+            if (self.elided_compound_op[idx]) continue;
+            const ip = start_ip + idx;
+            const op = block.ops[ip];
+            const ud = opUseDefMasks(block, op);
+            if (ud.def == 0) continue;
+            switch (op.opcode) {
+                .not_bits, .or_bits, .xor_bits, .shl, .shr => {
+                    non_u31_bitwise_written |= ud.def;
+                },
+                .and_bits => {
+                    const rhs_nonneg_const = op.c < 64 and idx > 0 and block.ops[ip - 1].opcode == .load_const and block.ops[ip - 1].a == op.c and block.constants[block.ops[ip - 1].b] == .number and (if (asExactInt32(block.constants[block.ops[ip - 1].b].number)) |v| v >= 0 else false);
+                    if (!rhs_nonneg_const) {
+                        non_u31_bitwise_written |= ud.def;
+                    }
+                },
+                else => {
+                    non_bitwise_written |= ud.def;
+                    non_u31_bitwise_written |= ud.def;
+                },
+            }
+        }
+        for (0..limit) |r| {
+            const r_bit = @as(u64, 1) << @intCast(r);
+            if ((written_in_loop & r_bit) != 0 and (non_bitwise_written & r_bit) == 0) {
+                if (fregs[r].isNumber()) {
+                    if (asExactInt32(fregs[r].asNumber())) |iv| {
+                        cand_i32 |= r_bit;
+                        if (iv >= 0 and (non_u31_bitwise_written & r_bit) == 0) {
+                            cand_u31 |= r_bit;
+                        }
+                    }
+                }
+            }
+        }
+        self.loop_safe_i32_mask = cand_i32;
+        self.loop_safe_u31_mask = cand_u31;
+    }
 };
 
 pub noinline fn analyzeHoistedArrays(
@@ -1174,6 +1355,7 @@ pub noinline fn analyzeHoistedArrays(
                 if (op.c >= block.call_target_cache.len) return .{};
                 const cs = &block.call_target_cache[op.c];
                 const allowed = isMathSqrtCall(cs) or
+                    isMathImulCall(cs) or
                     findCharCodeAtGetProp(block, start_ip, end_ip, ip) != null or
                     (cs.this_reg == null and cs.target_block != null);
                 if (!allowed) return .{};
@@ -1440,7 +1622,7 @@ pub noinline fn analyzeOsrLoop(
                     break;
                 }
                 const cs = &block.call_target_cache[op.c];
-                if (!isMathSqrtCall(cs) and findCharCodeAtGetProp(block, start_ip, end_ip, ip) == null) {
+                if (!isMathSqrtCall(cs) and !isMathImulCall(cs) and findCharCodeAtGetProp(block, start_ip, end_ip, ip) == null) {
                     const is_pure_leaf = (cs.this_reg == null and cs.target_block != null and cs.target_block.?.jit_pure_leaf);
                     if (!is_pure_leaf) {
                         is_pure_loop = false;
@@ -1487,6 +1669,7 @@ pub noinline fn analyzeOsrLoop(
     prepass.populateMathSqrtElisions(block, start_ip, end_ip);
     prepass.populateCharCodeAtElisions(block, start_ip, end_ip);
     prepass.populateBorrowedStrArgElisions(block, start_ip, end_ip, &hoisted_arrs);
+    prepass.populateInt32AndMulAnalysis(block, start_ip, end_ip, &hoisted_arrs, frame_regs_opt);
 
     var invalid: [64]bool = @splat(false);
     var written: [64]bool = @splat(false);
@@ -1551,8 +1734,12 @@ pub noinline fn analyzeOsrLoop(
                     use_count[op.c] +%= w;
                 }
                 if (op.a < 64) {
-                    use_count[op.a] +%= w;
-                    written[op.a] = true;
+                    if (op.opcode == .mul_num and prepass.elided_mul_f64_store[idx]) {
+                        invalid[op.a] = true;
+                    } else {
+                        use_count[op.a] +%= w;
+                        written[op.a] = true;
+                    }
                 }
             },
             .add_local_const, .sub_local_const => {
@@ -1713,6 +1900,19 @@ pub noinline fn analyzeOsrLoop(
                             written[op.a] = true;
                         }
                     }
+                } else if (isMathImulCall(cs)) {
+                    const arg0_reg: usize = @as(usize, op.b) + 1;
+                    const arg1_reg: usize = @as(usize, op.b) + 2;
+                    if (arg0_reg < 64) {
+                        if (!written[arg0_reg]) read_before_written[arg0_reg] = true;
+                        use_count[arg0_reg] +%= w;
+                    }
+                    if (arg1_reg < 64) {
+                        if (!written[arg1_reg]) read_before_written[arg1_reg] = true;
+                        use_count[arg1_reg] +%= w;
+                    }
+                    if (op.b < 64) invalid[op.b] = true;
+                    if (op.a < 64) invalid[op.a] = true;
                 } else {
                     if (op.b < 64) invalid[op.b] = true;
                     if (op.a < 64) invalid[op.a] = true;
