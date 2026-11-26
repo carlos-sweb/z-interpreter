@@ -26,6 +26,7 @@ const compileImpl = @import("whole_fn.zig").compileImpl;
 const canCompileFastIntAscii = @import("fast_int_ascii.zig").canCompileFastIntAscii;
 const isMathSqrtCall = @import("osr_analysis.zig").isMathSqrtCall;
 const isMathImulCall = @import("osr_analysis.zig").isMathImulCall;
+const isMathIntrinsicCall = @import("osr_analysis.zig").isMathIntrinsicCall;
 const OsrPrePass = @import("osr_analysis.zig").OsrPrePass;
 const analyzeOsrLoop = @import("osr_analysis.zig").analyzeOsrLoop;
 const OsrCompiler = @import("osr_emit.zig").OsrCompiler;
@@ -203,7 +204,7 @@ pub noinline fn canCompileOsr(block: *const codeblock.CodeBlock, start_ip: usize
                 if (op.c >= block.call_target_cache.len) return false;
                 const cs = &block.call_target_cache[op.c];
                 if ((@as(usize, op.b) + 1 + cs.arg_count) > block.register_count) return false;
-                if (!isMathSqrtCall(cs) and !isMathImulCall(cs) and findCharCodeAtGetProp(block, start_ip, end_ip, ip) == null) {
+                if (!isMathIntrinsicCall(cs) and findCharCodeAtGetProp(block, start_ip, end_ip, ip) == null) {
                     if (cs.this_reg != null) return false;
                     const tb = cs.target_block orelse return false;
                     if (tb.param_count != cs.arg_count) return false;
@@ -248,8 +249,10 @@ pub noinline fn compileOsr(allocator: Allocator, block: *codeblock.CodeBlock, en
     }
 
     var osr_prop_ics: ?[]codeblock.OsrPropIC = null;
-    const exec = compileOsrImpl(allocator, block, start_ip, end_ip, prop_ic_ptr, frame_regs_opt, &osr_prop_ics) catch {
+    var osr_global_slots: ?[]JitGlobalSlot = null;
+    const exec = compileOsrImpl(allocator, block, start_ip, end_ip, prop_ic_ptr, frame_regs_opt, &osr_prop_ics, &osr_global_slots) catch {
         if (osr_prop_ics) |pics| allocator.free(pics);
+        if (osr_global_slots) |gslots| allocator.free(gslots);
         entry.failed = true;
         return false;
     };
@@ -258,6 +261,7 @@ pub noinline fn compileOsr(allocator: Allocator, block: *codeblock.CodeBlock, en
     entry.code = exec;
     entry.fn_ptr = @ptrCast(exec.ptr);
     entry.prop_ics = osr_prop_ics;
+    entry.global_slots = osr_global_slots;
     return true;
 }
 
@@ -269,6 +273,7 @@ pub noinline fn compileOsrImpl(
     prop_ic_ptr: ?*const anyopaque,
     frame_regs_opt: ?[]const JSValue,
     out_osr_prop_ics: *?[]codeblock.OsrPropIC,
+    out_osr_global_slots: *?[]JitGlobalSlot,
 ) ![]align(std.heap.page_size_min) u8 {
     const prop_ic: ?*const [256]PropIC = if (prop_ic_ptr) |p| @ptrCast(@alignCast(p)) else null;
 
@@ -295,6 +300,34 @@ pub noinline fn compileOsrImpl(
         break :blk s;
     } else null;
     out_osr_prop_ics.* = osr_ics;
+
+    var global_site_count: usize = 0;
+    for (0..loop_len) |idx| {
+        if (prepass.elided_compound_op[idx]) continue;
+        if (block.ops[start_ip + idx].opcode == .load_global) {
+            global_site_count += 1;
+        }
+    }
+    const osr_gslots: ?[]JitGlobalSlot = if (global_site_count > 0) blk: {
+        const gs = try allocator.alloc(JitGlobalSlot, global_site_count);
+        @memset(gs, .{});
+        break :blk gs;
+    } else null;
+    out_osr_global_slots.* = osr_gslots;
+
+    const global_slot_addrs = try allocator.alloc(u64, loop_len);
+    defer allocator.free(global_slot_addrs);
+    @memset(global_slot_addrs, 0);
+    if (osr_gslots) |gslots| {
+        var g_k: usize = 0;
+        for (0..loop_len) |idx| {
+            if (prepass.elided_compound_op[idx]) continue;
+            if (block.ops[start_ip + idx].opcode == .load_global) {
+                global_slot_addrs[idx] = @intFromPtr(&gslots[g_k]);
+                g_k += 1;
+            }
+        }
+    }
 
     const prop_ic_addrs = try allocator.alloc(u64, loop_len);
     defer allocator.free(prop_ic_addrs);
@@ -388,6 +421,7 @@ pub noinline fn compileOsrImpl(
         .prop_ic = prop_ic,
         .prop_ic_addrs = prop_ic_addrs,
         .prop_ics_init = prop_ics_init,
+        .global_slot_addrs = global_slot_addrs,
         .prepass = &prepass,
         .analysis = analysis,
         .single_hoisted_arr = if (hoisted_arrs.count == 1 and !hoisted_arrs.kinds[0].isTypedArray()) hoisted_arrs.regs[0] else null,

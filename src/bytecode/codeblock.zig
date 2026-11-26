@@ -175,6 +175,7 @@ pub const OsrEntry = struct {
     code: ?[]align(std.heap.page_size_min) u8 = null,
     fn_ptr: ?OsrFn = null,
     prop_ics: ?[]OsrPropIC = null,
+    global_slots: ?[]JitGlobalSlot = null,
 };
 
 /// Immutable representation emitted by a later compiler pass.
@@ -216,6 +217,10 @@ pub const CodeBlock = struct {
             if (entry.prop_ics) |pics| {
                 allocator.free(pics);
                 entry.prop_ics = null;
+            }
+            if (entry.global_slots) |gslots| {
+                allocator.free(gslots);
+                entry.global_slots = null;
             }
         }
         if (self.jit_global_slots) |slots| {

@@ -31,8 +31,11 @@ const ArrayBox = @import("jit_common.zig").ArrayBox;
 const arr_items_ptr_off = @import("jit_common.zig").arr_items_ptr_off;
 const arr_items_len_off = @import("jit_common.zig").arr_items_len_off;
 const constantName = @import("jit_common.zig").constantName;
+const jitCheckMathIntrinsic = @import("jit_common.zig").jitCheckMathIntrinsic;
 const isMathSqrtCall = @import("osr_analysis.zig").isMathSqrtCall;
 const isMathImulCall = @import("osr_analysis.zig").isMathImulCall;
+const isMathIntrinsicCall = @import("osr_analysis.zig").isMathIntrinsicCall;
+const classifyMathIntrinsicCall = @import("osr_analysis.zig").classifyMathIntrinsicCall;
 const PromotedPropsAnalysis = @import("osr_analysis.zig").PromotedPropsAnalysis;
 const MAX_HOISTED_ARRAYS = @import("osr_analysis.zig").MAX_HOISTED_ARRAYS;
 const HoistedElemKind = @import("osr_analysis.zig").HoistedElemKind;
@@ -257,6 +260,92 @@ pub noinline fn emitStoreBoxedValToUncached(
     a.bindLabel(done_val_lbl);
 }
 
+pub noinline fn emitStoreSlotValOrSlow(
+    a: *Assembler,
+    slot_base: x64_asm.Reg,
+    slot_disp: i32,
+    new_val_reg: x64_asm.Reg,
+    slow_lbl: Label,
+) !void {
+    const old_is_rc_lbl = try a.createLabel();
+    const old_ok_lbl = try a.createLabel();
+    const new_is_rc_lbl = try a.createLabel();
+    const new_ok_lbl = try a.createLabel();
+    const write_slot_lbl = try a.createLabel();
+    const done_lbl = try a.createLabel();
+
+    if (new_val_reg != .rsi) {
+        try a.movRegReg(.rsi, new_val_reg);
+    }
+    try a.movRegMem(.rax, slot_base, slot_disp);
+    try a.cmpRegReg(.rsi, .rax);
+    try a.jcc(.e, done_lbl);
+
+    try a.xorReg32Reg32(.rdi, .rdi);
+    try a.cmpRegReg(.rax, .r14); // %r14 = HEAP_BASE
+    try a.jcc(.b, old_ok_lbl);
+
+    try a.movRegReg(.rcx, .rax);
+    try a.shrRegImm8(.rcx, 47);
+    try a.cmpRegImm32(.rcx, @intCast(HEADER_OBJECT));
+    try a.jcc(.e, old_is_rc_lbl);
+    try a.cmpRegImm32(.rcx, HEADER_ARRAY);
+    try a.jcc(.e, old_is_rc_lbl);
+    try a.cmpRegImm32(.rcx, HEADER_FUNCTION);
+    try a.jcc(.e, old_is_rc_lbl);
+    try a.cmpRegImm32(.rcx, HEADER_STRING);
+    try a.jcc(.e, old_is_rc_lbl);
+    try a.movRegImm64(.rcx, JSValue.TAG15_MASK);
+    try a.andRegReg(.rcx, .rax);
+    try a.movRegImm64(.rdi, HEADER_TYPED_ARRAY_BITS);
+    try a.cmpRegReg(.rcx, .rdi);
+    try a.jcc(.ne, slow_lbl);
+
+    a.bindLabel(old_is_rc_lbl);
+    try a.movRegImm64(.rdi, JSValue.PTR_MASK);
+    try a.andRegReg(.rdi, .rax);
+    try a.movRegMem(.rcx, .rdi, 0);
+    try a.cmpRegImm32(.rcx, 1);
+    try a.jcc(.be, slow_lbl);
+
+    a.bindLabel(old_ok_lbl);
+    try a.cmpRegReg(.rsi, .r14); // %r14 = HEAP_BASE
+    try a.jcc(.b, new_ok_lbl);
+
+    try a.movRegReg(.rcx, .rsi);
+    try a.shrRegImm8(.rcx, 47);
+    try a.cmpRegImm32(.rcx, @intCast(HEADER_OBJECT));
+    try a.jcc(.e, new_is_rc_lbl);
+    try a.cmpRegImm32(.rcx, HEADER_ARRAY);
+    try a.jcc(.e, new_is_rc_lbl);
+    try a.cmpRegImm32(.rcx, HEADER_FUNCTION);
+    try a.jcc(.e, new_is_rc_lbl);
+    try a.cmpRegImm32(.rcx, HEADER_STRING);
+    try a.jcc(.e, new_is_rc_lbl);
+    try a.movRegImm64(.rcx, JSValue.TAG15_MASK);
+    try a.andRegReg(.rcx, .rsi);
+    try a.movRegImm64(.rax, HEADER_TYPED_ARRAY_BITS);
+    try a.cmpRegReg(.rcx, .rax);
+    try a.jcc(.ne, slow_lbl);
+
+    a.bindLabel(new_is_rc_lbl);
+    try a.movRegImm64(.rcx, JSValue.PTR_MASK);
+    try a.andRegReg(.rcx, .rsi);
+    try a.incMem64(.rcx, 0);
+
+    a.bindLabel(new_ok_lbl);
+    try a.testRegReg(.rdi, .rdi);
+    try a.jcc(.e, write_slot_lbl);
+    try a.movRegMem(.rcx, .rdi, 0);
+    try a.decReg64(.rcx);
+    try a.movMemReg(.rdi, 0, .rcx);
+
+    a.bindLabel(write_slot_lbl);
+    try a.movMemReg(slot_base, slot_disp, .rsi);
+
+    a.bindLabel(done_lbl);
+}
+
 pub fn isNextOpNumericConsumer(
     block: *const codeblock.CodeBlock,
     start_ip: usize,
@@ -283,7 +372,7 @@ pub fn isNextOpNumericConsumer(
                 if (scan_op.b == reg) return true;
                 if (scan_op.a == reg or scan_op.a >= 64 or reg_to_xmm[scan_op.a] == null) return false;
             },
-            .get_prop, .load_const => {
+            .get_prop, .load_const, .load_global => {
                 if (scan_op.a == reg or scan_op.a >= 64 or reg_to_xmm[scan_op.a] == null) return false;
             },
             else => return false,
@@ -426,6 +515,7 @@ pub const OsrCompiler = struct {
     prop_ic: ?*const [256]PropIC,
     prop_ic_addrs: []const u64,
     prop_ics_init: []const codeblock.OsrPropIC,
+    global_slot_addrs: []const u64,
     prepass: *const OsrPrePass,
     analysis: OsrCachedAnalysis,
     single_hoisted_arr: ?u8,
@@ -599,7 +689,7 @@ pub const OsrCompiler = struct {
                     }
                 },
                 .call => {
-                    if ((ck.c < self.block.call_target_cache.len and isMathSqrtCall(&self.block.call_target_cache[ck.c])) or self.prepass.char_code_at_str_reg[k] != null) {
+                    if ((ck.c < self.block.call_target_cache.len and isMathIntrinsicCall(&self.block.call_target_cache[ck.c])) or self.prepass.char_code_at_str_reg[k] != null) {
                         if (ck.a == eff_obj) break;
                         if (ck.a < 64) {
                             scan_copy_src[ck.a] = null;
@@ -675,13 +765,25 @@ pub const OsrCompiler = struct {
         try a.movRegImm64(.r14, JSValue.HEAP_BASE); // %r14 = HEAP_BASE
         try a.movRegImm64(.r15, JSValue.BASE_TAG); // %r15 = BASE_TAG
 
-        if (self.math_sqrt_guard_bits) |expected_bits| {
-            try a.movRegReg(.rdi, .r13);
-            try a.movRegImm64(.rsi, expected_bits);
-            try a.movRegImm64(.rax, @intFromPtr(&vm.jitCheckMathSqrt));
-            try a.callReg(.rax);
-            try a.testRegReg(.rax, .rax);
-            try a.jcc(.ne, preheader_bailout);
+        for (0..self.prepass.math_guard_count) |g_idx| {
+            const g = self.prepass.math_guards[g_idx];
+            if (std.mem.eql(u8, g.prop_name, "sqrt")) {
+                try a.movRegReg(.rdi, .r13);
+                try a.movRegImm64(.rsi, g.expected_bits);
+                try a.movRegImm64(.rax, @intFromPtr(&vm.jitCheckMathSqrt));
+                try a.callReg(.rax);
+                try a.testRegReg(.rax, .rax);
+                try a.jcc(.ne, preheader_bailout);
+            } else {
+                try a.movRegReg(.rdi, .r13);
+                try a.movRegImm64(.rsi, @intFromPtr(g.prop_name.ptr));
+                try a.movRegImm64(.rdx, g.prop_name.len);
+                try a.movRegImm64(.rcx, g.expected_bits);
+                try a.movRegImm64(.rax, @intFromPtr(&jitCheckMathIntrinsic));
+                try a.callReg(.rax);
+                try a.testRegReg(.rax, .rax);
+                try a.jcc(.ne, preheader_bailout);
+            }
         }
 
         if (self.has_char_code_at_guard) {
@@ -1126,11 +1228,29 @@ pub const OsrCompiler = struct {
             .call => {
                 self.invalidateKilledReg(op.a);
                 if (op.a < 64) {
-                    const is_imul = (op.c < block.call_target_cache.len and isMathImulCall(&block.call_target_cache[op.c]));
+                    const mk_opt = if (op.c < block.call_target_cache.len) classifyMathIntrinsicCall(&block.call_target_cache[op.c]) else null;
+                    const arg0_r: u8 = op.b + 1;
+                    const arg1_r: u8 = op.b + 2;
+                    const a0_i32 = (arg0_r < 64 and self.reg_is_int32[arg0_r]);
+                    const a0_u31 = (arg0_r < 64 and self.reg_is_uint31[arg0_r]);
+                    const a1_i32 = (arg1_r < 64 and self.reg_is_int32[arg1_r]);
+                    const a1_u31 = (arg1_r < 64 and self.reg_is_uint31[arg1_r]);
+                    const res_i32 = if (mk_opt) |mk| switch (mk) {
+                        .imul => true,
+                        .abs => a0_u31,
+                        .floor, .ceil, .trunc => a0_i32,
+                        .min2, .max2 => a0_i32 and a1_i32,
+                        .sqrt => false,
+                    } else false;
+                    const res_u31 = if (mk_opt) |mk| switch (mk) {
+                        .abs, .floor, .ceil, .trunc => a0_u31,
+                        .min2, .max2 => a0_u31 and a1_u31,
+                        .imul, .sqrt => false,
+                    } else false;
                     self.known_f64[op.a] = null;
-                    self.reg_is_int32[op.a] = is_imul;
-                    self.reg_is_uint31[op.a] = false;
-                    self.reg_is_exact_idx[op.a] = is_imul;
+                    self.reg_is_int32[op.a] = res_i32;
+                    self.reg_is_uint31[op.a] = res_u31;
+                    self.reg_is_exact_idx[op.a] = res_i32;
                 }
             },
             .get_prop => {

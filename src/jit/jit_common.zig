@@ -123,8 +123,39 @@ pub const ic_next_shape_offset: i32 = @offsetOf(PropIC, "next_shape");
 pub const ic_cached_shape_id_offset: i32 = @offsetOf(PropIC, "cached_shape_id");
 pub const ic_slot_idx_offset: i32 = @offsetOf(PropIC, "slot_idx");
 
+pub const ctx_frame_ptr_offset: i32 = @offsetOf(codeblock.OsrContext, "frame_ptr");
 pub const ctx_prop_ic_ptr_offset: i32 = @offsetOf(codeblock.OsrContext, "prop_ic_ptr");
 pub const ctx_global_obj_offset: i32 = @offsetOf(codeblock.OsrContext, "global_obj_box_ptr");
+pub const frame_closure_env_offset: i32 = @offsetOf(vm.CallFrame, "closure_env");
+pub const frame_has_rc_offset: i32 = @offsetOf(vm.CallFrame, "has_rc");
+
+pub const MathIntrinsicGuard = struct {
+    prop_name: []const u8 = "",
+    expected_bits: u64 = 0,
+};
+
+pub noinline fn jitCheckMathIntrinsic(
+    ctx: *codeblock.OsrContext,
+    prop_ptr: [*]const u8,
+    prop_len: usize,
+    expected_bits: u64,
+) callconv(.c) u64 {
+    const frame: *vm.CallFrame = @ptrCast(@alignCast(ctx.frame_ptr));
+    const env = frame.closure_env orelse return 1;
+    const prop_name = prop_ptr[0..prop_len];
+    var cur: ?*Environment = env;
+    while (cur) |e| : (cur = e.parent) {
+        if (e.tdz.contains("Math")) return 1;
+        if (e.bindingIndex("Math")) |idx| {
+            const math_val = e.bindings.items[idx].value;
+            if (!math_val.isObject()) return 1;
+            const rec = math_val.asObject().value.getOwnRecord(prop_name) orelse return 1;
+            if (rec.isAccessor()) return 1;
+            return if (rec.value.bits == expected_bits) 0 else 1;
+        }
+    }
+    return 1;
+}
 pub const osr_ic_shape_off: i32 = @offsetOf(codeblock.OsrPropIC, "shape_id");
 pub const osr_ic_slot_off: i32 = @offsetOf(codeblock.OsrPropIC, "slot_idx");
 pub const osr_ic_slot_byte_off: i32 = @offsetOf(codeblock.OsrPropIC, "slot_byte_off");

@@ -878,6 +878,36 @@ pub const Assembler = struct {
         try self.emitBytes(&.{ 0x0F, 0x57, modRM(0b11, dst.low3(), src.low3()) });
     }
 
+    pub noinline fn andpd(self: *Assembler, dst: Xmm, src: Xmm) !void {
+        try self.emitByte(0x66);
+        if (rexSSE(dst.isExt(), src.isExt())) |r| try self.emitByte(r);
+        try self.emitBytes(&.{ 0x0F, 0x54, modRM(0b11, dst.low3(), src.low3()) });
+    }
+
+    pub noinline fn orpd(self: *Assembler, dst: Xmm, src: Xmm) !void {
+        try self.emitByte(0x66);
+        if (rexSSE(dst.isExt(), src.isExt())) |r| try self.emitByte(r);
+        try self.emitBytes(&.{ 0x0F, 0x56, modRM(0b11, dst.low3(), src.low3()) });
+    }
+
+    pub noinline fn minsd(self: *Assembler, dst: Xmm, src: Xmm) !void {
+        try self.emitByte(0xF2);
+        if (rexSSE(dst.isExt(), src.isExt())) |r| try self.emitByte(r);
+        try self.emitBytes(&.{ 0x0F, 0x5D, modRM(0b11, dst.low3(), src.low3()) });
+    }
+
+    pub noinline fn maxsd(self: *Assembler, dst: Xmm, src: Xmm) !void {
+        try self.emitByte(0xF2);
+        if (rexSSE(dst.isExt(), src.isExt())) |r| try self.emitByte(r);
+        try self.emitBytes(&.{ 0x0F, 0x5F, modRM(0b11, dst.low3(), src.low3()) });
+    }
+
+    pub noinline fn roundsd(self: *Assembler, dst: Xmm, src: Xmm, imm8: u8) !void {
+        try self.emitByte(0x66);
+        if (rexSSE(dst.isExt(), src.isExt())) |r| try self.emitByte(r);
+        try self.emitBytes(&.{ 0x0F, 0x3A, 0x0B, modRM(0b11, dst.low3(), src.low3()), imm8 });
+    }
+
     pub noinline fn cvttsd2siReg32Xmm(self: *Assembler, dst: Reg, src: Xmm) !void {
         try self.emitByte(0xF2);
         if (rexSSE(dst.isExt(), src.isExt())) |r| try self.emitByte(r);

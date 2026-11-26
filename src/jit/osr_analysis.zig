@@ -10,21 +10,69 @@ const math_builtins = @import("jit_common.zig").math_builtins;
 const Xmm = @import("jit_common.zig").Xmm;
 const PropIC = @import("jit_common.zig").PropIC;
 const constantName = @import("jit_common.zig").constantName;
+const MathIntrinsicGuard = @import("jit_common.zig").MathIntrinsicGuard;
 const findCharCodeAtGetProp = @import("whole_fn.zig").findCharCodeAtGetProp;
 const asExactInt32 = @import("osr_emit.zig").asExactInt32;
 
+pub const MathIntrinsicKind = enum {
+    sqrt,
+    abs,
+    floor,
+    ceil,
+    trunc,
+    imul,
+    min2,
+    max2,
+
+    pub fn propName(self: MathIntrinsicKind) []const u8 {
+        return switch (self) {
+            .sqrt => "sqrt",
+            .abs => "abs",
+            .floor => "floor",
+            .ceil => "ceil",
+            .trunc => "trunc",
+            .imul => "imul",
+            .min2 => "min",
+            .max2 => "max",
+        };
+    }
+
+    pub fn argCount(self: MathIntrinsicKind) u8 {
+        return switch (self) {
+            .sqrt, .abs, .floor, .ceil, .trunc => 1,
+            .imul, .min2, .max2 => 2,
+        };
+    }
+};
+
+pub fn classifyMathIntrinsicCall(cs: *const codeblock.CallSiteCache) ?MathIntrinsicKind {
+    const callee = cs.callee orelse return null;
+    if (!callee.isFunction()) return null;
+    const fn_ptr = callee.asFunction().value.call;
+    if (cs.arg_count == 1) {
+        if (fn_ptr == math_builtins.mathSqrt) return .sqrt;
+        if (fn_ptr == math_builtins.mathAbs) return .abs;
+        if (fn_ptr == math_builtins.mathFloor) return .floor;
+        if (fn_ptr == math_builtins.mathCeil) return .ceil;
+        if (fn_ptr == math_builtins.mathTrunc) return .trunc;
+    } else if (cs.arg_count == 2) {
+        if (fn_ptr == math_builtins.mathImul) return .imul;
+        if (fn_ptr == math_builtins.mathMin) return .min2;
+        if (fn_ptr == math_builtins.mathMax) return .max2;
+    }
+    return null;
+}
+
+pub fn isMathIntrinsicCall(cs: *const codeblock.CallSiteCache) bool {
+    return classifyMathIntrinsicCall(cs) != null;
+}
+
 pub fn isMathSqrtCall(cs: *const codeblock.CallSiteCache) bool {
-    if (cs.arg_count != 1) return false;
-    const callee = cs.callee orelse return false;
-    if (!callee.isFunction()) return false;
-    return callee.asFunction().value.call == math_builtins.mathSqrt;
+    return classifyMathIntrinsicCall(cs) == .sqrt;
 }
 
 pub fn isMathImulCall(cs: *const codeblock.CallSiteCache) bool {
-    if (cs.arg_count != 2) return false;
-    const callee = cs.callee orelse return false;
-    if (!callee.isFunction()) return false;
-    return callee.asFunction().value.call == math_builtins.mathImul;
+    return classifyMathIntrinsicCall(cs) == .imul;
 }
 
 pub const PromotedPropsAnalysis = struct {
@@ -50,6 +98,7 @@ pub noinline fn analyzePromotedProps(
     end_ip: usize,
     prop_ic: ?*const [256]PropIC,
     prepass: *const OsrPrePass,
+    frame_regs_opt: ?[]const JSValue,
 ) PromotedPropsAnalysis {
     const table = prop_ic orelse return .{};
     var res = PromotedPropsAnalysis{};
@@ -118,6 +167,17 @@ pub noinline fn analyzePromotedProps(
     }
 
     if (res.count == 0) return .{};
+
+    if (frame_regs_opt) |fregs| {
+        if (res.obj_reg >= fregs.len or !fregs[res.obj_reg].isObject()) return .{};
+        const box = fregs[res.obj_reg].asObject();
+        const vals = box.value.properties.entries.items(.value);
+        if (res.max_slot >= vals.len) return .{};
+        for (0..res.count) |p| {
+            const s = res.slots[p];
+            if (s >= vals.len or vals[s].isAccessor() or !vals[s].value.isNumber()) return .{};
+        }
+    }
 
     for (0..loop_len) |l_idx| {
         if (prepass.elided_compound_op[l_idx]) continue;
@@ -399,14 +459,22 @@ pub noinline fn computeBlockLiveOut(allocator: Allocator, block: *const codebloc
 pub fn opMayMutateMathSqrt(block: *const codeblock.CodeBlock, start_ip: usize, end_ip: usize, ip: usize, op: codeblock.Op) bool {
     return switch (op.opcode) {
         .call_global => true,
-        .call => (op.c >= block.call_target_cache.len or (!isMathSqrtCall(&block.call_target_cache[op.c]) and !isMathImulCall(&block.call_target_cache[op.c]) and findCharCodeAtGetProp(block, start_ip, end_ip, ip) == null)),
+        .call => (op.c >= block.call_target_cache.len or (!isMathIntrinsicCall(&block.call_target_cache[op.c]) and findCharCodeAtGetProp(block, start_ip, end_ip, ip) == null)),
         .store_global => blk: {
             const k = constantName(block, op.b) orelse break :blk true;
             break :blk std.mem.eql(u8, k, "Math");
         },
         .set_prop, .set_prop_transition => blk: {
             const k = constantName(block, op.b) orelse break :blk true;
-            break :blk (std.mem.eql(u8, k, "sqrt") or std.mem.eql(u8, k, "imul") or std.mem.eql(u8, k, "Math"));
+            break :blk (std.mem.eql(u8, k, "Math") or
+                std.mem.eql(u8, k, "sqrt") or
+                std.mem.eql(u8, k, "abs") or
+                std.mem.eql(u8, k, "floor") or
+                std.mem.eql(u8, k, "ceil") or
+                std.mem.eql(u8, k, "trunc") or
+                std.mem.eql(u8, k, "imul") or
+                std.mem.eql(u8, k, "min") or
+                std.mem.eql(u8, k, "max"));
         },
         else => false,
     };
@@ -415,7 +483,7 @@ pub fn opMayMutateMathSqrt(block: *const codeblock.CodeBlock, start_ip: usize, e
 pub fn opMayMutateStringCharCodeAt(block: *const codeblock.CodeBlock, start_ip: usize, end_ip: usize, ip: usize, op: codeblock.Op) bool {
     return switch (op.opcode) {
         .call_global => true,
-        .call => (op.c >= block.call_target_cache.len or (!isMathSqrtCall(&block.call_target_cache[op.c]) and !isMathImulCall(&block.call_target_cache[op.c]) and findCharCodeAtGetProp(block, start_ip, end_ip, ip) == null)),
+        .call => (op.c >= block.call_target_cache.len or (!isMathIntrinsicCall(&block.call_target_cache[op.c]) and findCharCodeAtGetProp(block, start_ip, end_ip, ip) == null)),
         .set_prop, .set_prop_transition => blk: {
             const k = constantName(block, op.b) orelse break :blk true;
             break :blk (std.mem.eql(u8, k, "charCodeAt") or std.mem.eql(u8, k, "prototype"));
@@ -423,6 +491,8 @@ pub fn opMayMutateStringCharCodeAt(block: *const codeblock.CodeBlock, start_ip: 
         else => false,
     };
 }
+
+pub const MAX_MATH_GUARDS: usize = 8;
 
 pub const OsrPrePass = struct {
     live_out: []u64,
@@ -443,7 +513,24 @@ pub const OsrPrePass = struct {
     loop_safe_u31_mask: u64 = 0,
     math_sqrt_guard_bits: ?u64 = null,
     math_imul_guard_bits: ?u64 = null,
+    math_guards: [MAX_MATH_GUARDS]MathIntrinsicGuard = @splat(.{}),
+    math_guard_count: usize = 0,
     has_char_code_at_guard: bool = false,
+
+    pub fn addMathIntrinsicGuard(self: *OsrPrePass, prop_name: []const u8, expected_bits: u64) bool {
+        for (0..self.math_guard_count) |i| {
+            if (std.mem.eql(u8, self.math_guards[i].prop_name, prop_name)) {
+                return self.math_guards[i].expected_bits == expected_bits;
+            }
+        }
+        if (self.math_guard_count >= MAX_MATH_GUARDS) return false;
+        self.math_guards[self.math_guard_count] = .{
+            .prop_name = prop_name,
+            .expected_bits = expected_bits,
+        };
+        self.math_guard_count += 1;
+        return true;
+    }
 
     pub noinline fn init(allocator: Allocator, block: *const codeblock.CodeBlock, start_ip: usize, end_ip: usize) !OsrPrePass {
         const loop_len = end_ip - start_ip + 1;
@@ -940,17 +1027,10 @@ pub const OsrPrePass = struct {
             const call_op = block.ops[start_ip + call_idx];
             if (call_op.opcode != .call) continue;
             const cs = &block.call_target_cache[call_op.c];
-            const is_sqrt = isMathSqrtCall(cs);
-            const is_imul = isMathImulCall(cs);
-            if (!is_sqrt and !is_imul) continue;
-            const expected_prop = if (is_sqrt) "sqrt" else "imul";
+            const mk = classifyMathIntrinsicCall(cs) orelse continue;
+            const expected_prop = mk.propName();
             const this_r = cs.this_reg orelse continue;
             const expected_bits = cs.callee.?.bits;
-            if (is_sqrt) {
-                if (self.math_sqrt_guard_bits != null and self.math_sqrt_guard_bits.? != expected_bits) continue;
-            } else {
-                if (self.math_imul_guard_bits != null and self.math_imul_guard_bits.? != expected_bits) continue;
-            }
 
             var found_gp: ?usize = null;
             var k = call_idx;
@@ -966,33 +1046,44 @@ pub const OsrPrePass = struct {
                 }
                 const is_pure_arg_op = switch (cand.opcode) {
                     .nop,
-                    .move,
-                    .load_local,
                     .load_const,
                     .load_true,
                     .load_false,
-                    .add,
-                    .add_num,
-                    .sub_num,
-                    .mul_num,
-                    .div_num,
-                    .mod_num,
+                    => cand.a != this_r and cand.a != call_op.b,
+                    .move,
+                    .load_local,
                     .neg,
+                    .not_bits,
                     .add_local_const,
                     .sub_local_const,
-                    .lt_num,
-                    .gt_num,
-                    .le_num,
-                    .ge_num,
-                    .eq,
-                    .ne,
                     .lt_local_const,
                     .gt_local_const,
                     .le_local_const,
                     .ge_local_const,
                     .eq_local_const,
                     .get_prop,
-                    => cand.a != this_r and cand.a != call_op.b,
+                    .get_elem_const,
+                    => cand.a != this_r and cand.a != call_op.b and cand.b != call_op.b,
+                    .add,
+                    .add_num,
+                    .sub_num,
+                    .mul_num,
+                    .div_num,
+                    .mod_num,
+                    .and_bits,
+                    .or_bits,
+                    .xor_bits,
+                    .shl,
+                    .shr,
+                    .ushr,
+                    .lt_num,
+                    .gt_num,
+                    .le_num,
+                    .ge_num,
+                    .eq,
+                    .ne,
+                    .get_elem,
+                    => cand.a != this_r and cand.a != call_op.b and cand.b != call_op.b and cand.c != call_op.b,
                     .jump, .jump_if_false, .jump_if_true, .jeq_local_const_false, .jlt_local_const_false, .jle_local_const_false, .jgt_local_const_false, .jge_local_const_false => true,
                     else => false,
                 };
@@ -1028,9 +1119,12 @@ pub const OsrPrePass = struct {
                     const lg_op = block.ops[start_ip + lg_idx];
                     if (jumps_contained and lg_op.opcode == .load_global and lg_op.a == this_r) {
                         const gname = constantName(block, lg_op.b) orelse "";
-                        if (std.mem.eql(u8, gname, "Math")) {
-                            if (is_sqrt) {
-                                self.math_sqrt_guard_bits = expected_bits;
+                        if (std.mem.eql(u8, gname, "Math") and
+                            (call_op.a == call_op.b or (self.live_out[start_ip + call_idx] & regBit64(call_op.b)) == 0) and
+                            (call_op.a == this_r or (self.live_out[start_ip + call_idx] & regBit64(this_r)) == 0))
+                        {
+                            if (self.addMathIntrinsicGuard(expected_prop, expected_bits)) {
+                                if (mk == .sqrt) self.math_sqrt_guard_bits = expected_bits;
                                 self.elided_compound_op[lg_idx] = true;
                                 self.elided_compound_op[gp_idx] = true;
                                 self.elided_math_call[call_idx] = true;
@@ -1354,8 +1448,7 @@ pub noinline fn analyzeHoistedArrays(
             .call => {
                 if (op.c >= block.call_target_cache.len) return .{};
                 const cs = &block.call_target_cache[op.c];
-                const allowed = isMathSqrtCall(cs) or
-                    isMathImulCall(cs) or
+                const allowed = isMathIntrinsicCall(cs) or
                     findCharCodeAtGetProp(block, start_ip, end_ip, ip) != null or
                     (cs.this_reg == null and cs.target_block != null);
                 if (!allowed) return .{};
@@ -1622,7 +1715,7 @@ pub noinline fn analyzeOsrLoop(
                     break;
                 }
                 const cs = &block.call_target_cache[op.c];
-                if (!isMathSqrtCall(cs) and !isMathImulCall(cs) and findCharCodeAtGetProp(block, start_ip, end_ip, ip) == null) {
+                if (!isMathIntrinsicCall(cs) and findCharCodeAtGetProp(block, start_ip, end_ip, ip) == null) {
                     const is_pure_leaf = (cs.this_reg == null and cs.target_block != null and cs.target_block.?.jit_pure_leaf);
                     if (!is_pure_leaf) {
                         is_pure_loop = false;
@@ -1663,7 +1756,7 @@ pub noinline fn analyzeOsrLoop(
     }
 
     prepass.populatePropElisions(block, start_ip, end_ip);
-    var promoted = analyzePromotedProps(block, start_ip, end_ip, prop_ic, prepass);
+    var promoted = analyzePromotedProps(block, start_ip, end_ip, prop_ic, prepass, frame_regs_opt);
     const hoisted_arrs = analyzeHoistedArrays(block, start_ip, end_ip, promoted.count, prepass, frame_regs_opt);
     prepass.populateArrayElisions(block, start_ip, end_ip, &hoisted_arrs);
     prepass.populateMathSqrtElisions(block, start_ip, end_ip);
@@ -1879,40 +1972,35 @@ pub noinline fn analyzeOsrLoop(
                         use_count[op.a] +%= w;
                         written[op.a] = true;
                     }
-                } else if (isMathSqrtCall(cs)) {
-                    const arg_reg: usize = @as(usize, op.b) + 1;
-                    if (arg_reg < 64) {
-                        if (!written[arg_reg]) read_before_written[arg_reg] = true;
-                        use_count[arg_reg] +%= w;
+                } else if (classifyMathIntrinsicCall(cs)) |mk| {
+                    const arg0_reg: usize = @as(usize, op.b) + 1;
+                    if (arg0_reg < 64) {
+                        if (!written[arg0_reg]) read_before_written[arg0_reg] = true;
+                        use_count[arg0_reg] +%= w;
+                    }
+                    if (mk.argCount() == 2) {
+                        const arg1_reg: usize = @as(usize, op.b) + 2;
+                        if (arg1_reg < 64) {
+                            if (!written[arg1_reg]) read_before_written[arg1_reg] = true;
+                            use_count[arg1_reg] +%= w;
+                        }
                     }
                     if (prepass.elided_math_call[idx]) {
                         if (op.a < 64) {
                             use_count[op.a] +%= w;
                             written[op.a] = true;
                         }
-                    } else if (loop_mutates_math_sqrt) {
-                        if (op.a < 64) invalid[op.a] = true;
-                        if (op.b < 64) invalid[op.b] = true;
                     } else {
-                        if (op.a != op.b and op.b < 64) invalid[op.b] = true;
+                        if (op.b < 64) invalid[op.b] = true;
                         if (op.a < 64) {
-                            use_count[op.a] +%= w;
-                            written[op.a] = true;
+                            if (op.a == op.b or loop_mutates_math_sqrt) {
+                                invalid[op.a] = true;
+                            } else {
+                                use_count[op.a] +%= w;
+                                written[op.a] = true;
+                            }
                         }
                     }
-                } else if (isMathImulCall(cs)) {
-                    const arg0_reg: usize = @as(usize, op.b) + 1;
-                    const arg1_reg: usize = @as(usize, op.b) + 2;
-                    if (arg0_reg < 64) {
-                        if (!written[arg0_reg]) read_before_written[arg0_reg] = true;
-                        use_count[arg0_reg] +%= w;
-                    }
-                    if (arg1_reg < 64) {
-                        if (!written[arg1_reg]) read_before_written[arg1_reg] = true;
-                        use_count[arg1_reg] +%= w;
-                    }
-                    if (op.b < 64) invalid[op.b] = true;
-                    if (op.a < 64) invalid[op.a] = true;
                 } else {
                     if (op.b < 64) invalid[op.b] = true;
                     if (op.a < 64) invalid[op.a] = true;
@@ -1987,6 +2075,18 @@ pub noinline fn analyzeOsrLoop(
                 if (op.b < 64) invalid[op.b] = true;
                 if (op.c < 64) invalid[op.c] = true;
             },
+        }
+    }
+
+    if (frame_regs_opt) |fregs| {
+        const freg_limit = @min(@min(block.register_count, 64), fregs.len);
+        for (0..freg_limit) |r| {
+            const fv = fregs[r];
+            if (read_before_written[r] and !fv.isNumber()) {
+                invalid[r] = true;
+            } else if (written[r] and !fv.isNumber() and !fv.isUndefined()) {
+                invalid[r] = true;
+            }
         }
     }
 

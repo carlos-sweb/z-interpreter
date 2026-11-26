@@ -33,11 +33,11 @@ fn mathUnary(comptime f: fn (f64) f64) NativeFn {
     }.call;
 }
 
-const mathFloor = mathUnary(zmath.floor);
-const mathCeil = mathUnary(zmath.ceil);
-const mathRound = mathUnary(zmath.round);
-const mathTrunc = mathUnary(zmath.trunc);
-const mathAbs = mathUnary(zmath.abs);
+pub const mathFloor = mathUnary(zmath.floor);
+pub const mathCeil = mathUnary(zmath.ceil);
+pub const mathRound = mathUnary(zmath.round);
+pub const mathTrunc = mathUnary(zmath.trunc);
+pub const mathAbs = mathUnary(zmath.abs);
 const mathSign = mathUnary(zmath.sign);
 pub const mathSqrt = mathUnary(zmath.sqrt);
 const mathSin = mathUnary(zmath.sin);
@@ -98,12 +98,12 @@ fn mathVariadic(ctx: *anyopaque, allocator: Allocator, args: []const JSValue, co
     return JSValue.fromNumber(f(nums));
 }
 
-fn mathMin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+pub fn mathMin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
     return mathVariadic(ctx, allocator, args, zmath.min);
 }
 
-fn mathMax(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+pub fn mathMax(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
     return mathVariadic(ctx, allocator, args, zmath.max);
 }

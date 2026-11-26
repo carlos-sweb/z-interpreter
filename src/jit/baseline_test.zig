@@ -2121,5 +2121,146 @@ test "baseline JIT Phase J2.5: OSR binary search i32 index elision, nested matmu
     try std.testing.expectEqual(@as(f64, 1), res.asNumber());
 }
 
+test "baseline JIT Phase J3.1 & J3.2: OSR heap property ICs, inline load_global slots, and Math intrinsics (abs/floor/ceil/trunc/min/max/imul)" {
+    if (!comptime x64_asm.is_supported_host) return;
+    const Interpreter = @import("../interpreter.zig").Interpreter;
+
+    var allocating = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(std.testing.allocator, &allocating.writer);
+    defer interp.deinit();
+    interp.compile_options.use_bytecode_vm = true;
+
+    const res = try interp.run(
+        \\// 1. J3.1: Linked-list / object-graph traversal and heap property set_prop/get_prop in OSR
+        \\function testObjectGraphOsr(n) {
+        \\    var head = { val: 0, tag: "node", next: null, alt: null };
+        \\    var tail = head;
+        \\    for (var i = 1; i < n; i++) {
+        \\        var node = { val: i, tag: (i & 1) ? "odd" : "even", next: null, alt: head };
+        \\        tail.next = node;
+        \\        tail = node;
+        \\    }
+        \\    tail.next = head; // cyclic ring of n nodes
+        \\
+        \\    var cur = head;
+        \\    var prev = tail;
+        \\    var acc = 0;
+        \\    var steps = n * 4;
+        \\    for (var s = 0; s < steps; s++) {
+        \\        var t = cur.tag;
+        \\        cur.alt = prev;
+        \\        acc += cur.val + prev.alt.val + t.length;
+        \\        prev = cur;
+        \\        cur = cur.next;
+        \\    }
+        \\    // Break cycle so RC frees cleanly without leaks
+        \\    var p = head;
+        \\    for (var i = 0; i < n; i++) {
+        \\        var nx = p.next;
+        \\        p.next = null;
+        \\        p.alt = null;
+        \\        p = nx;
+        \\    }
+        \\    return acc;
+        \\}
+        \\var graphRes = testObjectGraphOsr(80);
+        \\if (graphRes <= 0) throw new Error("bad graphRes: " + graphRes);
+        \\
+        \\// 2. J3.1: Inline .load_global (JitGlobalSlot) for closure captures & globals in OSR
+        \\var globalBias = 7;
+        \\function makeCapturedRunner(scale, cfgObj) {
+        \\    var localOffset = 13;
+        \\    return function(n) {
+        \\        var total = 0;
+        \\        for (var i = 0; i < n; i++) {
+        \\            var c = cfgObj;
+        \\            total += (i * scale) + localOffset + globalBias + c.base;
+        \\        }
+        \\        return total;
+        \\    };
+        \\}
+        \\var runner = makeCapturedRunner(3, { base: 5 });
+        \\var capRes = runner(200);
+        \\// sum_{i=0..199} (3*i + 13 + 7 + 5) = 3 * (199*200/2) + 200 * 25 = 59700 + 5000 = 64700
+        \\if (capRes !== 64700) throw new Error("bad capRes: " + capRes);
+        \\
+        \\// 3. J3.2: Math.abs, Math.floor, Math.ceil, Math.trunc, Math.min, Math.max, Math.imul in OSR
+        \\function testMathIntrinsicsOsr(n) {
+        \\    var acc = 0;
+        \\    for (var i = 0; i < n; i++) {
+        \\        var x = (i - 100) * 0.75;
+        \\        var a = Math.abs(x);
+        \\        var fl = Math.floor(x);
+        \\        var ce = Math.ceil(x);
+        \\        var tr = Math.trunc(x);
+        \\        var mn = Math.min(fl, tr);
+        \\        var mx = Math.max(ce, a);
+        \\        var im = Math.imul(i - 50, 17);
+        \\        acc += mn + mx + im;
+        \\    }
+        \\    return acc;
+        \\}
+        \\function testMathIntrinsicsRef(n) {
+        \\    var acc = 0;
+        \\    for (var c = 0; c < n; c += 10) {
+        \\        for (var j = 0; j < 10; j++) {
+        \\            var i = c + j;
+        \\            var x = (i - 100) * 0.75;
+        \\            var a = Math.abs(x);
+        \\            var fl = Math.floor(x);
+        \\            var ce = Math.ceil(x);
+        \\            var tr = Math.trunc(x);
+        \\            var mn = Math.min(fl, tr);
+        \\            var mx = Math.max(ce, a);
+        \\            var im = Math.imul(i - 50, 17);
+        \\            acc += mn + mx + im;
+        \\        }
+        \\    }
+        \\    return acc;
+        \\}
+        \\var mathOsr = testMathIntrinsicsOsr(200);
+        \\var mathRef = testMathIntrinsicsRef(200);
+        \\if (mathOsr !== mathRef) throw new Error("bad mathOsr: " + mathOsr + " vs " + mathRef);
+        \\
+        \\// 4. J3.2: Verify IEEE-754 -0.0 and NaN semantics in OSR for Math.min / max / abs / ceil / trunc
+        \\function testNegativeZeroAndNanOsr(n) {
+        \\    var minZeroSign = 0;
+        \\    var maxZeroSign = 0;
+        \\    var absZeroSign = 0;
+        \\    var ceilNegSign = 0;
+        \\    var truncNegSign = 0;
+        \\    var nanCount = 0;
+        \\    for (var i = 0; i < n; i++) {
+        \\        var mz = Math.min(0.0, -0.0);
+        \\        var xz = Math.max(-0.0, 0.0);
+        \\        var az = Math.abs(-0.0);
+        \\        var cz = Math.ceil(-0.5);
+        \\        var tz = Math.trunc(-0.5);
+        \\        if (1 / mz === -Infinity) minZeroSign++;
+        \\        if (1 / xz === Infinity) maxZeroSign++;
+        \\        if (1 / az === Infinity) absZeroSign++;
+        \\        if (1 / cz === -Infinity) ceilNegSign++;
+        \\        if (1 / tz === -Infinity) truncNegSign++;
+        \\        var mnan1 = Math.min(NaN, i);
+        \\        var mnan2 = Math.max(i, NaN);
+        \\        if (mnan1 !== mnan1 && mnan2 !== mnan2) nanCount++;
+        \\    }
+        \\    if (minZeroSign !== n) throw new Error("bad minZeroSign: " + minZeroSign);
+        \\    if (maxZeroSign !== n) throw new Error("bad maxZeroSign: " + maxZeroSign);
+        \\    if (absZeroSign !== n) throw new Error("bad absZeroSign: " + absZeroSign);
+        \\    if (ceilNegSign !== n) throw new Error("bad ceilNegSign: " + ceilNegSign);
+        \\    if (truncNegSign !== n) throw new Error("bad truncNegSign: " + truncNegSign);
+        \\    if (nanCount !== n) throw new Error("bad nanCount: " + nanCount);
+        \\    return 1;
+        \\}
+        \\testNegativeZeroAndNanOsr(150);
+    );
+    defer res.deinit();
+    try std.testing.expect(res.isNumber());
+    try std.testing.expectEqual(@as(f64, 1), res.asNumber());
+}
+
+
 
 
