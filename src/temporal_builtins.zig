@@ -1867,8 +1867,11 @@ fn readDurationCompareOptions(self: *Interpreter, options: JSValue) anyerror!?zt
         else => {},
     };
     if (v.tag() == .string) {
-        if (relativeToHasTimeZoneAnnotation(v.asString().value.data))
+        const text = v.asString().value.data;
+        if (relativeToHasTimeZoneAnnotation(text))
             return .{ .zonedDateTime = try coerceZonedDateTime(self, self.gc_allocator, v, .constrain, .compatible, .reject) };
+        if (std.mem.indexOfAny(u8, text, "Tt ") != null)
+            return .{ .plainDateTime = try coercePlainDateTime(self, v, .constrain) };
         return .{ .plainDate = try coercePlainDate(self, v, .constrain) };
     }
     if (v.tag() == .object or v.tag() == .proxy) {
@@ -2012,9 +2015,12 @@ fn readRelativeTo(self: *Interpreter, options: JSValue) anyerror!?ztemporal.Dura
     };
     if (v.tag() == .string) {
         // A bracket annotation without '=' is a time-zone annotation. A
-        // calendar annotation remains a PlainDate relativeTo.
-        if (relativeToHasTimeZoneAnnotation(v.asString().value.data))
+        // calendar annotation remains a PlainDate/PlainDateTime relativeTo.
+        const text = v.asString().value.data;
+        if (relativeToHasTimeZoneAnnotation(text))
             return .{ .zonedDateTime = try coerceZonedDateTime(self, self.gc_allocator, v, .constrain, .compatible, .reject) };
+        if (std.mem.indexOfAny(u8, text, "Tt ") != null)
+            return .{ .plainDateTime = try coercePlainDateTime(self, v, .constrain) };
         return .{ .plainDate = try coercePlainDate(self, v, .constrain) };
     }
     // The shared selector observes a property bag incrementally, then chooses
@@ -2695,22 +2701,24 @@ fn zonedDateTimeConstructor(ctx: *anyopaque, allocator: Allocator, this_value: J
 /// each's own real-spec default when `.from()`'s own `options` is
 /// omitted).
 const ZonedDateTimeBagRaw = struct {
-    calendar: JSValue,
-    day: JSValue,
-    hour: JSValue,
-    microsecond: JSValue,
-    millisecond: JSValue,
-    minute: JSValue,
-    month: JSValue,
-    month_code: JSValue,
-    nanosecond: JSValue,
-    offset: JSValue,
-    second: JSValue,
-    time_zone: JSValue,
-    year: JSValue,
+    calendar: ?[]const u8 = null,
+    day: ?i32 = null,
+    hour: ?i32 = null,
+    microsecond: ?i32 = null,
+    millisecond: ?i32 = null,
+    minute: ?i32 = null,
+    month: ?i32 = null,
+    month_code: ?[]u8 = null,
+    nanosecond: ?i32 = null,
+    offset: ?[]u8 = null,
+    second: ?i32 = null,
+    time_zone: JSValue = JSValue.UNDEFINED,
+    year: ?i32 = null,
 
-    fn deinit(self: *ZonedDateTimeBagRaw) void {
-        inline for (@typeInfo(ZonedDateTimeBagRaw).@"struct".field_names) |name| @field(self, name).deinit();
+    fn deinit(self: *ZonedDateTimeBagRaw, allocator: Allocator) void {
+        if (self.month_code) |code| allocator.free(code);
+        if (self.offset) |text| allocator.free(text);
+        self.time_zone.deinit();
     }
 };
 
@@ -2720,36 +2728,37 @@ const ZonedDateTimeFromOptions = struct {
     offset: ztemporal.OffsetOption,
 };
 
-/// PrepareTemporalFields reads every field before conversions or validation.
-/// Keeping the raw values alive makes this true for ordinary objects, Proxy,
-/// functions, and every other ECMAScript object tag.
-fn readZonedDateTimeBagRaw(self: *Interpreter, fields: JSValue) anyerror!ZonedDateTimeBagRaw {
-    var raw: ZonedDateTimeBagRaw = undefined;
-    raw.calendar = try self.getProperty(fields, "calendar");
-    errdefer raw.calendar.deinit();
-    raw.day = try self.getProperty(fields, "day");
-    errdefer raw.day.deinit();
-    raw.hour = try self.getProperty(fields, "hour");
-    errdefer raw.hour.deinit();
-    raw.microsecond = try self.getProperty(fields, "microsecond");
-    errdefer raw.microsecond.deinit();
-    raw.millisecond = try self.getProperty(fields, "millisecond");
-    errdefer raw.millisecond.deinit();
-    raw.minute = try self.getProperty(fields, "minute");
-    errdefer raw.minute.deinit();
-    raw.month = try self.getProperty(fields, "month");
-    errdefer raw.month.deinit();
-    raw.month_code = try self.getProperty(fields, "monthCode");
-    errdefer raw.month_code.deinit();
-    raw.nanosecond = try self.getProperty(fields, "nanosecond");
-    errdefer raw.nanosecond.deinit();
-    raw.offset = try self.getProperty(fields, "offset");
-    errdefer raw.offset.deinit();
-    raw.second = try self.getProperty(fields, "second");
-    errdefer raw.second.deinit();
+/// PrepareTemporalFields reads and converts each field in alphabetical order
+/// before reading options or performing algorithmic validation.
+fn readZonedDateTimeBagRaw(self: *Interpreter, fields: JSValue, strict_month_code: bool, coerce_offset_objects: bool) anyerror!ZonedDateTimeBagRaw {
+    var raw: ZonedDateTimeBagRaw = .{};
+    errdefer raw.deinit(self.gc_allocator);
+
+    const calendar_val = try self.getProperty(fields, "calendar");
+    defer calendar_val.deinit();
+    raw.calendar = try calendarFromValue(self, calendar_val);
+
+    raw.day = try observedTemporalIntegerField(self, fields, "day");
+    raw.hour = try observedTemporalIntegerField(self, fields, "hour");
+    raw.microsecond = try observedTemporalIntegerField(self, fields, "microsecond");
+    raw.millisecond = try observedTemporalIntegerField(self, fields, "millisecond");
+    raw.minute = try observedTemporalIntegerField(self, fields, "minute");
+    raw.month = try observedTemporalIntegerField(self, fields, "month");
+
+    const month_code_val = try self.getProperty(fields, "monthCode");
+    defer month_code_val.deinit();
+    raw.month_code = try zonedDateTimeMonthCodeFromValue(self, month_code_val, strict_month_code);
+
+    raw.nanosecond = try observedTemporalIntegerField(self, fields, "nanosecond");
+
+    const offset_val = try self.getProperty(fields, "offset");
+    defer offset_val.deinit();
+    raw.offset = try zonedDateTimeOffsetFromValue(self, offset_val, coerce_offset_objects);
+    if (raw.offset) |text| try validateZonedDateTimeOffsetSyntax(self, text);
+
+    raw.second = try observedTemporalIntegerField(self, fields, "second");
     raw.time_zone = try self.getProperty(fields, "timeZone");
-    errdefer raw.time_zone.deinit();
-    raw.year = try self.getProperty(fields, "year");
+    raw.year = try observedTemporalIntegerField(self, fields, "year");
     return raw;
 }
 
@@ -2839,41 +2848,26 @@ fn readZonedDateTimeFromOptions(self: *Interpreter, options: JSValue) anyerror!Z
     };
 }
 
-fn zonedDateTimeFromRawBag(self: *Interpreter, allocator: Allocator, raw: *const ZonedDateTimeBagRaw, options: ZonedDateTimeFromOptions, strict_month_code: bool, coerce_offset_objects: bool) anyerror!ztemporal.ZonedDateTime {
-    const calendar = try calendarFromValue(self, raw.calendar);
+fn zonedDateTimeFromRawBag(self: *Interpreter, allocator: Allocator, raw: *const ZonedDateTimeBagRaw, options: ZonedDateTimeFromOptions) anyerror!ztemporal.ZonedDateTime {
     // Preserve the established calendar error priority over a missing
     // timeZone, after all observable field reads have completed.
-    if (calendar) |id| _ = ztemporal.PlainDate.init(1970, 1, 1, id) catch |e| return temporalErr(self, e);
-    const day = try zonedDateTimeIntegerFromValue(self, raw.day, "day");
-    const hour = try zonedDateTimeIntegerFromValue(self, raw.hour, "hour");
-    const microsecond = try zonedDateTimeIntegerFromValue(self, raw.microsecond, "microsecond");
-    const millisecond = try zonedDateTimeIntegerFromValue(self, raw.millisecond, "millisecond");
-    const minute = try zonedDateTimeIntegerFromValue(self, raw.minute, "minute");
-    const month = try zonedDateTimeIntegerFromValue(self, raw.month, "month");
-    const month_code = try zonedDateTimeMonthCodeFromValue(self, raw.month_code, strict_month_code);
-    defer if (month_code) |code| self.gc_allocator.free(code);
-    const nanosecond = try zonedDateTimeIntegerFromValue(self, raw.nanosecond, "nanosecond");
-    const offset = try zonedDateTimeOffsetFromValue(self, raw.offset, coerce_offset_objects);
-    defer if (offset) |text| self.gc_allocator.free(text);
-    if (offset) |text| try validateZonedDateTimeOffsetSyntax(self, text);
-    const second = try zonedDateTimeIntegerFromValue(self, raw.second, "second");
+    if (raw.calendar) |id| _ = ztemporal.PlainDate.init(1970, 1, 1, id) catch |e| return temporalErr(self, e);
     if (raw.time_zone.tag() == .undefined) return self.throwError(.type_error, "timeZone is required", .{});
     const time_zone = try surfaceZone(self, raw.time_zone);
-    const year = try zonedDateTimeIntegerFromValue(self, raw.year, "year");
     return ztemporal.ZonedDateTime.from(allocator, ioHandle(), .{ .fields = .{
-        .year = year orelse return self.throwError(.type_error, "year is required", .{}),
-        .month = month,
-        .monthCode = month_code,
-        .day = day orelse return self.throwError(.type_error, "day is required", .{}),
-        .calendar = calendar,
-        .hour = hour orelse 0,
-        .minute = minute orelse 0,
-        .second = second orelse 0,
-        .millisecond = millisecond orelse 0,
-        .microsecond = microsecond orelse 0,
-        .nanosecond = nanosecond orelse 0,
+        .year = raw.year orelse return self.throwError(.type_error, "year is required", .{}),
+        .month = raw.month,
+        .monthCode = raw.month_code,
+        .day = raw.day orelse return self.throwError(.type_error, "day is required", .{}),
+        .calendar = raw.calendar,
+        .hour = raw.hour orelse 0,
+        .minute = raw.minute orelse 0,
+        .second = raw.second orelse 0,
+        .millisecond = raw.millisecond orelse 0,
+        .microsecond = raw.microsecond orelse 0,
+        .nanosecond = raw.nanosecond orelse 0,
         .timeZone = time_zone,
-        .offset = offset,
+        .offset = raw.offset,
     } }, .{
         .overflow = options.overflow,
         .disambiguation = options.disambiguation,
@@ -2891,9 +2885,9 @@ fn coerceZonedDateTime(self: *Interpreter, allocator: Allocator, v: JSValue, ove
         .disambiguation = disambiguation,
     }) catch |e| temporalErr(self, e);
     if (Interpreter.isPrimitiveTag(v)) return self.throwError(.type_error, "Temporal.ZonedDateTime.from requires a string or an object", .{});
-    var raw = try readZonedDateTimeBagRaw(self, v);
-    defer raw.deinit();
-    return zonedDateTimeFromRawBag(self, allocator, &raw, .{ .overflow = overflow, .disambiguation = disambiguation, .offset = offset_option }, false, true);
+    var raw = try readZonedDateTimeBagRaw(self, v, false, true);
+    defer raw.deinit(self.gc_allocator);
+    return zonedDateTimeFromRawBag(self, allocator, &raw, .{ .overflow = overflow, .disambiguation = disambiguation, .offset = offset_option });
 }
 
 fn zonedDateTimeFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -2918,10 +2912,10 @@ fn zonedDateTimeFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
         const options = try readZonedDateTimeFromOptions(self, option_value);
         break :blk try coerceZonedDateTime(self, allocator, item, options.overflow, options.disambiguation, options.offset);
     } else if (!Interpreter.isPrimitiveTag(item) and !(item.tag() == .temporal and item.asTemporal().value == .zoned_date_time)) blk: {
-        var raw = try readZonedDateTimeBagRaw(self, item);
-        defer raw.deinit();
+        var raw = try readZonedDateTimeBagRaw(self, item, true, true);
+        defer raw.deinit(self.gc_allocator);
         const options = try readZonedDateTimeFromOptions(self, option_value);
-        break :blk try zonedDateTimeFromRawBag(self, allocator, &raw, options, true, true);
+        break :blk try zonedDateTimeFromRawBag(self, allocator, &raw, options);
     } else blk: {
         // Primitive non-strings fail before options are observable.
         break :blk try coerceZonedDateTime(self, allocator, item, .constrain, .compatible, .reject);

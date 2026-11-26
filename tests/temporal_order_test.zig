@@ -539,10 +539,10 @@ test "ZonedDateTime from validates calendar before a missing timeZone" {
     try testing.expectEqualStrings("RangeError", actual);
 }
 
-test "ZonedDateTime from reads overflow before field conversion errors" {
+test "ZonedDateTime from reads overflow before field suitability errors" {
     const actual = try observedOptions(
         "let log = []; let options = new Proxy({ disambiguation: 'compatible', offset: 'reject', overflow: 'constrain' }, { get(target, key) { log.push(key); return target[key]; } });" ++
-            "try { Temporal.ZonedDateTime.from({ year: Symbol(), monthCode: 'M11', day: 1, timeZone: 'UTC' }, options); } catch (e) {} log.join(',');",
+            "try { Temporal.ZonedDateTime.from({ year: 2020, monthCode: 'M99', day: 1, timeZone: 'UTC' }, options); } catch (e) {} log.join(',');",
     );
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings("disambiguation,offset,overflow", actual);
