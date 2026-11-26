@@ -992,25 +992,14 @@ pub fn bindForIteration(self: *Interpreter, env: *Environment, binding: zstateme
 /// Runs one for-in/for-of iteration with the loop variable bound to
 /// `value`. Returns null to proceed to the next iteration, or a
 /// Completion the whole loop must deliver (an owned break converts to
-/// normal-and-stop; everything else abrupt propagates).
-pub fn forIterationStep(self: *Interpreter, env: *Environment, binding: zstatements.ForBinding, value: JSValue, body: *zstatements.Statement, labels: []const []const u8) anyerror!?Completion {
+/// normal-and-stop; everything else abrupt propagates). `last_value` is
+/// the loop's running value V (ECMA-262 14.7.5.7 ForIn/OfBodyEvaluation):
+/// non-empty body values replace it, and an abrupt exit gets
+/// UpdateEmpty(result, V) -- see `loopStep` for the ownership contract.
+pub fn forIterationStep(self: *Interpreter, env: *Environment, binding: zstatements.ForBinding, value: JSValue, body: *zstatements.Statement, labels: []const []const u8, last_value: *JSValue) anyerror!?Completion {
     const iter_env = try self.bindForIteration(env, binding, value);
     const c = try self.evalStatement(iter_env, body);
-    switch (c.type) {
-        .break_completion => {
-            if (Interpreter.loopOwns(c.target, labels)) return Completion{ .type = .normal, .value = c.value };
-            return c;
-        },
-        .continue_completion => {
-            if (!Interpreter.loopOwns(c.target, labels)) return c;
-            return null;
-        },
-        .return_completion => return c,
-        .normal => {
-            c.value.deinit();
-            return null;
-        },
-    }
+    return @import("interpreter_stmt.zig").loopStep(c, labels, last_value);
 }
 
 pub fn closeIterator(self: *Interpreter, iterator: JSValue) anyerror!void {
@@ -1081,6 +1070,10 @@ fn evalForOfIterator(
     if (!isCallableVal(next_fn)) {
         return self.throwError(.type_error, "iterator.next is not a function", .{});
     }
+    // The loop's running value V (14.7.5.7); moved into the returned
+    // completion by `loopStep`, released on any error path.
+    var last_value: JSValue = JSValue.UNDEFINED;
+    errdefer last_value.deinit();
     while (true) {
         var step_result = try self.callValue(next_fn, iter, &.{}, "next");
         if (is_await and resolved.is_async) {
@@ -1112,7 +1105,7 @@ fn evalForOfIterator(
             value.deinit();
             value = awaited;
         }
-        const step = self.forIterationStep(env, binding, value, body, labels) catch |err| {
+        const step = self.forIterationStep(env, binding, value, body, labels, &last_value) catch |err| {
             value.deinit();
             if (err == error.JsReturn) {
                 if (is_await and resolved.is_async) {
@@ -1140,7 +1133,7 @@ fn evalForOfIterator(
             return c;
         }
     }
-    return .{};
+    return .{ .type = .normal, .value = last_value };
 }
 
 /// for-of over the built-in iterables, natively: arrays (elements),
@@ -1167,6 +1160,10 @@ pub fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zs
     };
     const iterable = try self.evalExpression(head_env, head.iterable);
     defer iterable.deinit();
+    // The loop's running value V (14.7.5.7 ForIn/OfBodyEvaluation);
+    // `forIterationStep` moves it into any completion it returns.
+    var last_value: JSValue = JSValue.UNDEFINED;
+    errdefer last_value.deinit();
     switch (iterable.unpack()) {
         .array => |box| {
             if (isIntactArrayIterator(self, iterable)) {
@@ -1178,11 +1175,11 @@ pub fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zs
                         item.deinit();
                         item = awaited;
                     }
-                    const step = try self.forIterationStep(env, head.binding, item, body, labels);
+                    const step = try self.forIterationStep(env, head.binding, item, body, labels, &last_value);
                     item.deinit();
                     if (step) |c| return c;
                 }
-                return .{};
+                return .{ .type = .normal, .value = last_value };
             }
             return evalForOfIterator(self, env, fs, is_await, iterable, head.binding, body, labels);
         },
@@ -1195,7 +1192,7 @@ pub fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zs
                     ch.deinit();
                     ch = awaited;
                 }
-                const step = try self.forIterationStep(env, head.binding, ch, body, labels);
+                const step = try self.forIterationStep(env, head.binding, ch, body, labels, &last_value);
                 ch.deinit();
                 if (step) |c| return c;
             }
@@ -1219,7 +1216,7 @@ pub fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zs
                     entry.deinit();
                     entry = awaited;
                 }
-                const step = try self.forIterationStep(env, head.binding, entry, body, labels);
+                const step = try self.forIterationStep(env, head.binding, entry, body, labels, &last_value);
                 entry.deinit();
                 if (step) |c| return c;
             }
@@ -1240,7 +1237,7 @@ pub fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zs
                     v.deinit();
                     v = awaited;
                 }
-                const step = try self.forIterationStep(env, head.binding, v, body, labels);
+                const step = try self.forIterationStep(env, head.binding, v, body, labels, &last_value);
                 v.deinit();
                 if (step) |c| return c;
             }
@@ -1268,11 +1265,11 @@ pub fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zs
                         item.deinit();
                         item = awaited;
                     }
-                    const step = try self.forIterationStep(env, head.binding, item, body, labels);
+                    const step = try self.forIterationStep(env, head.binding, item, body, labels, &last_value);
                     item.deinit();
                     if (step) |c| return c;
                 }
-                return .{};
+                return .{ .type = .normal, .value = last_value };
             }
             return evalForOfIterator(self, env, fs, is_await, iterable, head.binding, body, labels);
         },
@@ -1284,7 +1281,7 @@ pub fn evalForOf(self: *Interpreter, env: *Environment, head: anytype, body: *zs
         .object, .proxy, .function, .array_buffer, .data_view, .regex, .date, .@"error", .promise, .temporal => return evalForOfIterator(self, env, fs, is_await, iterable, head.binding, body, labels),
         else => return self.throwError(.type_error, "{s} is not iterable", .{iterable.typeOf()}),
     }
-    return .{};
+    return .{ .type = .normal, .value = last_value };
 }
 
 fn definePatternTdz(self: *Interpreter, env: *Environment, pattern: *const zstatements.BindingPattern) anyerror!void {
@@ -1311,41 +1308,7 @@ fn objectHasKeyInChain(obj: anytype, key: []const u8) bool {
 }
 
 fn forInStep(self: *Interpreter, env: *Environment, binding: zstatements.ForBinding, value: JSValue, body: *zstatements.Statement, labels: []const []const u8, last_value: *JSValue) anyerror!?Completion {
-    const iter_env = try self.bindForIteration(env, binding, value);
-    const c = try self.evalStatement(iter_env, body);
-    switch (c.type) {
-        .break_completion => {
-            if (Interpreter.loopOwns(c.target, labels)) {
-                if (!c.value.isUndefined()) {
-                    last_value.deinit();
-                    last_value.* = JSValue.UNDEFINED;
-                    return Completion{ .type = .normal, .value = c.value };
-                }
-                const out = last_value.*;
-                last_value.* = JSValue.UNDEFINED;
-                return Completion{ .type = .normal, .value = out };
-            }
-            return c;
-        },
-        .continue_completion => {
-            if (!Interpreter.loopOwns(c.target, labels)) return c;
-            if (!c.value.isUndefined()) {
-                last_value.deinit();
-                last_value.* = c.value;
-            }
-            return null;
-        },
-        .return_completion => return c,
-        .normal => {
-            if (!c.value.isUndefined()) {
-                last_value.deinit();
-                last_value.* = c.value;
-            } else {
-                c.value.deinit();
-            }
-            return null;
-        },
-    }
+    return forIterationStep(self, env, binding, value, body, labels, last_value);
 }
 
 /// for-in over enumerable string keys: own + inherited (walking the

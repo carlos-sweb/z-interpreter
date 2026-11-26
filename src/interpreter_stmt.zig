@@ -69,25 +69,36 @@ fn deinitOutcome(outcome: Outcome) void {
 /// `evalBody` (function/script bodies: var + lexical pre-passes) or
 /// `evalStatementList` (blocks: lexical pre-pass only).
 pub fn evalProgram(self: *Interpreter, env: *Environment, program: []const *zstatements.Statement) anyerror!Completion {
+    // ECMA-262 14.2.2 StatementList: UpdateEmpty(s, sl) -- an `empty`
+    // statement (declaration, `;`, bare break/continue) never
+    // overwrites the running value, and an abrupt empty completion
+    // inherits it (`1; break;` breaks with value 1).
     var last_value: JSValue = JSValue.UNDEFINED;
+    var has_value = false;
     for (program) |stmt| {
         const c = self.evalStatement(env, stmt) catch |err0| {
+            last_value.deinit();
             if (err0 == error.JsReturn) {
-                last_value.deinit();
                 const rv = self.pending_return orelse JSValue.UNDEFINED;
                 self.pending_return = null;
                 return .{ .type = .return_completion, .value = rv };
             }
             return err0;
         };
-        if (c.type != .normal) return c;
+        if (c.type != .normal) {
+            if (c.empty and has_value) return c.updateEmpty(last_value);
+            last_value.deinit();
+            return c;
+        }
+        if (c.empty) continue;
         // Etapa 2 de uniform-ownership-contract.md: solo la última
         // sentencia sobrevive; cada valor anterior es una referencia
         // propia (garantizado por la Etapa 1) que nadie más liberará.
         last_value.deinit();
         last_value = c.value;
+        has_value = true;
     }
-    return .{ .type = .normal, .value = last_value };
+    return .{ .type = .normal, .value = last_value, .empty = !has_value };
 }
 
 /// Function-body / script entry: `var` names hoist here (defined as
@@ -369,7 +380,7 @@ pub fn checkVarNotShadowingLexical(self: *Interpreter, env: *Environment, patter
 pub fn evalStatement(self: *Interpreter, env: *Environment, stmt: *zstatements.Statement) anyerror!Completion {
     const arena = self.gc_allocator;
     switch (stmt.data) {
-        .empty, .debugger => return .{},
+        .empty, .debugger => return .{ .empty = true },
         .expr_stmt => |expr| {
             const v = try self.evalExpression(env, expr);
             return .{ .type = .normal, .value = v };
@@ -410,15 +421,22 @@ pub fn evalStatement(self: *Interpreter, env: *Environment, stmt: *zstatements.S
                 // let/const define here, ending their TDZ.
                 try self.bindPattern(env, decl.pattern, value, if (v.kind == .@"var") .assign else .define);
             }
-            return .{};
+            return .{ .empty = true };
         },
         .if_stmt => |s| {
             const test_v = try self.evalExpression(env, s.test_expr);
             const truthy = coercion.isTruthy(test_v);
             test_v.deinit();
-            if (truthy) return self.evalStatement(env, s.consequent);
-            if (s.alternate) |alt| return self.evalStatement(env, alt);
-            return .{};
+            // 14.6.2: UpdateEmpty(stmtCompletion, undefined) -- an `if`
+            // is never empty (`1; if (true) {}` is undefined).
+            var c: Completion = if (truthy)
+                try self.evalStatement(env, s.consequent)
+            else if (s.alternate) |alt|
+                try self.evalStatement(env, alt)
+            else
+                .{};
+            c.empty = false;
+            return c;
         },
         .while_stmt => |s| return self.evalWhile(env, s, &.{}),
         .do_while => |s| return self.evalDoWhile(env, s, &.{}),
@@ -431,8 +449,8 @@ pub fn evalStatement(self: *Interpreter, env: *Environment, stmt: *zstatements.S
         // already guaranteed at parse time by z-statements
         // (UndefinedLabel/IllegalContinue), so the runtime can trust
         // every target resolves to some enclosing labelled statement.
-        .break_stmt => |label| return .{ .type = .break_completion, .target = label },
-        .continue_stmt => |label| return .{ .type = .continue_completion, .target = label },
+        .break_stmt => |label| return .{ .type = .break_completion, .target = label, .empty = true },
+        .continue_stmt => |label| return .{ .type = .continue_completion, .target = label, .empty = true },
         // ECMA-262 14.13.4 LabelledEvaluation: collect the whole label
         // chain (`a: b: for (...)` attaches BOTH labels to the loop)
         // and hand it to the loop as its label set; for non-loop
@@ -454,19 +472,20 @@ pub fn evalStatement(self: *Interpreter, env: *Environment, stmt: *zstatements.S
             };
             if (c.type == .break_completion) {
                 if (c.target) |t| {
-                    if (labelIn(t, labels.items)) return .{ .type = .normal, .value = c.value };
+                    // Keeps an `empty` value empty (`L: break L;`).
+                    if (labelIn(t, labels.items)) return .{ .type = .normal, .value = c.value, .empty = c.empty };
                 }
             }
             return c;
         },
-        .function_declaration => return .{},
+        .function_declaration => return .{ .empty = true },
         .class_declaration => |ptr| {
             const cnode = zfunctions.asClassNode(ptr);
             const value = try self.evalClass(env, cnode);
             // Declarations always carry a name (MissingClassName is a
             // parse error otherwise).
             try env.define(arena, cnode.name.?, value.retain());
-            return .{};
+            return .{ .empty = true };
         },
         // Reaching these through evalStatement means they're NOT at a
         // module's top level (evalModuleBody intercepts those) -- a
@@ -531,7 +550,10 @@ pub fn evalStatement(self: *Interpreter, env: *Environment, stmt: *zstatements.S
                 }
             }
 
-            return try self.deliver(result);
+            // 14.15.3: UpdateEmpty(C/F, undefined) -- never empty.
+            var c = try self.deliver(result);
+            c.empty = false;
+            return c;
         },
         // ECMA-262 14.12 CaseBlockEvaluation. The AST's flat case order
         // is already "A clauses, default, B clauses", so one selector
@@ -572,17 +594,26 @@ pub fn evalStatement(self: *Interpreter, env: *Environment, stmt: *zstatements.S
             if (start_index) |start| {
                 for (s.cases[start..]) |case| {
                     for (case.consequent) |case_stmt| {
-                        const c = try self.evalStatement(switch_env, case_stmt);
+                        const c = self.evalStatement(switch_env, case_stmt) catch |err| {
+                            last_value.deinit();
+                            return err;
+                        };
                         switch (c.type) {
-                            .normal => {
+                            // 14.12.4 CaseBlockEvaluation: only a
+                            // non-empty value replaces V.
+                            .normal => if (!c.empty) {
                                 last_value.deinit();
                                 last_value = c.value;
                             },
-                            .break_completion => {
-                                if (c.target == null) return .{ .type = .normal, .value = last_value };
-                                return c; // labelled break: handled by the labelled wrapper/loop
+                            // Abrupt: UpdateEmpty(R, V); an unlabelled
+                            // break then becomes normal (never empty).
+                            .break_completion, .return_completion, .continue_completion => {
+                                const r = c.updateEmpty(last_value);
+                                if (r.type == .break_completion and r.target == null) {
+                                    return .{ .type = .normal, .value = r.value };
+                                }
+                                return r; // labelled break / continue / return
                             },
-                            .return_completion, .continue_completion => return c,
                         }
                     }
                 }
@@ -612,41 +643,52 @@ fn evalTruthy(self: *Interpreter, env: *Environment, expr: anytype) anyerror!boo
     return coercion.isTruthy(v);
 }
 
+/// One loop-body completion folded into the loop's running value `v`
+/// (ECMA-262 14.7.1.1 LoopContinues + the loops' `V` / UpdateEmpty
+/// steps). Returns null to keep iterating, or the completion the loop
+/// must return; in that case `v`'s ownership has moved into it (`v` is
+/// reset to UNDEFINED, so a caller's errdefer/deinit stays a no-op).
+pub fn loopStep(c: Completion, labels: []const []const u8, v: *JSValue) ?Completion {
+    const continues = switch (c.type) {
+        .normal => true,
+        .continue_completion => loopOwns(c.target, labels),
+        .break_completion, .return_completion => false,
+    };
+    if (continues) {
+        if (!c.empty) {
+            v.deinit();
+            v.* = c.value;
+        }
+        return null;
+    }
+    const out = c.updateEmpty(v.*);
+    v.* = JSValue.UNDEFINED;
+    // An owned break ends the loop normally with UpdateEmpty(break, V).
+    if (out.type == .break_completion and loopOwns(out.target, labels)) {
+        return .{ .type = .normal, .value = out.value };
+    }
+    return out;
+}
+
 pub fn evalWhile(self: *Interpreter, env: *Environment, s: anytype, labels: []const []const u8) anyerror!Completion {
+    var v: JSValue = JSValue.UNDEFINED;
+    errdefer v.deinit();
     while (try evalTruthy(self, env, s.test_expr)) {
         const c = try self.evalStatement(env, s.body);
-        switch (c.type) {
-            .break_completion => {
-                if (loopOwns(c.target, labels)) break;
-                return c;
-            },
-            .continue_completion => {
-                if (!loopOwns(c.target, labels)) return c;
-            },
-            .return_completion => return c,
-            .normal => c.value.deinit(),
-        }
+        if (loopStep(c, labels, &v)) |out| return out;
     }
-    return .{};
+    return .{ .type = .normal, .value = v };
 }
 
 pub fn evalDoWhile(self: *Interpreter, env: *Environment, s: anytype, labels: []const []const u8) anyerror!Completion {
+    var v: JSValue = JSValue.UNDEFINED;
+    errdefer v.deinit();
     while (true) {
         const c = try self.evalStatement(env, s.body);
-        switch (c.type) {
-            .break_completion => {
-                if (loopOwns(c.target, labels)) break;
-                return c;
-            },
-            .continue_completion => {
-                if (!loopOwns(c.target, labels)) return c;
-            },
-            .return_completion => return c,
-            .normal => c.value.deinit(),
-        }
+        if (loopStep(c, labels, &v)) |out| return out;
         if (!try evalTruthy(self, env, s.test_expr)) break;
     }
-    return .{};
+    return .{ .type = .normal, .value = v };
 }
 
 pub fn evalForStatement(self: *Interpreter, env: *Environment, s: anytype, labels: []const []const u8) anyerror!Completion {
@@ -670,25 +712,17 @@ pub fn evalForStatement(self: *Interpreter, env: *Environment, s: anytype, label
                     .expr => |e| (try self.evalExpression(loop_env, e)).deinit(),
                 }
             }
+            var v: JSValue = JSValue.UNDEFINED;
+            errdefer v.deinit();
             while (true) {
                 if (head.test_expr) |t| {
                     if (!try evalTruthy(self, loop_env, t)) break;
                 }
                 const c = try self.evalStatement(loop_env, s.body);
-                switch (c.type) {
-                    .break_completion => {
-                        if (loopOwns(c.target, labels)) break;
-                        return c;
-                    },
-                    .continue_completion => {
-                        if (!loopOwns(c.target, labels)) return c;
-                    },
-                    .return_completion => return c,
-                    .normal => c.value.deinit(),
-                }
+                if (loopStep(c, labels, &v)) |out| return out;
                 if (head.update) |u| (try self.evalExpression(loop_env, u)).deinit();
             }
-            return .{};
+            return .{ .type = .normal, .value = v };
         },
         .for_in => |head| return self.evalForIn(env, head, s.body, labels),
         .for_of => |head| return self.evalForOf(env, head, s.body, labels),

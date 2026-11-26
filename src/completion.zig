@@ -31,4 +31,19 @@ pub const Completion = struct {
     /// this field exists so a future phase can add label-stack support
     /// without reshaping this type again.
     target: ?[]const u8 = null,
+    /// ECMA-262's `empty` completion value (distinct from `undefined`):
+    /// declarations, `;`, and value-less break/continue produce it so a
+    /// StatementList / loop keeps its previous value (UpdateEmpty).
+    /// Invariant: `empty` implies `value == UNDEFINED` (nothing owned).
+    /// Defaults to false so every pre-existing `.{}` keeps meaning
+    /// "normal, undefined".
+    empty: bool = false,
+
+    /// ECMA-262 6.2.4.6 UpdateEmpty(C, V). Consumes `v` (owned): it
+    /// becomes C's value when C is empty, otherwise it is released.
+    pub fn updateEmpty(c: Completion, v: JSValue) Completion {
+        if (c.empty) return .{ .type = c.type, .value = v, .target = c.target };
+        v.deinit();
+        return c;
+    }
 };
