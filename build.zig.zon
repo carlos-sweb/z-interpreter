@@ -86,8 +86,8 @@
             .hash = "zbuffer-0.1.0-bUHCsLbNAACFgIa6_Fkp5fmtDQwiRXnGCKuL52UYODVv",
         },
         .ztemporal = .{
-            .url = "https://github.com/carlos-sweb/z-temporal/archive/551dcd2.tar.gz",
-            .hash = "ztemporal-0.2.9-9l_8_t4IBwD25a6PAhIn8c-F0dMzAIxdIzHSsHpHjUZJ",
+            .url = "https://github.com/carlos-sweb/z-temporal/archive/913675a.tar.gz",
+            .hash = "ztemporal-0.2.9-9l_8_gkJBwC7rvHXdSa8zaEXzUQxk4utjSTW3D4SmzbB",
         },
         .zurlcode = .{
             .url = "https://github.com/carlos-sweb/z-urlcode/archive/refs/tags/v0.1.0.tar.gz",

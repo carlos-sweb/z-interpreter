@@ -1871,7 +1871,7 @@ fn readDurationCompareOptions(self: *Interpreter, options: JSValue) anyerror!?zt
         if (relativeToHasTimeZoneAnnotation(text))
             return .{ .zonedDateTime = try coerceZonedDateTime(self, self.gc_allocator, v, .constrain, .compatible, .reject) };
         if (std.mem.indexOfAny(u8, text, "Tt ") != null)
-            return .{ .plainDateTime = try coercePlainDateTime(self, v, .constrain) };
+            return .{ .plainDate = (try coercePlainDateTime(self, v, .constrain)).toPlainDate() };
         return .{ .plainDate = try coercePlainDate(self, v, .constrain) };
     }
     if (v.tag() == .object or v.tag() == .proxy) {
@@ -2015,12 +2015,12 @@ fn readRelativeTo(self: *Interpreter, options: JSValue) anyerror!?ztemporal.Dura
     };
     if (v.tag() == .string) {
         // A bracket annotation without '=' is a time-zone annotation. A
-        // calendar annotation remains a PlainDate/PlainDateTime relativeTo.
+        // calendar annotation remains a PlainDate relativeTo.
         const text = v.asString().value.data;
         if (relativeToHasTimeZoneAnnotation(text))
             return .{ .zonedDateTime = try coerceZonedDateTime(self, self.gc_allocator, v, .constrain, .compatible, .reject) };
         if (std.mem.indexOfAny(u8, text, "Tt ") != null)
-            return .{ .plainDateTime = try coercePlainDateTime(self, v, .constrain) };
+            return .{ .plainDate = (try coercePlainDateTime(self, v, .constrain)).toPlainDate() };
         return .{ .plainDate = try coercePlainDate(self, v, .constrain) };
     }
     // The shared selector observes a property bag incrementally, then chooses
