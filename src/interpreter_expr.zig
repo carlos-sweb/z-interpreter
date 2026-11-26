@@ -646,6 +646,11 @@ pub fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSV
             return JSValue.UNDEFINED;
         },
         .pre_inc, .pre_dec => {
+            // Member targets evaluate base and key exactly once
+            // (`obj[k()]++` must not re-run `k()` or re-coerce the key).
+            if (u.operand.data == .member and !u.operand.data.member.optional) {
+                return evalMemberUpdate(self, env, u.operand.data.member, u.op == .pre_inc, true);
+            }
             const v = try self.evalExpression(env, u.operand);
             defer v.deinit();
             const old_num = try self.toNumericJS(v);
@@ -655,6 +660,9 @@ pub fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSV
             return new_val;
         },
         .post_inc, .post_dec => {
+            if (u.operand.data == .member and !u.operand.data.member.optional) {
+                return evalMemberUpdate(self, env, u.operand.data.member, u.op == .post_inc, false);
+            }
             const old = try self.evalExpression(env, u.operand);
             defer old.deinit();
             // ToNumeric exactly once: the conversion (e.g. a user
@@ -702,9 +710,34 @@ pub fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSV
                 if (privateMemberName(m)) |pn| {
                     return self.throwError(.syntax_error, "Private fields can not be deleted: {s}", .{pn});
                 }
+                // `delete super.x` / `delete super[k]`: the SuperProperty
+                // is evaluated (GetThisBinding first -- uninitialized
+                // `this` throws before the key expression runs -- then
+                // the key expression, WITHOUT ToPropertyKey), and then
+                // delete always throws a ReferenceError (13.5.1.2 5.a).
+                if (m.object.data == .super_expr) {
+                    if (env.resolveThisEnv()) |te| {
+                        if (!te.this_initialized) {
+                            return self.throwError(.reference_error, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor", .{});
+                        }
+                    }
+                    if (m.computed) (try self.evalExpression(env, m.property)).deinit();
+                    return self.throwError(.reference_error, "Unsupported reference to 'super'", .{});
+                }
                 const obj = try self.evalExpression(env, m.object);
                 defer obj.deinit();
-                const pk = try self.memberKeyString(env, m);
+                // Base and key expression are evaluated first; then
+                // ToObject(base) (TypeError for null/undefined) runs
+                // BEFORE ToPropertyKey(key).
+                const prop_val: ?JSValue = if (m.computed) try self.evalExpression(env, m.property) else null;
+                defer if (prop_val) |pv| pv.deinit();
+                if (obj.isNull() or obj.isUndefined()) {
+                    return self.throwError(.type_error, "Cannot convert undefined or null to object", .{});
+                }
+                const pk: PropKey = if (prop_val) |pv|
+                    .{ .key = try self.encodeKey(pv), .owned = true }
+                else
+                    try self.memberKeyString(env, m);
                 defer pk.free(self.gc_allocator);
                 const ok = try self.deletePropertyOnValue(obj, pk.key);
                 if (!ok) {
@@ -826,6 +859,12 @@ pub fn evalAssignment(self: *Interpreter, env: *Environment, a: anytype) anyerro
             if (!should_assign) return current;
             current.deinit();
             const value = try self.evalExpression(env, a.value);
+            errdefer value.deinit();
+            // NamedEvaluation (13.15.2): `x ??= AnonFn` names it "x"
+            // when the target is a bare IdentifierReference.
+            if (a.target.data == .identifier) {
+                try self.maybeNameAnonymousValue(a.value, value, a.target.data.identifier);
+            }
             try self.assignTo(env, a.target, value);
             return value;
         },
@@ -986,6 +1025,97 @@ pub fn assignTo(self: *Interpreter, env: *Environment, target: *zparser.Node, va
         },
         else => return error.NotImplemented,
     }
+}
+
+/// `++`/`--` on a member target (13.4.2-13.4.5): base and key are
+/// evaluated ONCE, RequireObjectCoercible(base) runs before
+/// ToPropertyKey(key), the old value is ToNumeric'd exactly once, and the
+/// write goes to the same (base, key) reference that was read.
+fn evalMemberUpdate(self: *Interpreter, env: *Environment, m: anytype, is_inc: bool, is_prefix: bool) anyerror!JSValue {
+    var key_owned: ?[]const u8 = null;
+    defer if (key_owned) |ko| self.gc_allocator.free(ko);
+
+    var old: JSValue = undefined;
+    var sproto: ?JSValue = null;
+    defer if (sproto) |sp| sp.deinit();
+    var receiver: ?JSValue = null;
+    defer if (receiver) |r| r.deinit();
+    var base: ?JSValue = null;
+    defer if (base) |b| b.deinit();
+    var private_name: ?[]const u8 = null;
+    var key: []const u8 = "";
+
+    if (m.object.data == .super_expr) {
+        sproto = try resolveSuperBase(self, env);
+        receiver = env.resolveThis();
+        if (m.computed) {
+            const pv = try self.evalExpression(env, m.property);
+            defer pv.deinit();
+            const ko = try self.encodeKey(pv);
+            key_owned = ko;
+            key = ko;
+        } else key = switch (m.property.data) {
+            .identifier => |name| name,
+            else => return error.NotImplemented,
+        };
+        if (sproto.?.isNull() or sproto.?.isUndefined()) {
+            return self.throwError(.type_error, "Cannot read properties of null (reading '{s}')", .{key});
+        }
+        old = (try self.getFromProto(receiver.?, sproto.?, key)) orelse JSValue.UNDEFINED;
+    } else {
+        base = try self.evalExpression(env, m.object);
+        const b = base.?;
+        if (m.computed) {
+            const pv = try self.evalExpression(env, m.property);
+            defer pv.deinit();
+            if (b.isNull() or b.isUndefined()) {
+                return self.throwError(.type_error, "Cannot read properties of {s}", .{b.typeOf()});
+            }
+            const ko = try self.encodeKey(pv);
+            key_owned = ko;
+            key = ko;
+            old = try self.getProperty(b, key);
+        } else if (privateMemberName(m)) |pn| {
+            private_name = pn;
+            old = try self.privateGet(env, b, pn);
+        } else {
+            if (b.isNull() or b.isUndefined()) {
+                return self.throwError(.type_error, "Cannot read properties of {s}", .{b.typeOf()});
+            }
+            key = switch (m.property.data) {
+                .identifier => |name| name,
+                else => return error.NotImplemented,
+            };
+            old = try self.getProperty(b, key);
+        }
+    }
+    defer old.deinit();
+
+    const old_num = try self.toNumericJS(old);
+    var old_num_owned = true;
+    defer if (old_num_owned) old_num.deinit();
+    const new_val = try self.incDecOne(old_num, is_inc);
+    var new_val_owned = true;
+    defer if (new_val_owned) new_val.deinit();
+
+    if (sproto) |sp| {
+        try assignSuperProperty(self, sp, receiver.?, key, new_val);
+    } else if (private_name) |pn| {
+        try self.privateSet(env, base.?, pn, new_val);
+    } else {
+        try self.setPropertyOnValue(base.?, key, new_val);
+    }
+
+    if (is_prefix) {
+        new_val_owned = false;
+        return new_val;
+    }
+    // Postfix value: the ToNumeric'd old value (see `.post_inc` above).
+    if (old_num.isBigInt()) {
+        return try self.gcNewBigIntValue(try old_num.asBigInt().value.clone());
+    }
+    old_num_owned = false;
+    return old_num;
 }
 
 fn resolveSuperBase(self: *Interpreter, env: *Environment) anyerror!JSValue {

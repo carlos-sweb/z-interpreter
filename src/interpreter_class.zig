@@ -1192,12 +1192,50 @@ pub fn evalPreparedFunctionBody(
 ) anyerror!JSValue {
     switch (fnode.body) {
         .block => |body_stmt| {
-            const c = try self.evalBody(call_env, body_stmt.data.block);
+            // ECMA-262 10.2.11 step 28: with parameter expressions, the
+            // body's `var`s live in a SEPARATE varEnv (child of the
+            // parameter env), each seeded with the same-named parameter's
+            // current value -- so a body `var x = ...` never clobbers the
+            // binding a closure in a default initializer captured.
+            const body_env = if (hasParameterExpressions(fnode)) blk: {
+                const var_env = try self.gcChildEnv(call_env);
+                try self.hoistVarScope(var_env, body_stmt.data.block);
+                var i: usize = 0;
+                while (i < var_env.bindings.items.len) {
+                    const name = var_env.bindings.items[i].name;
+                    if (call_env.getLocalBinding(name)) |pv| {
+                        var_env.bindings.items[i].value = pv.retain();
+                        i += 1;
+                    } else if (std.mem.eql(u8, name, "arguments") and call_env.lazy_arguments != null) {
+                        // Lazily materialized `arguments` stays reachable
+                        // through the parameter env.
+                        _ = var_env.removeBinding(name);
+                    } else {
+                        i += 1;
+                    }
+                }
+                break :blk var_env;
+            } else call_env;
+            const c = try self.evalBody(body_env, body_stmt.data.block);
             if (c.type == .return_completion) return c.value;
             return JSValue.UNDEFINED;
         },
         .expression => |expr| return try self.evalExpression(call_env, expr),
     }
+}
+
+/// True when the formal parameter list contains expressions (default
+/// initializers or destructuring patterns, which may hold defaults or
+/// computed keys) -- the spec's `hasParameterExpressions`.
+fn hasParameterExpressions(fnode: *zfunctions.FunctionNode) bool {
+    for (fnode.params.items) |param| {
+        if (param.default != null) return true;
+        if (param.pattern.* != .identifier) return true;
+    }
+    if (fnode.params.rest) |rest| {
+        if (rest.* != .identifier) return true;
+    }
+    return false;
 }
 
 /// The shared body of every user-code invocation: fresh call env off the
