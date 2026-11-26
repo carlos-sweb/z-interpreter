@@ -577,6 +577,15 @@ pub const ClassCtx = struct {
     outer_private_ctx: ?*ClassCtx = null,
     /// Exact class source slice (for Function.prototype.toString).
     source_text: ?[]const u8 = null,
+    /// Instance private methods/accessors (encoded `\x00P...` keys),
+    /// held in a class-owned bag and copied onto each instance by
+    /// runInstanceFields -- never on the prototype. Owned (+1).
+    private_methods: ?JSValue = null,
+    /// The bag's keys in declaration order (interpreter-arena memory).
+    private_method_keys: []const []const u8 = &.{},
+    /// Encoded keys of STATIC private methods (non-writable; PrivateSet
+    /// throws). Interpreter-arena memory.
+    private_static_method_keys: []const []const u8 = &.{},
 
     /// GC prep (roadmap item 15, phase 2): see Environment.traceChildren
     /// for the visitor contract. `instance_fields[i].value` is an AST
@@ -586,6 +595,7 @@ pub const ClassCtx = struct {
         visitor.environment(self.closure_env);
         if (self.super_ctor) |v| visitor.value(v);
         if (self.super_proto) |v| visitor.value(v);
+        if (self.private_methods) |v| visitor.value(v);
     }
 };
 

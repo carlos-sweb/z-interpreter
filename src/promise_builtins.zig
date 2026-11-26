@@ -114,10 +114,51 @@ fn handlerOrNull(v: JSValue) ?JSValue {
     return if (v.isFunction()) v else null;
 }
 
+/// ECMA-262 27.2.5.4 Promise.prototype.then: C = SpeciesConstructor(p,
+/// %Promise%), capability = NewPromiseCapability(C), then
+/// PerformPromiseThen. The intrinsic %Promise% keeps the native fast
+/// path; a subclass/species constructor gets a real capability whose
+/// resolve/reject are fed from a native derived promise.
 fn promiseThen(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
+    const self = interp(ctx);
     const p = try requirePromise(ctx, this_value, "then");
-    return interp(ctx).promiseThen(p, handlerOrNull(arg(args, 0)), handlerOrNull(arg(args, 1)));
+    const ctor = try speciesPromiseConstructor(self, p);
+    defer ctor.deinit();
+    const on_f = handlerOrNull(arg(args, 0));
+    const on_r = handlerOrNull(arg(args, 1));
+    if (isPromiseConstructor(ctor)) return self.promiseThen(p, on_f, on_r);
+
+    const cap = try newPromiseCapability(self, allocator, ctor);
+    errdefer cap.promise.deinit();
+    defer cap.resolve.deinit();
+    defer cap.reject.deinit();
+    const derived = try self.promiseThen(p, on_f, on_r);
+    defer derived.deinit();
+    const fwd_resolve = try capabilityForwarder(self, allocator, cap.resolve, "resolve");
+    defer fwd_resolve.deinit();
+    const fwd_reject = try capabilityForwarder(self, allocator, cap.reject, "reject");
+    defer fwd_reject.deinit();
+    try self.subscribePromise(derived, fwd_resolve, fwd_reject, null);
+    return cap.promise;
+}
+
+/// Native wrapper that forwards its single argument to a capability's
+/// resolve/reject (which may be any callable, incl. a callable Proxy --
+/// the job runner itself only invokes native function values).
+fn capabilityForwarder(self: *Interpreter, allocator: Allocator, target: JSValue, name: []const u8) anyerror!JSValue {
+    const c = try allocator.create(FinallyCtx);
+    c.* = .{ .interp = self, .handler = target.retain() };
+    try self.gcTrackFinallyCtx(c);
+    return self.gcNewFunction(.{ .ctx = c, .name = name, .arity = 1, .call = capabilityForwardCall });
+}
+
+fn capabilityForwardCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const c = finallyCtx(ctx);
+    const r = try c.interp.callValue(c.handler, JSValue.UNDEFINED, &.{arg(args, 0)}, "resolve");
+    r.deinit();
+    return JSValue.UNDEFINED;
 }
 
 fn promiseCatch(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -270,9 +311,14 @@ fn customCapExecutor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
     return JSValue.UNDEFINED;
 }
 
+/// ECMA-262 27.2.1.5 NewPromiseCapability(C): the only check BEFORE
+/// construction is IsConstructor(C); IsCallable(resolve/reject) is
+/// validated after `new C(executor)` returns (so the constructor -- and
+/// any executor calls it makes -- are observable first). Both resolve
+/// and reject are returned owned (+1), on the native and custom paths.
 fn newPromiseCapability(self: *Interpreter, allocator: Allocator, ctor: JSValue) anyerror!Capability {
     if (!builtin_helpers.isObjectLike(ctor)) {
-        return self.throwError(.type_error, "Promise capability target is not an object", .{});
+        return self.throwError(.type_error, "Promise capability target is not a constructor", .{});
     }
     if (isPromiseConstructor(ctor)) {
         const p = try self.gcNewPromise();
@@ -292,10 +338,13 @@ fn newPromiseCapability(self: *Interpreter, allocator: Allocator, ctor: JSValue)
     const exec_fn = try self.gcNewFunction(.{ .ctx = c, .name = "", .arity = 2, .call = customCapExecutor });
     const promise = try self.constructValue(ctor, &.{exec_fn}, "");
     errdefer promise.deinit();
-    if (!c.handler.isFunction() or !c.aux.isFunction()) {
-        return self.throwError(.type_error, "Promise resolve or reject function is not callable", .{});
+    if (!property_desc.isCallable(c.handler)) {
+        return self.throwError(.type_error, "Promise resolve function is not callable", .{});
     }
-    return .{ .promise = promise, .resolve = c.handler, .reject = c.aux, .is_native = false };
+    if (!property_desc.isCallable(c.aux)) {
+        return self.throwError(.type_error, "Promise reject function is not callable", .{});
+    }
+    return .{ .promise = promise, .resolve = c.handler.retain(), .reject = c.aux.retain(), .is_native = false };
 }
 
 fn promiseResolveStatic(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -323,7 +372,7 @@ fn promiseResolveStatic(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
         return p;
     }
     const cap = try newPromiseCapability(self, allocator, this_value);
-    const r = try cap.resolve.asFunction().value.call(cap.resolve.asFunction().value.ctx, allocator, JSValue.UNDEFINED, &.{v});
+    const r = try self.callValue(cap.resolve, JSValue.UNDEFINED, &.{v}, "resolve");
     r.deinit();
     return cap.promise;
 }
@@ -338,7 +387,7 @@ fn promiseRejectStatic(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
         return self.rejectedPromise(v);
     }
     const cap = try newPromiseCapability(self, allocator, this_value);
-    const r = try cap.reject.asFunction().value.call(cap.reject.asFunction().value.ctx, allocator, JSValue.UNDEFINED, &.{v});
+    const r = try self.callValue(cap.reject, JSValue.UNDEFINED, &.{v}, "reject");
     r.deinit();
     return cap.promise;
 }
@@ -365,7 +414,7 @@ fn promiseTryStatic(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
         self.throwError(.type_error, "Promise.try callback is not a function", .{});
     if (call_res) |val| {
         defer val.deinit();
-        const r = try cap.resolve.asFunction().value.call(cap.resolve.asFunction().value.ctx, allocator, JSValue.UNDEFINED, &.{val});
+        const r = try self.callValue(cap.resolve, JSValue.UNDEFINED, &.{val}, "resolve");
         r.deinit();
     } else |err0| {
         const err = self.throwIfGap(err0);
@@ -373,7 +422,7 @@ fn promiseTryStatic(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
         const ex = self.pending_exception.?;
         self.pending_exception = null;
         defer ex.deinit();
-        const r = try cap.reject.asFunction().value.call(cap.reject.asFunction().value.ctx, allocator, JSValue.UNDEFINED, &.{ex});
+        const r = try self.callValue(cap.reject, JSValue.UNDEFINED, &.{ex}, "reject");
         r.deinit();
     }
     return cap.promise;
@@ -755,7 +804,7 @@ fn promiseCombinator(comptime mode: CombinatorMode) NativeFn {
                 const ex = self.pending_exception.?;
                 self.pending_exception = null;
                 defer ex.deinit();
-                const r = try cap.reject.asFunction().value.call(cap.reject.asFunction().value.ctx, allocator, JSValue.UNDEFINED, &.{ex});
+                const r = try self.callValue(cap.reject, JSValue.UNDEFINED, &.{ex}, "reject");
                 r.deinit();
             };
             return cap.promise;
@@ -867,7 +916,7 @@ fn promiseKeyedCombinator(comptime all_mode: @TypeOf(@as(AllCtx, undefined).mode
                 const ex = self.pending_exception.?;
                 self.pending_exception = null;
                 defer ex.deinit();
-                const r = try cap.reject.asFunction().value.call(cap.reject.asFunction().value.ctx, allocator, JSValue.UNDEFINED, &.{ex});
+                const r = try self.callValue(cap.reject, JSValue.UNDEFINED, &.{ex}, "reject");
                 r.deinit();
             };
             return cap.promise;

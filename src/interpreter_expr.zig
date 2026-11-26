@@ -1175,9 +1175,13 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
             const should_adopt = (sctor_is_js and @import("builtin_helpers.zig").isObjectLike(result)) or
                 result.isArray() or result.isRegex() or
                 (result.isTemporal() and self.temporal_protos.contains(@intFromPtr(result.asTemporal()))) or
-                result.isTypedArray() or result.isArrayBuffer() or result.isDataView() or result.isSet() or result.isMap();
+                result.isTypedArray() or result.isArrayBuffer() or result.isDataView() or result.isSet() or result.isMap() or
+                result.isPromise() or result.isDate();
             if (should_adopt) {
-                if ((result.isArray() or result.isRegex()) and this_v.isObject()) {
+                // Exotic results built by a native parent (`class P extends
+                // Promise`, `extends Date`, ...) take new.target's prototype
+                // from the provisional `this`.
+                if ((result.isArray() or result.isRegex() or result.isPromise() or result.isDate()) and this_v.isObject()) {
                     if (this_v.asObject().value.getPrototype()) |pp| {
                         const Box = @TypeOf(this_v.asObject().*);
                         const box: *Box = @fieldParentPtr("value", pp);

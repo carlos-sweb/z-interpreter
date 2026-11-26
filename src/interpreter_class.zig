@@ -727,6 +727,14 @@ pub fn privateSet(self: *Interpreter, env: *Environment, obj: JSValue, name: []c
             _ = try s.asFunction().value.call(s.asFunction().value.ctx, self.gc_allocator, obj, &.{value});
             return;
         }
+        // Private METHODS (instance methods copied onto the object, or
+        // static ones on the statics bag) are not writable: a write is
+        // the spec TypeError (PrivateSet step 5). Decided by the class's
+        // declared method keys, not the descriptor (Object.freeze also
+        // clears `writable` on private FIELD records).
+        if (isPrivateMethodKey(ctx, key)) {
+            return self.throwError(.type_error, "Cannot assign to private method {s}", .{name});
+        }
         // A brand-checked private FIELD write updates in place.
         hv.set(key, value.retain()) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
@@ -750,6 +758,17 @@ pub fn privateSet(self: *Interpreter, env: *Environment, obj: JSValue, name: []c
     return self.throwError(.type_error, "Cannot write private member {s} to an object whose class did not declare it", .{name});
 }
 
+fn isPrivateMethodKey(ctx: *anyopaque, key: []const u8) bool {
+    const cctx = interpreter_mod.classCtxFromOpaque(ctx);
+    for (cctx.private_method_keys) |k| {
+        if (std.mem.eql(u8, k, key)) return true;
+    }
+    for (cctx.private_static_method_keys) |k| {
+        if (std.mem.eql(u8, k, key)) return true;
+    }
+    return false;
+}
+
 /// `#name in obj` -- true iff obj carries this class's brand for the
 /// name (an own-or-prototype private entry under the encoded key).
 pub fn privateHas(self: *Interpreter, env: *Environment, obj: JSValue, name: []const u8) anyerror!bool {
@@ -770,8 +789,12 @@ pub fn privateHas(self: *Interpreter, env: *Environment, obj: JSValue, name: []c
 /// Called at constructor entry for base classes and right after
 /// `super()` returns for derived ones.
 pub fn runInstanceFields(self: *Interpreter, cctx: *ClassCtx, instance: JSValue) anyerror!void {
-    if (cctx.instance_fields.len == 0) return;
+    if (cctx.instance_fields.len == 0 and cctx.private_method_keys.len == 0) return;
     if (!instance.isObject() and !instance.isTypedArray() and !instance.isArrayBuffer() and !instance.isDataView() and !instance.isArray()) return; // exotic `this` -- nothing to define on
+    // ECMA-262 7.3.34 InitializeInstanceElements: private methods and
+    // accessors are added to the instance FIRST, then fields run.
+    try installPrivateMethods(self, cctx, instance);
+    if (cctx.instance_fields.len == 0) return;
     const field_env = try self.gcChildEnv(cctx.closure_env);
     field_env.this_value = instance.retain();
     if (cctx.super_proto) |sp|
@@ -818,6 +841,61 @@ pub fn runInstanceFields(self: *Interpreter, cctx: *ClassCtx, instance: JSValue)
                 error.OutOfMemory => return error.OutOfMemory,
                 error.ObjectIsFrozen, error.ObjectNotExtensible, error.PropertyNotWritable, error.PropertyNotConfigurable => return self.throwError(.type_error, "Cannot define property {s}, object is not extensible", .{fd.key}),
                 else => return err,
+            };
+        }
+    }
+}
+
+/// ECMA-262 7.3.31 PrivateMethodOrAccessorAdd for every instance private
+/// method/accessor of `cctx`: copied from the class's private-methods
+/// bag onto the instance itself (never reachable through the prototype,
+/// so `Object.create(C.prototype)` carries no brand). A second
+/// initialization of the same object is the spec TypeError.
+fn installPrivateMethods(self: *Interpreter, cctx: *ClassCtx, instance: JSValue) anyerror!void {
+    const bag_v = cctx.private_methods orelse return;
+    if (cctx.private_method_keys.len == 0) return;
+    const target_obj = if (instance.isObject())
+        instance
+    else if (instance.isArray())
+        try self.arrayPropsObject(instance)
+    else
+        try self.extraPropsObject(instance);
+    const target = &target_obj.asObject().value;
+    for (cctx.private_method_keys) |key| {
+        if (target.getOwnRecord(key) != null) {
+            return self.throwError(.type_error, "Cannot initialize private methods of class {s} twice on the same object", .{cctx.name});
+        }
+    }
+    // Private elements ignore frozen/non-extensible state (same rule as
+    // private fields in runInstanceFields).
+    const saved_frozen = target.is_frozen;
+    const saved_ext = target.is_extensible;
+    target.is_frozen = false;
+    target.is_extensible = true;
+    defer {
+        target.is_frozen = saved_frozen;
+        target.is_extensible = saved_ext;
+    }
+    const bag = &bag_v.asObject().value;
+    for (cctx.private_method_keys) |key| {
+        const rec = bag.getOwnRecord(key) orelse continue;
+        if (rec.isAccessor()) {
+            const g: ?JSValue = if (rec.getter) |gv| gv.retain() else null;
+            const st: ?JSValue = if (rec.setter) |sv| sv.retain() else null;
+            target.defineAccessor(key, g, st, JSValue.UNDEFINED) catch |err| {
+                if (g) |gv| gv.deinit();
+                if (st) |sv| sv.deinit();
+                return err;
+            };
+            if (target.getOwnRecordMut(key)) |r| {
+                r.descriptor.enumerable = false;
+                r.descriptor.configurable = false;
+            }
+        } else {
+            const mv = rec.value.retain();
+            target_obj.objectDefine(key, mv, .{ .writable = false, .enumerable = false, .configurable = false }) catch |err| {
+                mv.deinit();
+                return err;
             };
         }
     }
@@ -964,6 +1042,8 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
     const field_attrs = zvalue.PropertyDescriptor{ .writable = true, .enumerable = true, .configurable = true };
 
     var instance_fields: std.ArrayList(FieldDef) = .empty;
+    var private_method_keys: std.ArrayList([]const u8) = .empty;
+    var private_static_method_keys: std.ArrayList([]const u8) = .empty;
     for (cnode.elements) |el| {
         if (el.kind == .static_block) {
             const sb_env = try self.gcChildEnv(closure_env);
@@ -1030,7 +1110,29 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
         const m_super = if (el.is_static) static_super_proto else inst_super_proto;
         const m_home = if (el.is_static) try self.functionStatics(class_fn) else proto;
         const m = try self.makeMethodClosure(closure_env, el.function.?, m_super, cctx, m_home);
-        const target = if (el.is_static) try self.functionStatics(class_fn) else proto;
+        const is_private = el.key == .private;
+        if (is_private and el.is_static and el.kind == .method) {
+            errdefer m.deinit();
+            try private_static_method_keys.append(self.arena_state.allocator(), try self.arena_state.allocator().dupe(u8, key));
+        }
+        // Instance private methods/accessors live in the class's own
+        // private-methods bag (copied onto each instance by
+        // runInstanceFields), never on the shared prototype.
+        const target = if (el.is_static)
+            try self.functionStatics(class_fn)
+        else if (is_private) blk: {
+            errdefer m.deinit();
+            if (cctx.private_methods == null) cctx.private_methods = try self.gcNewObject();
+            var seen = false;
+            for (private_method_keys.items) |k| {
+                if (std.mem.eql(u8, k, key)) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (!seen) try private_method_keys.append(self.arena_state.allocator(), try self.arena_state.allocator().dupe(u8, key));
+            break :blk cctx.private_methods.?;
+        } else proto;
         // Real spec (ClassDefinitionEvaluation/PropertyDefinitionEvaluation
         // for MethodDefinition): every class method/accessor is installed
         // via DefinePropertyOrThrow with [[Enumerable]]: false --
@@ -1042,7 +1144,8 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
         // merges into ONE property, its own documented behavior) then
         // have their descriptor corrected the same way
         // definePropertyFromJs already does for JS-level accessors.
-        const method_attrs = zvalue.PropertyDescriptor{ .writable = true, .enumerable = false, .configurable = true };
+        // Private methods are not writable (PrivateSet throws on them).
+        const method_attrs = zvalue.PropertyDescriptor{ .writable = !is_private, .enumerable = false, .configurable = true };
         switch (el.kind) {
             .method => {
                 try setFunctionName(self, m, key, null);
@@ -1066,6 +1169,8 @@ pub fn evalClass(self: *Interpreter, env: *Environment, cnode: *zfunctions.Class
         }
     }
     cctx.instance_fields = try instance_fields.toOwnedSlice(arena);
+    cctx.private_method_keys = private_method_keys.items;
+    cctx.private_static_method_keys = private_static_method_keys.items;
     return class_fn;
 }
 
@@ -1395,10 +1500,11 @@ pub fn classConstructorCall(ctx: *anyopaque, allocator: Allocator, this_value: J
         const should_adopt = (parent_is_js and @import("builtin_helpers.zig").isObjectLike(parent_result)) or
             parent_result.isArray() or parent_result.isRegex() or
             (parent_result.isTemporal() and self.temporal_protos.contains(@intFromPtr(parent_result.asTemporal()))) or
-            parent_result.isTypedArray() or parent_result.isArrayBuffer() or parent_result.isDataView() or parent_result.isSet() or parent_result.isMap();
+            parent_result.isTypedArray() or parent_result.isArrayBuffer() or parent_result.isDataView() or parent_result.isSet() or parent_result.isMap() or
+            parent_result.isPromise() or parent_result.isDate();
         if (should_adopt) {
             errdefer parent_result.deinit();
-            if ((parent_result.isArray() or parent_result.isRegex()) and this_value.isObject()) {
+            if ((parent_result.isArray() or parent_result.isRegex() or parent_result.isPromise() or parent_result.isDate()) and this_value.isObject()) {
                 if (this_value.asObject().value.getPrototype()) |pp| {
                     const Box = @TypeOf(this_value.asObject().*);
                     const box: *Box = @fieldParentPtr("value", pp);

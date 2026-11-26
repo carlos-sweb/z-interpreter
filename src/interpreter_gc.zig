@@ -1095,6 +1095,7 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
         .class_ctx => |cx| {
             if (cx.super_ctor) |v| sweeper.value(v);
             if (cx.super_proto) |v| sweeper.value(v);
+            if (cx.private_methods) |v| sweeper.value(v);
             self.gc_allocator.free(cx.instance_fields);
             self.gc_allocator.destroy(cx);
         },
