@@ -525,9 +525,44 @@ pub fn appendWtf8Merged(buf: *std.ArrayList(u8), allocator: Allocator, chunk: []
 
 fn stringFromCharCode(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
+    const self = interp(ctx);
+    // Stack fast-path for 1..4 numeric arguments (e.g. String.fromCharCode(c) or String.fromCharCode(H, L) in tight loops).
+    if (args.len <= 4) {
+        var all_numbers = true;
+        for (args) |a| {
+            if (!a.isNumber()) {
+                all_numbers = false;
+                break;
+            }
+        }
+        if (all_numbers) {
+            var sbuf: [16]u8 = undefined;
+            var slen: usize = 0;
+            for (args) |a| {
+                const num = a.asNumber();
+                const wrapped: f64 = if (std.math.isFinite(num)) @mod(@trunc(num), 65536.0) else 0;
+                const code: u21 = @intFromFloat(wrapped);
+                if (code >= 0xD800 and code <= 0xDFFF) {
+                    var tmp: [3]u8 = undefined;
+                    zstring.utf16.encodeSurrogateWtf8(&tmp, @intCast(code));
+                    if (zstring.utf16.mergeSurrogateBoundary(sbuf[0..slen], &tmp)) |merged| {
+                        slen -= 3;
+                        @memcpy(sbuf[slen .. slen + 4], &merged);
+                        slen += 4;
+                    } else {
+                        @memcpy(sbuf[slen .. slen + 3], &tmp);
+                        slen += 3;
+                    }
+                    continue;
+                }
+                const n = std.unicode.utf8Encode(code, sbuf[slen..]) catch continue;
+                slen += n;
+            }
+            return self.gcNewString(sbuf[0..slen]);
+        }
+    }
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
-    const self = interp(ctx);
     for (args) |a| {
         // ToUint16: wrap into [0, 65536) (NaN/Infinity -> 0), never panicking.
         const num = try toNumberStrict(self, a);

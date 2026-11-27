@@ -96,8 +96,14 @@ fn globalIsFinite(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
 /// uriReserved+uriUnescaped+"#".
 fn globalEncodeURI(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
-    const s = try argString(interp(ctx), allocator, args, 0);
-    defer allocator.free(s);
+    const a0 = arg(args, 0);
+    var owned: ?[]u8 = null;
+    defer if (owned) |o| allocator.free(o);
+    const s = if (a0.isString()) a0.asString().value.data else blk: {
+        const str = try argString(interp(ctx), allocator, args, 0);
+        owned = str;
+        break :blk str;
+    };
     const encoded = zurlcode.encode(allocator, s, .uri) catch |err| switch (err) {
         error.InvalidUtf8 => return interp(ctx).throwError(.uri_error, "URI malformed", .{}),
         error.OutOfMemory => return error.OutOfMemory,
@@ -110,8 +116,14 @@ fn globalEncodeURI(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
 /// uriUnescaped (uriReserved gets encoded too, unlike encodeURI).
 fn globalEncodeURIComponent(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
-    const s = try argString(interp(ctx), allocator, args, 0);
-    defer allocator.free(s);
+    const a0 = arg(args, 0);
+    var owned: ?[]u8 = null;
+    defer if (owned) |o| allocator.free(o);
+    const s = if (a0.isString()) a0.asString().value.data else blk: {
+        const str = try argString(interp(ctx), allocator, args, 0);
+        owned = str;
+        break :blk str;
+    };
     const encoded = zurlcode.encode(allocator, s, .component) catch |err| switch (err) {
         error.InvalidUtf8 => return interp(ctx).throwError(.uri_error, "URI malformed", .{}),
         error.OutOfMemory => return error.OutOfMemory,
@@ -124,8 +136,14 @@ fn globalEncodeURIComponent(ctx: *anyopaque, allocator: Allocator, this_value: J
 /// reserved-set (uriReserved+"#") %XY literal rather than decoding it.
 fn globalDecodeURI(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
-    const s = try argString(interp(ctx), allocator, args, 0);
-    defer allocator.free(s);
+    const a0 = arg(args, 0);
+    var owned: ?[]u8 = null;
+    defer if (owned) |o| allocator.free(o);
+    const s = if (a0.isString()) a0.asString().value.data else blk: {
+        const str = try argString(interp(ctx), allocator, args, 0);
+        owned = str;
+        break :blk str;
+    };
     const decoded = zurlcode.decode(allocator, s, true) catch |err| switch (err) {
         error.MalformedUri => return interp(ctx).throwError(.uri_error, "URI malformed", .{}),
         error.OutOfMemory => return error.OutOfMemory,
@@ -137,8 +155,14 @@ fn globalDecodeURI(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
 /// ECMA-262 19.2.6.3/19.2.6.1: unescape every %XY sequence, no exceptions.
 fn globalDecodeURIComponent(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
-    const s = try argString(interp(ctx), allocator, args, 0);
-    defer allocator.free(s);
+    const a0 = arg(args, 0);
+    var owned: ?[]u8 = null;
+    defer if (owned) |o| allocator.free(o);
+    const s = if (a0.isString()) a0.asString().value.data else blk: {
+        const str = try argString(interp(ctx), allocator, args, 0);
+        owned = str;
+        break :blk str;
+    };
     const decoded = zurlcode.decode(allocator, s, false) catch |err| switch (err) {
         error.MalformedUri => return interp(ctx).throwError(.uri_error, "URI malformed", .{}),
         error.OutOfMemory => return error.OutOfMemory,
