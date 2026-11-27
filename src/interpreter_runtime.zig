@@ -1189,10 +1189,15 @@ pub fn makeGeneratorObject(
     private_ctx: ?*anyopaque,
     args: []const JSValue,
     home_object: ?JSValue,
-    instance_proto: ?JSValue,
+    generator_fn: ?JSValue,
 ) anyerror!JSValue {
     const arena = self.gc_allocator;
     const call_env = try prepareCallEnv(self, fnode, closure_env, arena, this_value, super_proto, null, private_ctx, args, home_object, true);
+    var instance_proto: ?JSValue = null;
+    defer if (instance_proto) |ip| ip.deinit();
+    if (generator_fn) |fn_val| {
+        instance_proto = try self.getProperty(fn_val, "prototype");
+    }
     const fs = try arena.create(FiberState);
     fs.* = .{
         .is_generator = true,
@@ -1272,10 +1277,15 @@ pub fn makeAsyncGeneratorObject(
     private_ctx: ?*anyopaque,
     args: []const JSValue,
     home_object: ?JSValue,
-    instance_proto: ?JSValue,
+    generator_fn: ?JSValue,
 ) anyerror!JSValue {
     const arena = self.gc_allocator;
     const call_env = try prepareCallEnv(self, fnode, closure_env, arena, this_value, super_proto, null, private_ctx, args, home_object, true);
+    var instance_proto: ?JSValue = null;
+    defer if (instance_proto) |ip| ip.deinit();
+    if (generator_fn) |fn_val| {
+        instance_proto = try self.getProperty(fn_val, "prototype");
+    }
     const fs = try arena.create(FiberState);
     fs.* = .{
         .is_generator = true,

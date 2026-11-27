@@ -4334,9 +4334,12 @@ test "Operacion 27: all 27 target spec compliance cases" {
         \\try { d0.total({ unit: "days", relativeTo: "+275760-09-12T00:00:01+00:00[UTC]" }); } catch (e) { tempErr = e instanceof RangeError; }
         \\var tempOk = tempErr && d0.total({ unit: "days", relativeTo: "+275760-09-12T00:00:00+00:00[UTC]" }) === 0;
         \\
-        \\// 2. GeneratorPrototype[Symbol.toStringTag]
+        \\// 2. GeneratorPrototype[Symbol.toStringTag] + generator-created-after-decl-inst
         \\var GP = Object.getPrototypeOf(Object.getPrototypeOf(function*() {}()));
-        \\var genTagOk = GP[Symbol.toStringTag] === "Generator";
+        \\function* gAfterDecl(a = (gAfterDecl.prototype = null)) {}
+        \\var oldGProto = gAfterDecl.prototype;
+        \\var itAfterDecl = gAfterDecl();
+        \\var genTagOk = GP[Symbol.toStringTag] === "Generator" && Object.getPrototypeOf(itAfterDecl) !== oldGProto;
         \\
         \\// 3. do-while ASI same line
         \\var dwX;
@@ -4359,8 +4362,11 @@ test "Operacion 27: all 27 target spec compliance cases" {
         \\// comment psHit = true;
         \\var ltOk = lsHit && psHit;
         \\
-        \\// 7. AggregateError & SuppressedError constructor [[Prototype]] === Error
-        \\var errProtoOk = Object.getPrototypeOf(AggregateError) === Error && Object.getPrototypeOf(SuppressedError) === Error;
+        \\// 7. AggregateError & SuppressedError constructor [[Prototype]] === Error & Function.prototype.toString
+        \\var errProtoOk = Object.getPrototypeOf(AggregateError) === Error &&
+        \\  Object.getPrototypeOf(SuppressedError) === Error &&
+        \\  ("" + AggregateError).includes("AggregateError") &&
+        \\  ("" + SuppressedError).includes("SuppressedError");
         \\
         \\// 8. Number.parseFloat === parseFloat, Number.parseInt === parseInt, toFixed(0n) throws TypeError
         \\var toFixedBigIntErr = false;

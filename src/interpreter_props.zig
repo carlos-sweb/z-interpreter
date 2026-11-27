@@ -277,6 +277,9 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             };
             if (!fn_proto.isNull()) {
                 if (try self.getFromProto(obj, fn_proto, key)) |m| break :blk m;
+                if (fn_proto.isFunction()) {
+                    if (try self.getFromProto(obj, self.protos.function, key)) |m| break :blk m;
+                }
             }
             break :blk JSValue.UNDEFINED;
         },

@@ -1569,22 +1569,12 @@ pub fn closureCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     }
     defer closure_ctx.interp.pending_call_new_target = prev_nt;
     if (fnode.is_generator and fnode.is_async) {
-        var inst_proto: ?JSValue = null;
-        defer if (inst_proto) |ip| ip.deinit();
-        if (closure_ctx.fn_box) |b| {
-            const fn_val = JSValue.fromFunction(@ptrCast(@alignCast(b)));
-            inst_proto = try closure_ctx.interp.getProperty(fn_val, "prototype");
-        }
-        return closure_ctx.interp.makeAsyncGeneratorObject(fnode, closure_ctx.closure_env, this, closure_ctx.super_proto, closure_ctx.private_ctx, args, closure_ctx.home_object, inst_proto);
+        const gen_fn: ?JSValue = if (closure_ctx.fn_box) |b| JSValue.fromFunction(@ptrCast(@alignCast(b))) else null;
+        return closure_ctx.interp.makeAsyncGeneratorObject(fnode, closure_ctx.closure_env, this, closure_ctx.super_proto, closure_ctx.private_ctx, args, closure_ctx.home_object, gen_fn);
     }
     if (fnode.is_generator) {
-        var inst_proto: ?JSValue = null;
-        defer if (inst_proto) |ip| ip.deinit();
-        if (closure_ctx.fn_box) |b| {
-            const fn_val = JSValue.fromFunction(@ptrCast(@alignCast(b)));
-            inst_proto = try closure_ctx.interp.getProperty(fn_val, "prototype");
-        }
-        return closure_ctx.interp.makeGeneratorObject(fnode, closure_ctx.closure_env, this, closure_ctx.super_proto, closure_ctx.private_ctx, args, closure_ctx.home_object, inst_proto);
+        const gen_fn: ?JSValue = if (closure_ctx.fn_box) |b| JSValue.fromFunction(@ptrCast(@alignCast(b))) else null;
+        return closure_ctx.interp.makeGeneratorObject(fnode, closure_ctx.closure_env, this, closure_ctx.super_proto, closure_ctx.private_ctx, args, closure_ctx.home_object, gen_fn);
     }
     if (fnode.is_async) {
         return closure_ctx.interp.runAsyncFunction(fnode, closure_ctx.closure_env, this, closure_ctx.super_proto, closure_ctx.private_ctx, args, closure_ctx.home_object);
