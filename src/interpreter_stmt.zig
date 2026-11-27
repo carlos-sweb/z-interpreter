@@ -191,9 +191,30 @@ pub fn hoistVarForBinding(self: *Interpreter, env: *Environment, binding: zstate
 pub fn hoistVarPattern(self: *Interpreter, env: *Environment, pattern: *const zstatements.BindingPattern) anyerror!void {
     const arena = self.gc_allocator;
     switch (pattern.*) {
-        .identifier => |id| if (!env.containsBinding(id.name)) {
-            try env.define(arena, id.name, JSValue.UNDEFINED);
-            try markGlobalVarName(self, env, id.name);
+        .identifier => |id| {
+            if (self.global_var_env == env) {
+                if (self.global_object) |go| {
+                    if (go.asObject().value.getOwnRecordMut(id.name)) |rec| {
+                        rec.descriptor.configurable = false;
+                    }
+                }
+                _ = self.eval_var_names.remove(id.name);
+                if (!env.containsBinding(id.name)) {
+                    const init_v: JSValue = if (self.global_object) |go|
+                        if (go.asObject().value.getOwnRecord(id.name)) |rec|
+                            (if (rec.isAccessor()) JSValue.UNDEFINED else rec.value.retain())
+                        else if (self.global_env.getLocalBinding(id.name)) |gv|
+                            gv.retain()
+                        else
+                            JSValue.UNDEFINED
+                    else
+                        JSValue.UNDEFINED;
+                    try env.define(arena, id.name, init_v);
+                }
+                try markGlobalVarName(self, env, id.name);
+            } else if (!env.containsBinding(id.name)) {
+                try env.define(arena, id.name, JSValue.UNDEFINED);
+            }
         },
         .array => |arr| {
             for (arr.elements) |maybe_el| {
@@ -203,10 +224,31 @@ pub fn hoistVarPattern(self: *Interpreter, env: *Environment, pattern: *const zs
         },
         .object => |obj| {
             for (obj.properties) |p| try self.hoistVarPattern(env, p.value);
-            if (obj.rest) |r| if (!env.containsBinding(r.name)) {
-                try env.define(arena, r.name, JSValue.UNDEFINED);
-                try markGlobalVarName(self, env, r.name);
-            };
+            if (obj.rest) |r| {
+                if (self.global_var_env == env) {
+                    if (self.global_object) |go| {
+                        if (go.asObject().value.getOwnRecordMut(r.name)) |rec| {
+                            rec.descriptor.configurable = false;
+                        }
+                    }
+                    _ = self.eval_var_names.remove(r.name);
+                    if (!env.containsBinding(r.name)) {
+                        const init_v: JSValue = if (self.global_object) |go|
+                            if (go.asObject().value.getOwnRecord(r.name)) |rec|
+                                (if (rec.isAccessor()) JSValue.UNDEFINED else rec.value.retain())
+                            else if (self.global_env.getLocalBinding(r.name)) |gv|
+                                gv.retain()
+                            else
+                                JSValue.UNDEFINED
+                        else
+                            JSValue.UNDEFINED;
+                        try env.define(arena, r.name, init_v);
+                    }
+                    try markGlobalVarName(self, env, r.name);
+                } else if (!env.containsBinding(r.name)) {
+                    try env.define(arena, r.name, JSValue.UNDEFINED);
+                }
+            }
         },
     }
 }
@@ -270,6 +312,21 @@ pub fn hoistLexical(self: *Interpreter, env: *Environment, stmts: []const *zstat
                     return self.throwError(.syntax_error, "Identifier '{s}' has already been declared", .{name});
                 }
                 const value = try self.makeClosure(env, fnode);
+                if (self.global_var_env == env) {
+                    if (self.global_object) |go| {
+                        const go_obj = &go.asObject().value;
+                        if (go_obj.getOwnRecordMut(name)) |rec| {
+                            if (rec.descriptor.configurable) {
+                                _ = try self.deleteObjectProperty(go, name);
+                            } else {
+                                const old = rec.value;
+                                rec.value = value.retain();
+                                old.deinit();
+                            }
+                        }
+                    }
+                    _ = self.eval_var_names.remove(name);
+                }
                 try env.define(arena, name, value);
                 try markGlobalVarName(self, env, name);
             },
@@ -289,8 +346,13 @@ pub fn hoistLexical(self: *Interpreter, env: *Environment, stmts: []const *zstat
             .class_declaration => |ptr| {
                 const cnode = zfunctions.asClassNode(ptr);
                 const name = cnode.name.?;
-                if (env.declaresLocally(name)) {
+                if (env.declaresLocally(name) and !(self.global_var_env == env and self.eval_var_names.contains(name))) {
                     return self.throwError(.syntax_error, "Identifier '{s}' has already been declared", .{name});
+                }
+                if (self.global_var_env == env and self.eval_var_names.remove(name)) {
+                    if (env.removeBinding(name)) |old_b| {
+                        try self.global_env.define(arena, name, old_b.value);
+                    }
                 }
                 try env.markTDZ(arena, name);
             },
@@ -332,8 +394,13 @@ pub fn markPatternTDZ(self: *Interpreter, env: *Environment, pattern: *const zst
     const arena = self.gc_allocator;
     switch (pattern.*) {
         .identifier => |id| {
-            if (env.declaresLocally(id.name)) {
+            if (env.declaresLocally(id.name) and !(self.global_var_env == env and self.eval_var_names.contains(id.name))) {
                 return self.throwError(.syntax_error, "Identifier '{s}' has already been declared", .{id.name});
+            }
+            if (self.global_var_env == env and self.eval_var_names.remove(id.name)) {
+                if (env.removeBinding(id.name)) |old_b| {
+                    try self.global_env.define(arena, id.name, old_b.value);
+                }
             }
             try env.markTDZ(arena, id.name);
         },
@@ -346,8 +413,13 @@ pub fn markPatternTDZ(self: *Interpreter, env: *Environment, pattern: *const zst
         .object => |obj| {
             for (obj.properties) |p| try self.markPatternTDZ(env, p.value);
             if (obj.rest) |r| {
-                if (env.declaresLocally(r.name)) {
+                if (env.declaresLocally(r.name) and !(self.global_var_env == env and self.eval_var_names.contains(r.name))) {
                     return self.throwError(.syntax_error, "Identifier '{s}' has already been declared", .{r.name});
+                }
+                if (self.global_var_env == env and self.eval_var_names.remove(r.name)) {
+                    if (env.removeBinding(r.name)) |old_b| {
+                        try self.global_env.define(arena, r.name, old_b.value);
+                    }
                 }
                 try env.markTDZ(arena, r.name);
             }

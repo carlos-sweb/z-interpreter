@@ -793,6 +793,7 @@ pub const Interpreter = struct {
     gc_registry: GcRegistry = .empty,
     global_env: *Environment,
     strict_mode: bool = false,
+    in_sloppy_eval: bool = false,
     /// Injected, not hardcoded to real stdout -- lets tests point this at
     /// an in-memory buffer instead of touching the process's actual
     /// stdout. console.log/info/debug write here.
@@ -853,6 +854,13 @@ pub const Interpreter = struct {
     /// (same lifetime contract as Environment.bindings), never freed
     /// individually.
     global_var_names: std.StringHashMapUnmanaged(void) = .empty,
+    /// Names of `var`/function declarations introduced at global scope by
+    /// non-strict `eval` (`CreateGlobalVarBinding(N, true)` /
+    /// `CreateGlobalFunctionBinding(N, V, true)`): these live in
+    /// `global_var_env` (or `globalThis`'s own bag) as configurable own
+    /// properties of `globalThis`, and do NOT count as `HasVarDeclaration`
+    /// in `GlobalDeclarationInstantiation`.
+    eval_var_names: std.StringHashMapUnmanaged(void) = .empty,
     /// Snapshot of `global_env`'s binding names taken right after
     /// `setupGlobals()` installs every builtin (isNaN, Boolean, Math, ...)
     /// -- lets `Object.getOwnPropertyDescriptor(globalThis, k)` tell an
@@ -4688,6 +4696,76 @@ test "Fase A - String: 8 spec compliance cases" {
         \\var sReSubOk = reSubCalled === 2 && reSubOut1 === "azc azc azc" && reSubOut2 === "zzz zbc";
         \\
         \\sArrOk && sTrimArgsOk && sSymThrow && sSymCallOk && sFccBigIntThrow && sIdxBoxedSymThrow && sLocEqOk && sReSubOk;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
+test "Fase A - Lote 3: $262.evalScript, global-code, and eval-code (24 spec cases)" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\// 1. decl-func.js & decl-var.js: top-level var/function properties on globalThis (writable, enumerable, non-configurable)
+        \\function brandNewFn() {}
+        \\var brandNewVar = 42;
+        \\var dFn = Object.getOwnPropertyDescriptor(this, "brandNewFn");
+        \\var dVar = Object.getOwnPropertyDescriptor(this, "brandNewVar");
+        \\var enumFnOk = this.propertyIsEnumerable("brandNewFn") && Object.keys(this).includes("brandNewFn");
+        \\this.brandNewVar = 99;
+        \\var writeVarOk = brandNewVar === 99 && this.brandNewVar === 99;
+        \\var declPropOk = dFn.writable && dFn.enumerable && !dFn.configurable &&
+        \\  dVar.writable && dVar.enumerable && !dVar.configurable && enumFnOk && writeVarOk;
+        \\
+        \\// 2. decl-lex-configurable-global.js: top-level let does not shadow or overwrite configurable global property on `this`
+        \\let Array;
+        \\var lexGlobalOk = Array === undefined && typeof this.Array === "function";
+        \\
+        \\// 3. $262.evalScript & GlobalDeclarationInstantiation conflicts
+        \\let test262Let = 1;
+        \\var esLexLexThrow = false;
+        \\try { $262.evalScript("var xNotCreated; let test262Let;"); } catch (e) { esLexLexThrow = e instanceof SyntaxError; }
+        \\var esNoPartialHoist = typeof xNotCreated === "undefined" && !("xNotCreated" in this);
+        \\
+        \\var esVarLexThrow = false;
+        \\try { $262.evalScript("var test262Let;"); } catch (e) { esVarLexThrow = e instanceof SyntaxError; }
+        \\var esFuncLexThrow = false;
+        \\try { $262.evalScript("function test262Let() {}"); } catch (e) { esFuncLexThrow = e instanceof SyntaxError; }
+        \\var esLexVarThrow = false;
+        \\try { $262.evalScript("let brandNewVar;"); } catch (e) { esLexVarThrow = e instanceof SyntaxError; }
+        \\var esLexRestrictedThrow = false;
+        \\try { $262.evalScript("let NaN;"); } catch (e) { esLexRestrictedThrow = e instanceof SyntaxError; }
+        \\
+        \\// 4. script-decl-func-err-non-configurable.js: CanDeclareGlobalFunction throws TypeError on non-configurable read-only global
+        \\var esFuncNonCfgThrow = false;
+        \\try { $262.evalScript("var yNotCreated; function NaN() {}"); } catch (e) { esFuncNonCfgThrow = e instanceof TypeError; }
+        \\var esNoPartialHoist2 = !("yNotCreated" in this);
+        \\
+        \\// 5. Indirect eval var/function creation & configurable update + script-decl-lex-var-declared-via-eval.js
+        \\(0, eval)("var evalCreatedVar = 7; function evalCreatedFn() { return 8; }");
+        \\var dEvalVar = Object.getOwnPropertyDescriptor(this, "evalCreatedVar");
+        \\var dEvalFn = Object.getOwnPropertyDescriptor(this, "evalCreatedFn");
+        \\var evalConfigurableOk = dEvalVar.configurable && dEvalVar.enumerable && dEvalVar.writable &&
+        \\  dEvalFn.configurable && dEvalFn.enumerable && dEvalFn.writable;
+        \\$262.evalScript("let evalCreatedVar = 'lex'; class evalCreatedFn {}");
+        \\var evalLexOverEvalVarOk = evalCreatedVar === "lex" && typeof evalCreatedFn === "function";
+        \\
+        \\// 6. typeof (parenthesized undeclared identifier) & direct/indirect parse-failure-5 (return;) & strict reserved words & sloppy indirect assignment
+        \\var typeofParenOk = typeof (undeclaredParenIdent) === "undefined";
+        \\var evalReturnThrow = false;
+        \\try { eval("return;"); } catch (e) { evalReturnThrow = e instanceof SyntaxError; }
+        \\var evalStrictReservedThrow = false;
+        \\try { eval("var public = 1;"); } catch (e) { evalStrictReservedThrow = e instanceof SyntaxError; }
+        \\(0, eval)("sloppyUnresolvableGlobal = 123;");
+        \\var sloppyAssignOk = this.sloppyUnresolvableGlobal === 123 && delete this.sloppyUnresolvableGlobal;
+        \\
+        \\declPropOk && lexGlobalOk && esLexLexThrow && esNoPartialHoist && esVarLexThrow && esFuncLexThrow &&
+        \\  esLexVarThrow && esLexRestrictedThrow && esFuncNonCfgThrow && esNoPartialHoist2 &&
+        \\  evalConfigurableOk && evalLexOverEvalVarOk && typeofParenOk && evalReturnThrow &&
+        \\  evalStrictReservedThrow && sloppyAssignOk;
     );
     defer res.deinit();
     try testing.expect(res.isBool() and res.asBool());

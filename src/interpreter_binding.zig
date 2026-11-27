@@ -524,7 +524,24 @@ pub fn bindPattern(self: *Interpreter, env: *Environment, pattern: *const zstate
                 .define => try env.define(arena, id.name, v),
                 // The pre-pass defined every var name; the fallback
                 // define is belt-and-braces, not a real path.
-                .assign => env.assign(id.name, v) catch try env.define(arena, id.name, v),
+                .assign => {
+                    env.assign(id.name, v) catch try env.define(arena, id.name, v);
+                    if (self.global_var_names.contains(id.name) or self.eval_var_names.contains(id.name)) {
+                        if (self.global_var_env) |gve| {
+                            if (env == gve or env.parent == gve) {
+                                if (self.global_object) |go| {
+                                    if (go.asObject().value.getOwnRecordMut(id.name)) |rec| {
+                                        if (!rec.isAccessor() and rec.descriptor.writable) {
+                                            const old = rec.value;
+                                            rec.value = value.retain();
+                                            old.deinit();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
             }
         },
         .array => |arr_pat| {

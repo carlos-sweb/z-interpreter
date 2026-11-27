@@ -633,8 +633,10 @@ pub fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSV
             // here is `env.lookup`'s own raw result -- still genuinely
             // BORROWED (Etapa 1 only retained at the evalExpression call
             // site, not inside `lookup` itself) -- do not deinit it.
-            if (u.operand.data == .identifier) {
-                const name = u.operand.data.identifier;
+            var op_node = u.operand;
+            while (op_node.data == .paren) op_node = op_node.data.paren;
+            if (op_node.data == .identifier) {
+                const name = op_node.data.identifier;
                 switch (env.lookup(name)) {
                     .value => |v| return try self.gcNewString(v.typeOf()),
                     .tdz => return self.throwError(.reference_error, "Cannot access '{s}' before initialization", .{name}),
@@ -789,8 +791,10 @@ pub fn evalAssignment(self: *Interpreter, env: *Environment, a: anytype) anyerro
         const value = try self.evalExpression(env, a.value);
         errdefer value.deinit();
         if (unresolvable_ident) |name| {
-            value.deinit();
-            return self.throwError(.reference_error, "{s} is not defined", .{name});
+            if (!self.in_sloppy_eval or self.strict_mode) {
+                value.deinit();
+                return self.throwError(.reference_error, "{s} is not defined", .{name});
+            }
         }
         switch (a.target.data) {
             // Cover-grammar reinterpretation: the literal IS the
@@ -995,7 +999,17 @@ pub fn assignTo(self: *Interpreter, env: *Environment, target: *zparser.Node, va
         // env.assign takes ownership -- retain, matching bindPattern's
         // convention (the caller keeps its own reference to `value`).
         .identifier => |name| env.assign(name, value.retain()) catch |err| return switch (err) {
-            error.ReferenceError => self.throwError(.reference_error, "{s} is not defined", .{name}),
+            error.ReferenceError => blk: {
+                if (self.in_sloppy_eval and !self.strict_mode) {
+                    if (self.global_object) |go| {
+                        try self.setPropertyOnValue(go, name, value);
+                    } else {
+                        try self.global_env.define(self.gc_allocator, name, value.retain());
+                    }
+                    break :blk;
+                }
+                break :blk self.throwError(.reference_error, "{s} is not defined", .{name});
+            },
             error.BeforeInitialization => self.throwError(.reference_error, "Cannot access '{s}' before initialization", .{name}),
             error.ImmutableBinding => self.throwError(.type_error, "Assignment to constant variable.", .{}),
         },

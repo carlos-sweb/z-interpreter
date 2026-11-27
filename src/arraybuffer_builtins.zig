@@ -1691,6 +1691,15 @@ fn hostDetachArrayBuffer(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
     return JSValue.UNDEFINED;
 }
 
+fn hostEvalScript(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    const self = interp(ctx);
+    const code = arg(args, 0);
+    const str = try self.toDisplayStringJS(allocator, code);
+    defer allocator.free(str);
+    return @import("interpreter_runtime.zig").evalScriptSource(self, str);
+}
+
 fn arrayBufferIsView(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = ctx;
     _ = allocator;
@@ -1752,5 +1761,6 @@ pub fn install(self: *Interpreter) !void {
 
     const dollar262 = try self.ordinaryObject();
     try builtin_helpers.dneMethod(dollar262, "detachArrayBuffer", try native(self, "detachArrayBuffer", 1, hostDetachArrayBuffer));
+    try builtin_helpers.dneMethod(dollar262, "evalScript", try native(self, "evalScript", 1, hostEvalScript));
     try g.define(arena, "$262", dollar262);
 }

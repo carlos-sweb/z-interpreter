@@ -103,8 +103,13 @@ pub fn getPropertyWithReceiver(self: *Interpreter, obj: JSValue, key: []const u8
             // === 1`).
             if (self.global_object) |go| {
                 if (obj.asObject() == go.asObject()) {
-                    const lookup_env = self.global_var_env orelse self.global_env;
-                    if (lookup_env.get(key)) |v| break :blk v.retain();
+                    if (box.value.getOwnRecord(key) == null) {
+                        if (self.global_var_names.contains(key) or self.eval_var_names.contains(key)) {
+                            const gve = self.global_var_env orelse self.global_env;
+                            if (gve.getLocalBinding(key)) |v| break :blk v.retain();
+                        }
+                        if (self.global_env.getLocalBinding(key)) |v| break :blk v.retain();
+                    }
                 }
             }
             var last_obj: *const @TypeOf(box.value) = &box.value;
@@ -984,12 +989,42 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
     // built-ins/undefined+NaN+Infinity/prop-desc.js).
     if (self.global_object) |go| {
         if (obj.asObject() == go.asObject()) {
+            const go_obj = &go.asObject().value;
+            if (go_obj.getOwnRecord(key) != null) {
+                try self.setObjectProperty(obj, key, value);
+                if (go_obj.getOwnRecord(key)) |rec| {
+                    if (!rec.isAccessor()) {
+                        if (self.global_var_names.contains(key) or self.eval_var_names.contains(key)) {
+                            const gve = self.global_var_env orelse self.global_env;
+                            if (gve.containsBinding(key)) {
+                                try gve.define(self.gc_allocator, key, rec.value.retain());
+                            }
+                        } else if (self.global_env.containsBinding(key)) {
+                            try self.global_env.define(self.gc_allocator, key, rec.value.retain());
+                        }
+                    }
+                }
+                return;
+            }
+            if (self.global_var_names.contains(key) or self.eval_var_names.contains(key)) {
+                const gve = self.global_var_env orelse self.global_env;
+                if (gve.containsBinding(key)) {
+                    gve.assign(key, value.retain()) catch |e| switch (e) {
+                        error.ImmutableBinding => return self.throwError(.type_error, "Cannot assign to read only property '{s}' of object '#<Object>'", .{key}),
+                        else => return e,
+                    };
+                    return;
+                }
+            }
             if (self.global_env.containsBinding(key)) {
                 self.global_env.assign(key, value.retain()) catch |e| switch (e) {
                     error.ImmutableBinding => return self.throwError(.type_error, "Cannot assign to read only property '{s}' of object '#<Object>'", .{key}),
                     else => return e,
                 };
                 return;
+            }
+            if (!go_obj.is_extensible) {
+                return self.throwError(.type_error, "Cannot add property {s}, object is not extensible", .{key});
             }
             // `Environment.define` stores `key` BY REFERENCE (never
             // dupes -- every other call site passes an AST-borrowed,
@@ -1091,6 +1126,16 @@ pub fn deletePropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8) 
             if (obj.asObject() == go.asObject()) {
                 if (std.mem.eql(u8, key, "undefined") or std.mem.eql(u8, key, "NaN") or std.mem.eql(u8, key, "Infinity") or self.global_var_names.contains(key)) {
                     return false;
+                }
+                const go_obj = &go.asObject().value;
+                if (go_obj.getOwnRecord(key)) |rec| {
+                    if (!rec.descriptor.configurable) return false;
+                    _ = try self.deleteObjectProperty(obj, key);
+                }
+                if (self.eval_var_names.remove(key)) {
+                    if (self.global_var_env) |gve| {
+                        if (gve.removeBinding(key)) |binding| binding.value.deinit();
+                    }
                 }
                 if (self.global_env.removeBinding(key)) |binding| {
                     binding.value.deinit();

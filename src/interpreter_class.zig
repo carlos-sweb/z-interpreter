@@ -467,13 +467,29 @@ pub fn normalizePrivateInProgram(allocator: Allocator, source: []const u8, stmts
     return normalizePrivateInProgramMode(allocator, source, stmts, strict);
 }
 
+fn isStrictReservedWord(name: []const u8) bool {
+    return std.mem.eql(u8, name, "implements") or
+        std.mem.eql(u8, name, "interface") or
+        std.mem.eql(u8, name, "let") or
+        std.mem.eql(u8, name, "package") or
+        std.mem.eql(u8, name, "private") or
+        std.mem.eql(u8, name, "protected") or
+        std.mem.eql(u8, name, "public") or
+        std.mem.eql(u8, name, "static") or
+        std.mem.eql(u8, name, "yield");
+}
+
 pub fn normalizePrivateInProgramMode(allocator: Allocator, source: []const u8, stmts: []const *zstatements.Statement, strict: bool) anyerror!void {
     for (stmts) |stmt| try normalizePrivateInStatementMode(allocator, source, stmt, strict);
 }
 
 fn normalizePrivateInPattern(allocator: Allocator, source: []const u8, pattern: *const zstatements.BindingPattern, strict: bool) anyerror!void {
     switch (pattern.*) {
-        .identifier => {},
+        .identifier => |id| {
+            if (strict and (isStrictReservedWord(id.name) or std.mem.eql(u8, id.name, "eval") or std.mem.eql(u8, id.name, "arguments"))) {
+                return error.InvalidStrictAssignment;
+            }
+        },
         .array => |arr| {
             for (arr.elements) |maybe_el| if (maybe_el) |el| {
                 try normalizePrivateInPattern(allocator, source, el.pattern, strict);
@@ -487,6 +503,11 @@ fn normalizePrivateInPattern(allocator: Allocator, source: []const u8, pattern: 
                 try normalizePrivateInPattern(allocator, source, p.value, strict);
                 if (p.default) |d| try normalizePrivateInNodeMode(allocator, source, d, strict);
             }
+            if (obj.rest) |r| {
+                if (strict and (isStrictReservedWord(r.name) or std.mem.eql(u8, r.name, "eval") or std.mem.eql(u8, r.name, "arguments"))) {
+                    return error.InvalidStrictAssignment;
+                }
+            }
         },
     }
 }
@@ -494,6 +515,18 @@ fn normalizePrivateInPattern(allocator: Allocator, source: []const u8, pattern: 
 fn normalizePrivateInFunction(allocator: Allocator, source: []const u8, fnode: *zfunctions.FunctionNode, outer_strict: bool) anyerror!void {
     const body_strict = fnode.body == .block and @import("bytecode/codeblock.zig").hasUseStrict(fnode.body.block.data.block);
     const strict = outer_strict or body_strict;
+    if (strict) {
+        const fn_name: ?[]const u8 = switch (fnode.kind) {
+            .function_decl => |d| d.name,
+            .function_expr => |e| e.name,
+            else => null,
+        };
+        if (fn_name) |n| {
+            if (isStrictReservedWord(n) or std.mem.eql(u8, n, "eval") or std.mem.eql(u8, n, "arguments")) {
+                return error.InvalidStrictAssignment;
+            }
+        }
+    }
     for (fnode.params.items) |param| {
         try normalizePrivateInPattern(allocator, source, param.pattern, strict);
         if (param.default) |d| try normalizePrivateInNodeMode(allocator, source, d, strict);
@@ -527,7 +560,14 @@ fn normalizePrivateInClass(allocator: Allocator, source: []const u8, cnode: *zfu
 
 fn normalizePrivateInStatementMode(allocator: Allocator, source: []const u8, stmt: *const zstatements.Statement, strict: bool) anyerror!void {
     switch (stmt.data) {
-        .empty, .continue_stmt, .break_stmt, .debugger, .import_decl => {},
+        .continue_stmt, .break_stmt => |label_opt| {
+            if (strict) {
+                if (label_opt) |lbl| {
+                    if (isStrictReservedWord(lbl)) return error.InvalidStrictAssignment;
+                }
+            }
+        },
+        .empty, .debugger, .import_decl => {},
         .expr_stmt, .throw_stmt => |e| try normalizePrivateInNodeMode(allocator, source, e, strict),
         .return_stmt => |maybe_e| if (maybe_e) |e| try normalizePrivateInNodeMode(allocator, source, e, strict),
         .block => |stmts| try normalizePrivateInProgramMode(allocator, source, stmts, strict),
@@ -564,7 +604,7 @@ fn normalizePrivateInStatementMode(allocator: Allocator, source: []const u8, stm
                 .for_in => |h| {
                     switch (h.binding) {
                         .declared => |d| try normalizePrivateInPattern(allocator, source, d.pattern, strict),
-                        .existing => {},
+                        .existing => |bn| if (strict and (isStrictReservedWord(bn.name) or std.mem.eql(u8, bn.name, "eval") or std.mem.eql(u8, bn.name, "arguments"))) return error.InvalidStrictAssignment,
                         .existing_pattern => |e| try normalizePrivateInNodeMode(allocator, source, e, strict),
                     }
                     try normalizePrivateInNodeMode(allocator, source, h.object, strict);
@@ -572,7 +612,7 @@ fn normalizePrivateInStatementMode(allocator: Allocator, source: []const u8, stm
                 .for_of => |h| {
                     switch (h.binding) {
                         .declared => |d| try normalizePrivateInPattern(allocator, source, d.pattern, strict),
-                        .existing => {},
+                        .existing => |bn| if (strict and (isStrictReservedWord(bn.name) or std.mem.eql(u8, bn.name, "eval") or std.mem.eql(u8, bn.name, "arguments"))) return error.InvalidStrictAssignment,
                         .existing_pattern => |e| try normalizePrivateInNodeMode(allocator, source, e, strict),
                     }
                     try normalizePrivateInNodeMode(allocator, source, h.iterable, strict);
@@ -580,7 +620,10 @@ fn normalizePrivateInStatementMode(allocator: Allocator, source: []const u8, stm
             }
             try normalizePrivateInStatementMode(allocator, source, s.body, strict);
         },
-        .labelled => |s| try normalizePrivateInStatementMode(allocator, source, s.body, strict),
+        .labelled => |s| {
+            if (strict and isStrictReservedWord(s.label)) return error.InvalidStrictAssignment;
+            try normalizePrivateInStatementMode(allocator, source, s.body, strict);
+        },
         .try_stmt => |s| {
             try normalizePrivateInStatementMode(allocator, source, s.block, strict);
             if (s.handler) |h| {
@@ -619,6 +662,8 @@ pub fn normalizePrivateInNodeMode(allocator: Allocator, source: []const u8, node
         .identifier => |*name| {
             if (node.start < source.len and source[node.start] == '#' and (name.len == 0 or name.*[0] != '#')) {
                 name.* = try std.fmt.allocPrint(allocator, "#{s}", .{name.*});
+            } else if (strict and isStrictReservedWord(name.*)) {
+                return error.InvalidStrictAssignment;
             }
         },
         .template_literal => |t| for (t.expressions) |e| try normalizePrivateInNodeMode(allocator, source, e, strict),
@@ -680,7 +725,11 @@ pub fn normalizePrivateInNodeMode(allocator: Allocator, source: []const u8, node
         },
         .member => |m| {
             try normalizePrivateInNodeMode(allocator, source, m.object, strict);
-            try normalizePrivateInNodeMode(allocator, source, m.property, strict);
+            if (m.computed) {
+                try normalizePrivateInNodeMode(allocator, source, m.property, strict);
+            } else {
+                try normalizePrivateInNodeMode(allocator, source, m.property, false);
+            }
         },
         .function_like => |ptr| try normalizePrivateInFunction(allocator, source, zfunctions.asFunctionNode(ptr), strict),
         .class_like => |ptr| try normalizePrivateInClass(allocator, source, zfunctions.asClassNode(ptr)),

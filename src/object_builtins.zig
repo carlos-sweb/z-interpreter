@@ -103,15 +103,24 @@ pub fn ownEnumerableKeys(ctx: *anyopaque, allocator: Allocator, v: JSValue) anye
     // see global_builtin_names' doc comment) aren't in the object's own
     // bag, same gap as getOwnPropertyDescriptor/getOwnPropertyNames above.
     if (v.isObject() and isGlobalObject(self, v)) {
+        const go_obj = &v.asObject().value;
         if (self.global_var_env) |gve| {
             for (gve.bindings.items) |binding| {
+                if (!self.global_var_names.contains(binding.name) and !self.eval_var_names.contains(binding.name)) continue;
+                if (go_obj.getOwnRecord(binding.name)) |rec| {
+                    if (!rec.descriptor.enumerable) continue;
+                }
                 if (seen.contains(binding.name)) continue;
                 try seen.put(allocator, binding.name, {});
                 try owned.append(allocator, try allocator.dupe(u8, binding.name));
             }
         }
         for (self.global_env.bindings.items) |binding| {
-            if (self.global_builtin_names.contains(binding.name)) continue;
+            if (go_obj.getOwnRecord(binding.name)) |rec| {
+                if (!rec.descriptor.enumerable) continue;
+            } else if (self.global_builtin_names.contains(binding.name)) {
+                continue;
+            }
             if (seen.contains(binding.name)) continue;
             try seen.put(allocator, binding.name, {});
             try owned.append(allocator, try allocator.dupe(u8, binding.name));
@@ -312,7 +321,7 @@ pub fn objHasOwnProperty(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
         .object => |box| blk: {
             if (self.global_object) |go| {
                 if (this_value.asObject() == go.asObject()) {
-                    break :blk JSValue.fromBool(self.global_var_names.contains(key) or self.global_env.declaresLocally(key) or box.value.hasOwnProperty(key));
+                    break :blk JSValue.fromBool(self.global_var_names.contains(key) or self.eval_var_names.contains(key) or self.global_env.declaresLocally(key) or box.value.hasOwnProperty(key));
                 }
             }
             break :blk JSValue.fromBool(box.value.hasOwnProperty(key));
@@ -360,7 +369,12 @@ fn objPropertyIsEnumerable(ctx: *anyopaque, allocator: Allocator, this_value: JS
         return self.throwError(.type_error, "Cannot convert undefined or null to object", .{});
     }
     switch (this_value.unpack()) {
-        .object => return JSValue.fromBool(this_value.asObject().value.propertyIsEnumerable(key)),
+        .object => {
+            if (isGlobalObject(self, this_value)) {
+                return JSValue.fromBool((try ownPropertyEnumerable(self, this_value, key)) orelse false);
+            }
+            return JSValue.fromBool(this_value.asObject().value.propertyIsEnumerable(key));
+        },
         .function => |box| return JSValue.fromBool(if (box.value.statics) |bag| bag.asObject().value.propertyIsEnumerable(key) else false),
         .temporal => return JSValue.fromBool(if (self.temporalProps(this_value)) |bag| bag.asObject().value.propertyIsEnumerable(key) else false),
         .array => |box| {
@@ -657,9 +671,19 @@ fn isGlobalObject(self: *Interpreter, obj: JSValue) bool {
 /// Mirrors getProperty's own precedence (global-env binding shadows a
 /// same-named bag record).
 fn globalPropertyDescriptor(self: *Interpreter, key: []const u8) !?JSValue {
+    if (self.global_object) |go| {
+        if (go.asObject().value.getOwnRecord(key)) |rec| {
+            return try descFromRecord(self, rec);
+        }
+    }
     if (self.global_var_names.contains(key)) {
         const env = self.global_var_env orelse self.global_env;
         if (env.getLocalBinding(key)) |v| return try dataDescObj(self, v.retain(), true, true, false);
+        return null;
+    }
+    if (self.eval_var_names.contains(key)) {
+        const env = self.global_var_env orelse self.global_env;
+        if (env.getLocalBinding(key)) |v| return try dataDescObj(self, v.retain(), true, true, true);
         return null;
     }
     if (std.mem.eql(u8, key, "undefined") or std.mem.eql(u8, key, "NaN") or std.mem.eql(u8, key, "Infinity")) {
@@ -939,6 +963,7 @@ pub fn objectGetOwnPropertyNames(ctx: *anyopaque, allocator: Allocator, this_val
                 }
                 if (self.global_var_env) |gve| {
                     for (gve.bindings.items) |binding| {
+                        if (!self.global_var_names.contains(binding.name) and !self.eval_var_names.contains(binding.name)) continue;
                         if (seen.contains(binding.name)) continue;
                         try seen.put(allocator, binding.name, {});
                         _ = try result.asArray().value.push(try interp(ctx).gcNewString(binding.name));

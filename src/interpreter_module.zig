@@ -166,6 +166,9 @@ pub fn loadModule(self: *Interpreter, specifier: []const u8, referrer: ?[]const 
 /// exports its final value.
 pub fn evalModuleBody(self: *Interpreter, env: *Environment, stmts: []const *zstatements.Statement, rec: *ModuleRecord) anyerror!void {
     const arena = self.gc_allocator;
+    if (self.global_var_env == env) {
+        try @import("interpreter_runtime.zig").globalValidateScriptDecls(self, env, stmts);
+    }
     try self.hoistVarScope(env, stmts);
     try self.hoistLexical(env, stmts);
 

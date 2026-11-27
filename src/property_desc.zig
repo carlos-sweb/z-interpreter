@@ -392,9 +392,62 @@ pub fn syncFnPrototypeSlot(f: JSValue) void {
     if (old) |o| o.deinit();
 }
 
+pub fn materializeGlobalVirtual(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!void {
+    const go = self.global_object orelse return;
+    if (!obj.isObject() or obj.asObject() != go.asObject()) return;
+    if (obj.asObject().value.hasOwnProperty(key)) return;
+    const interned = try self.internPropKey(key);
+    if (self.global_var_names.contains(key)) {
+        const env = self.global_var_env orelse self.global_env;
+        if (env.getLocalBinding(key)) |v| {
+            try bagInsertRaw(obj, interned, v.retain(), .{ .writable = true, .enumerable = true, .configurable = false });
+            return;
+        }
+    }
+    if (self.eval_var_names.contains(key)) {
+        const env = self.global_var_env orelse self.global_env;
+        if (env.getLocalBinding(key)) |v| {
+            try bagInsertRaw(obj, interned, v.retain(), .{ .writable = true, .enumerable = true, .configurable = true });
+            return;
+        }
+    }
+    if (std.mem.eql(u8, key, "undefined") or std.mem.eql(u8, key, "NaN") or std.mem.eql(u8, key, "Infinity")) {
+        if (self.global_env.getLocalBinding(key)) |v| {
+            try bagInsertRaw(obj, interned, v.retain(), .{ .writable = false, .enumerable = false, .configurable = false });
+            return;
+        }
+    }
+    if (self.global_env.getLocalBinding(key)) |v| {
+        const is_builtin = self.global_builtin_names.contains(key);
+        try bagInsertRaw(obj, interned, v.retain(), .{ .writable = true, .enumerable = !is_builtin, .configurable = true });
+    }
+}
+
+pub fn syncGlobalVirtual(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!void {
+    const go = self.global_object orelse return;
+    if (!obj.isObject() or obj.asObject() != go.asObject()) return;
+    const rec = obj.asObject().value.getOwnRecord(key) orelse return;
+    if (rec.isAccessor()) return;
+    if (self.global_var_names.contains(key) or self.eval_var_names.contains(key)) {
+        const env = self.global_var_env orelse self.global_env;
+        if (env.containsBinding(key)) {
+            try env.define(self.gc_allocator, key, rec.value.retain());
+            return;
+        }
+    }
+    if (self.global_env.containsBinding(key)) {
+        try self.global_env.define(self.gc_allocator, key, rec.value.retain());
+    }
+}
+
 pub fn defineOwnProperty(self: *Interpreter, obj: JSValue, key: []const u8, d: *const ParsedDesc) anyerror!bool {
     switch (obj.unpack()) {
-        .object => return validateAndApply(self, obj, key, d),
+        .object => {
+            try materializeGlobalVirtual(self, obj, key);
+            const ok = try validateAndApply(self, obj, key, d);
+            if (ok) try syncGlobalVirtual(self, obj, key);
+            return ok;
+        },
         .function => {
             if (std.mem.eql(u8, key, "prototype") and (obj.asFunction().value.prototype != null or obj.asFunction().value.constructable) and obj.asFunction().value.ctx == @as(*anyopaque, @ptrCast(self))) {
                 const proto = try self.functionPrototype(obj);

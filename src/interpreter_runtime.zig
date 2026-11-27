@@ -449,8 +449,21 @@ pub fn run(self: *Interpreter, source: []const u8) anyerror!JSValue {
         if (compiled) |*block| {
             if (self.strict_mode) block.block.flags.is_strict = true;
             defer block.deinit(self.gc_allocator);
-            try self.hoistVarScope(self.script_env.?, program);
-            try self.hoistLexical(self.script_env.?, program);
+            globalValidateScriptDecls(self, self.script_env.?, program) catch |err0| {
+                const err = self.throwIfGap(err0);
+                if (err == error.JsThrow) return error.UncaughtException;
+                return err;
+            };
+            self.hoistVarScope(self.script_env.?, program) catch |err0| {
+                const err = self.throwIfGap(err0);
+                if (err == error.JsThrow) return error.UncaughtException;
+                return err;
+            };
+            self.hoistLexical(self.script_env.?, program) catch |err0| {
+                const err = self.throwIfGap(err0);
+                if (err == error.JsThrow) return error.UncaughtException;
+                return err;
+            };
             if (self.compile_options.disasm) {
                 const text = bytecode_emitter.disassemble(self.gc_allocator, &block.block) catch null;
                 if (text) |t| {
@@ -471,6 +484,11 @@ pub fn run(self: *Interpreter, source: []const u8) anyerror!JSValue {
             }
         }
     }
+    globalValidateScriptDecls(self, self.script_env.?, program) catch |err0| {
+        const err = self.throwIfGap(err0);
+        if (err != error.JsThrow) return err;
+        return error.UncaughtException;
+    };
     const c = self.evalBody(self.script_env.?, program) catch |err0| {
         const err = self.throwIfGap(err0);
         if (err != error.JsThrow) return err;
@@ -747,7 +765,7 @@ fn evalSourceImpl(self: *Interpreter, scope: *Environment, src: []const u8, is_d
     };
     self.current_source = parsed.source;
     const program = parsed.program;
-    const eval_is_strict = (is_direct and self.strict_mode) or codeblock.hasUseStrict(program);
+    const eval_is_strict = (is_direct and (self.strict_mode or !self.in_sloppy_eval)) or codeblock.hasUseStrict(program);
     interpreter_mod.normalizePrivateInProgramMode(ast_arena, parsed.source, program, eval_is_strict) catch |err| switch (err) {
         error.InvalidOctalLiteral => return self.throwError(.syntax_error, "Octal literals are not allowed in strict mode", .{}),
         error.InvalidStrictAssignment => return self.throwError(.syntax_error, "Unexpected eval or arguments in strict mode", .{}),
@@ -758,6 +776,11 @@ fn evalSourceImpl(self: *Interpreter, scope: *Environment, src: []const u8, is_d
         .allow_super_call = is_direct and scope.allowsSuperCall(),
         .allow_super_property = is_direct and scope.allowsSuperProperty(),
     };
+    for (program) |stmt| {
+        validateTopLevelFlow(stmt, false, false) catch {
+            return self.throwError(.syntax_error, "Illegal return, break, or continue statement in eval", .{});
+        };
+    }
     if (!flags.allow_arguments or !flags.allow_super_call or !flags.allow_super_property) {
         for (program) |stmt| {
             validateEvalStatement(stmt, flags) catch |err| switch (err) {
@@ -770,21 +793,25 @@ fn evalSourceImpl(self: *Interpreter, scope: *Environment, src: []const u8, is_d
     if (!is_direct) {
         const is_eval_strict = codeblock.hasUseStrict(program);
         const prev_strict = self.strict_mode;
+        const prev_sloppy_eval = self.in_sloppy_eval;
         self.strict_mode = is_eval_strict;
-        defer self.strict_mode = prev_strict;
+        self.in_sloppy_eval = !is_eval_strict;
+        defer {
+            self.strict_mode = prev_strict;
+            self.in_sloppy_eval = prev_sloppy_eval;
+        }
 
         const var_env = self.global_var_env orelse self.script_env orelse scope;
         if (!is_eval_strict) {
             try evalValidateGlobalDecls(self, var_env, program);
-            try self.hoistVarScope(var_env, program);
-            // Hoist top-level function declarations onto global var_env
+            try evalHoistVarScope(self, var_env, program);
+            // Hoist top-level function declarations onto global var_env (CreateGlobalFunctionBinding(fn, V, true))
             for (program) |stmt| {
                 if (stmt.data == .function_declaration) {
                     const fnode = zfunctions.asFunctionNode(stmt.data.function_declaration);
                     const name = fnode.kind.function_decl.name;
                     const value = try self.makeClosure(var_env, fnode);
-                    try var_env.define(self.gc_allocator, name, value);
-                    try self.global_var_names.put(self.gc_allocator, name, {});
+                    try evalCreateGlobalFunctionBinding(self, var_env, name, value);
                 }
             }
             const lex_scope = try self.gcChildEnv(var_env);
@@ -835,8 +862,341 @@ fn evalSourceImpl(self: *Interpreter, scope: *Environment, src: []const u8, is_d
     return c.value;
 }
 
+fn validateTopLevelFlow(stmt: *const zstatements.Statement, in_loop: bool, in_switch: bool) error{InvalidFlow}!void {
+    switch (stmt.data) {
+        .return_stmt => return error.InvalidFlow,
+        .continue_stmt => if (!in_loop) return error.InvalidFlow,
+        .break_stmt => |label| if (!in_loop and !in_switch and label == null) return error.InvalidFlow,
+        .block => |stmts| for (stmts) |s| try validateTopLevelFlow(s, in_loop, in_switch),
+        .if_stmt => |s| {
+            try validateTopLevelFlow(s.consequent, in_loop, in_switch);
+            if (s.alternate) |alt| try validateTopLevelFlow(alt, in_loop, in_switch);
+        },
+        .while_stmt => |s| try validateTopLevelFlow(s.body, true, in_switch),
+        .do_while => |s| try validateTopLevelFlow(s.body, true, in_switch),
+        .for_stmt => |s| try validateTopLevelFlow(s.body, true, in_switch),
+        .switch_stmt => |s| for (s.cases) |c| for (c.consequent) |cs| try validateTopLevelFlow(cs, in_loop, true),
+        .try_stmt => |s| {
+            try validateTopLevelFlow(s.block, in_loop, in_switch);
+            if (s.handler) |h| try validateTopLevelFlow(h.body, in_loop, in_switch);
+            if (s.finalizer) |fin| try validateTopLevelFlow(fin, in_loop, in_switch);
+        },
+        .labelled => |s| try validateTopLevelFlow(s.body, in_loop, in_switch),
+        .with_stmt => |s| try validateTopLevelFlow(s.body, in_loop, in_switch),
+        else => {},
+    }
+}
+
+fn evalCreateGlobalVarBinding(self: *Interpreter, var_env: *Environment, name: []const u8) anyerror!void {
+    if (var_env.containsBinding(name)) return;
+    if (self.global_object) |go| {
+        const go_obj = &go.asObject().value;
+        if (go_obj.getOwnRecord(name)) |rec| {
+            const init_val = if (rec.isAccessor()) JSValue.UNDEFINED else rec.value.retain();
+            try var_env.define(self.gc_allocator, name, init_val);
+            if (!self.global_var_names.contains(name)) {
+                try self.eval_var_names.put(self.gc_allocator, name, {});
+            }
+            return;
+        }
+    }
+    if (self.global_env.getLocalBinding(name)) |gv| {
+        try var_env.define(self.gc_allocator, name, gv.retain());
+        if (!self.global_var_names.contains(name)) {
+            try self.eval_var_names.put(self.gc_allocator, name, {});
+        }
+        return;
+    }
+    try var_env.define(self.gc_allocator, name, JSValue.UNDEFINED);
+    if (!self.global_var_names.contains(name)) {
+        try self.eval_var_names.put(self.gc_allocator, name, {});
+    }
+}
+
+fn evalCreateGlobalFunctionBinding(self: *Interpreter, var_env: *Environment, name: []const u8, value: JSValue) anyerror!void {
+    if (self.global_object) |go| {
+        const go_obj = &go.asObject().value;
+        if (go_obj.getOwnRecordMut(name)) |rec| {
+            if (rec.descriptor.configurable) {
+                if (rec.isAccessor()) {
+                    const og = rec.getter;
+                    const os = rec.setter;
+                    rec.getter = null;
+                    rec.setter = null;
+                    if (og) |x| x.deinit();
+                    if (os) |x| x.deinit();
+                    rec.descriptor.is_accessor = false;
+                }
+                const old = rec.value;
+                rec.value = value.retain();
+                old.deinit();
+                rec.descriptor.writable = true;
+                rec.descriptor.enumerable = true;
+                rec.descriptor.configurable = true;
+            } else {
+                const old = rec.value;
+                rec.value = value.retain();
+                old.deinit();
+            }
+        }
+    }
+    if (self.global_env.containsBinding(name) and !self.global_var_names.contains(name)) {
+        _ = self.global_builtin_names.remove(name);
+    }
+    try var_env.define(self.gc_allocator, name, value);
+    if (!self.global_var_names.contains(name)) {
+        try self.eval_var_names.put(self.gc_allocator, name, {});
+    }
+}
+
+fn evalHoistVarPattern(self: *Interpreter, var_env: *Environment, pat: *const zstatements.BindingPattern) anyerror!void {
+    switch (pat.*) {
+        .identifier => |id| try evalCreateGlobalVarBinding(self, var_env, id.name),
+        .array => |arr| {
+            for (arr.elements) |maybe_el| if (maybe_el) |el| try evalHoistVarPattern(self, var_env, el.pattern);
+            if (arr.rest) |r| try evalHoistVarPattern(self, var_env, r);
+        },
+        .object => |obj| {
+            for (obj.properties) |p| try evalHoistVarPattern(self, var_env, p.value);
+            if (obj.rest) |r| try evalCreateGlobalVarBinding(self, var_env, r.name);
+        },
+    }
+}
+
+fn evalHoistVarScope(self: *Interpreter, var_env: *Environment, stmts: []const *zstatements.Statement) anyerror!void {
+    for (stmts) |stmt| {
+        switch (stmt.data) {
+            .variable => |v| if (v.kind == .@"var") {
+                for (v.declarators) |d| try evalHoistVarPattern(self, var_env, d.pattern);
+            },
+            .block => |inner| try evalHoistVarScope(self, var_env, inner),
+            .if_stmt => |i| {
+                try evalHoistVarScope(self, var_env, &.{i.consequent});
+                if (i.alternate) |alt| try evalHoistVarScope(self, var_env, &.{alt});
+            },
+            .while_stmt => |w| try evalHoistVarScope(self, var_env, &.{w.body}),
+            .do_while => |d| try evalHoistVarScope(self, var_env, &.{d.body}),
+            .for_stmt => |f| {
+                switch (f.head) {
+                    .c_style => |cs| if (cs.init) |init| switch (init) {
+                        .decl => |d| if (d.kind == .@"var") for (d.declarators) |decl| try evalHoistVarPattern(self, var_env, decl.pattern),
+                        else => {},
+                    },
+                    .for_in => |fi| switch (fi.binding) {
+                        .declared => |d| if (d.kind == .@"var") try evalHoistVarPattern(self, var_env, d.pattern),
+                        else => {},
+                    },
+                    .for_of => |fo| switch (fo.binding) {
+                        .declared => |d| if (d.kind == .@"var") try evalHoistVarPattern(self, var_env, d.pattern),
+                        else => {},
+                    },
+                }
+                try evalHoistVarScope(self, var_env, &.{f.body});
+            },
+            .try_stmt => |t| {
+                try evalHoistVarScope(self, var_env, &.{t.block});
+                if (t.handler) |h| try evalHoistVarScope(self, var_env, &.{h.body});
+                if (t.finalizer) |fin| try evalHoistVarScope(self, var_env, &.{fin});
+            },
+            .switch_stmt => |s| for (s.cases) |sc| try evalHoistVarScope(self, var_env, sc.consequent),
+            .labelled => |l| try evalHoistVarScope(self, var_env, &.{l.body}),
+            else => {},
+        }
+    }
+}
+
+fn isLexicallyDeclaredInGlobal(self: *Interpreter, var_env: *Environment, name: []const u8) bool {
+    return var_env.declaresLocally(name) and !self.global_var_names.contains(name) and !self.eval_var_names.contains(name);
+}
+
+fn hasRestrictedGlobalProperty(self: *Interpreter, name: []const u8) bool {
+    if (std.mem.eql(u8, name, "NaN") or std.mem.eql(u8, name, "Infinity") or std.mem.eql(u8, name, "undefined")) return true;
+    if (self.global_var_names.contains(name)) return true;
+    if (self.global_object) |go| {
+        if (go.asObject().value.getOwnRecord(name)) |rec| {
+            return !rec.descriptor.configurable;
+        }
+    }
+    return false;
+}
+
+pub fn globalValidateScriptDecls(self: *Interpreter, var_env: *Environment, stmts: []const *zstatements.Statement) anyerror!void {
+    const arena = self.gc_allocator;
+    var lex_names: std.StringHashMapUnmanaged(void) = .empty;
+    defer lex_names.deinit(arena);
+    var var_names: std.ArrayList([]const u8) = .empty;
+    defer var_names.deinit(arena);
+    var fn_names: std.ArrayList([]const u8) = .empty;
+    defer fn_names.deinit(arena);
+
+    for (stmts) |stmt| {
+        validateTopLevelFlow(stmt, false, false) catch {
+            return self.throwError(.syntax_error, "Illegal return, break, or continue statement in script", .{});
+        };
+        switch (stmt.data) {
+            .variable => |v| if (v.kind != .@"var") {
+                for (v.declarators) |d| try collectLexPatternNames(self, arena, d.pattern, &lex_names);
+            },
+            .class_declaration => |ptr| {
+                const name = zfunctions.asClassNode(ptr).name.?;
+                if (lex_names.contains(name)) {
+                    return self.throwError(.syntax_error, "Identifier '{s}' has already been declared", .{name});
+                }
+                try lex_names.put(arena, name, {});
+            },
+            .function_declaration => |ptr| {
+                const name = zfunctions.asFunctionNode(ptr).kind.function_decl.name;
+                try fn_names.append(arena, name);
+                try var_names.append(arena, name);
+            },
+            else => {},
+        }
+    }
+    try collectHoistedVarNames(arena, stmts, &var_names);
+
+    var lex_it = lex_names.keyIterator();
+    while (lex_it.next()) |k| {
+        const name = k.*;
+        if (self.global_var_names.contains(name)) {
+            return self.throwError(.syntax_error, "Identifier '{s}' has already been declared", .{name});
+        }
+        if (isLexicallyDeclaredInGlobal(self, var_env, name)) {
+            return self.throwError(.syntax_error, "Identifier '{s}' has already been declared", .{name});
+        }
+        if (hasRestrictedGlobalProperty(self, name)) {
+            return self.throwError(.syntax_error, "Identifier '{s}' has already been declared", .{name});
+        }
+    }
+    for (var_names.items) |name| {
+        if (lex_names.contains(name) or isLexicallyDeclaredInGlobal(self, var_env, name)) {
+            return self.throwError(.syntax_error, "Identifier '{s}' has already been declared", .{name});
+        }
+    }
+    for (fn_names.items) |name| {
+        try evalCheckGlobalBinding(self, var_env, name, true);
+    }
+    for (var_names.items) |name| {
+        try evalCheckGlobalBinding(self, var_env, name, false);
+    }
+}
+
+fn collectLexPatternNames(self: *Interpreter, arena: Allocator, pat: *const zstatements.BindingPattern, set: *std.StringHashMapUnmanaged(void)) anyerror!void {
+    switch (pat.*) {
+        .identifier => |id| {
+            if (set.contains(id.name)) {
+                return self.throwError(.syntax_error, "Identifier '{s}' has already been declared", .{id.name});
+            }
+            try set.put(arena, id.name, {});
+        },
+        .array => |arr| {
+            for (arr.elements) |maybe_el| if (maybe_el) |el| try collectLexPatternNames(self, arena, el.pattern, set);
+            if (arr.rest) |r| try collectLexPatternNames(self, arena, r, set);
+        },
+        .object => |obj| {
+            for (obj.properties) |p| try collectLexPatternNames(self, arena, p.value, set);
+            if (obj.rest) |r| {
+                if (set.contains(r.name)) {
+                    return self.throwError(.syntax_error, "Identifier '{s}' has already been declared", .{r.name});
+                }
+                try set.put(arena, r.name, {});
+            }
+        },
+    }
+}
+
+fn collectVarPatternNames(arena: Allocator, pat: *const zstatements.BindingPattern, list: *std.ArrayList([]const u8)) !void {
+    switch (pat.*) {
+        .identifier => |id| try list.append(arena, id.name),
+        .array => |arr| {
+            for (arr.elements) |maybe_el| if (maybe_el) |el| try collectVarPatternNames(arena, el.pattern, list);
+            if (arr.rest) |r| try collectVarPatternNames(arena, r, list);
+        },
+        .object => |obj| {
+            for (obj.properties) |p| try collectVarPatternNames(arena, p.value, list);
+            if (obj.rest) |r| try list.append(arena, r.name);
+        },
+    }
+}
+
+fn collectHoistedVarNames(arena: Allocator, stmts: []const *zstatements.Statement, list: *std.ArrayList([]const u8)) !void {
+    for (stmts) |stmt| {
+        switch (stmt.data) {
+            .variable => |v| if (v.kind == .@"var") {
+                for (v.declarators) |d| try collectVarPatternNames(arena, d.pattern, list);
+            },
+            .block => |inner| try collectHoistedVarNames(arena, inner, list),
+            .if_stmt => |i| {
+                try collectHoistedVarNames(arena, &.{i.consequent}, list);
+                if (i.alternate) |alt| try collectHoistedVarNames(arena, &.{alt}, list);
+            },
+            .while_stmt => |w| try collectHoistedVarNames(arena, &.{w.body}, list),
+            .do_while => |d| try collectHoistedVarNames(arena, &.{d.body}, list),
+            .for_stmt => |f| {
+                switch (f.head) {
+                    .c_style => |cs| if (cs.init) |init| switch (init) {
+                        .decl => |d| if (d.kind == .@"var") for (d.declarators) |decl| try collectVarPatternNames(arena, decl.pattern, list),
+                        else => {},
+                    },
+                    .for_in => |fi| switch (fi.binding) {
+                        .declared => |d| if (d.kind == .@"var") try collectVarPatternNames(arena, d.pattern, list),
+                        else => {},
+                    },
+                    .for_of => |fo| switch (fo.binding) {
+                        .declared => |d| if (d.kind == .@"var") try collectVarPatternNames(arena, d.pattern, list),
+                        else => {},
+                    },
+                }
+                try collectHoistedVarNames(arena, &.{f.body}, list);
+            },
+            .try_stmt => |t| {
+                try collectHoistedVarNames(arena, &.{t.block}, list);
+                if (t.handler) |h| try collectHoistedVarNames(arena, &.{h.body}, list);
+                if (t.finalizer) |fin| try collectHoistedVarNames(arena, &.{fin}, list);
+            },
+            .switch_stmt => |s| for (s.cases) |sc| try collectHoistedVarNames(arena, sc.consequent, list),
+            .labelled => |l| try collectHoistedVarNames(arena, &.{l.body}, list),
+            else => {},
+        }
+    }
+}
+
+pub fn evalScriptSource(self: *Interpreter, src: []const u8) anyerror!JSValue {
+    const ast_arena = self.arena_state.allocator();
+    const owned_src = try ast_arena.dupe(u8, src);
+    const prev_source = self.current_source;
+    defer self.current_source = prev_source;
+    const parsed = @import("interpreter_class.zig").parseProgramWithAsi(
+        ast_arena,
+        owned_src,
+        self.stack_limit,
+        false,
+    ) catch |err| switch (err) {
+        error.MaxNestingDepthExceeded => return self.throwError(.range_error, "Maximum call stack size exceeded", .{}),
+        else => return self.throwError(.syntax_error, "Invalid or unexpected token in evalScript", .{}),
+    };
+    self.current_source = parsed.source;
+    const program = parsed.program;
+    const prev_strict = self.strict_mode;
+    self.strict_mode = codeblock.hasUseStrict(program);
+    defer self.strict_mode = prev_strict;
+
+    interpreter_mod.normalizePrivateInProgramMode(ast_arena, parsed.source, program, self.strict_mode) catch |err| switch (err) {
+        error.InvalidOctalLiteral => return self.throwError(.syntax_error, "Octal literals are not allowed in strict mode", .{}),
+        error.InvalidStrictAssignment => return self.throwError(.syntax_error, "Unexpected eval or arguments in strict mode", .{}),
+        else => return err,
+    };
+
+    const var_env = self.global_var_env orelse self.script_env orelse self.global_env;
+    globalValidateScriptDecls(self, var_env, program) catch |err| switch (err) {
+        error.InvalidFlow => return self.throwError(.syntax_error, "Illegal return, break, or continue statement in script", .{}),
+        else => return err,
+    };
+    const c = try self.evalBody(var_env, program);
+    return c.value;
+}
+
 fn evalCheckGlobalBinding(self: *Interpreter, var_env: *Environment, name: []const u8, is_func: bool) anyerror!void {
-    if (var_env.declaresLocally(name) and !self.global_var_names.contains(name)) {
+    if (isLexicallyDeclaredInGlobal(self, var_env, name)) {
         return self.throwError(.syntax_error, "Identifier '{s}' has already been declared", .{name});
     }
     if (is_func and (std.mem.eql(u8, name, "NaN") or std.mem.eql(u8, name, "Infinity") or std.mem.eql(u8, name, "undefined"))) {
