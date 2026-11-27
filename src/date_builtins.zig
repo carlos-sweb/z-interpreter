@@ -93,7 +93,7 @@ const INVALID_DATE_MS: i64 = std.math.maxInt(i64);
 /// produce an Invalid Date instead of `@intFromFloat` panicking on an
 /// out-of-range float (matching TimeClip ultimately yielding NaN).
 fn dateField(self: *Interpreter, v: JSValue) !?i32 {
-    const n = try self.toNumberJS(v);
+    const n = try builtin_helpers.toNumberStrict(self, v);
     if (!std.math.isFinite(n)) return null;
     const t = @trunc(n);
     if (t > @as(f64, std.math.maxInt(i32)) or t < @as(f64, std.math.minInt(i32))) return null;
@@ -109,39 +109,97 @@ fn timeClip(n: f64) i64 {
     return @intFromFloat(t);
 }
 
+/// ECMA-262 21.4.1.14 MakeTime(hour, min, sec, ms) in exact IEEE-754 f64 arithmetic.
+fn makeTimeF64(hour: f64, min: f64, sec: f64, ms: f64) f64 {
+    if (!std.math.isFinite(hour) or !std.math.isFinite(min) or !std.math.isFinite(sec) or !std.math.isFinite(ms)) {
+        return std.math.nan(f64);
+    }
+    const h = @trunc(hour);
+    const m = @trunc(min);
+    const s = @trunc(sec);
+    const milli = @trunc(ms);
+    return ((h * 3_600_000.0 + m * 60_000.0) + s * 1_000.0) + milli;
+}
+
+/// Howard Hinnant's civil-from-days / days-from-civil in f64 for ECMA-262 MakeDay(year, month, date).
+fn makeDayF64(year: f64, month: f64, date: f64) f64 {
+    if (!std.math.isFinite(year) or !std.math.isFinite(month) or !std.math.isFinite(date)) {
+        return std.math.nan(f64);
+    }
+    const y = @trunc(year);
+    const m = @trunc(month);
+    const dt = @trunc(date);
+    const ym = y + @floor(m / 12.0);
+    if (!std.math.isFinite(ym)) return std.math.nan(f64);
+    var mn = @mod(m, 12.0);
+    if (mn < 0) mn += 12.0;
+    if (ym > 1_000_000.0 or ym < -1_000_000.0) return std.math.nan(f64);
+    const yi: i64 = @intFromFloat(ym);
+    const mi: i64 = @intFromFloat(mn); // 0..11 (Jan..Dec)
+    const y_adj: i64 = if (mi <= 1) yi - 1 else yi;
+    const era: i64 = @divFloor(y_adj, 400);
+    const yoe: i64 = y_adj - era * 400; // [0, 399]
+    const mp: i64 = if (mi > 1) mi - 2 else mi + 10; // [0, 11] (Mar..Feb)
+    const doy: i64 = @divTrunc(153 * mp + 2, 5); // day-of-year of 1st of month
+    const doe: i64 = yoe * 365 + @divTrunc(yoe, 4) - @divTrunc(yoe, 100) + doy;
+    const days_first: f64 = @floatFromInt(era * 146097 + doe - 719468);
+    return days_first + dt - 1.0;
+}
+
+fn computeUtcFieldsMs(self: *Interpreter, args: []const JSValue) !i64 {
+    var raw: [7]f64 = .{ 0, 0, 1, 0, 0, 0, 0 };
+    var i: usize = 0;
+    while (i < args.len and i < 7) : (i += 1) {
+        raw[i] = try builtin_helpers.toNumberStrict(self, args[i]);
+    }
+    if (args.len == 0 or !std.math.isFinite(raw[0])) return INVALID_DATE_MS;
+    var yr = raw[0];
+    const yi = @trunc(yr);
+    if (yi >= 0 and yi <= 99) yr = 1900.0 + yi;
+    const day = makeDayF64(yr, raw[1], raw[2]);
+    const time = makeTimeF64(raw[3], raw[4], raw[5], raw[6]);
+    return timeClip(day * 86_400_000.0 + time);
+}
+
+fn parseDateStringMs(str: []const u8) i64 {
+    if (std.mem.startsWith(u8, str, "-000000")) return INVALID_DATE_MS;
+    return zvalue.ZDate.fromString(str).timestamp;
+}
+
 /// `new Date()` -> now; `new Date(ms)` -> timestamp (TimeClip'd); `new
 /// Date(str)` -> parsed; `new Date(dateValue)` -> copy; `new Date(y, m, d?,
 /// h?, min?, s?, ms?)` -> from local components. Any non-finite / out-of-range
 /// field yields an Invalid Date rather than crashing. Called without `new` it
-/// still returns a .date (real JS returns a string there -- documented).
+/// ignores all arguments and returns `new Date().toString()`.
 fn dateConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
     _ = this_value;
-    if (args.len == 0) return interp(ctx).gcNewDate(nowMs());
-    if (args.len == 1) {
-        const first = args[0];
-        if (first.isString()) {
-            return interp(ctx).gcNewDate(zvalue.ZDate.fromString(first.asString().value.data).timestamp);
-        }
-        if (first.isDate()) return interp(ctx).gcNewDate(first.asDate().value.getTime());
-        return interp(ctx).gcNewDate(timeClip(try interp(ctx).toNumberJS(first)));
-    }
-    // Multi-arg form: read up to 7 fields; a present-but-invalid field (NaN,
-    // Infinity, out of i32) makes the whole Date Invalid. Real spec converts
-    // every field via ToNumber before checking any of them for validity
-    // (confirmed against Node: all valueOf's run even if an early field is
-    // already NaN) -- read them all first, THEN decide.
     const self = interp(ctx);
-    var raw: [7]?i32 = .{ null, null, null, null, null, null, null };
-    var i: usize = 0;
-    while (i < args.len and i < 7) : (i += 1) {
-        raw[i] = try dateField(self, args[i]);
+    const is_construct = if (self.construct_target) |ct| ct == ctx else false;
+    if (!is_construct) {
+        const s = zvalue.ZDate.fromTimestamp(nowMs()).toString(allocator) catch
+            return self.gcNewString("Invalid Date");
+        defer allocator.free(s);
+        return self.gcNewString(s);
     }
-    var fields: [7]?i32 = .{ null, null, null, null, null, null, null };
-    for (raw[0..i], 0..) |f, k| fields[k] = f orelse return self.gcNewDate(INVALID_DATE_MS);
-    // year and month are always present here (args.len >= 2).
-    const d = zvalue.ZDate.fromComponents(fields[0].?, fields[1].?, fields[2], fields[3], fields[4], fields[5], fields[6]);
-    return interp(ctx).gcNewDate(d.timestamp);
+    const ts: i64 = blk: {
+        if (args.len == 0) break :blk nowMs();
+        if (args.len == 1) {
+            const first = args[0];
+            if (first.isDate()) break :blk first.asDate().value.getTime();
+            const prim = if (Interpreter.isPrimitiveTag(first)) first.retain() else try self.toPrimitive(first, .default);
+            defer prim.deinit();
+            if (prim.isString()) {
+                break :blk parseDateStringMs(prim.asString().value.data);
+            }
+            break :blk timeClip(try builtin_helpers.toNumberStrict(self, prim));
+        }
+        break :blk try computeUtcFieldsMs(self, args);
+    };
+    const d_val = try self.gcNewDate(ts);
+    if (self.construct_proto) |cp| {
+        try self.setOwnedPrototype(d_val, cp);
+    }
+    return d_val;
 }
 
 /// `Date.now()` -> current time in ms.
@@ -155,12 +213,14 @@ fn dateNow(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []c
 
 /// `Date.parse(str)` -> ms since epoch, or NaN if unparseable.
 fn dateParse(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = ctx;
     _ = allocator;
     _ = this_value;
-    const s = arg(args, 0);
-    if (!s.isString()) return JSValue.fromNumber(std.math.nan(f64));
-    const ms = zvalue.ZDate.parse(s.asString().value.data);
+    const self = interp(ctx);
+    const s_arg = arg(args, 0);
+    const s_str = try self.toDisplayStringJS(self.gc_allocator, s_arg);
+    defer self.gc_allocator.free(s_str);
+    if (std.mem.startsWith(u8, s_str, "-000000")) return JSValue.fromNumber(std.math.nan(f64));
+    const ms = zvalue.ZDate.parse(s_str);
     if (ms == INVALID_DATE_MS) return JSValue.fromNumber(std.math.nan(f64));
     return JSValue.fromNumber(@floatFromInt(ms));
 }
@@ -170,19 +230,8 @@ fn dateParse(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
 fn dateUTC(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     _ = this_value;
-    // `Date.UTC()` with no args, and a NaN year, are both NaN. Every
-    // provided field is ToNumber'd regardless of an earlier one already
-    // being invalid (confirmed against Node: every valueOf still runs) --
-    // convert them all first, THEN decide.
     const self = interp(ctx);
-    var raw: [7]?i32 = .{ null, null, null, null, null, null, null };
-    var i: usize = 0;
-    while (i < args.len and i < 7) : (i += 1) raw[i] = try dateField(self, args[i]);
-    var fields: [7]?i32 = .{ null, null, null, null, null, null, null };
-    for (raw[0..i], 0..) |f, k| fields[k] = f orelse return JSValue.fromNumber(std.math.nan(f64));
-    if (fields[0] == null) return JSValue.fromNumber(std.math.nan(f64));
-    // Month defaults to 0 when only the year is given.
-    const ms = zvalue.ZDate.UTC(fields[0].?, fields[1] orelse 0, fields[2], fields[3], fields[4], fields[5], fields[6]);
+    const ms = try computeUtcFieldsMs(self, args);
     if (ms == INVALID_DATE_MS) return JSValue.fromNumber(std.math.nan(f64));
     return JSValue.fromNumber(@floatFromInt(ms));
 }
@@ -368,7 +417,7 @@ fn dateSetter(comptime method: []const u8, comptime n_optional: usize) NativeFn 
 /// Installs the `Date` constructor + statics (no method table wiring here --
 /// `date_methods` is consulted directly by materializeProtos).
 pub fn install(self: *Interpreter) !void {
-    _ = try installBuiltin(self, .{ .name = "Date", .ctor = .{ .call = dateConstructor, .constructable = true }, .statics = &.{
+    _ = try installBuiltin(self, .{ .name = "Date", .ctor = .{ .call = dateConstructor, .arity = 7, .constructable = true }, .statics = &.{
         .{ .name = "now", .value = .{ .method = .{ .call = dateNow, .arity = 0 } } },
         .{ .name = "parse", .value = .{ .method = .{ .call = dateParse, .arity = 1 } } },
         .{ .name = "UTC", .value = .{ .method = .{ .call = dateUTC, .arity = 7 } } },

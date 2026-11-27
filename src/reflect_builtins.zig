@@ -48,7 +48,8 @@ fn reflectGet(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     const target = try reflectRequireObject(ctx, "get", arg(args, 0));
     const key = try self.encodeKey(arg(args, 1));
     defer allocator.free(key);
-    return self.getProperty(target, key);
+    const receiver = if (args.len >= 3) args[2] else target;
+    return self.getPropertyWithReceiver(target, key, receiver);
 }
 
 fn reflectSet(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -126,31 +127,26 @@ fn reflectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, this_v
 }
 
 fn reflectApply(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
     _ = this_value;
     const self = interp(ctx);
     const target = arg(args, 0);
+    if (!property_desc.isCallable(target)) {
+        return self.throwError(.type_error, "Reflect.apply target is not callable", .{});
+    }
     const this_arg = arg(args, 1);
     const arg_list = arg(args, 2);
-    const call_args: []const JSValue = switch (arg_list.unpack()) {
-        .undefined, .null => &.{},
-        .array => |box| box.value.toSlice(),
-        else => return self.throwError(.type_error, "CreateListFromArrayLike called on non-object", .{}),
-    };
+    const call_args = try builtin_helpers.arrayLikeToList(self, allocator, arg_list);
+    defer {
+        for (call_args) |item| item.deinit();
+        allocator.free(call_args);
+    }
     return self.callValue(target, this_arg, call_args, "target");
 }
 
 fn reflectConstruct(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
     _ = this_value;
     const self = interp(ctx);
     const target = arg(args, 0);
-    const arg_list = arg(args, 1);
-    const call_args: []const JSValue = switch (arg_list.unpack()) {
-        .undefined, .null => &.{},
-        .array => |box| box.value.toSlice(),
-        else => return self.throwError(.type_error, "CreateListFromArrayLike called on non-object", .{}),
-    };
     if (!self.isConstructor(target)) {
         return self.throwError(.type_error, "target is not a constructor", .{});
     }
@@ -158,6 +154,12 @@ fn reflectConstruct(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     const new_target: JSValue = if (new_target_arg.isUndefined()) target else new_target_arg;
     if (!self.isConstructor(new_target)) {
         return self.throwError(.type_error, "newTarget is not a constructor", .{});
+    }
+    const arg_list = arg(args, 1);
+    const call_args = try builtin_helpers.arrayLikeToList(self, allocator, arg_list);
+    defer {
+        for (call_args) |item| item.deinit();
+        allocator.free(call_args);
     }
     return self.constructValueWithNewTarget(target, call_args, new_target, "target");
 }

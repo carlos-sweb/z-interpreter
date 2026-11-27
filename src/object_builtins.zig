@@ -721,19 +721,22 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, thi
                 return if (deleted.name) JSValue.UNDEFINED else dataDescObj(self, try interp(ctx).gcNewString(box.value.name), false, false, true);
             if (std.mem.eql(u8, key, "prototype")) {
                 if (!isProxyConstructor(self, obj) and function_builtins.boundContext(obj) == null and (box.value.prototype != null or box.value.constructable)) {
-                    const is_builtin = box.value.constructable and box.value.ctx == @as(*anyopaque, @ptrCast(self));
+                    const is_builtin = box.value.ctx == @as(*anyopaque, @ptrCast(self));
                     return dataDescObj(self, (try self.functionPrototype(obj)).retain(), !is_builtin, false, false);
                 }
             }
             return JSValue.UNDEFINED;
         },
         .array => |box| {
+            const bag_opt = self.array_props.get(@intFromPtr(box));
             if (std.mem.eql(u8, key, "length")) {
+                if (bag_opt) |bag| {
+                    if (bag.asObject().value.getOwnRecord(key)) |rec| return descFromRecord(self, rec);
+                }
                 if (self.deleted_arguments_length.contains(@intFromPtr(box))) return JSValue.UNDEFINED;
                 const configurable = self.arguments_arrays.contains(@intFromPtr(box));
                 return dataDescObj(self, JSValue.fromNumber(@floatFromInt(box.value.length())), box.value.isLengthWritable(), false, configurable);
             }
-            const bag_opt = self.array_props.get(@intFromPtr(box));
             if (bag_opt) |bag| {
                 if (bag.asObject().value.getOwnRecord(key)) |rec| return descFromRecord(self, rec);
             }
@@ -985,16 +988,27 @@ pub fn objectGetOwnPropertyNames(ctx: *anyopaque, allocator: Allocator, this_val
         },
         .function => |box| {
             const deleted = self.deletedFnProps(o);
-            if (!deleted.length) _ = try result.asArray().value.push(try interp(ctx).gcNewString("length"));
-            if (!deleted.name) _ = try result.asArray().value.push(try interp(ctx).gcNewString("name"));
             const has_proto = !isProxyConstructor(self, o) and function_builtins.boundContext(o) == null and (box.value.prototype != null or box.value.constructable);
-            if (has_proto)
-                _ = try result.asArray().value.push(try interp(ctx).gcNewString("prototype"));
+            var statics_names: ?[]const []const u8 = null;
+            defer if (statics_names) |sn| allocator.free(sn);
             if (box.value.statics) |bag| {
                 const names = try bag.asObject().value.getOwnPropertyNames(allocator);
-                defer allocator.free(names);
+                statics_names = names;
                 for (names) |n| {
                     if (isSymbolKey(n)) continue;
+                    if (zarray.CanonicalNumericIndexString(n) != null) {
+                        _ = try result.asArray().value.push(try interp(ctx).gcNewString(n));
+                    }
+                }
+            }
+            if (!deleted.length) _ = try result.asArray().value.push(try interp(ctx).gcNewString("length"));
+            if (!deleted.name) _ = try result.asArray().value.push(try interp(ctx).gcNewString("name"));
+            if (has_proto)
+                _ = try result.asArray().value.push(try interp(ctx).gcNewString("prototype"));
+            if (statics_names) |names| {
+                for (names) |n| {
+                    if (isSymbolKey(n)) continue;
+                    if (zarray.CanonicalNumericIndexString(n) != null) continue;
                     if (!deleted.length and std.mem.eql(u8, n, "length")) continue;
                     if (!deleted.name and std.mem.eql(u8, n, "name")) continue;
                     if (has_proto and std.mem.eql(u8, n, "prototype")) continue;
@@ -1576,7 +1590,7 @@ pub fn objectGetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: J
             const box: *Box = @fieldParentPtr("value", p);
             break :blk (JSValue.fromObject(box)).retain();
         },
-        .array => self.protos.array.retain(),
+        .array => |box| if (self.arguments_arrays.contains(@intFromPtr(box))) self.protos.object.retain() else self.protos.array.retain(),
         .string => self.protos.string.retain(),
         .number => self.protos.number.retain(),
         .boolean => self.protos.boolean.retain(),
@@ -1588,6 +1602,9 @@ pub fn objectGetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: J
             }
             if (@import("error_builtins.zig").isErrorSubclassConstructor(box.value.call)) {
                 if (self.global_env.get("Error")) |ector| break :blk ector.retain();
+            }
+            if (function_builtins.isFunctionSubclassConstructor(box.value.call)) {
+                if (self.global_env.get("Function")) |fctor| break :blk fctor.retain();
             }
             if (box.value.call == iclass.closureCall) {
                 const cctx: *interpreter_mod.ClosureCtx = @ptrCast(@alignCast(box.value.ctx));

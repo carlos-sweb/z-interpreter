@@ -328,8 +328,12 @@ pub fn evalExpression(self: *Interpreter, env: *Environment, node: *zparser.Node
             // hands this expression the only reference.
             if (fs.resume_is_return) {
                 fs.resume_is_return = false;
+                var ret_val = fs.takeResumeValue();
+                if (fs.is_async) {
+                    ret_val = try self.awaitValue(fs, ret_val);
+                }
                 if (self.pending_return) |pr| pr.deinit();
-                self.pending_return = fs.takeResumeValue();
+                self.pending_return = ret_val;
                 return error.JsReturn;
             }
             if (fs.resume_is_throw) {
@@ -504,7 +508,8 @@ pub fn evalIn(self: *Interpreter, l: JSValue, r: JSValue) anyerror!JSValue {
                 if (!ext_proto.isNull()) break :blk try self.evalIn(l, ext_proto);
                 break :blk JSValue.fromBool(false);
             }
-            break :blk JSValue.fromBool(self.protos.array.asObject().value.has(key));
+            const arr_proto = if (self.arguments_arrays.contains(@intFromPtr(box))) self.protos.object else self.protos.array;
+            break :blk JSValue.fromBool(arr_proto.asObject().value.has(key));
         },
         // `key` is the raw `\x00S<ptr>` encoding when `l` is a symbol --
         // display the real "Symbol(desc)" form in the message instead
@@ -617,8 +622,7 @@ pub fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSV
             // explicit-conversion case).
             const v = try self.evalExpression(env, u.operand);
             defer v.deinit();
-            if (v.isBigInt()) return self.throwError(.type_error, "Cannot convert a BigInt value to a number", .{});
-            return JSValue.fromNumber(try self.toNumberJS(v));
+            return JSValue.fromNumber(try @import("builtin_helpers.zig").toNumberStrict(self, v));
         },
         .typeof => {
             // typeof on an undeclared identifier is "undefined", not a
@@ -1183,7 +1187,7 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
             const iclass = @import("interpreter_class.zig");
             const sctor_is_js = sctor.isProxy() or (sctor.isFunction() and (sctor.asFunction().value.call == iclass.closureCall or sctor.asFunction().value.call == iclass.classConstructorCall));
             const should_adopt = (sctor_is_js and @import("builtin_helpers.zig").isObjectLike(result)) or
-                result.isArray() or result.isRegex() or
+                result.isFunction() or result.isArray() or result.isRegex() or
                 (result.isTemporal() and self.temporal_protos.contains(@intFromPtr(result.asTemporal()))) or
                 result.isTypedArray() or result.isArrayBuffer() or result.isDataView() or result.isSet() or result.isMap() or
                 result.isPromise() or result.isDate();
@@ -1191,7 +1195,7 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
                 // Exotic results built by a native parent (`class P extends
                 // Promise`, `extends Date`, ...) take new.target's prototype
                 // from the provisional `this`.
-                if ((result.isArray() or result.isRegex() or result.isPromise() or result.isDate()) and this_v.isObject()) {
+                if ((result.isFunction() or result.isArray() or result.isRegex() or result.isPromise() or result.isDate()) and this_v.isObject()) {
                     if (this_v.asObject().value.getPrototype()) |pp| {
                         const Box = @TypeOf(this_v.asObject().*);
                         const box: *Box = @fieldParentPtr("value", pp);

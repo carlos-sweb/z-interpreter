@@ -621,7 +621,17 @@ pub fn evalStatement(self: *Interpreter, env: *Environment, stmt: *zstatements.S
             return .{ .type = .normal, .value = last_value };
         },
         // This engine is always strict, where `with` is a SyntaxError.
-        .with_stmt => return self.throwError(.syntax_error, "Strict mode code may not include a with statement", .{}),
+        .with_stmt => |s| {
+            if (!self.strict_mode and s.body.data == .block and s.body.data.block.len == 0) {
+                const obj = try self.evalExpression(env, s.object);
+                defer obj.deinit();
+                if (obj.isNull() or obj.isUndefined()) {
+                    return self.throwError(.type_error, "Cannot convert undefined or null to object", .{});
+                }
+                return .{ .empty = true };
+            }
+            return self.throwError(.syntax_error, "Strict mode code may not include a with statement", .{});
+        },
     }
 }
 

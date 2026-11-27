@@ -377,7 +377,7 @@ pub fn materializeFnVirtual(self: *Interpreter, f: JSValue, key: []const u8) any
     } else if (std.mem.eql(u8, key, "prototype")) {
         if (isProxyConstructor(self, f) or function_builtins.boundContext(f) != null or !(box.value.prototype != null or box.value.constructable)) return;
         const p = (try self.functionPrototype(f)).retain();
-        const is_builtin = f.asFunction().value.constructable and f.asFunction().value.ctx == @as(*anyopaque, @ptrCast(self));
+        const is_builtin = f.asFunction().value.ctx == @as(*anyopaque, @ptrCast(self));
         try bagInsertRaw(bag, key, p, .{ .writable = !is_builtin, .enumerable = false, .configurable = false });
     }
 }
@@ -396,7 +396,7 @@ pub fn defineOwnProperty(self: *Interpreter, obj: JSValue, key: []const u8, d: *
     switch (obj.unpack()) {
         .object => return validateAndApply(self, obj, key, d),
         .function => {
-            if (std.mem.eql(u8, key, "prototype") and obj.asFunction().value.constructable and obj.asFunction().value.ctx == @as(*anyopaque, @ptrCast(self))) {
+            if (std.mem.eql(u8, key, "prototype") and (obj.asFunction().value.prototype != null or obj.asFunction().value.constructable) and obj.asFunction().value.ctx == @as(*anyopaque, @ptrCast(self))) {
                 const proto = try self.functionPrototype(obj);
                 return virtualDataAllows(d, proto, false, false, false);
             }

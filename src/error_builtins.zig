@@ -31,6 +31,9 @@ const MethodSpec = native_helpers.MethodSpec;
 fn errorToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
     const self = interp(ctx);
+    if (!builtin_helpers.isObjectLike(this_value)) {
+        return self.throwError(.type_error, "Error.prototype.toString called on non-object", .{});
+    }
     const name_v = try self.getProperty(this_value, "name");
     defer name_v.deinit();
     const name = if (name_v.tag() == .undefined) try allocator.dupe(u8, "Error") else try self.toDisplayStringJS(allocator, name_v);

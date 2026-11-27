@@ -416,7 +416,11 @@ fn createDynamicFunction(ctx: *anyopaque, allocator: Allocator, args: []const JS
     const node = parser.parseExpression() catch |err| {
         return self.throwError(.syntax_error, "Function constructor: {s}", .{@errorName(err)});
     };
-    try interpreter_mod.normalizePrivateInNode(ast_allocator, src.items, node);
+    interpreter_mod.normalizePrivateInNode(ast_allocator, src.items, node) catch |err| switch (err) {
+        error.InvalidOctalLiteral => return self.throwError(.syntax_error, "Octal literals are not allowed in strict mode", .{}),
+        error.InvalidStrictAssignment => return self.throwError(.syntax_error, "Unexpected eval or arguments in strict mode", .{}),
+        else => return err,
+    };
     const fnode_ptr = switch (node.data) {
         .paren => |inner| switch (inner.data) {
             .function_like => |ptr| ptr,
@@ -432,7 +436,12 @@ fn createDynamicFunction(ctx: *anyopaque, allocator: Allocator, args: []const JS
         self.current_source = prev_source;
         self.strict_mode = prev_strict;
     }
-    return self.makeClosure(self.global_env, zfunctions.asFunctionNode(fnode_ptr));
+    const closure_scope = self.global_var_env orelse self.script_env orelse self.global_env;
+    const fn_val = try self.makeClosure(closure_scope, zfunctions.asFunctionNode(fnode_ptr));
+    if (self.construct_proto) |cp| {
+        try self.setOwnedPrototype(fn_val, cp);
+    }
+    return fn_val;
 }
 
 /// `new Function('a', 'b', 'return a + b')` -- compose, parse with the
@@ -455,6 +464,12 @@ pub fn asyncFunctionConstructor(ctx: *anyopaque, allocator: Allocator, this_valu
 pub fn asyncGeneratorFunctionConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
     return createDynamicFunction(ctx, allocator, args, "async function*");
+}
+
+pub fn isFunctionSubclassConstructor(call: NativeFn) bool {
+    return call == generatorFunctionConstructor or
+        call == asyncFunctionConstructor or
+        call == asyncGeneratorFunctionConstructor;
 }
 
 pub fn throwTypeErrorFn(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {

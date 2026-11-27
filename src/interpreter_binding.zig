@@ -1450,6 +1450,50 @@ pub fn evalForIn(self: *Interpreter, env: *Environment, head: anytype, body: *zs
                 }
             }
         },
+        .function => |box| {
+            var seen: std.StringHashMapUnmanaged(void) = .empty;
+            defer seen.deinit(arena);
+            var keys_list: std.ArrayList([]const u8) = .empty;
+            defer keys_list.deinit(arena);
+            if (box.value.statics) |bag| {
+                const ks = try bag.asObject().value.getOwnPropertyNames(arena);
+                defer arena.free(ks);
+                for (ks) |k| {
+                    if (Interpreter.isSymbolKey(k)) continue;
+                    if (!seen.contains(k)) {
+                        try seen.put(arena, k, {});
+                        if (bag.asObject().value.getOwnRecord(k)) |rec| {
+                            if (rec.descriptor.enumerable) try keys_list.append(arena, k);
+                        }
+                    }
+                }
+            }
+            if (self.protos.function.isObject()) {
+                var current: ?*const @TypeOf(self.protos.function.asObject().value) = &self.protos.function.asObject().value;
+                while (current) |o| : (current = o.getPrototype()) {
+                    const ks = try o.getOwnPropertyNames(arena);
+                    defer arena.free(ks);
+                    for (ks) |k| {
+                        if (Interpreter.isSymbolKey(k)) continue;
+                        if (!seen.contains(k)) {
+                            try seen.put(arena, k, {});
+                            if (o.getOwnRecord(k)) |rec| {
+                                if (rec.descriptor.enumerable) try keys_list.append(arena, k);
+                            }
+                        }
+                    }
+                }
+            }
+            for (keys_list.items) |k| {
+                const kv = try self.gcNewString(k);
+                const step = try forInStep(self, env, head.binding, kv, body, labels, &last_value);
+                kv.deinit();
+                if (step) |c| {
+                    last_value.deinit();
+                    return c;
+                }
+            }
+        },
         .date, .promise, .map, .set, .@"error", .regex, .array_buffer, .data_view => {
             const bag_opt = if (target.isRegex()) self.regexProps(target) else self.extraProps(target);
             if (bag_opt) |bag| {

@@ -223,8 +223,11 @@ pub fn toBigIntValue(self: *Interpreter, allocator: Allocator, a_in: JSValue) an
 pub fn toNumberStrict(self: *Interpreter, v: JSValue) anyerror!f64 {
     const prim = if (Interpreter.isPrimitiveTag(v)) v.retain() else try self.toPrimitive(v, .number);
     defer prim.deinit();
-    if (prim.isSymbol() or prim.isBigInt()) {
-        return self.throwError(.type_error, "Cannot convert a {s} value to a number", .{@tagName(prim.tag())});
+    if (prim.isSymbol()) {
+        return self.throwError(.type_error, "Cannot convert a Symbol value to a number", .{});
+    }
+    if (prim.isBigInt()) {
+        return self.throwError(.type_error, "Cannot convert a BigInt value to a number", .{});
     }
     return try self.toNumberJS(prim);
 }

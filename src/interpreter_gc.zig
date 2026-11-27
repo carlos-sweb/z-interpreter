@@ -498,6 +498,9 @@ pub fn gcAdoptTree(self: *Interpreter, v: JSValue) !void {
     switch (v.unpack()) {
         .object => |box| {
             try self.gcTrack(v);
+            if (box.value.getPrototype() == null and self.protos.object.isObject()) {
+                try box.value.setPrototype(&self.protos.object.asObject().value);
+            }
             for (box.value.properties.values()) |prop| try self.gcAdoptTree(prop.value);
         },
         .array => |box| {

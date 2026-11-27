@@ -38,6 +38,9 @@ pub const bigint_methods = std.StaticStringMap(MethodSpec).initComptime(.{
 fn globalBigInt(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
     const self = interp(ctx);
+    if (self.construct_target == ctx or self.construct_new_target != null) {
+        return self.throwError(.type_error, "BigInt is not a constructor", .{});
+    }
     const a_in = arg(args, 0);
     // Real spec (21.2.1.1): ToPrimitive(value, number) FIRST, then a
     // Number result gets this function's own special NumberToBigInt
@@ -71,7 +74,7 @@ fn bigintToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     const v = try requireBigInt(ctx, this_value, "toString");
     var radix: u8 = 10;
     if (arg(args, 0).tag() != .undefined) {
-        const r = toIntSat(try interp(ctx).toNumberJS(arg(args, 0)));
+        const r = toIntSat(try builtin_helpers.toNumberStrict(interp(ctx), arg(args, 0)));
         if (r < 2 or r > 36) return interp(ctx).throwError(.range_error, "toString() radix argument must be between 2 and 36", .{});
         radix = @intCast(r);
     }
@@ -94,7 +97,7 @@ fn bigintAsNArgs(ctx: *anyopaque, args: []const JSValue) anyerror!struct { bits:
     const self = interp(ctx);
     const bits_arg = arg(args, 0);
     const bits: usize = if (bits_arg.tag() == .undefined) 0 else blk: {
-        const bits_n = try self.toNumberJS(bits_arg);
+        const bits_n = try builtin_helpers.toNumberStrict(self, bits_arg);
         const integer: f64 = if (std.math.isNan(bits_n)) 0 else @trunc(bits_n);
         const max_index: f64 = 9007199254740991.0;
         if (integer < 0 or integer > max_index) {
@@ -156,7 +159,7 @@ pub fn install(self: *Interpreter) !void {
     // [[BigIntData]] wrapper object at all), which `constructValue`'s
     // existing generic `!callee.asFunction().value.constructable` guard
     // already produces for free by just leaving this false.
-    _ = try installBuiltin(self, .{ .name = "BigInt", .ctor = .{ .arity = 1, .call = globalBigInt, .constructable = false }, .statics = &.{
+    _ = try installBuiltin(self, .{ .name = "BigInt", .ctor = .{ .arity = 1, .call = globalBigInt, .constructable = true }, .statics = &.{
         .{ .name = "asIntN", .value = .{ .method = .{ .call = bigintAsIntN, .arity = 2 } } },
         .{ .name = "asUintN", .value = .{ .method = .{ .call = bigintAsUintN, .arity = 2 } } },
     } });

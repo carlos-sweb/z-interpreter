@@ -60,19 +60,27 @@ pub fn typedArrayInstanceProto(self: *Interpreter, obj: JSValue) JSValue {
 }
 
 pub fn getExtraPropsOrProto(self: *Interpreter, obj: JSValue, default_proto: JSValue, key: []const u8) anyerror!JSValue {
+    return self.getExtraPropsOrProtoWithReceiver(obj, obj, default_proto, key);
+}
+
+pub fn getExtraPropsOrProtoWithReceiver(self: *Interpreter, obj: JSValue, receiver: JSValue, default_proto: JSValue, key: []const u8) anyerror!JSValue {
     if (self.extraProps(obj)) |bag| {
         if (bag.asObject().value.getOwnRecord(key)) |rec| {
             if (!rec.isAccessor()) return rec.value.retain();
             const g = rec.getter orelse return JSValue.UNDEFINED;
-            return try g.asFunction().value.call(g.asFunction().value.ctx, self.gc_allocator, obj, &.{});
+            return try g.asFunction().value.call(g.asFunction().value.ctx, self.gc_allocator, receiver, &.{});
         }
     }
     const proto = if (Interpreter.heapBoxAddress(obj)) |addr| (self.proto_refs.get(addr) orelse default_proto) else default_proto;
-    if (try self.getFromProto(obj, proto, key)) |m| return m;
+    if (try self.getFromProto(receiver, proto, key)) |m| return m;
     return JSValue.UNDEFINED;
 }
 
 pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!JSValue {
+    return self.getPropertyWithReceiver(obj, key, obj);
+}
+
+pub fn getPropertyWithReceiver(self: *Interpreter, obj: JSValue, key: []const u8, receiver: JSValue) anyerror!JSValue {
     return switch (obj.unpack()) {
         // Own-then-chain walk over property *records* (not values), so
         // accessor properties dispatch: a getter is invoked with
@@ -106,7 +114,7 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
                 const rec = o.getOwnRecord(key) orelse continue;
                 if (rec.isAccessor()) {
                     const g = rec.getter orelse break :blk JSValue.UNDEFINED;
-                    break :blk try g.asFunction().value.call(g.asFunction().value.ctx, arena, obj, &.{});
+                    break :blk try g.asFunction().value.call(g.asFunction().value.ctx, arena, receiver, &.{});
                 }
                 break :blk rec.value.retain();
             }
@@ -120,14 +128,14 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
                         .invalid_index => break :blk JSValue.UNDEFINED,
                         .not_numeric => {
                             if (self.extraProps(ext_proto)) |bag| {
-                                if (try self.getFromProto(obj, bag, key)) |m| break :blk m;
+                                if (try self.getFromProto(receiver, bag, key)) |m| break :blk m;
                             }
-                            if (try self.getFromProto(obj, typedArrayInstanceProto(self, ext_proto), key)) |m| break :blk m;
+                            if (try self.getFromProto(receiver, typedArrayInstanceProto(self, ext_proto), key)) |m| break :blk m;
                             break :blk JSValue.UNDEFINED;
                         },
                     }
                 } else if (!ext_proto.isObject() and !ext_proto.isNull()) {
-                    break :blk try self.getProperty(ext_proto, key);
+                    break :blk try self.getPropertyWithReceiver(ext_proto, key, receiver);
                 }
             }
             // Chain miss: ordinary objects chain to the real
@@ -138,120 +146,67 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             break :blk JSValue.UNDEFINED;
         },
         .array => |box| blk: {
-            if (std.mem.eql(u8, key, "length") and !self.deleted_arguments_length.contains(@intFromPtr(box))) break :blk JSValue.fromNumber(@floatFromInt(box.value.length()));
             if (self.array_props.get(@intFromPtr(box))) |bag| {
                 if (bag.asObject().value.getOwnRecord(key)) |rec| {
                     if (!rec.isAccessor()) break :blk rec.value.retain();
                     const g = rec.getter orelse break :blk JSValue.UNDEFINED;
-                    break :blk try g.asFunction().value.call(g.asFunction().value.ctx, self.gc_allocator, obj, &.{});
+                    break :blk try g.asFunction().value.call(g.asFunction().value.ctx, self.gc_allocator, receiver, &.{});
                 }
             }
+            if (std.mem.eql(u8, key, "length") and !self.deleted_arguments_length.contains(@intFromPtr(box))) break :blk JSValue.fromNumber(@floatFromInt(box.value.length()));
+            const default_arr_proto = if (self.arguments_arrays.contains(@intFromPtr(box))) self.protos.object else self.protos.array;
+            const arr_proto = self.proto_refs.get(@intFromPtr(box)) orelse default_arr_proto;
             const idx = zarray.CanonicalNumericIndexString(key) orelse {
-                if (try self.getFromProto(obj, self.protos.array, key)) |m| break :blk m;
+                if (try self.getFromProto(receiver, arr_proto, key)) |m| break :blk m;
                 break :blk JSValue.UNDEFINED;
             };
             if (idx < box.value.length() and !box.value.isHole(idx)) {
                 if (box.value.getOpt(idx)) |v| break :blk v.retain();
             }
-            if (try self.getFromProto(obj, self.protos.array, key)) |m| break :blk m;
+            if (try self.getFromProto(receiver, arr_proto, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
         .string => |box| blk: {
-            // Real JS strings are UTF-16: `.length` and indexed access
-            // both count/address UTF-16 code units, not UTF-8 bytes --
-            // `box.value.data.len` is a byte count, wrong for any
-            // non-ASCII string (confirmed against real Node: "café"
-            // .length is 4, not the 5 UTF-8 bytes). String.prototype's
-            // real methods (charAt, slice, ...) already go through
-            // zstring's UTF-16-aware helpers; this raw property-access
-            // path just never did.
             if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.length()));
             if (std.fmt.parseInt(usize, key, 10)) |idx| {
-                // Indexed access: the one-char string at that UTF-16
-                // position, or undefined past the end (real JS string
-                // indexing) -- charAt() returning "" is exactly the
-                // out-of-bounds case here, since every valid UTF-16
-                // index in a real string yields a non-empty result.
                 const ch = zstring.access.charAt(self.gc_allocator, box.value.data, @intCast(idx)) catch break :blk JSValue.UNDEFINED;
                 defer self.gc_allocator.free(ch);
                 if (ch.len == 0) break :blk JSValue.UNDEFINED;
                 break :blk try self.gcNewString(ch);
             } else |_| {}
-            if (try self.getFromProto(obj, self.protos.string, key)) |m| break :blk m;
+            if (try self.getFromProto(receiver, self.protos.string, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
-        // `catch (e) { console.log(e.message) }` is the most common
-        // catch body in existence -- name/message are read-only views
-        // over ZError's existing fields.
         .@"error" => |box| blk: {
             if (self.extraProps(obj)) |bag| {
                 if (bag.asObject().value.getOwnRecord(key)) |rec| {
                     if (!rec.isAccessor()) break :blk rec.value.retain();
                     const g = rec.getter orelse break :blk JSValue.UNDEFINED;
-                    break :blk try g.asFunction().value.call(g.asFunction().value.ctx, self.gc_allocator, obj, &.{});
+                    break :blk try g.asFunction().value.call(g.asFunction().value.ctx, self.gc_allocator, receiver, &.{});
                 }
             }
             if (std.mem.eql(u8, key, "name")) break :blk try self.gcNewString(box.value.kind.name());
             if (std.mem.eql(u8, key, "message")) break :blk try self.gcNewString(box.value.message);
-            // `thrown.constructor === TypeError` -- what Test262's
-            // assert.throws actually compares. Same function identity
-            // every time: the global binding for this kind's name.
             if (std.mem.eql(u8, key, "constructor")) {
                 break :blk (self.global_env.get(box.value.kind.name()) orelse JSValue.UNDEFINED).retain();
             }
-            if (try self.getFromProto(obj, self.protos.@"error", key)) |m| break :blk m;
+            if (try self.getFromProto(receiver, self.protos.@"error", key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
         .function => |box| blk: {
-            // functionPrototype() returns a borrow of Callable.prototype's
-            // own reference (matching every other branch here, which all
-            // retain before returning -- necessary now that
-            // Callable.deinit() actually releases .prototype). Gated on
-            // constructability (same condition objectGetOwnPropertyDescriptor
-            // already uses for this exact key) -- a non-constructable
-            // function (native methods, arrows, ...) has NO `.prototype`
-            // at all per real spec, confirmed against Node:
-            // `Function.prototype.toString.prototype === undefined`,
-            // `(() => {}).prototype === undefined`. Materializing one
-            // unconditionally here was also a second bug: it made
-            // hasOwnProperty(fn, "prototype") flip to true right after
-            // the first plain read, since that check ORs in
-            // `prototype != null`.
-            // An own, user-defined `prototype` (including an accessor) must
-            // take precedence over Callable.prototype. This keeps
-            // GetPrototypeFromConstructor observable.
             if (std.mem.eql(u8, key, "prototype")) {
                 if (box.value.statics) |bag| {
                     if (bag.asObject().value.hasOwnProperty(key)) {
-                        if (try self.getFromProto(obj, bag, key)) |v| break :blk v;
+                        if (try self.getFromProto(receiver, bag, key)) |v| break :blk v;
                     }
                 }
                 if (box.value.prototype) |p| break :blk p.retain();
                 if (!box.value.constructable or function_builtins.boundContext(obj) != null) break :blk JSValue.UNDEFINED;
                 break :blk (try self.functionPrototype(obj)).retain();
             }
-            // The statics bag (class statics, F.myProp = 1) shadows
-            // the Function.prototype methods, like an own property
-            // would. Recursing through getProperty gives accessor
-            // dispatch and -- because class bags chain to the
-            // parent's bag -- static inheritance. Narrowing: a static
-            // getter's `this` is the bag, not the class function, so
-            // `this.otherStatic` works but `this === C` doesn't.
-            //
-            // Checked BEFORE the name/length fallbacks below: real
-            // spec's `.name`/`.length` are configurable own data
-            // properties, so an explicit `static name(){}` (installed
-            // via DefineMethod, which overwrites the auto-created own
-            // property) or a direct `fn.name = "x"` (routed into this
-            // same bag by setPropertyOnValue) must win over the
-            // Callable-struct-backed default.
             if (box.value.statics) |bag| {
                 if (bag.asObject().value.has(key)) {
-                    // getFromProto walks the same chain as a getProperty
-                    // on the bag, but calls a getter with the function
-                    // itself as `this` (`static get x() { return this }`
-                    // is the class; RegExp[Symbol.species] is RegExp).
-                    if (try self.getFromProto(obj, bag, key)) |v| break :blk v;
+                    if (try self.getFromProto(receiver, bag, key)) |v| break :blk v;
                 }
             }
             if (std.mem.eql(u8, key, "name")) break :blk try self.gcNewString(box.value.name);
@@ -260,6 +215,9 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
                 const iclass = @import("interpreter_class.zig");
                 if (error_builtins.isErrorSubclassConstructor(box.value.call)) {
                     if (self.global_env.get("Error")) |ector| break :blk_fp ector;
+                }
+                if (function_builtins.isFunctionSubclassConstructor(box.value.call)) {
+                    if (self.global_env.get("Function")) |fctor| break :blk_fp fctor;
                 }
                 if (box.value.call == iclass.closureCall) {
                     const cctx: *interpreter_mod.ClosureCtx = @ptrCast(@alignCast(box.value.ctx));
@@ -276,24 +234,24 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
                 break :blk_fp self.protos.function;
             };
             if (!fn_proto.isNull()) {
-                if (try self.getFromProto(obj, fn_proto, key)) |m| break :blk m;
+                if (try self.getFromProto(receiver, fn_proto, key)) |m| break :blk m;
                 if (fn_proto.isFunction()) {
-                    if (try self.getFromProto(obj, self.protos.function, key)) |m| break :blk m;
+                    if (try self.getFromProto(receiver, self.protos.function, key)) |m| break :blk m;
                 }
             }
             break :blk JSValue.UNDEFINED;
         },
         .number => blk: {
-            if (try self.getFromProto(obj, self.protos.number, key)) |m| break :blk m;
+            if (try self.getFromProto(receiver, self.protos.number, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
         .boolean => blk: {
-            if (try self.getFromProto(obj, self.protos.boolean, key)) |m| break :blk m;
+            if (try self.getFromProto(receiver, self.protos.boolean, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
-        .date => try self.getExtraPropsOrProto(obj, self.protos.date, key),
+        .date => try self.getExtraPropsOrProtoWithReceiver(obj, receiver, self.protos.date, key),
         .bigint => blk: {
-            if (try self.getFromProto(obj, self.protos.bigint, key)) |m| break :blk m;
+            if (try self.getFromProto(receiver, self.protos.bigint, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
         .temporal => |box| blk: {
@@ -301,28 +259,22 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
                 if (bag.asObject().value.getOwnRecord(key)) |rec| {
                     if (!rec.isAccessor()) break :blk rec.value.retain();
                     const getter = rec.getter orelse break :blk JSValue.UNDEFINED;
-                    break :blk try getter.asFunction().value.call(getter.asFunction().value.ctx, self.gc_allocator, obj, &.{});
+                    break :blk try getter.asFunction().value.call(getter.asFunction().value.ctx, self.gc_allocator, receiver, &.{});
                 }
             }
             const proto = self.temporalPrototype(obj);
             if (proto.isObject()) {
-                if (try self.getFromProto(obj, proto, key)) |m| break :blk m;
+                if (try self.getFromProto(receiver, proto, key)) |m| break :blk m;
             }
             break :blk JSValue.UNDEFINED;
         },
-        // get(target, property, receiver) -- receiver is the proxy
-        // itself, not the target (matters when the trap forwards via
-        // Reflect.get(target, property, receiver) for correct `this`
-        // binding on inherited accessors -- narrowing: this engine's
-        // Reflect.get, once it exists, ignores the receiver arg like
-        // getFromProto already does elsewhere).
         .proxy => |box| blk: {
             try self.checkStack();
             if (try self.proxyTrap(box, "get")) |trap_fn| {
                 defer trap_fn.deinit();
                 const key_val = try property_desc.keyToValue(self, key);
                 defer key_val.deinit();
-                const trap_result = try self.callValue(trap_fn, box.value.handler, &.{ box.value.target, key_val, obj }, "get");
+                const trap_result = try self.callValue(trap_fn, box.value.handler, &.{ box.value.target, key_val, receiver }, "get");
                 errdefer trap_result.deinit();
                 const target_desc = try object_builtins.objectGetOwnPropertyDescriptor(self, self.gc_allocator, JSValue.UNDEFINED, &.{ box.value.target, key_val });
                 defer target_desc.deinit();
@@ -348,46 +300,30 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
                 }
                 break :blk trap_result;
             }
-            break :blk try self.getProperty(box.value.target, key);
+            break :blk try self.getPropertyWithReceiver(box.value.target, key, receiver);
         },
-        .promise => |box| try self.getExtraPropsOrProto(obj, self.proto_refs.get(@intFromPtr(box)) orelse self.protos.promise, key),
-        .map => |box| try self.getExtraPropsOrProto(obj, self.proto_refs.get(@intFromPtr(box)) orelse self.protos.map, key),
-        .set => |box| try self.getExtraPropsOrProto(obj, self.proto_refs.get(@intFromPtr(box)) orelse self.protos.set, key),
-        // `.byteLength` is a real spec ACCESSOR property (no parens),
-        // computed here rather than stored -- same category as
-        // array/string's own special-cased `.length`.
-        .array_buffer => |box| try self.getExtraPropsOrProto(obj, self.arrayBufferProto(box.value.is_shared), key),
-        // `.buffer`/`.byteOffset`/`.byteLength` are all real spec
-        // accessor properties. `.buffer` returns the SAME `.array_buffer`
-        // JSValue this view was constructed over (retained) -- real JS:
-        // `dv.buffer === buf`.
-        .data_view => try self.getExtraPropsOrProto(obj, self.protos.data_view, key),
-        // Integer-indexed exotic access: a canonical numeric index
-        // out of `[0,len)` reads as `undefined` (real spec) --
-        // NEVER falls through to the prototype chain like a plain
-        // object's missing numeric-string key would.
+        .promise => |box| try self.getExtraPropsOrProtoWithReceiver(obj, receiver, self.proto_refs.get(@intFromPtr(box)) orelse self.protos.promise, key),
+        .map => |box| try self.getExtraPropsOrProtoWithReceiver(obj, receiver, self.proto_refs.get(@intFromPtr(box)) orelse self.protos.map, key),
+        .set => |box| try self.getExtraPropsOrProtoWithReceiver(obj, receiver, self.proto_refs.get(@intFromPtr(box)) orelse self.protos.set, key),
+        .array_buffer => |box| try self.getExtraPropsOrProtoWithReceiver(obj, receiver, self.arrayBufferProto(box.value.is_shared), key),
+        .data_view => try self.getExtraPropsOrProtoWithReceiver(obj, receiver, self.protos.data_view, key),
         .typed_array => |box| blk: {
-            // length/buffer/byteOffset/byteLength are accessors on
-            // %TypedArray%.prototype (accessor_builtins).
             switch (canonicalNumericIndex(self.gc_allocator, key, box.value.len)) {
                 .valid_index => |idx| break :blk try builtins.typedElemGet(self, box.value.kind, &box.value.owner.asArrayBuffer().value, box.value.byte_offset, box.value.len, idx),
                 .invalid_index => break :blk JSValue.UNDEFINED,
-                .not_numeric => break :blk try self.getExtraPropsOrProto(obj, typedArrayInstanceProto(self, obj), key),
+                .not_numeric => break :blk try self.getExtraPropsOrProtoWithReceiver(obj, receiver, typedArrayInstanceProto(self, obj), key),
             }
         },
         .symbol => blk: {
-            // `description` is an accessor on Symbol.prototype.
-            if (try self.getFromProto(obj, self.protos.symbol, key)) |m| break :blk m;
+            if (try self.getFromProto(receiver, self.protos.symbol, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
         .regex => blk: {
-            // `lastIndex` is a RegExp's only own property; source, flags,
-            // global, ... are accessors on RegExp.prototype (found below).
             if (std.mem.eql(u8, key, "lastIndex")) break :blk self.regexState(obj).last_index.retain();
             if (self.regexProps(obj)) |bag| {
-                if (try self.getFromProto(obj, bag, key)) |m| break :blk m;
+                if (try self.getFromProto(receiver, bag, key)) |m| break :blk m;
             }
-            if (try self.getFromProto(obj, self.protos.regex, key)) |m| break :blk m;
+            if (try self.getFromProto(receiver, self.protos.regex, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
         // Spec says TypeError here (not ReferenceError). The optional
@@ -404,6 +340,9 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
 pub fn setArrayProperty(self: *Interpreter, obj: JSValue, key: []const u8, value: JSValue) anyerror!void {
     const arr = &obj.asArray().value;
     if (std.mem.eql(u8, key, "length")) {
+        if (self.arguments_arrays.contains(@intFromPtr(obj.asArray()))) {
+            return self.setObjectProperty(try self.arrayPropsObject(obj), key, value);
+        }
         if (!arr.isLengthWritable()) return self.throwError(.type_error, "Cannot assign to read only property 'length' of array", .{});
         const n = try self.toUint32JS(value);
         const num = try self.toNumberJS(value);
@@ -600,12 +539,13 @@ pub fn setObjectProperty(self: *Interpreter, obj: JSValue, key: []const u8, valu
 /// was factored out of `evalUnary`'s `.delete` case (now shared with
 /// a Proxy's `deleteProperty` trap fallback, when absent).
 pub fn deleteObjectProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!bool {
+    _ = self;
     const old_rec = obj.asObject().value.getOwnRecord(key);
     const old_value = if (old_rec) |r| r.value else null;
     const old_getter = if (old_rec) |r| r.getter else null;
     const old_setter = if (old_rec) |r| r.setter else null;
     const removed = obj.asObject().value.delete(key) catch |err| return switch (err) {
-        error.PropertyNotConfigurable, error.ObjectIsFrozen => self.throwError(.type_error, "Cannot delete property '{s}' of object", .{key}),
+        error.PropertyNotConfigurable, error.ObjectIsFrozen => false,
         else => err,
     };
     if (removed) {
@@ -837,7 +777,7 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
         // everything else goes into the statics bag (class statics,
         // F.myProp = 1 -- the old "functions have no property bag"
         // gap is gone).
-        if (std.mem.eql(u8, key, "prototype") and obj.asFunction().value.constructable) {
+        if (std.mem.eql(u8, key, "prototype") and (obj.asFunction().value.prototype != null or obj.asFunction().value.constructable)) {
             if (obj.asFunction().value.ctx == @as(*anyopaque, @ptrCast(self))) return self.throwError(.type_error, "Cannot assign to read only property 'prototype' of function '{s}'", .{obj.asFunction().value.name});
             if (obj.asFunction().value.statics) |bag| {
                 if (bag.asObject().value.getOwnRecord("prototype")) |rec| {
@@ -1013,7 +953,23 @@ pub fn setPropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8, val
         }
         return;
     }
-    if (!obj.isObject()) return self.throwError(.type_error, "Cannot add property {s} to a {s}: not supported yet", .{ key, @tagName(obj.tag()) });
+    if (!obj.isObject()) {
+        const prim_proto: ?JSValue = switch (obj.tag()) {
+            .number => self.protos.number,
+            .string => self.protos.string,
+            .boolean => self.protos.boolean,
+            .symbol => self.protos.symbol,
+            .bigint => self.protos.bigint,
+            else => null,
+        };
+        if (prim_proto) |pp| {
+            if (!try self.setPropertyWithReceiver(pp, key, value, obj)) {
+                return self.throwError(.type_error, "Cannot add property {s} to a {s}: not supported yet", .{ key, @tagName(obj.tag()) });
+            }
+            return;
+        }
+        return self.throwError(.type_error, "Cannot add property {s} to a {s}: not supported yet", .{ key, @tagName(obj.tag()) });
+    }
     // Writing a property on `globalThis` creates/updates a global
     // binding (`globalThis.foo = 1` makes `foo` a global) -- UNLESS
     // `key` already names one (`undefined`/`NaN`/`Infinity`, marked
@@ -1106,7 +1062,7 @@ pub fn deletePropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8) 
         // `.prototype` at all (arrows, methods) have nothing to delete,
         // so fall through to the bag lookup below like any other miss.
         if (std.mem.eql(u8, key, "prototype") and !property_desc.isProxyConstructor(self, obj) and function_builtins.boundContext(obj) == null and (obj.asFunction().value.prototype != null or obj.asFunction().value.constructable)) {
-            return self.throwError(.type_error, "Cannot delete property '{s}' of function", .{key});
+            return false;
         }
         // Everything else (class statics, ad-hoc `F.x = 1` properties)
         // lives in the statics bag -- this used to just `return true`
@@ -1133,7 +1089,7 @@ pub fn deletePropertyOnValue(self: *Interpreter, obj: JSValue, key: []const u8) 
         if (self.global_object) |go| {
             if (obj.asObject() == go.asObject()) {
                 if (std.mem.eql(u8, key, "undefined") or std.mem.eql(u8, key, "NaN") or std.mem.eql(u8, key, "Infinity") or self.global_var_names.contains(key)) {
-                    return self.throwError(.type_error, "Cannot delete property '{s}' of #<Object>", .{key});
+                    return false;
                 }
                 if (self.global_env.removeBinding(key)) |binding| {
                     binding.value.deinit();
@@ -1433,6 +1389,7 @@ pub fn materializeProtos(self: *Interpreter) !void {
         // take effect on Object.prototype.toString.call(Math/JSON).
         if (self.global_env.get("Math")) |math_obj| try math_obj.asObject().value.defineProperty(tag_key, try self.gcNewString("Math"), tag_attrs);
         if (self.global_env.get("JSON")) |json_obj| try json_obj.asObject().value.defineProperty(tag_key, try self.gcNewString("JSON"), tag_attrs);
+        if (self.global_env.get("Reflect")) |reflect_obj| try reflect_obj.asObject().value.defineProperty(tag_key, try self.gcNewString("Reflect"), tag_attrs);
         // Atomics: plain namespace object, same as Math/JSON above.
         // SharedArrayBuffer.prototype: real own accessor per spec
         // (25.1.5.4-equivalent, 25.2.5.6) -- same shape as Map/Set/etc.

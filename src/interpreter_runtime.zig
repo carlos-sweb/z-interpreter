@@ -195,6 +195,112 @@ fn generatorThrow(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
     return iterResult(self, c, true);
 }
 
+fn asyncGenReturnOnFulfilled(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const fs: *FiberState = @ptrCast(@alignCast(ctx));
+    const self = fs.interp;
+    const v = if (args.len > 0) args[0] else JSValue.UNDEFINED;
+    if (fs.pending_result_promise) |p| {
+        fs.pending_result_promise = null;
+        try self.resolvePromise(p, try iterResult(self, v, true));
+        p.deinit();
+    }
+    try drainAsyncGenQueue(self, fs);
+    return JSValue.UNDEFINED;
+}
+
+fn asyncGenReturnOnRejected(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = this_value;
+    const fs: *FiberState = @ptrCast(@alignCast(ctx));
+    const self = fs.interp;
+    const reason = if (args.len > 0) args[0] else JSValue.UNDEFINED;
+    if (fs.pending_result_promise) |p| {
+        fs.pending_result_promise = null;
+        try self.rejectPromiseValue(p, reason);
+        p.deinit();
+    }
+    try drainAsyncGenQueue(self, fs);
+    return JSValue.UNDEFINED;
+}
+
+fn awaitReturnForClosedAsyncGen(self: *Interpreter, fs: *FiberState, req_promise: JSValue, val: JSValue) anyerror!void {
+    fs.pending_result_promise = req_promise;
+    const is_native_promise = if (val.isPromise()) blk: {
+        if (self.extraProps(val)) |bag| {
+            if (bag.asObject().value.getOwnRecord("constructor") != null) {
+                const ctor_prop = self.getProperty(val, "constructor") catch |err0| {
+                    const err = self.throwIfGap(err0);
+                    if (err == error.JsThrow) {
+                        const ex = self.pending_exception.?;
+                        self.pending_exception = null;
+                        fs.pending_result_promise = null;
+                        try self.rejectPromiseValue(req_promise, ex);
+                        req_promise.deinit();
+                        try drainAsyncGenQueue(self, fs);
+                        return;
+                    }
+                    return err;
+                };
+                defer ctor_prop.deinit();
+                break :blk builtins.isPromiseConstructor(ctor_prop);
+            }
+        }
+        break :blk true;
+    } else false;
+    const awaited_p = if (is_native_promise)
+        val
+    else blk: {
+        const fresh = try self.gcNewPromise();
+        try self.resolvePromise(fresh, val);
+        break :blk fresh;
+    };
+    const on_f = try self.gcNewFunction(.{ .ctx = fs, .name = "", .call = asyncGenReturnOnFulfilled });
+    const on_r = try self.gcNewFunction(.{ .ctx = fs, .name = "", .call = asyncGenReturnOnRejected });
+    try self.subscribePromise(awaited_p, on_f, on_r, null);
+}
+
+fn drainAsyncGenQueue(self: *Interpreter, fs: *FiberState) anyerror!void {
+    if (fs.pending_result_promise != null) return;
+    while (fs.async_queue.items.len > 0) {
+        const req = fs.async_queue.orderedRemove(0);
+        if (fs.fiber.finished or (req.kind != .next and !fs.has_started)) {
+            fs.fiber.finished = true;
+            switch (req.kind) {
+                .next => {
+                    defer {
+                        req.promise.deinit();
+                        req.value.deinit();
+                    }
+                    try self.resolvePromise(req.promise, try iterResult(self, JSValue.UNDEFINED, true));
+                    continue;
+                },
+                .throw => {
+                    defer {
+                        req.promise.deinit();
+                        req.value.deinit();
+                    }
+                    try self.rejectPromiseValue(req.promise, req.value);
+                    continue;
+                },
+                .ret => {
+                    defer req.value.deinit();
+                    try awaitReturnForClosedAsyncGen(self, fs, req.promise, req.value);
+                    break;
+                },
+            }
+        }
+        fs.has_started = true;
+        fs.pending_result_promise = req.promise;
+        fs.setResumeValue(req.value);
+        fs.resume_is_return = (req.kind == .ret);
+        fs.resume_is_throw = (req.kind == .throw);
+        try self.resumeFiber(fs);
+        break;
+    }
+}
+
 fn asyncGeneratorEnqueue(fs: *FiberState, kind: interpreter_mod.AsyncGenReqKind, val: JSValue) anyerror!JSValue {
     const self = fs.interp;
     const p = try self.gcNewPromise();
@@ -213,7 +319,7 @@ fn asyncGeneratorEnqueue(fs: *FiberState, kind: interpreter_mod.AsyncGenReqKind,
         fs.fiber.finished = true;
         switch (kind) {
             .next => try self.resolvePromise(p, try iterResult(self, JSValue.UNDEFINED, true)),
-            .ret => try self.resolvePromise(p, try iterResult(self, val, true)),
+            .ret => try awaitReturnForClosedAsyncGen(self, fs, p.retain(), val),
             .throw => try self.rejectPromiseValue(p, val),
         }
         return p;
@@ -320,8 +426,18 @@ pub fn run(self: *Interpreter, source: []const u8) anyerror!JSValue {
     const parsed = try @import("interpreter_class.zig").parseProgramWithAsi(ast_arena, source, self.stack_limit, null);
     self.current_source = parsed.source;
     const program = parsed.program;
-    try interpreter_mod.normalizePrivateInProgram(ast_arena, parsed.source, program);
     if (codeblock.hasUseStrict(program)) self.strict_mode = true;
+    interpreter_mod.normalizePrivateInProgramMode(ast_arena, parsed.source, program, self.strict_mode) catch |err| switch (err) {
+        error.InvalidOctalLiteral => {
+            _ = self.throwError(.syntax_error, "Octal literals are not allowed in strict mode", .{}) catch {};
+            return error.UncaughtException;
+        },
+        error.InvalidStrictAssignment => {
+            _ = self.throwError(.syntax_error, "Unexpected eval or arguments in strict mode", .{}) catch {};
+            return error.UncaughtException;
+        },
+        else => return err,
+    };
     if (self.compile_options.use_bytecode_vm) {
         var compiled = bytecode_emitter.BytecodeEmitter.emitScript(self.gc_allocator, program) catch |err| switch (err) {
             error.UnsupportedSyntax, error.UnknownLocal => blk: {
@@ -631,8 +747,10 @@ fn evalSourceImpl(self: *Interpreter, scope: *Environment, src: []const u8, is_d
     };
     self.current_source = parsed.source;
     const program = parsed.program;
-    interpreter_mod.normalizePrivateInProgram(ast_arena, parsed.source, program) catch |err| switch (err) {
+    const eval_is_strict = (is_direct and self.strict_mode) or codeblock.hasUseStrict(program);
+    interpreter_mod.normalizePrivateInProgramMode(ast_arena, parsed.source, program, eval_is_strict) catch |err| switch (err) {
         error.InvalidOctalLiteral => return self.throwError(.syntax_error, "Octal literals are not allowed in strict mode", .{}),
+        error.InvalidStrictAssignment => return self.throwError(.syntax_error, "Unexpected eval or arguments in strict mode", .{}),
         else => return err,
     };
     const flags = EvalValidFlags{
@@ -1034,28 +1152,7 @@ pub fn resumeFiber(self: *Interpreter, fs: *FiberState) anyerror!void {
             // settle yet, leave pending_result_promise as-is.
         }
         if (fs.pending_result_promise == null) {
-            while (fs.async_queue.items.len > 0) {
-                const req = fs.async_queue.orderedRemove(0);
-                if (fs.fiber.finished) {
-                    defer {
-                        req.promise.deinit();
-                        req.value.deinit();
-                    }
-                    switch (req.kind) {
-                        .next => try self.resolvePromise(req.promise, try iterResult(self, JSValue.UNDEFINED, true)),
-                        .ret => try self.resolvePromise(req.promise, try iterResult(self, req.value, true)),
-                        .throw => try self.rejectPromiseValue(req.promise, req.value),
-                    }
-                    continue;
-                }
-                fs.has_started = true;
-                fs.pending_result_promise = req.promise;
-                fs.setResumeValue(req.value);
-                fs.resume_is_return = (req.kind == .ret);
-                fs.resume_is_throw = (req.kind == .throw);
-                try self.resumeFiber(fs);
-                break;
-            }
+            try drainAsyncGenQueue(self, fs);
         }
     }
     if (fs.fatal_error) |err| {

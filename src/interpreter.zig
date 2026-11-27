@@ -1286,7 +1286,9 @@ pub const Interpreter = struct {
     // z-interpreter-refactor.md, Step 5 Phase C batch 5: propaccess+protos
     // cluster, split into interpreter_props.zig.
     pub const getProperty = interpreter_props.getProperty;
+    pub const getPropertyWithReceiver = interpreter_props.getPropertyWithReceiver;
     pub const getExtraPropsOrProto = interpreter_props.getExtraPropsOrProto;
+    pub const getExtraPropsOrProtoWithReceiver = interpreter_props.getExtraPropsOrProtoWithReceiver;
 
     // z-interpreter-refactor.md, Step 5 Phase C batch 5: propaccess+protos
     // cluster, split into interpreter_props.zig.
@@ -1349,7 +1351,9 @@ pub const invokeFunctionNode = interpreter_class.invokeFunctionNode;
 pub const prepareCallEnv = interpreter_class.prepareCallEnv;
 pub const evalPreparedFunctionBody = interpreter_class.evalPreparedFunctionBody;
 pub const normalizePrivateInProgram = interpreter_class.normalizePrivateInProgram;
+pub const normalizePrivateInProgramMode = interpreter_class.normalizePrivateInProgramMode;
 pub const normalizePrivateInNode = interpreter_class.normalizePrivateInNode;
+pub const normalizePrivateInNodeMode = interpreter_class.normalizePrivateInNodeMode;
 
 // ---- GC tests (roadmap item 15, phase 5) -----------------------------
 // White-box: collectGarbage()/gc_registry are private, so these live here
@@ -4401,5 +4405,231 @@ test "Operacion 27: all 27 target spec compliance cases" {
     const res2 = try interp.run("tempOk && genTagOk && asiOk && octalErr && assignRefErr && ltOk && errProtoOk && numOk && setKeysOk && forEachOk && pFinallyOk;");
     defer res2.deinit();
     try testing.expect(res2.isBool() and res2.asBool());
+}
+
+test "Fase A - JSON: 3 remaining non-realm spec compliance cases" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\// 1. S15.12.2_A1.js: JSON.parse('{"__proto__":[]}') prototype & own property
+        \\var x = JSON.parse('{"__proto__":[]}');
+        \\var ok1 = Object.getPrototypeOf(x) === Object.prototype && Array.isArray(x.__proto__) && Object.prototype.hasOwnProperty.call(x, "__proto__");
+        \\
+        \\// 2. reviver-object-get-prop-from-prototype.js
+        \\Object.prototype.b = 3;
+        \\var obj2 = JSON.parse('{"a": 1, "b": 2}', function(key, value) {
+        \\  if (key === 'a') { delete this.b; }
+        \\  return value;
+        \\});
+        \\delete Object.prototype.b;
+        \\var ok2 = obj2.a === 1 && obj2.hasOwnProperty('b') && obj2.b === 3;
+        \\
+        \\// 3. reviver-object-non-configurable-prop-delete.js
+        \\var obj3 = JSON.parse('{"a": 1, "b": 2}', function(key, value) {
+        \\  if (key === 'a') { Object.defineProperty(this, 'b', {configurable: false}); }
+        \\  if (key === 'b') return;
+        \\  return value;
+        \\});
+        \\var ok3 = obj3.a === 1 && obj3.hasOwnProperty('b') && obj3.b === 2;
+        \\ok1 && ok2 && ok3;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
+test "Fase A - Error, Reflect, BigInt: 15 spec compliance cases" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\// 1. Error.prototype.toString.call(1) throws TypeError
+        \\var errToStrThrow = false;
+        \\try { Error.prototype.toString.call(1); } catch (e) { errToStrThrow = e instanceof TypeError; }
+        \\
+        \\// 2. Error.prototype.stack getter on Proxy returns undefined & setter on function is enumerable in for-in
+        \\var pErr = new Proxy(new Error('inner'), { get(t, k, r) { return Reflect.get(t, k, r); } });
+        \\var stackSet = Object.getOwnPropertyDescriptor(Error.prototype, 'stack').set;
+        \\var fnForStack = function() {};
+        \\stackSet.call(fnForStack, 'function');
+        \\var fnInKeys = [];
+        \\for (var k in fnForStack) fnInKeys.push(k);
+        \\var errProxyStackOk = pErr.stack === undefined && fnInKeys.includes('stack');
+        \\
+        \\// 3. Reflect[Symbol.toStringTag] is own property "Reflect"
+        \\var reflectTagDesc = Object.getOwnPropertyDescriptor(Reflect, Symbol.toStringTag);
+        \\var reflectTagOk = reflectTagDesc && reflectTagDesc.value === "Reflect" && !reflectTagDesc.writable && !reflectTagDesc.enumerable && reflectTagDesc.configurable;
+        \\
+        \\// 4. Reflect.get with receiver
+        \\var ro1 = {};
+        \\Object.defineProperty(ro1, 'x', { get: function() { return this.y; } });
+        \\var ro2 = Object.create(ro1);
+        \\var reflectGetOk = Reflect.get(ro1, 'x', { y: 42 }) === 42 && Reflect.get(ro2, 'x', { y: 42 }) === 42;
+        \\
+        \\// 5. Reflect.apply / Reflect.construct CreateListFromArrayLike
+        \\var fnArrLike = new Function();
+        \\Object.defineProperty(fnArrLike, "length", { get() { return 1; } });
+        \\var reflectApplyOk = Reflect.apply((...a) => a.length, null, fnArrLike) === 1;
+        \\var reflectApplyThrow = false;
+        \\try { Reflect.apply(() => {}, null); } catch (e) { reflectApplyThrow = e instanceof TypeError; }
+        \\
+        \\// 6. Reflect.deleteProperty on non-configurable returns false
+        \\var rdelObj = {};
+        \\Object.defineProperty(rdelObj, 'p2', { value: 1, configurable: false });
+        \\var reflectDelOk = Reflect.deleteProperty(rdelObj, 'p2') === false;
+        \\
+        \\// 7. BigInt: isConstructor, prototype descriptor, asIntN/asUintN/toString BigInt TypeError, +Object(1n) TypeError
+        \\var biCtorOk = false;
+        \\try { Reflect.construct(function(){}, [], BigInt); biCtorOk = true; } catch (e) {}
+        \\var biNewThrow = false;
+        \\try { new BigInt({ valueOf() { throw new Error("should not reach"); } }); } catch (e) { biNewThrow = e instanceof TypeError; }
+        \\var biProtoDesc = Object.getOwnPropertyDescriptor(BigInt, "prototype");
+        \\var biProtoOk = biProtoDesc && biProtoDesc.writable === false && biProtoDesc.enumerable === false && biProtoDesc.configurable === false;
+        \\var biAsIntThrow = false, biAsUintThrow = false, biToStrThrow = false, biWrapperPlusThrow = false;
+        \\try { BigInt.asIntN(0n, 0n); } catch (e) { biAsIntThrow = e instanceof TypeError; }
+        \\try { BigInt.asUintN(0n, 0n); } catch (e) { biAsUintThrow = e instanceof TypeError; }
+        \\try { (0n).toString(0n); } catch (e) { biToStrThrow = e instanceof TypeError; }
+        \\try { +Object(1n); } catch (e) { biWrapperPlusThrow = e instanceof TypeError; }
+        \\
+        \\errToStrThrow && errProxyStackOk && reflectTagOk && reflectGetOk && reflectApplyOk && reflectApplyThrow && reflectDelOk &&
+        \\  biCtorOk && biNewThrow && biProtoOk && biAsIntThrow && biAsUintThrow && biToStrThrow && biWrapperPlusThrow;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
+test "Fase A - Grupo 1: GeneratorFunction, AsyncFunction, AsyncGeneratorPrototype, comments, arguments, language/*" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\// 1. AsyncFunction, GeneratorFunction, AsyncGeneratorFunction instance construct throws & prototype
+        \\async function af() {}
+        \\function* gf() {}
+        \\async function* agf() {}
+        \\var AsyncFunction = Object.getPrototypeOf(af).constructor;
+        \\var GeneratorFunction = Object.getPrototypeOf(gf).constructor;
+        \\var AsyncGeneratorFunction = Object.getPrototypeOf(agf).constructor;
+        \\var afProtoOk = af.prototype === undefined && !af.hasOwnProperty("prototype") && Object.getPrototypeOf(AsyncFunction) === Function;
+        \\var afThrow = false, gfThrow = false, agfThrow = false;
+        \\try { new (AsyncFunction())(); } catch (e) { afThrow = e instanceof TypeError; }
+        \\try { new (GeneratorFunction())(); } catch (e) { gfThrow = e instanceof TypeError; }
+        \\try { new (AsyncGeneratorFunction())(); } catch (e) { agfThrow = e instanceof TypeError; }
+        \\
+        \\// 2. Subclassing GeneratorFunction
+        \\class SubGF extends GeneratorFunction {}
+        \\var subGf = new SubGF('a', 'yield a; yield a * 2;');
+        \\var subIt = subGf(21);
+        \\var subGfOk = subIt.next().value === 21 && subIt.next().value === 42 && !subGf.prototype.hasOwnProperty('constructor') && subGf.length === 1 && subGf.name === 'anonymous';
+        \\
+        \\// 3. AsyncGenerator.prototype.return awaits value in suspendedStart, suspendedYield, completed
+        \\var agLog = [];
+        \\var ag1 = (async function*() {})();
+        \\ag1.return(Promise.resolve("unwrapped1")).then(r => agLog.push("s1:" + r.value + ":" + r.done));
+        \\var ag2 = (async function*() { yield 1; })();
+        \\ag2.next().then(() => ag2.return(Promise.resolve("unwrapped2"))).then(r => agLog.push("s2:" + r.value + ":" + r.done));
+        \\var brokenP = Promise.resolve(42);
+        \\Object.defineProperty(brokenP, 'constructor', { get() { throw new Error('broken'); } });
+        \\var ag3 = (async function*() { try { yield; } catch (e) { return "caught:" + e.message; } })();
+        \\ag3.next().then(() => ag3.return(brokenP)).then(r => agLog.push("s3:" + r.value));
+        \\
+        \\// 4. Class static numeric method order
+        \\class COrder { static 2() {} static a() {} static 1() {} }
+        \\var cOrderOk = Object.getOwnPropertyNames(COrder).join(",") === "1,2,length,name,prototype,a";
+        \\
+        \\// 5. Function("return f();") sees global function declaration
+        \\function globalFForFnCtor() { "use strict"; return this === undefined; }
+        \\var fnCtorGlobalOk = Function("return globalFForFnCtor();")() === true;
+        \\
+        \\// 6. arguments prototype, length override, strict eval assignment SyntaxError
+        \\var argsOk = (function() {
+        \\  var pOk = Object.getPrototypeOf(arguments) === Object.prototype && arguments.constructor.prototype === Object.prototype;
+        \\  arguments.length = "custom";
+        \\  return pOk && arguments.length === "custom";
+        \\})();
+        \\var strictArgsEvalErr = false;
+        \\try { eval("(function() { 'use strict'; arguments = 10; })()"); } catch (e) { strictArgsEvalErr = e instanceof SyntaxError; }
+        \\
+        \\// 7. Primitive receiver [[Set]] consults prototype chain Proxy set trap
+        \\var numSetCount = 0;
+        \\var origNumProto = Object.getPrototypeOf(Number.prototype);
+        \\Object.setPrototypeOf(Number.prototype, new Proxy({}, { set() { numSetCount += 1; return true; } }));
+        \\(0).test262 = null;
+        \\Object.setPrototypeOf(Number.prototype, origNumProto);
+        \\var primSetOk = numSetCount === 1;
+        \\true;
+    );
+    defer res.deinit();
+
+    const r_hash = try interp.run("#! hashbang\u{2028}var hbOk = true;\n''/*\u{2028}*/''\nhbOk;");
+    defer r_hash.deinit();
+    try testing.expect(r_hash.isBool() and r_hash.asBool());
+
+    const res2 = try interp.run("afProtoOk && afThrow && gfThrow && agfThrow && subGfOk && agLog.length === 3 && agLog.includes('s1:unwrapped1:true') && agLog.includes('s2:unwrapped2:true') && agLog.includes('s3:caught:broken') && cOrderOk && fnCtorGlobalOk && argsOk && strictArgsEvalErr && primSetOk;");
+    defer res2.deinit();
+    try testing.expect(res2.isBool() and res2.asBool());
+}
+
+test "Fase A - Date: all 12 non-realm spec compliance cases" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\// 1. Date.length === 7 (S15.9.4_A5.js, length.js)
+        \\var dLenDesc = Object.getOwnPropertyDescriptor(Date, "length");
+        \\var dLenOk = Date.length === 7 && dLenDesc.value === 7 && !dLenDesc.writable && !dLenDesc.enumerable && dLenDesc.configurable;
+        \\
+        \\// 2. Date(...) without new returns string & ignores poisoned arguments (S15.9.2.1_A1/A2, value-to-primitive-get-meth-err)
+        \\var poisonedObj = {};
+        \\Object.defineProperty(poisonedObj, Symbol.toPrimitive, { get() { throw new Error("poisoned"); } });
+        \\var poisonedDate = new Date(12345);
+        \\Object.defineProperty(poisonedDate, Symbol.toPrimitive, { get() { throw new Error("poisoned"); } });
+        \\var dCallOk = typeof Date() === "string" && typeof Date(1970, 1, 1) === "string" && typeof Date(poisonedObj) === "string";
+        \\var dCopyPoisonedOk = new Date(poisonedDate).getTime() === 12345;
+        \\var dPoisonedThrow = false;
+        \\try { new Date(poisonedObj); } catch (e) { dPoisonedThrow = e.message === "poisoned"; }
+        \\
+        \\// 3. new Date(val) invokes Symbol.toPrimitive with "default" & handles string/number/Symbol result
+        \\var hintSeen = null;
+        \\var retVal = 1234;
+        \\var yObj = { [Symbol.toPrimitive](h) { hintSeen = h; return retVal; } };
+        \\var dPrimNumOk = new Date(yObj).valueOf() === 1234 && hintSeen === "default";
+        \\retVal = "2016-06-05T18:40:00.000Z";
+        \\var dPrimStrOk = new Date(yObj).getTime() === 1465152000000;
+        \\retVal = Symbol.toPrimitive;
+        \\var dPrimSymThrow = false;
+        \\try { new Date(yObj); } catch (e) { dPrimSymThrow = e instanceof TypeError; }
+        \\
+        \\// 4. Reflect.construct(Date, [64], Ctor) subclassing
+        \\var Ctor = function() {};
+        \\var subInst1 = Reflect.construct(Date, [64], Ctor);
+        \\var dSub1Ok = Object.getPrototypeOf(subInst1) === Ctor.prototype && Date.prototype.getTime.call(subInst1) === 64;
+        \\Ctor.prototype = null;
+        \\var subInst2 = Reflect.construct(Date, [64], Ctor);
+        \\var dSub2Ok = Object.getPrototypeOf(subInst2) === Date.prototype && subInst2.getTime() === 64;
+        \\
+        \\// 5. Reject -000000 extended year (year-zero.js)
+        \\var dYearZeroOk = Number.isNaN(+new Date("-000000-03-31T00:45Z")) && Number.isNaN(Date.parse("-000000-03-31T00:45Z"));
+        \\
+        \\// 6. Date.UTC floating-point evaluation order (fp-evaluation-order.js)
+        \\var dUtcFpOk = Date.UTC(1970, 0, 1, 80063993375, 29, 1, -288230376151711740) === 29312 &&
+        \\  Date.UTC(1970, 0, 213503982336, 0, 0, 0, -18446744073709552000) === 34447360;
+        \\
+        \\dLenOk && dCallOk && dCopyPoisonedOk && dPoisonedThrow && dPrimNumOk && dPrimStrOk && dPrimSymThrow && dSub1Ok && dSub2Ok && dYearZeroOk && dUtcFpOk;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
 }
 
