@@ -258,6 +258,9 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.arity));
             const fn_proto = self.proto_refs.get(@intFromPtr(box)) orelse blk_fp: {
                 const iclass = @import("interpreter_class.zig");
+                if (error_builtins.isErrorSubclassConstructor(box.value.call)) {
+                    if (self.global_env.get("Error")) |ector| break :blk_fp ector;
+                }
                 if (box.value.call == iclass.closureCall) {
                     const cctx: *interpreter_mod.ClosureCtx = @ptrCast(@alignCast(box.value.ctx));
                     if (cctx.function_node.is_generator and cctx.function_node.is_async and self.protos.async_generator_function_proto.isObject()) {
@@ -344,7 +347,7 @@ pub fn getProperty(self: *Interpreter, obj: JSValue, key: []const u8) anyerror!J
             }
             break :blk try self.getProperty(box.value.target, key);
         },
-        .promise => try self.getExtraPropsOrProto(obj, self.protos.promise, key),
+        .promise => |box| try self.getExtraPropsOrProto(obj, self.proto_refs.get(@intFromPtr(box)) orelse self.protos.promise, key),
         .map => |box| try self.getExtraPropsOrProto(obj, self.proto_refs.get(@intFromPtr(box)) orelse self.protos.map, key),
         .set => |box| try self.getExtraPropsOrProto(obj, self.proto_refs.get(@intFromPtr(box)) orelse self.protos.set, key),
         // `.byteLength` is a real spec ACCESSOR property (no parens),
@@ -1450,6 +1453,11 @@ pub fn materializeProtos(self: *Interpreter) !void {
     try self.aliasSymbolIterator(self.protos.array, "array", builtins.array_methods, "values");
     try self.aliasSymbolIterator(self.protos.map, "map", builtins.map_methods, "entries");
     try self.aliasSymbolIterator(self.protos.set, "set", builtins.set_methods, "values");
+    {
+        const set_values_spec = builtins.set_methods.get("values").?;
+        const set_values_fn = try self.nativeMethod("set", "values", set_values_spec.arity, set_values_spec.call);
+        try self.protos.set.asObject().value.defineProperty("keys", set_values_fn, .{ .writable = true, .enumerable = false, .configurable = true });
+    }
 
     if (self.global_env.get("Symbol")) |sym_ctor| {
         const uns_sym = try self.getProperty(sym_ctor, "unscopables");

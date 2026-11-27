@@ -400,6 +400,7 @@ pub fn makeClosure(self: *Interpreter, env: *Environment, fnode: *zfunctions.Fun
     if (fnode.is_generator) {
         _ = try self.functionPrototype(fn_value);
     }
+    ctx.fn_box = fn_value.asFunction();
     if (self_name) |n| {
         try closure_env.define(arena, n, fn_value.retain());
         // immutable-bindings.md: a named function expression's own
@@ -657,7 +658,159 @@ pub fn normalizePrivateInNode(allocator: Allocator, source: []const u8, node: *z
         .function_like => |ptr| try normalizePrivateInFunction(allocator, source, zfunctions.asFunctionNode(ptr)),
         .class_like => |ptr| try normalizePrivateInClass(allocator, source, zfunctions.asClassNode(ptr)),
         .yield_expr => |y| if (y.argument) |a| try normalizePrivateInNode(allocator, source, a),
-        .number_literal, .bigint_literal, .string_literal, .boolean_literal, .null_literal, .regex_literal, .this_expr, .super_expr, .new_target => {},
+        .number_literal => {
+            if (node.end > node.start + 1 and node.end <= source.len and
+                source[node.start] == '0' and source[node.start + 1] >= '0' and source[node.start + 1] <= '9')
+            {
+                return error.InvalidOctalLiteral;
+            }
+        },
+        .bigint_literal, .string_literal, .boolean_literal, .null_literal, .regex_literal, .this_expr, .super_expr, .new_target => {},
+    }
+}
+
+/// Pre-normalizes source text for two ECMAScript lexical/ASI rules that the
+/// upstream pinned z-lexer/z-statements releases do not handle natively:
+///   1. Single-line `//` comments terminated by U+2028 (LS) or U+2029 (PS).
+///   2. Same-line ASI after `do ... while (expr) stmt` (ECMA-262 12.10.1).
+pub fn preprocessSource(allocator: Allocator, source: []const u8) ![]const u8 {
+    if (std.mem.indexOf(u8, source, "//") == null or
+        (std.mem.indexOf(u8, source, "\u{2028}") == null and std.mem.indexOf(u8, source, "\u{2029}") == null))
+    {
+        return source;
+    }
+    const out = try allocator.dupe(u8, source);
+    var i: usize = 0;
+    var state: enum { normal, single_quote, double_quote, template, line_comment, block_comment } = .normal;
+    while (i < out.len) {
+        const c = out[i];
+        switch (state) {
+            .normal => {
+                if (c == '\'') {
+                    state = .single_quote;
+                    i += 1;
+                } else if (c == '"') {
+                    state = .double_quote;
+                    i += 1;
+                } else if (c == '`') {
+                    state = .template;
+                    i += 1;
+                } else if (c == '/' and i + 1 < out.len and out[i + 1] == '/') {
+                    state = .line_comment;
+                    i += 2;
+                } else if (c == '/' and i + 1 < out.len and out[i + 1] == '*') {
+                    state = .block_comment;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            },
+            .single_quote => {
+                if (c == '\\' and i + 1 < out.len) {
+                    i += 2;
+                } else if (c == '\'') {
+                    state = .normal;
+                    i += 1;
+                } else {
+                    i += 1;
+                }
+            },
+            .double_quote => {
+                if (c == '\\' and i + 1 < out.len) {
+                    i += 2;
+                } else if (c == '"') {
+                    state = .normal;
+                    i += 1;
+                } else {
+                    i += 1;
+                }
+            },
+            .template => {
+                if (c == '\\' and i + 1 < out.len) {
+                    i += 2;
+                } else if (c == '`') {
+                    state = .normal;
+                    i += 1;
+                } else {
+                    i += 1;
+                }
+            },
+            .line_comment => {
+                if (c == '\n' or c == '\r') {
+                    state = .normal;
+                    i += 1;
+                } else if (c == 0xE2 and i + 2 < out.len and out[i + 1] == 0x80 and (out[i + 2] == 0xA8 or out[i + 2] == 0xA9)) {
+                    out[i] = '\n';
+                    out[i + 1] = ' ';
+                    out[i + 2] = ' ';
+                    state = .normal;
+                    i += 3;
+                } else {
+                    i += 1;
+                }
+            },
+            .block_comment => {
+                if (c == '*' and i + 1 < out.len and out[i + 1] == '/') {
+                    state = .normal;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            },
+        }
+    }
+    return out;
+}
+
+/// If `parseProgram` failed with `error.MissingSemicolon` right after a
+/// `do ... while (expr)` closing `)` on the same line (ECMA-262 12.10.1 third
+/// bullet), inserts `;` after that `)` and returns the updated source slice.
+pub fn tryInsertDoWhileAsi(allocator: Allocator, source: []const u8, offending_start: usize) !?[]const u8 {
+    if (offending_start == 0 or offending_start > source.len) return null;
+    if (std.mem.indexOf(u8, source[0..offending_start], "do") == null) return null;
+    var p = offending_start;
+    while (p > 0 and (source[p - 1] == ' ' or source[p - 1] == '\t' or source[p - 1] == 0x0B or source[p - 1] == 0x0C)) : (p -= 1) {}
+    if (p == 0 or source[p - 1] != ')') return null;
+    const rparen_idx = p - 1;
+    // Walk backwards to matching '('
+    var depth: usize = 1;
+    var q = rparen_idx;
+    while (q > 0 and depth > 0) {
+        q -= 1;
+        if (source[q] == ')') depth += 1 else if (source[q] == '(') depth -= 1;
+    }
+    if (depth != 0) return null;
+    while (q > 0 and (source[q - 1] == ' ' or source[q - 1] == '\t' or source[q - 1] == '\n' or source[q - 1] == '\r')) : (q -= 1) {}
+    if (q < 5 or !std.mem.eql(u8, source[q - 5 .. q], "while")) return null;
+    if (q > 5) {
+        const prev = source[q - 6];
+        if (std.ascii.isAlphanumeric(prev) or prev == '_' or prev == '$' or prev == '.') return null;
+    }
+    var buf = try allocator.alloc(u8, source.len + 1);
+    @memcpy(buf[0 .. rparen_idx + 1], source[0 .. rparen_idx + 1]);
+    buf[rparen_idx + 1] = ';';
+    @memcpy(buf[rparen_idx + 2 ..], source[rparen_idx + 1 ..]);
+    return buf;
+}
+
+pub fn parseProgramWithAsi(allocator: Allocator, source_in: []const u8, stack_limit: usize, new_target_allowed: ?bool) !struct { source: []const u8, program: []const *zstatements.Statement } {
+    var cur_src = try preprocessSource(allocator, source_in);
+    var attempts: usize = 0;
+    while (true) : (attempts += 1) {
+        var parser = try zfunctions.Parser.init(allocator, cur_src);
+        parser.setStackLimit(stack_limit);
+        if (new_target_allowed) |nta| parser.stmt_parser.expr_parser.new_target_allowed = nta;
+        const program = parser.parseProgram() catch |err| {
+            if (err == error.MissingSemicolon and attempts < 16) {
+                const off = parser.stmt_parser.expr_parser.current.start;
+                if (try tryInsertDoWhileAsi(allocator, cur_src, off)) |patched| {
+                    cur_src = patched;
+                    continue;
+                }
+            }
+            return err;
+        };
+        return .{ .source = cur_src, .program = program };
     }
 }
 
@@ -1416,10 +1569,22 @@ pub fn closureCall(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     }
     defer closure_ctx.interp.pending_call_new_target = prev_nt;
     if (fnode.is_generator and fnode.is_async) {
-        return closure_ctx.interp.makeAsyncGeneratorObject(fnode, closure_ctx.closure_env, this, closure_ctx.super_proto, closure_ctx.private_ctx, args, closure_ctx.home_object);
+        var inst_proto: ?JSValue = null;
+        defer if (inst_proto) |ip| ip.deinit();
+        if (closure_ctx.fn_box) |b| {
+            const fn_val = JSValue.fromFunction(@ptrCast(@alignCast(b)));
+            inst_proto = try closure_ctx.interp.getProperty(fn_val, "prototype");
+        }
+        return closure_ctx.interp.makeAsyncGeneratorObject(fnode, closure_ctx.closure_env, this, closure_ctx.super_proto, closure_ctx.private_ctx, args, closure_ctx.home_object, inst_proto);
     }
     if (fnode.is_generator) {
-        return closure_ctx.interp.makeGeneratorObject(fnode, closure_ctx.closure_env, this, closure_ctx.super_proto, closure_ctx.private_ctx, args, closure_ctx.home_object);
+        var inst_proto: ?JSValue = null;
+        defer if (inst_proto) |ip| ip.deinit();
+        if (closure_ctx.fn_box) |b| {
+            const fn_val = JSValue.fromFunction(@ptrCast(@alignCast(b)));
+            inst_proto = try closure_ctx.interp.getProperty(fn_val, "prototype");
+        }
+        return closure_ctx.interp.makeGeneratorObject(fnode, closure_ctx.closure_env, this, closure_ctx.super_proto, closure_ctx.private_ctx, args, closure_ctx.home_object, inst_proto);
     }
     if (fnode.is_async) {
         return closure_ctx.interp.runAsyncFunction(fnode, closure_ctx.closure_env, this, closure_ctx.super_proto, closure_ctx.private_ctx, args, closure_ctx.home_object);

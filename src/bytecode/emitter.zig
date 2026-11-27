@@ -654,6 +654,8 @@ pub const BytecodeEmitter = struct {
                         }
                         if (self.resolveBinding(name)) |b| {
                             if (!b.initialized) return error.UnsupportedSyntax;
+                        } else if (unwrapParen(assignment.value).data == .assignment) {
+                            return error.UnsupportedSyntax;
                         }
                         const value = try self.emitExpression(assignment.value);
                         try self.emitStore(name, value);

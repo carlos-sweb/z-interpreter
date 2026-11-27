@@ -60,7 +60,7 @@ fn numberValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
 /// defaults and range validation in the order required by each method.
 fn numberFormatArg(ctx: *anyopaque, args: []const JSValue) anyerror!?f64 {
     if (arg(args, 0).tag() == .undefined) return null;
-    return try interp(ctx).toNumberJS(arg(args, 0));
+    return try builtin_helpers.toNumberStrict(interp(ctx), arg(args, 0));
 }
 
 fn numberFormatError(ctx: *anyopaque, err: anyerror, message: []const u8) anyerror!JSValue {
@@ -141,13 +141,11 @@ fn numberIsSafeInteger(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
 
 /// Installs the `Number` constructor + statics.
 pub fn install(self: *Interpreter) !void {
-    _ = try installBuiltin(self, .{ .name = "Number", .ctor = .{ .arity = 1, .call = globalNumber, .constructable = true }, .statics = &.{
+    const num_ctor = try installBuiltin(self, .{ .name = "Number", .ctor = .{ .arity = 1, .call = globalNumber, .constructable = true }, .statics = &.{
         .{ .name = "isNaN", .value = .{ .method = .{ .call = numberIsNaN, .arity = 1 } } },
         .{ .name = "isFinite", .value = .{ .method = .{ .call = numberIsFinite, .arity = 1 } } },
         .{ .name = "isInteger", .value = .{ .method = .{ .call = numberIsInteger, .arity = 1 } } },
         .{ .name = "isSafeInteger", .value = .{ .method = .{ .call = numberIsSafeInteger, .arity = 1 } } },
-        .{ .name = "parseFloat", .value = .{ .method = .{ .call = globals_builtins.globalParseFloat, .arity = 1 } } },
-        .{ .name = "parseInt", .value = .{ .method = .{ .call = globals_builtins.globalParseInt, .arity = 2 } } },
         .{ .name = "MAX_SAFE_INTEGER", .value = .{ .constant = JSValue.fromNumber(9007199254740991.0) } },
         .{ .name = "MIN_SAFE_INTEGER", .value = .{ .constant = JSValue.fromNumber(-9007199254740991.0) } },
         .{ .name = "EPSILON", .value = .{ .constant = JSValue.fromNumber(std.math.floatEps(f64)) } },
@@ -157,4 +155,7 @@ pub fn install(self: *Interpreter) !void {
         .{ .name = "POSITIVE_INFINITY", .value = .{ .constant = JSValue.fromNumber(std.math.inf(f64)) } },
         .{ .name = "NEGATIVE_INFINITY", .value = .{ .constant = JSValue.fromNumber(-std.math.inf(f64)) } },
     } });
+    const bag = try self.functionStatics(num_ctor);
+    if (self.global_env.get("parseFloat")) |pf| try builtin_helpers.dneMethod(bag, "parseFloat", pf.retain());
+    if (self.global_env.get("parseInt")) |pi| try builtin_helpers.dneMethod(bag, "parseInt", pi.retain());
 }

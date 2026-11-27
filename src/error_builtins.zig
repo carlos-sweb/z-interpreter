@@ -225,6 +225,17 @@ fn suppressedErrorConstructor(ctx: *anyopaque, allocator: Allocator, this_value:
     return o;
 }
 
+pub fn isErrorSubclassConstructor(call: NativeFn) bool {
+    return call == aggregateErrorConstructor or
+        call == suppressedErrorConstructor or
+        call == errorConstructor(.eval_error) or
+        call == errorConstructor(.range_error) or
+        call == errorConstructor(.reference_error) or
+        call == errorConstructor(.syntax_error) or
+        call == errorConstructor(.type_error) or
+        call == errorConstructor(.uri_error);
+}
+
 /// The `AggregateError` global and its prototype, and NativeError
 /// prototypes chained to Error.prototype. Runs from materializeProtos,
 /// once Error.prototype exists.

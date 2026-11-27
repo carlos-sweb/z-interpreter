@@ -117,48 +117,72 @@ fn mapHas(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
     return JSValue.fromBool(m.asMap().value.has(arg(args, 0)));
 }
 
+const ForEachCursor = struct {
+    target_box: usize,
+    index: usize,
+    prev: ?*ForEachCursor,
+};
+
+fn adjustForEachCursorsOnDelete(self: *Interpreter, target_box: usize, deleted_index: usize) void {
+    var cur: ?*ForEachCursor = @ptrCast(@alignCast(self.top_foreach_cursor));
+    while (cur) |c| : (cur = c.prev) {
+        if (c.target_box == target_box and deleted_index < c.index) {
+            c.index -= 1;
+        }
+    }
+}
+
+fn adjustForEachCursorsOnClear(self: *Interpreter, target_box: usize) void {
+    var cur: ?*ForEachCursor = @ptrCast(@alignCast(self.top_foreach_cursor));
+    while (cur) |c| : (cur = c.prev) {
+        if (c.target_box == target_box) {
+            c.index = 0;
+        }
+    }
+}
+
 fn mapDelete(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
+    const self = interp(ctx);
     const m = try requireMap(ctx, this_value, "delete");
+    const key = arg(args, 0);
+    if (m.asMap().value.storage.getIndex(key)) |idx| {
+        adjustForEachCursorsOnDelete(self, @intFromPtr(m.asMap()), idx);
+    }
     // Releases the STORED key (maybe a different, equal box than the
     // argument) and its value.
-    return JSValue.fromBool(m.mapDelete(arg(args, 0)));
+    return JSValue.fromBool(m.mapDelete(key));
 }
 
 fn mapClear(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     _ = args;
+    const self = interp(ctx);
     const m = try requireMap(ctx, this_value, "clear");
+    adjustForEachCursorsOnClear(self, @intFromPtr(m.asMap()));
     m.mapClear();
     return JSValue.UNDEFINED;
 }
 
 fn mapForEach(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self = interp(ctx);
     const m = try requireMap(ctx, this_value, "forEach");
     const cb = try requireCallback(ctx, args);
-    const ks = m.asMap().value.keys();
-    const vs = m.asMap().value.values();
-    // Snapshot + retain before calling into JS: `ks`/`vs` are live slices
-    // into the map's storage, and the callback may mutate `m` (delete/
-    // set), which can resize/compact that storage and invalidate them
-    // mid-iteration -- a real, confirmed crash ("switch on corrupt
-    // value" in JSValue.retain(), Test262). A copy WITHOUT retaining
-    // isn't enough either: a callback that deletes the very entry being
-    // visited would leave the snapshot pointing at an already-freed box.
-    const snap_keys = try allocator.alloc(JSValue, ks.len);
-    defer allocator.free(snap_keys);
-    const snap_values = try allocator.alloc(JSValue, ks.len);
-    defer allocator.free(snap_values);
-    for (ks, vs, 0..) |k, v, i| {
-        snap_keys[i] = k.retain();
-        snap_values[i] = v.retain();
-    }
-    defer for (snap_keys, snap_values) |k, v| {
-        k.deinit();
-        v.deinit();
-    };
     const this_arg = if (args.len > 1) args[1] else JSValue.UNDEFINED;
-    for (snap_keys, snap_values) |k, v| {
+    var cursor = ForEachCursor{
+        .target_box = @intFromPtr(m.asMap()),
+        .index = 0,
+        .prev = @ptrCast(@alignCast(self.top_foreach_cursor)),
+    };
+    self.top_foreach_cursor = &cursor;
+    defer self.top_foreach_cursor = cursor.prev;
+    while (cursor.index < m.asMap().value.size()) {
+        const i = cursor.index;
+        cursor.index += 1;
+        const k = m.asMap().value.keys()[i].retain();
+        defer k.deinit();
+        const v = m.asMap().value.values()[i].retain();
+        defer v.deinit();
         const res = try cb.asFunction().value.call(cb.asFunction().value.ctx, allocator, this_arg, &.{ v, k, m });
         res.deinit();
     }
@@ -514,19 +538,26 @@ fn setHas(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
 
 fn setDelete(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
+    const self = interp(ctx);
     const s = try requireSet(ctx, this_value, "delete");
+    const val = arg(args, 0);
+    if (s.asSet().value.map.storage.getIndex(val)) |idx| {
+        adjustForEachCursorsOnDelete(self, @intFromPtr(s.asSet()), idx);
+    }
     // Set.delete/clear no liberan porque iterableItems devuelve elementos
     // prestados. Migrar (a setDelete/setClear) cuando iterableItems
     // devuelva referencias propias: hoy liberar aquí deja colgando la
     // lista de un llamador que ejecuta JS mientras la recorre
     // (Array.from(set, fn), yield* set).
-    return JSValue.fromBool(s.asSet().value.delete(arg(args, 0)));
+    return JSValue.fromBool(s.asSet().value.delete(val));
 }
 
 fn setClear(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     _ = args;
+    const self = interp(ctx);
     const s = try requireSet(ctx, this_value, "clear");
+    adjustForEachCursorsOnClear(self, @intFromPtr(s.asSet()));
     // Set.delete/clear no liberan porque iterableItems devuelve elementos
     // prestados. Migrar (a setDelete/setClear) cuando iterableItems
     // devuelva referencias propias: hoy liberar aquí deja colgando la
@@ -537,16 +568,22 @@ fn setClear(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []
 }
 
 fn setForEach(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    const self = interp(ctx);
     const s = try requireSet(ctx, this_value, "forEach");
     const cb = try requireCallback(ctx, args);
-    const vs = s.asSet().value.values();
-    // Same snapshot-and-retain rationale as mapForEach above.
-    const snap_values = try allocator.alloc(JSValue, vs.len);
-    defer allocator.free(snap_values);
-    for (vs, 0..) |v, i| snap_values[i] = v.retain();
-    defer for (snap_values) |v| v.deinit();
     const this_arg = if (args.len > 1) args[1] else JSValue.UNDEFINED;
-    for (snap_values) |v| {
+    var cursor = ForEachCursor{
+        .target_box = @intFromPtr(s.asSet()),
+        .index = 0,
+        .prev = @ptrCast(@alignCast(self.top_foreach_cursor)),
+    };
+    self.top_foreach_cursor = &cursor;
+    defer self.top_foreach_cursor = cursor.prev;
+    while (cursor.index < s.asSet().value.size()) {
+        const i = cursor.index;
+        cursor.index += 1;
+        const v = s.asSet().value.values()[i].retain();
+        defer v.deinit();
         const res = try cb.asFunction().value.call(cb.asFunction().value.ctx, allocator, this_arg, &.{ v, v, s });
         res.deinit();
     }

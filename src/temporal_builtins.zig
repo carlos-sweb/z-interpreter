@@ -2198,7 +2198,15 @@ fn readDurationTotalOptions(self: *Interpreter, options: JSValue, allocator: All
 fn durTotal(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const self = interp(ctx);
     const d = try durSelf(self, this_value);
-    const result = d.total(try readDurationTotalOptions(self, arg(args, 0), allocator)) catch |e| return temporalErr(self, e);
+    const opts = try readDurationTotalOptions(self, arg(args, 0), allocator);
+    if (d.blank() and opts.unit == .day) {
+        if (opts.relativeTo) |rt| {
+            if (rt == .zonedDateTime) {
+                _ = rt.zonedDateTime.add(allocator, opts.io.?, .{ .days = 1 }, .constrain) catch |e| return temporalErr(self, e);
+            }
+        }
+    }
+    const result = d.total(opts) catch |e| return temporalErr(self, e);
     return JSValue.fromNumber(result);
 }
 

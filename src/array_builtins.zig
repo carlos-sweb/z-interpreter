@@ -925,7 +925,7 @@ fn arrayFrom(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
                 index += 1;
             }
         },
-        .object => {
+        .object, .number, .boolean, .bigint, .symbol, .function, .proxy => {
             // Real @@iterator-presence-first, array-like fallback --
             // the array-like helper is shared with the TypedArray
             // constructor's equivalent overload (also fixes the

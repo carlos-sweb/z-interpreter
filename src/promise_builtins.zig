@@ -132,6 +132,10 @@ fn promiseThen(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     errdefer cap.promise.deinit();
     defer cap.resolve.deinit();
     defer cap.reject.deinit();
+    if (cap.promise.isPromise() and cap.resolve.isFunction() and cap.resolve.asFunction().value.call == capResolve and cap.reject.isFunction() and cap.reject.asFunction().value.call == capReject) {
+        try self.subscribePromise(p, on_f, on_r, cap.promise);
+        return cap.promise;
+    }
     const derived = try self.promiseThen(p, on_f, on_r);
     defer derived.deinit();
     const fwd_resolve = try capabilityForwarder(self, allocator, cap.resolve, "resolve");

@@ -369,6 +369,8 @@ pub const ClosureCtx = struct {
     source_full: ?[]const u8 = null,
     /// True when the function was defined in strict code or contains a `"use strict"` directive.
     is_strict: bool = false,
+    /// Unretained pointer to the owning Function RcBox (used by generator calls to look up `F.prototype`).
+    fn_box: ?*anyopaque = null,
 
     /// GC prep (roadmap item 15, phase 2): see Environment.traceChildren
     /// for the visitor contract. private_ctx is downcast back to *ClassCtx
@@ -1042,6 +1044,8 @@ pub const Interpreter = struct {
     raw_json_objects: std.AutoHashMapUnmanaged(usize, void) = .empty,
     /// Active source text being parsed/executed so closures/classes can slice `start..end`.
     current_source: ?[]const u8 = null,
+    /// Stack of active Map/Set.prototype.forEach cursors adjusted on delete/clear.
+    top_foreach_cursor: ?*anyopaque = null,
     /// The stack-depth guard: recursing below this native stack address
     /// raises the real `RangeError: Maximum call stack size exceeded`
     /// instead of segfaulting (Test262's tco-* tests found this). Set
@@ -4316,23 +4320,80 @@ test "Phase 8.4: String/TypedArray prototypes, for-in semantics, object expressi
     try testing.expect(res.isBool() and res.asBool());
 }
 
+test "Operacion 27: all 27 target spec compliance cases" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    const res = try interp.run(
+        \\// 1. Temporal Duration.prototype.total relativeTo date limits
+        \\var d0 = new Temporal.Duration(0);
+        \\var tempErr = false;
+        \\try { d0.total({ unit: "days", relativeTo: "+275760-09-12T00:00:01+00:00[UTC]" }); } catch (e) { tempErr = e instanceof RangeError; }
+        \\var tempOk = tempErr && d0.total({ unit: "days", relativeTo: "+275760-09-12T00:00:00+00:00[UTC]" }) === 0;
+        \\
+        \\// 2. GeneratorPrototype[Symbol.toStringTag]
+        \\var GP = Object.getPrototypeOf(Object.getPrototypeOf(function*() {}()));
+        \\var genTagOk = GP[Symbol.toStringTag] === "Generator";
+        \\
+        \\// 3. do-while ASI same line
+        \\var dwX;
+        \\do break ; while (0) dwX = 42;
+        \\var dwY = 0;
+        \\do do do ; while (dwY) while (dwY) while (dwY) dwY = 39;
+        \\var asiOk = dwX === 42 && dwY === 39;
+        \\
+        \\// 4. Strict octal in eval (7.8.3-3gs)
+        \\var octalErr = false;
+        \\try { eval("var a; a = 0x1; a = 01;"); } catch (e) { octalErr = e instanceof SyntaxError; }
+        \\
+        \\// 5. Assign to global undeclared when RHS defines it on globalThis
+        \\var assignRefErr = false;
+        \\try { undeclaredOp27 = (globalThis.undeclaredOp27 = 5); } catch (e) { assignRefErr = e instanceof ReferenceError; }
+        \\
+        \\// 6. Line terminators U+2028 and U+2029 in single-line comments
+        \\var lsHit = false, psHit = false;
+        \\// comment lsHit = true;
+        \\// comment psHit = true;
+        \\var ltOk = lsHit && psHit;
+        \\
+        \\// 7. AggregateError & SuppressedError constructor [[Prototype]] === Error
+        \\var errProtoOk = Object.getPrototypeOf(AggregateError) === Error && Object.getPrototypeOf(SuppressedError) === Error;
+        \\
+        \\// 8. Number.parseFloat === parseFloat, Number.parseInt === parseInt, toFixed(0n) throws TypeError
+        \\var toFixedBigIntErr = false;
+        \\try { (0).toFixed(0n); } catch (e) { toFixedBigIntErr = e instanceof TypeError; }
+        \\var numOk = Number.parseFloat === parseFloat && Number.parseInt === parseInt && toFixedBigIntErr;
+        \\
+        \\// 9. Set.prototype.keys === Set.prototype.values & Map/Set.prototype.forEach live mutations
+        \\var setKeysOk = Set.prototype.keys === Set.prototype.values;
+        \\var m1 = new Map([["foo", 0], ["bar", 1]]);
+        \\var m1Res = [];
+        \\m1.forEach((v, k) => { if (m1Res.length === 0) m1.delete("bar"); m1Res.push(k); });
+        \\var m2 = new Map([["foo", 0], ["bar", 1]]);
+        \\var m2Res = [];
+        \\m2.forEach((v, k) => { if (m2Res.length === 0) m2.set("baz", 2); m2Res.push(k); });
+        \\var m3 = new Map([["foo", 0], ["bar", 1]]);
+        \\var m3Res = [];
+        \\m3.forEach((v, k) => { if (m3Res.length === 0) { m3.delete("foo"); m3.set("foo", "baz"); } m3Res.push(k + ":" + v); });
+        \\var s1 = new Set([1, 2, 3]);
+        \\var s1Res = [];
+        \\s1.forEach((v) => { if (v === 2) s1.delete(1); if (v === 3) s1.add(1); s1Res.push(v); });
+        \\var forEachOk = m1Res.join(",") === "foo" && m2Res.join(",") === "foo,bar,baz" &&
+        \\  m3Res.join(",") === "foo:0,bar:1,foo:baz" && s1Res.join(",") === "1,2,3,1";
+        \\
+        \\// 10. Promise.prototype.finally species constructor count
+        \\var fCount = 0;
+        \\class FooPromise extends Promise { constructor(res, rej) { fCount++; return super(res, rej); } }
+        \\var pFinallyOk = false;
+        \\FooPromise.resolve().finally(() => {}).then(() => { pFinallyOk = (fCount === 7); }).then(() => {});
+        \\true;
+    );
+    defer res.deinit();
+    const res2 = try interp.run("tempOk && genTagOk && asiOk && octalErr && assignRefErr && ltOk && errProtoOk && numOk && setKeysOk && forEachOk && pFinallyOk;");
+    defer res2.deinit();
+    try testing.expect(res2.isBool() and res2.asBool());
+}
 

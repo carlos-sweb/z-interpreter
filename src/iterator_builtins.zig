@@ -994,13 +994,13 @@ fn iteratorZip(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
         } orelse break;
         defer elem.deinit();
         const rec = getIteratorFlattenable(self, elem, false) catch |err| {
-            _ = closeOnThrow(self, input_rec.iterator, err) catch {};
-            return iteratorCloseAllThrow(self, items.items, err);
+            _ = iteratorCloseAllThrow(self, items.items, err) catch {};
+            return closeOnThrow(self, input_rec.iterator, err);
         };
         items.append(self.gc_allocator, .{ .iterator = rec.iterator, .next = rec.next }) catch |err| {
             rec.deinit();
-            _ = closeOnThrow(self, input_rec.iterator, err) catch {};
-            return iteratorCloseAllThrow(self, items.items, err);
+            _ = iteratorCloseAllThrow(self, items.items, err) catch {};
+            return closeOnThrow(self, input_rec.iterator, err);
         };
     }
 

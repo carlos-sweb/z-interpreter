@@ -316,12 +316,11 @@ pub fn run(self: *Interpreter, source: []const u8) anyerror!JSValue {
     // creates goes through gc_allocator.
     const ast_arena = self.arena_state.allocator();
     const prev_source = self.current_source;
-    self.current_source = source;
     defer self.current_source = prev_source;
-    const parser = try zfunctions.Parser.init(ast_arena, source);
-    parser.setStackLimit(self.stack_limit);
-    const program = try parser.parseProgram();
-    try interpreter_mod.normalizePrivateInProgram(ast_arena, source, program);
+    const parsed = try @import("interpreter_class.zig").parseProgramWithAsi(ast_arena, source, self.stack_limit, null);
+    self.current_source = parsed.source;
+    const program = parsed.program;
+    try interpreter_mod.normalizePrivateInProgram(ast_arena, parsed.source, program);
     if (codeblock.hasUseStrict(program)) self.strict_mode = true;
     if (self.compile_options.use_bytecode_vm) {
         var compiled = bytecode_emitter.BytecodeEmitter.emitScript(self.gc_allocator, program) catch |err| switch (err) {
@@ -620,26 +619,22 @@ fn evalSourceImpl(self: *Interpreter, scope: *Environment, src: []const u8, is_d
     // arena copy lives as long as the AST.
     const owned_src = try ast_arena.dupe(u8, src);
     const prev_source = self.current_source;
-    self.current_source = owned_src;
     defer self.current_source = prev_source;
-    const parser = zfunctions.Parser.init(ast_arena, owned_src) catch
-        return self.throwError(.syntax_error, "Invalid or unexpected token in eval", .{});
-    // Reuse whatever budget is already active for the current
-    // execution context (main-thread `run()`, or the fiber-scoped
-    // value `resumeFiber` swaps in) -- `eval()` can be called from
-    // deep inside an already-recursed script, so a freshly-computed
-    // budget here would over-allow (see z-parser-improve.md).
-    parser.setStackLimit(self.stack_limit);
-    parser.stmt_parser.expr_parser.new_target_allowed = is_direct and scope.allowsNewTarget();
-    const program = parser.parseProgram() catch |err| switch (err) {
-        // Same message as `evalExpression`'s own stack guard (line
-        // ~3387) -- deeply nested source text and deeply nested
-        // evaluation now report the identical RangeError, whichever
-        // phase actually trips.
+    const parsed = @import("interpreter_class.zig").parseProgramWithAsi(
+        ast_arena,
+        owned_src,
+        self.stack_limit,
+        is_direct and scope.allowsNewTarget(),
+    ) catch |err| switch (err) {
         error.MaxNestingDepthExceeded => return self.throwError(.range_error, "Maximum call stack size exceeded", .{}),
         else => return self.throwError(.syntax_error, "Invalid or unexpected token in eval", .{}),
     };
-    try interpreter_mod.normalizePrivateInProgram(ast_arena, owned_src, program);
+    self.current_source = parsed.source;
+    const program = parsed.program;
+    interpreter_mod.normalizePrivateInProgram(ast_arena, parsed.source, program) catch |err| switch (err) {
+        error.InvalidOctalLiteral => return self.throwError(.syntax_error, "Octal literals are not allowed in strict mode", .{}),
+        else => return err,
+    };
     const flags = EvalValidFlags{
         .allow_arguments = !is_direct or !scope.isInFieldInitializer(),
         .allow_super_call = is_direct and scope.allowsSuperCall(),
@@ -898,9 +893,6 @@ pub fn resolvePromise(self: *Interpreter, p: JSValue, value: JSValue) anyerror!v
         if (value.asPromise() == p.asPromise()) {
             const cycle = try self.gcNewError(.type_error, "Chaining cycle detected for promise");
             return self.settlePromise(p, .rejected, cycle);
-        }
-        if (self.extraProps(value) == null) {
-            return self.subscribePromise(value, null, null, p);
         }
     }
     if (builtins.isObjectLike(value)) {
@@ -1197,6 +1189,7 @@ pub fn makeGeneratorObject(
     private_ctx: ?*anyopaque,
     args: []const JSValue,
     home_object: ?JSValue,
+    instance_proto: ?JSValue,
 ) anyerror!JSValue {
     const arena = self.gc_allocator;
     const call_env = try prepareCallEnv(self, fnode, closure_env, arena, this_value, super_proto, null, private_ctx, args, home_object, true);
@@ -1215,7 +1208,13 @@ pub fn makeGeneratorObject(
     fs.fiber = try fiber_mod.Fiber.init(arena, fiberEntry, fs);
     try self.gcTrackFiberState(fs);
     var obj = try self.gcNewObject();
-    if (self.protos.generator_proto.isObject()) {
+    if (instance_proto) |ip| {
+        if (builtins.isObjectLike(ip)) {
+            try self.setOwnedPrototype(obj, ip);
+        } else if (self.protos.generator_proto.isObject()) {
+            try obj.asObject().value.setPrototype(&self.protos.generator_proto.asObject().value);
+        }
+    } else if (self.protos.generator_proto.isObject()) {
         try obj.asObject().value.setPrototype(&self.protos.generator_proto.asObject().value);
     } else if (self.iterator_prototype) |p| {
         try obj.asObject().value.setPrototype(&p.asObject().value);
@@ -1273,6 +1272,7 @@ pub fn makeAsyncGeneratorObject(
     private_ctx: ?*anyopaque,
     args: []const JSValue,
     home_object: ?JSValue,
+    instance_proto: ?JSValue,
 ) anyerror!JSValue {
     const arena = self.gc_allocator;
     const call_env = try prepareCallEnv(self, fnode, closure_env, arena, this_value, super_proto, null, private_ctx, args, home_object, true);
@@ -1291,7 +1291,13 @@ pub fn makeAsyncGeneratorObject(
     fs.fiber = try fiber_mod.Fiber.init(arena, fiberEntry, fs);
     try self.gcTrackFiberState(fs);
     var obj = try self.gcNewObject();
-    if (self.protos.async_generator_proto.isObject()) {
+    if (instance_proto) |ip| {
+        if (builtins.isObjectLike(ip)) {
+            try self.setOwnedPrototype(obj, ip);
+        } else if (self.protos.async_generator_proto.isObject()) {
+            try obj.asObject().value.setPrototype(&self.protos.async_generator_proto.asObject().value);
+        }
+    } else if (self.protos.async_generator_proto.isObject()) {
         try obj.asObject().value.setPrototype(&self.protos.async_generator_proto.asObject().value);
     }
     try self.generator_fibers.put(self.gc_allocator, @intFromPtr(obj.asObject()), fs);

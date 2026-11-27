@@ -776,8 +776,18 @@ pub fn evalAssignment(self: *Interpreter, env: *Environment, a: anytype) anyerro
         return value;
     }
     if (a.op == .assign) {
+        var target_unwrapped = a.target;
+        while (target_unwrapped.data == .paren) target_unwrapped = target_unwrapped.data.paren;
+        const unresolvable_ident: ?[]const u8 = if (target_unwrapped.data == .identifier) blk: {
+            const name = target_unwrapped.data.identifier;
+            break :blk if (env.lookup(name) == .not_found) name else null;
+        } else null;
         const value = try self.evalExpression(env, a.value);
         errdefer value.deinit();
+        if (unresolvable_ident) |name| {
+            value.deinit();
+            return self.throwError(.reference_error, "{s} is not defined", .{name});
+        }
         switch (a.target.data) {
             // Cover-grammar reinterpretation: the literal IS the
             // pattern. The expression's own value stays the RHS
