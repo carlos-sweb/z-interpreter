@@ -94,7 +94,7 @@ fn globalIsFinite(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, ar
 
 /// ECMA-262 19.2.6.4/19.2.6.1: percent-encode everything outside
 /// uriReserved+uriUnescaped+"#".
-fn globalEncodeURI(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+pub fn globalEncodeURI(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
     const a0 = arg(args, 0);
     var owned: ?[]u8 = null;
@@ -114,7 +114,7 @@ fn globalEncodeURI(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
 
 /// ECMA-262 19.2.6.5/19.2.6.1: percent-encode everything outside
 /// uriUnescaped (uriReserved gets encoded too, unlike encodeURI).
-fn globalEncodeURIComponent(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+pub fn globalEncodeURIComponent(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
     const a0 = arg(args, 0);
     var owned: ?[]u8 = null;
@@ -132,11 +132,89 @@ fn globalEncodeURIComponent(ctx: *anyopaque, allocator: Allocator, this_value: J
     return interp(ctx).gcNewString(encoded);
 }
 
+fn hexDigitFast(c: u8) ?u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'A'...'F' => c - 'A' + 10,
+        'a'...'f' => c - 'a' + 10,
+        else => null,
+    };
+}
+
+fn hexByteFast(hi: u8, lo: u8) ?u8 {
+    const h = hexDigitFast(hi) orelse return null;
+    const l = hexDigitFast(lo) orelse return null;
+    return (h << 4) | l;
+}
+
+fn isUriReservedFast(c: u8) bool {
+    return switch (c) {
+        ';', '/', '?', ':', '@', '&', '=', '+', '$', ',', '#' => true,
+        else => false,
+    };
+}
+
+/// Stack fast-path for short strings (`s.len <= 64`) in decodeURI / decodeURIComponent.
+/// Avoids heap ArrayList growth + allocation + free on every call.
+fn decodeShortFast(s: []const u8, keep_reserved: bool, out: *[64]u8) ?[]const u8 {
+    if (s.len > 64) return null;
+    var out_len: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) {
+        if (s[i] != '%') {
+            out[out_len] = s[i];
+            out_len += 1;
+            i += 1;
+            continue;
+        }
+        if (i + 3 > s.len) return null;
+        const b0 = hexByteFast(s[i + 1], s[i + 2]) orelse return null;
+        const n: u3 = if (b0 & 0x80 == 0) 1 else if (b0 & 0xE0 == 0xC0) 2 else if (b0 & 0xF0 == 0xE0) 3 else if (b0 & 0xF8 == 0xF0) 4 else return null;
+        if (n == 1) {
+            if (keep_reserved and isUriReservedFast(b0)) {
+                @memcpy(out[out_len .. out_len + 3], s[i .. i + 3]);
+                out_len += 3;
+            } else {
+                out[out_len] = b0;
+                out_len += 1;
+            }
+            i += 3;
+            continue;
+        }
+        var octets: [4]u8 = undefined;
+        octets[0] = b0;
+        var pos = i + 3;
+        var k: u3 = 1;
+        while (k < n) : (k += 1) {
+            if (pos + 3 > s.len or s[pos] != '%') return null;
+            octets[k] = hexByteFast(s[pos + 1], s[pos + 2]) orelse return null;
+            if (octets[k] & 0xC0 != 0x80) return null;
+            pos += 3;
+        }
+        _ = switch (n) {
+            2 => std.unicode.utf8Decode2(octets[0..2].*),
+            3 => std.unicode.utf8Decode3(octets[0..3].*),
+            4 => std.unicode.utf8Decode4(octets[0..4].*),
+            else => unreachable,
+        } catch return null;
+        @memcpy(out[out_len .. out_len + n], octets[0..n]);
+        out_len += n;
+        i = pos;
+    }
+    return out[0..out_len];
+}
+
 /// ECMA-262 19.2.6.2/19.2.6.1: unescape %XY sequences, leaving a
 /// reserved-set (uriReserved+"#") %XY literal rather than decoding it.
-fn globalDecodeURI(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+pub fn globalDecodeURI(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
     const a0 = arg(args, 0);
+    if (a0.isString()) {
+        var sbuf: [64]u8 = undefined;
+        if (decodeShortFast(a0.asString().value.data, true, &sbuf)) |fast| {
+            return interp(ctx).gcNewString(fast);
+        }
+    }
     var owned: ?[]u8 = null;
     defer if (owned) |o| allocator.free(o);
     const s = if (a0.isString()) a0.asString().value.data else blk: {
@@ -153,9 +231,15 @@ fn globalDecodeURI(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
 }
 
 /// ECMA-262 19.2.6.3/19.2.6.1: unescape every %XY sequence, no exceptions.
-fn globalDecodeURIComponent(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+pub fn globalDecodeURIComponent(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
     const a0 = arg(args, 0);
+    if (a0.isString()) {
+        var sbuf: [64]u8 = undefined;
+        if (decodeShortFast(a0.asString().value.data, false, &sbuf)) |fast| {
+            return interp(ctx).gcNewString(fast);
+        }
+    }
     var owned: ?[]u8 = null;
     defer if (owned) |o| allocator.free(o);
     const s = if (a0.isString()) a0.asString().value.data else blk: {

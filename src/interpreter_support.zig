@@ -378,17 +378,24 @@ pub fn argsToArray(self: *Interpreter, args: []const JSValue) anyerror!JSValue {
 /// operand is a string, so the caller falls through to
 /// `coercion.binaryOp`'s plain numeric `+`.
 pub fn stringConcat(self: *Interpreter, left: JSValue, right: JSValue) anyerror!?JSValue {
+    if (left.isString() and right.isString()) {
+        const ls = left.asString().value.data;
+        const rs = right.asString().value.data;
+        if (ls.len + rs.len <= 128 and zstring.utf16.mergeSurrogateBoundary(ls, rs) == null) {
+            var sbuf: [128]u8 = undefined;
+            @memcpy(sbuf[0..ls.len], ls);
+            @memcpy(sbuf[ls.len .. ls.len + rs.len], rs);
+            return try self.gcNewString(sbuf[0 .. ls.len + rs.len]);
+        }
+        const joined = try zstring.utf16.concatUtf8(self.gc_allocator, ls, rs);
+        defer self.gc_allocator.free(joined);
+        return try self.gcNewString(joined);
+    }
     if (!left.isString() and !right.isString()) return null;
     const ls = try toDisplayStringJS(self, self.gc_allocator, left);
     defer self.gc_allocator.free(ls);
     const rs = try toDisplayStringJS(self, self.gc_allocator, right);
     defer self.gc_allocator.free(rs);
-    // z-string-surrogate-charat.md: canonicalize a high+low WTF-8
-    // surrogate pair meeting exactly at this boundary back into real
-    // UTF-8, so the same logical string always has one byte
-    // representation regardless of how it was built (real spec:
-    // `String.fromCharCode(0xD83D) + String.fromCharCode(0xDE00) ===
-    // "😀"`).
     const joined = try zstring.utf16.concatUtf8(self.gc_allocator, ls, rs);
     defer self.gc_allocator.free(joined);
     return try self.gcNewString(joined);

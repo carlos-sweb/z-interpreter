@@ -523,7 +523,7 @@ pub fn appendWtf8Merged(buf: *std.ArrayList(u8), allocator: Allocator, chunk: []
 
 // ===== String statics (fromCharCode/fromCodePoint) =====
 
-fn stringFromCharCode(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+pub fn stringFromCharCode(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
     const self = interp(ctx);
     // Stack fast-path for 1..4 numeric arguments (e.g. String.fromCharCode(c) or String.fromCharCode(H, L) in tight loops).

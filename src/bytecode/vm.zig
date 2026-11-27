@@ -14,6 +14,7 @@ const interpreter_class = @import("../interpreter_class.zig");
 const interpreter_mod = @import("../interpreter.zig");
 const string_builtins = @import("../string_builtins.zig");
 const math_builtins = @import("../math_builtins.zig");
+const globals_builtins = @import("../globals_builtins.zig");
 const zparser = @import("zparser");
 const ClosureCtx = interpreter_mod.ClosureCtx;
 
@@ -420,6 +421,20 @@ noinline fn getElem(frame: *CallFrame, allocator: Allocator, obj: JSValue, key_v
                 }
             }
         }
+    } else if (obj.isString() and key_val.isNumber()) {
+        const box = obj.asString();
+        const n = key_val.asNumber();
+        if (n >= 0 and !std.math.isNan(n) and !std.math.isInf(n)) {
+            const idx: usize = @intFromFloat(n);
+            if (@as(f64, @floatFromInt(idx)) == n) {
+                const clen = box.value.length();
+                if (idx < clen and clen == box.value.data.len and box.value.data[idx] < 0x80) {
+                    const s = try JSValue.newString(allocator, box.value.data[idx .. idx + 1]);
+                    if (frame.interp) |it| try it.gcTrack(s);
+                    return s;
+                }
+            }
+        }
     }
     var buf: [32]u8 = undefined;
     if (keyToString(allocator, key_val, &buf)) |key| {
@@ -787,6 +802,11 @@ noinline fn callNativeFallback(allocator: Allocator, frame: *CallFrame, frame_re
         const call_ptr = fn_val.call;
         if (call_ptr == string_builtins.stringCharCodeAt or
             call_ptr == string_builtins.stringCodePointAt or
+            call_ptr == string_builtins.stringFromCharCode or
+            call_ptr == globals_builtins.globalDecodeURI or
+            call_ptr == globals_builtins.globalDecodeURIComponent or
+            call_ptr == globals_builtins.globalEncodeURI or
+            call_ptr == globals_builtins.globalEncodeURIComponent or
             call_ptr == math_builtins.mathSqrt)
         {
             var all_prim = true;
@@ -3370,7 +3390,17 @@ noinline fn addOp(frame: *CallFrame, registers: []JSValue, allocator: Allocator,
         const sl = stringSlice(left, &buf_l);
         const sr = stringSlice(right, &buf_r);
         if (sl != null and sr != null) {
-            const combined = try std.fmt.allocPrint(allocator, "{s}{s}", .{ sl.?, sr.? });
+            const s_l = sl.?;
+            const s_r = sr.?;
+            if (s_l.len + s_r.len <= 128) {
+                var sbuf: [128]u8 = undefined;
+                @memcpy(sbuf[0..s_l.len], s_l);
+                @memcpy(sbuf[s_l.len .. s_l.len + s_r.len], s_r);
+                const result = try JSValue.newString(allocator, sbuf[0 .. s_l.len + s_r.len]);
+                try setRegTracked(frame, registers, op.a, result);
+                return;
+            }
+            const combined = try std.fmt.allocPrint(allocator, "{s}{s}", .{ s_l, s_r });
             defer allocator.free(combined);
             const result = try JSValue.newString(allocator, combined);
             try setRegTracked(frame, registers, op.a, result);
@@ -3496,7 +3526,17 @@ noinline fn addLocalConst(frame: *CallFrame, registers: []JSValue, allocator: Al
         const sl = stringSlice(left, &buf_l);
         const sr = stringSlice(right, &buf_r);
         if (sl != null and sr != null) {
-            const combined = try std.fmt.allocPrint(allocator, "{s}{s}", .{ sl.?, sr.? });
+            const s_l = sl.?;
+            const s_r = sr.?;
+            if (s_l.len + s_r.len <= 128) {
+                var sbuf: [128]u8 = undefined;
+                @memcpy(sbuf[0..s_l.len], s_l);
+                @memcpy(sbuf[s_l.len .. s_l.len + s_r.len], s_r);
+                const result = try JSValue.newString(allocator, sbuf[0 .. s_l.len + s_r.len]);
+                try setRegTracked(frame, registers, op.a, result);
+                return;
+            }
+            const combined = try std.fmt.allocPrint(allocator, "{s}{s}", .{ s_l, s_r });
             defer allocator.free(combined);
             const result = try JSValue.newString(allocator, combined);
             try setRegTracked(frame, registers, op.a, result);
