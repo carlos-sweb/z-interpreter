@@ -438,8 +438,11 @@ fn createDynamicFunction(ctx: *anyopaque, allocator: Allocator, args: []const JS
     }
     const closure_scope = self.global_var_env orelse self.script_env orelse self.global_env;
     const fn_val = try self.makeClosure(closure_scope, zfunctions.asFunctionNode(fnode_ptr));
-    if (self.construct_proto) |cp| {
-        try self.setOwnedPrototype(fn_val, cp);
+    const is_construct = if (self.construct_target) |ct| ct == ctx else false;
+    if (is_construct) {
+        if (self.construct_proto) |cp| {
+            try self.setOwnedPrototype(fn_val, cp);
+        }
     }
     return fn_val;
 }

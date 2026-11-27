@@ -4627,7 +4627,13 @@ test "Fase A - Date: all 12 non-realm spec compliance cases" {
         \\var dUtcFpOk = Date.UTC(1970, 0, 1, 80063993375, 29, 1, -288230376151711740) === 29312 &&
         \\  Date.UTC(1970, 0, 213503982336, 0, 0, 0, -18446744073709552000) === 34447360;
         \\
-        \\dLenOk && dCallOk && dCopyPoisonedOk && dPoisonedThrow && dPrimNumOk && dPrimStrOk && dPrimSymThrow && dSub1Ok && dSub2Ok && dYearZeroOk && dUtcFpOk;
+        \\// 7. Regression checks: Function() inside constructor (S15.3.4.3_A3_T5) & Array -> TypedArray prototype chain hasOwnProperty
+        \\function FACTORY_REG() { return typeof Function("return 1;").apply === "function"; }
+        \\var fnInCtorOk = new FACTORY_REG() !== undefined && FACTORY_REG() === true;
+        \\var taProtoArr = Object.setPrototypeOf([], new Float64Array([0]));
+        \\var taProtoHasOwnOk = typeof taProtoArr.hasOwnProperty === "function" && !taProtoArr.hasOwnProperty(1);
+        \\
+        \\dLenOk && dCallOk && dCopyPoisonedOk && dPoisonedThrow && dPrimNumOk && dPrimStrOk && dPrimSymThrow && dSub1Ok && dSub2Ok && dYearZeroOk && dUtcFpOk && fnInCtorOk && taProtoHasOwnOk;
     );
     defer res.deinit();
     try testing.expect(res.isBool() and res.asBool());

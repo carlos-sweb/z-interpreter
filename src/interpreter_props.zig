@@ -1235,16 +1235,38 @@ pub fn typedArrayProto(self: *Interpreter, kind: zvalue.TypedKind) JSValue {
 /// on a full miss. This is how the primitive types (array/string/date/...)
 /// resolve their methods now that those live on real prototype objects.
 pub fn getFromProto(self: *Interpreter, receiver: JSValue, proto: JSValue, key: []const u8) anyerror!?JSValue {
-    const obj_proto = if (proto.isObject()) proto else if (proto.isFunction()) try self.functionStatics(proto) else return null;
+    if (!proto.isObject()) {
+        if (proto.isNull() or proto.isUndefined()) return null;
+        if (proto.isFunction()) {
+            if (proto.asFunction().value.statics) |bag| {
+                if (try self.getFromProto(receiver, bag, key)) |m| return m;
+            }
+            const fp = self.proto_refs.get(@intFromPtr(proto.asFunction())) orelse self.protos.function;
+            return self.getFromProto(receiver, fp, key);
+        }
+        const v = try self.getPropertyWithReceiver(proto, key, receiver);
+        if (v.isUndefined()) return null;
+        return v;
+    }
+    const obj_proto = proto;
     const arena = self.gc_allocator;
+    var last_obj: *const @TypeOf(obj_proto.asObject().value) = &obj_proto.asObject().value;
     var current: ?*const @TypeOf(obj_proto.asObject().value) = &obj_proto.asObject().value;
     while (current) |o| : (current = o.getPrototype()) {
+        last_obj = o;
         const rec = o.getOwnRecord(key) orelse continue;
         if (rec.isAccessor()) {
             const gtr = rec.getter orelse return JSValue.UNDEFINED;
             return try gtr.asFunction().value.call(gtr.asFunction().value.ctx, arena, receiver, &.{});
         }
         return rec.value.retain();
+    }
+    const Box = @TypeOf(obj_proto.asObject().*);
+    const last_box: *const Box = @fieldParentPtr("value", last_obj);
+    if (self.proto_refs.get(@intFromPtr(last_box))) |ext_proto| {
+        if (!ext_proto.isObject() and !ext_proto.isNull()) {
+            return self.getFromProto(receiver, ext_proto, key);
+        }
     }
     return null;
 }
