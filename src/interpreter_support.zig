@@ -488,6 +488,12 @@ pub fn joinElementToStringJS(self: *Interpreter, item: JSValue, allocator: std.m
 /// `String(x)`, `+`'s string-concat path) should reach for this
 /// instead of `coercion.toDisplayString` directly.
 pub fn toDisplayStringJS(self: *Interpreter, allocator: std.mem.Allocator, v: JSValue) anyerror![]u8 {
+    if (v.isArray()) {
+        const prim = try toPrimitive(self, v, .string);
+        defer prim.deinit();
+        if (prim.isSymbol()) return self.throwError(.type_error, "Cannot convert a Symbol value to a string", .{});
+        return try coercion.toDisplayString(allocator, prim);
+    }
     return coercion.toDisplayString(allocator, v) catch |err| switch (err) {
         error.NotImplemented => blk: {
             // Implicit ToString(Symbol) is a real TypeError (explicit

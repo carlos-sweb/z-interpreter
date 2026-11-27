@@ -4639,3 +4639,57 @@ test "Fase A - Date: all 12 non-realm spec compliance cases" {
     try testing.expect(res.isBool() and res.asBool());
 }
 
+test "Fase A - String: 8 spec compliance cases" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\// 1. S15.5.1.1_A1_T8.js: String(new Array) calls Array.prototype.toString
+        \\var oldArrToStr = Array.prototype.toString;
+        \\Array.prototype.toString = function() { return "__ARRAY__"; };
+        \\var sArr = String(new Array());
+        \\Array.prototype.toString = oldArrToStr;
+        \\var sArrOk = sArr === "__ARRAY__";
+        \\
+        \\// 2. trim/15.5.4.20-2-51.js: String.prototype.trim.call(arguments) === "[object Arguments]"
+        \\var argObj = (function() { return arguments; })(1, 2, true);
+        \\var sTrimArgsOk = String.prototype.trim.call(argObj) === "[object Arguments]";
+        \\
+        \\// 3. symbol-wrapping.js: new String(Symbol('66')) throws TypeError, String(Symbol('66')) === "Symbol(66)"
+        \\var sSymThrow = false;
+        \\try { new String(Symbol("66")); } catch (e) { sSymThrow = e instanceof TypeError; }
+        \\var sSymCallOk = String(Symbol("66")) === "Symbol(66)";
+        \\
+        \\// 4. fromCharCode/touint16-tonumber-throws-bigint.js
+        \\var sFccBigIntThrow = false;
+        \\try { String.fromCharCode(0n); } catch (e) { sFccBigIntThrow = e instanceof TypeError; }
+        \\
+        \\// 5. indexOf/searchstring-tostring-errors.js: "".indexOf(Object(Symbol("1"))) throws TypeError
+        \\var sIdxBoxedSymThrow = false;
+        \\try { "".indexOf(Object(Symbol("1"))); } catch (e) { sIdxBoxedSymThrow = e instanceof TypeError; }
+        \\
+        \\// 6. localeCompare/15.5.4.9_CE.js: canonical equivalence
+        \\var sLocEqOk = "o\u0308".localeCompare("ö") === 0 && "\u1111\u1171\u11B6".localeCompare("퓛") === 0 && "Ω".localeCompare("Ω") === 0;
+        \\
+        \\// 7 & 8. replaceAll/searchValue-replacer-RegExp-call(-fn).js: class RE extends RegExp overriding [Symbol.replace]
+        \\var reSubCalled = 0;
+        \\class RE extends RegExp {
+        \\  [Symbol.replace](...args) {
+        \\    const actual = super[Symbol.replace](...args);
+        \\    reSubCalled += 1;
+        \\    return actual;
+        \\  }
+        \\}
+        \\var reSubOut1 = "abc abc abc".replaceAll(new RE("b", "g"), "z");
+        \\var reSubOut2 = (new String("aaa abc")).replaceAll(new RE("(a)", "g"), () => "z");
+        \\var sReSubOk = reSubCalled === 2 && reSubOut1 === "azc azc azc" && reSubOut2 === "zzz zbc";
+        \\
+        \\sArrOk && sTrimArgsOk && sSymThrow && sSymCallOk && sFccBigIntThrow && sIdxBoxedSymThrow && sLocEqOk && sReSubOk;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+

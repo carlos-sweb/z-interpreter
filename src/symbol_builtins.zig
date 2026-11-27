@@ -60,6 +60,12 @@ fn symbolValueOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     return (try requirePrimitive(ctx, this_value, .symbol, "Symbol.prototype.{s} requires a symbol", "valueOf")).retain();
 }
 
+pub fn symbolToPrimitive(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    _ = args;
+    return (try requirePrimitive(ctx, this_value, .symbol, "Symbol.prototype.{s} requires a symbol", "[Symbol.toPrimitive]")).retain();
+}
+
 fn symbolFor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
     const self = interp(ctx);

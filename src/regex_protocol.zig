@@ -303,6 +303,7 @@ fn pristine(self: *Interpreter, rx: JSValue, flags: JSValue) bool {
 /// property, not overridden on it) and whose lastIndex is writable.
 fn pristineExec(self: *Interpreter, rx: JSValue) bool {
     if (rx.tag() != .regex) return false;
+    if (self.proto_refs.contains(@intFromPtr(rx.asRegex()))) return false;
     const st = self.regexState(rx);
     if (!st.last_index_writable) return false;
     if (st.props) |bag| {

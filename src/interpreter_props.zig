@@ -318,12 +318,13 @@ pub fn getPropertyWithReceiver(self: *Interpreter, obj: JSValue, key: []const u8
             if (try self.getFromProto(receiver, self.protos.symbol, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
-        .regex => blk: {
+        .regex => |box| blk: {
             if (std.mem.eql(u8, key, "lastIndex")) break :blk self.regexState(obj).last_index.retain();
             if (self.regexProps(obj)) |bag| {
                 if (try self.getFromProto(receiver, bag, key)) |m| break :blk m;
             }
-            if (try self.getFromProto(receiver, self.protos.regex, key)) |m| break :blk m;
+            const rx_proto = self.proto_refs.get(@intFromPtr(box)) orelse self.protos.regex;
+            if (try self.getFromProto(receiver, rx_proto, key)) |m| break :blk m;
             break :blk JSValue.UNDEFINED;
         },
         // Spec says TypeError here (not ReferenceError). The optional
@@ -1386,6 +1387,8 @@ pub fn materializeProtos(self: *Interpreter) !void {
         defer self.gc_allocator.free(tp_key);
         const tp_fn = try native_helpers.native(self, "[Symbol.toPrimitive]", 1, date_builtins.dateToPrimitive);
         try self.protos.date.asObject().value.defineProperty(tp_key, tp_fn, .{ .writable = false, .enumerable = false, .configurable = true });
+        const sym_tp_fn = try native_helpers.native(self, "[Symbol.toPrimitive]", 1, @import("symbol_builtins.zig").symbolToPrimitive);
+        try self.protos.symbol.asObject().value.defineProperty(tp_key, sym_tp_fn, .{ .writable = false, .enumerable = false, .configurable = true });
     }
     if (self.symbol_has_instance) |hi_sym| {
         const hi_key = try self.encodeKey(hi_sym);

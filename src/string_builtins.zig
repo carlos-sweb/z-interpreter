@@ -425,7 +425,15 @@ fn stringLocaleCompare(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
     defer allocator.free(data);
     const other = try self.toDisplayStringJS(allocator, arg(args, 0));
     defer allocator.free(other);
-    return JSValue.fromNumber(switch (std.mem.order(u8, data, other)) {
+    const z_data = zstring.ZString{ .data = data };
+    const z_other = zstring.ZString{ .data = other };
+    const norm_data = z_data.normalizeStrict(allocator, "NFC") catch null;
+    defer if (norm_data) |nd| allocator.free(nd);
+    const norm_other = z_other.normalizeStrict(allocator, "NFC") catch null;
+    defer if (norm_other) |no| allocator.free(no);
+    const lhs = norm_data orelse data;
+    const rhs = norm_other orelse other;
+    return JSValue.fromNumber(switch (std.mem.order(u8, lhs, rhs)) {
         .lt => -1,
         .eq => 0,
         .gt => 1,
@@ -522,7 +530,7 @@ fn stringFromCharCode(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     const self = interp(ctx);
     for (args) |a| {
         // ToUint16: wrap into [0, 65536) (NaN/Infinity -> 0), never panicking.
-        const num = try self.toNumberJS(a);
+        const num = try toNumberStrict(self, a);
         const wrapped: f64 = if (std.math.isFinite(num)) @mod(@trunc(num), 65536.0) else 0;
         const code: u21 = @intFromFloat(wrapped);
         // A lone surrogate (0xD800-0xDFFF) is a real, legal UTF-16
@@ -566,7 +574,7 @@ fn stringFromCodePoint(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
     const self = interp(ctx);
     for (args) |a| {
         // Each argument must be an integer code point in [0, 0x10FFFF].
-        const num = try self.toNumberJS(a);
+        const num = try toNumberStrict(self, a);
         if (!std.math.isFinite(num) or num != @trunc(num) or num < 0 or num > 0x10FFFF)
             return interp(ctx).throwError(.range_error, "Invalid code point {d}", .{num});
         const cp: u21 = @intFromFloat(num);
@@ -656,12 +664,14 @@ fn globalString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     // "undefined" -- the empty-arg-list case is genuinely special, not
     // just ToString of the default.
     if (args.len == 0) return self.boxPrimitiveIfConstructed(ctx, this_value, try self.gcNewString(""));
-    // String(symbol) is the one explicit coercion the spec allows --
-    // "Symbol(desc)" -- unlike implicit `sym + ''` which throws.
-    if (arg(args, 0).tag() == .symbol) {
+    const is_construct = if (self.construct_target) |ct| ct == ctx else false;
+    // String(symbol) (called as a function, NOT `new String(symbol)`) is
+    // the one explicit coercion the spec allows -- "Symbol(desc)" --
+    // unlike implicit `sym + ''` or `new String(sym)` which throw.
+    if (!is_construct and arg(args, 0).tag() == .symbol) {
         const s = try arg(args, 0).asSymbol().value.toString(allocator);
         defer allocator.free(s);
-        return self.boxPrimitiveIfConstructed(ctx, this_value, try self.gcNewString(s));
+        return try self.gcNewString(s);
     }
     // String(regex) is regex.toString() -- /source/flags (with flags).
     if (arg(args, 0).tag() == .regex) {
