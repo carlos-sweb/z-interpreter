@@ -56,8 +56,10 @@ const normIndex = builtins.normIndex;
 
 pub const array_buffer_methods = std.StaticStringMap(MethodSpec).initComptime(.{
     .{ "slice", MethodSpec{ .call = arrayBufferSlice, .arity = 2 } },
+    .{ "sliceToImmutable", MethodSpec{ .call = arrayBufferSliceToImmutable, .arity = 2 } },
     .{ "transfer", MethodSpec{ .call = arrayBufferTransfer, .arity = 0 } },
     .{ "transferToFixedLength", MethodSpec{ .call = arrayBufferTransferToFixedLength, .arity = 0 } },
+    .{ "transferToImmutable", MethodSpec{ .call = arrayBufferTransferToImmutable, .arity = 0 } },
 });
 
 pub const shared_array_buffer_methods = std.StaticStringMap(MethodSpec).initComptime(.{
@@ -171,11 +173,20 @@ fn arrayBufferSlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
         if (new_buf.tag() != .array_buffer or new_buf.asArrayBuffer().value.is_shared != src.is_shared) {
             return self.throwError(.type_error, "Species constructor did not return a compatible ArrayBuffer", .{});
         }
+        if (self.isImmutableArrayBuffer(new_buf)) {
+            return self.throwError(.type_error, "Species constructor returned an immutable ArrayBuffer", .{});
+        }
+        if (new_buf.asArrayBuffer().value.isDetached()) {
+            return self.throwError(.type_error, "Species constructor returned a detached ArrayBuffer", .{});
+        }
         if (new_buf.asArrayBuffer() == this_value.asArrayBuffer()) {
             return self.throwError(.type_error, "Species constructor returned the same ArrayBuffer", .{});
         }
         if (new_buf.asArrayBuffer().value.byteLength() < new_len) {
             return self.throwError(.type_error, "Species constructor returned an ArrayBuffer that is too small", .{});
+        }
+        if (src.isDetached()) {
+            return self.throwError(.type_error, "ArrayBuffer was detached during slice", .{});
         }
         if (new_len > 0) {
             @memcpy(new_buf.asArrayBuffer().value.bytes[0..new_len], src.bytes[first .. first + new_len]);
@@ -187,8 +198,44 @@ fn arrayBufferSlice(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
     return self.gcNewArrayBufferFromValue(copy);
 }
 
+fn arrayBufferSliceToImmutable(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    if (this_value.tag() != .array_buffer) {
+        return self.throwError(.type_error, "ArrayBuffer.prototype.sliceToImmutable called on incompatible receiver", .{});
+    }
+    const src = &this_value.asArrayBuffer().value;
+    if (src.is_shared) {
+        return self.throwError(.type_error, "ArrayBuffer.prototype.sliceToImmutable cannot be called on a SharedArrayBuffer", .{});
+    }
+    if (src.isDetached()) {
+        return self.throwError(.type_error, "Cannot perform ArrayBuffer.prototype.sliceToImmutable on a detached ArrayBuffer", .{});
+    }
+    const len = src.byteLength();
+    const start_arg = arg(args, 0);
+    const end_arg = arg(args, 1);
+    const first: usize = if (start_arg.tag() == .undefined) 0 else normIndex(try toNumberStrict(self, start_arg), len);
+    const final: usize = if (end_arg.tag() == .undefined) len else normIndex(try toNumberStrict(self, end_arg), len);
+    const new_len = if (final > first) final - first else 0;
+    if (src.isDetached()) {
+        return self.throwError(.type_error, "Cannot perform ArrayBuffer.prototype.sliceToImmutable on a detached ArrayBuffer", .{});
+    }
+    if (src.byteLength() < final) {
+        return self.throwError(.range_error, "ArrayBuffer shrunk below slice bounds", .{});
+    }
+    const new_ab = self.gcNewArrayBuffer(new_len) catch {
+        return self.throwError(.range_error, "Array buffer allocation failed", .{});
+    };
+    errdefer new_ab.deinit();
+    if (new_len > 0) {
+        @memcpy(new_ab.asArrayBuffer().value.bytes[0..new_len], src.bytes[first .. first + new_len]);
+    }
+    try self.immutable_array_buffers.put(self.gc_allocator, @intFromPtr(new_ab.asArrayBuffer()), {});
+    return new_ab;
+}
+
 /// ECMA-262 25.1.3.1 ArrayBufferCopyAndDetach(arrayBuffer, newLength, preserveResizability).
-fn arrayBufferCopyAndDetach(ctx: *anyopaque, this_value: JSValue, args: []const JSValue, method: []const u8) anyerror!JSValue {
+fn arrayBufferCopyAndDetach(ctx: *anyopaque, this_value: JSValue, args: []const JSValue, method: []const u8, make_immutable: bool) anyerror!JSValue {
     const self = interp(ctx);
     if (this_value.tag() != .array_buffer) {
         return self.throwError(.type_error, "ArrayBuffer.prototype.{s} called on incompatible receiver", .{method});
@@ -205,6 +252,9 @@ fn arrayBufferCopyAndDetach(ctx: *anyopaque, this_value: JSValue, args: []const 
     if (src.isDetached()) {
         return self.throwError(.type_error, "Cannot perform ArrayBuffer.prototype.{s} on a detached ArrayBuffer", .{method});
     }
+    if (self.isImmutableArrayBuffer(this_value)) {
+        return self.throwError(.type_error, "Cannot perform ArrayBuffer.prototype.{s} on an immutable ArrayBuffer", .{method});
+    }
     // Guard against excessive allocations under 2 GiB address space cap.
     if (new_byte_length > 512 * 1024 * 1024) {
         return self.throwError(.range_error, "Array buffer allocation failed", .{});
@@ -218,17 +268,25 @@ fn arrayBufferCopyAndDetach(ctx: *anyopaque, this_value: JSValue, args: []const 
         @memcpy(new_ab.asArrayBuffer().value.bytes[0..copy_len], src.bytes[0..copy_len]);
     }
     src.detach();
+    if (make_immutable) {
+        try self.immutable_array_buffers.put(self.gc_allocator, @intFromPtr(new_ab.asArrayBuffer()), {});
+    }
     return new_ab;
 }
 
 fn arrayBufferTransfer(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
-    return arrayBufferCopyAndDetach(ctx, this_value, args, "transfer");
+    return arrayBufferCopyAndDetach(ctx, this_value, args, "transfer", false);
 }
 
 fn arrayBufferTransferToFixedLength(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
-    return arrayBufferCopyAndDetach(ctx, this_value, args, "transferToFixedLength");
+    return arrayBufferCopyAndDetach(ctx, this_value, args, "transferToFixedLength", false);
+}
+
+fn arrayBufferTransferToImmutable(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    return arrayBufferCopyAndDetach(ctx, this_value, args, "transferToImmutable", true);
 }
 
 fn dataViewConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
@@ -259,6 +317,12 @@ fn requireDataView(self: *Interpreter, v: JSValue, method: []const u8) anyerror!
     return v.asDataView().value.view;
 }
 
+fn requireWritableDataView(self: *Interpreter, v: JSValue, method: []const u8) anyerror!zbuffer.DataView {
+    if (v.tag() != .data_view) return self.throwError(.type_error, "DataView.prototype.{s} called on incompatible receiver", .{method});
+    if (self.isDataViewImmutable(v)) return self.throwError(.type_error, "Cannot perform DataView.prototype.{s} on an immutable ArrayBuffer", .{method});
+    return v.asDataView().value.view;
+}
+
 fn dataViewGetInt8(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const self = interp(ctx);
@@ -280,7 +344,7 @@ fn dataViewGetUint8(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
 fn dataViewSetInt8(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const self = interp(ctx);
-    const dv = try requireDataView(self, this_value, "setInt8");
+    const dv = try requireWritableDataView(self, this_value, "setInt8");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
     const value = try toInt8Wrap(self, arg(args, 1));
     if (dv.buffer.isDetached()) return self.throwError(.type_error, "Cannot perform DataView operation on a detached ArrayBuffer", .{});
@@ -290,7 +354,7 @@ fn dataViewSetInt8(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
 fn dataViewSetUint8(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const self = interp(ctx);
-    const dv = try requireDataView(self, this_value, "setUint8");
+    const dv = try requireWritableDataView(self, this_value, "setUint8");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
     const value = try toUint8Wrap(self, arg(args, 1));
     if (dv.buffer.isDetached()) return self.throwError(.type_error, "Cannot perform DataView operation on a detached ArrayBuffer", .{});
@@ -327,7 +391,7 @@ fn dataViewGetUint16(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
 fn dataViewSetInt16(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const self = interp(ctx);
-    const dv = try requireDataView(self, this_value, "setInt16");
+    const dv = try requireWritableDataView(self, this_value, "setInt16");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
     const value = try toInt16Wrap(self, arg(args, 1));
     const little_endian = coercion.isTruthy(arg(args, 2));
@@ -338,7 +402,7 @@ fn dataViewSetInt16(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
 fn dataViewSetUint16(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const self = interp(ctx);
-    const dv = try requireDataView(self, this_value, "setUint16");
+    const dv = try requireWritableDataView(self, this_value, "setUint16");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
     const value = try toUint16Wrap(self, arg(args, 1));
     const little_endian = coercion.isTruthy(arg(args, 2));
@@ -370,7 +434,7 @@ fn dataViewGetUint32(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
 fn dataViewSetInt32(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const self = interp(ctx);
-    const dv = try requireDataView(self, this_value, "setInt32");
+    const dv = try requireWritableDataView(self, this_value, "setInt32");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
     const value: i32 = try self.toInt32JS(arg(args, 1));
     const little_endian = coercion.isTruthy(arg(args, 2));
@@ -381,7 +445,7 @@ fn dataViewSetInt32(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
 fn dataViewSetUint32(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const self = interp(ctx);
-    const dv = try requireDataView(self, this_value, "setUint32");
+    const dv = try requireWritableDataView(self, this_value, "setUint32");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
     const value: u32 = try self.toUint32JS(arg(args, 1));
     const little_endian = coercion.isTruthy(arg(args, 2));
@@ -405,7 +469,7 @@ fn dataViewGetFloat16(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
 fn dataViewSetFloat16(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const self = interp(ctx);
-    const dv = try requireDataView(self, this_value, "setFloat16");
+    const dv = try requireWritableDataView(self, this_value, "setFloat16");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
     const num = try self.toNumberJS(arg(args, 1));
     const little_endian = coercion.isTruthy(arg(args, 2));
@@ -429,7 +493,7 @@ fn dataViewGetFloat32(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
 fn dataViewSetFloat32(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const self = interp(ctx);
-    const dv = try requireDataView(self, this_value, "setFloat32");
+    const dv = try requireWritableDataView(self, this_value, "setFloat32");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
     const value: f32 = @floatCast(try self.toNumberJS(arg(args, 1)));
     const little_endian = coercion.isTruthy(arg(args, 2));
@@ -451,7 +515,7 @@ fn dataViewGetFloat64(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
 fn dataViewSetFloat64(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const self = interp(ctx);
-    const dv = try requireDataView(self, this_value, "setFloat64");
+    const dv = try requireWritableDataView(self, this_value, "setFloat64");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
     const value: f64 = try self.toNumberJS(arg(args, 1));
     const little_endian = coercion.isTruthy(arg(args, 2));
@@ -484,7 +548,7 @@ fn dataViewGetBigUint64(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
 fn dataViewSetBigInt64(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const self = interp(ctx);
-    const dv = try requireDataView(self, this_value, "setBigInt64");
+    const dv = try requireWritableDataView(self, this_value, "setBigInt64");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
     const x = try toBigIntValue(self, self.gc_allocator, arg(args, 1));
     defer x.deinit();
@@ -497,7 +561,7 @@ fn dataViewSetBigInt64(ctx: *anyopaque, allocator: Allocator, this_value: JSValu
 fn dataViewSetBigUint64(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     const self = interp(ctx);
-    const dv = try requireDataView(self, this_value, "setBigUint64");
+    const dv = try requireWritableDataView(self, this_value, "setBigUint64");
     const offset = try toByteIndexArg(self, arg(args, 0), "byteOffset");
     const x = try toBigIntValue(self, self.gc_allocator, arg(args, 1));
     defer x.deinit();
@@ -647,6 +711,13 @@ fn requireTypedArray(ctx: *anyopaque, this_value: JSValue, method: []const u8) a
     _ = try requireTag(ctx, this_value, .typed_array, "Method TypedArray.prototype.{s} called on incompatible receiver", method);
     if (isTypedArrayDetached(this_value)) {
         return interp(ctx).throwError(.type_error, "Cannot perform TypedArray.prototype.{s} on a detached ArrayBuffer", .{method});
+    }
+}
+
+fn requireWritableTypedArray(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!void {
+    try requireTypedArray(ctx, this_value, method);
+    if (interp(ctx).isTypedArrayImmutable(this_value)) {
+        return interp(ctx).throwError(.type_error, "Cannot perform TypedArray.prototype.{s} on an immutable ArrayBuffer", .{method});
     }
 }
 
@@ -1010,7 +1081,7 @@ fn taToStringMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
 
 fn taFill(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
-    try requireTypedArray(ctx, this_value, "fill");
+    try requireWritableTypedArray(ctx, this_value, "fill");
     const self = interp(ctx);
     const box = this_value.asTypedArray().value;
     const len = box.len;
@@ -1028,7 +1099,7 @@ fn taFill(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
 }
 
 fn taCopyWithin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    try requireTypedArray(ctx, this_value, "copyWithin");
+    try requireWritableTypedArray(ctx, this_value, "copyWithin");
     const self = interp(ctx);
     const len = taLen(this_value);
     const target = normIndex(try toNumberStrict(self, arg(args, 0)), len);
@@ -1052,7 +1123,7 @@ fn taCopyWithin(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
 fn taReverse(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = allocator;
     _ = args;
-    try requireTypedArray(ctx, this_value, "reverse");
+    try requireWritableTypedArray(ctx, this_value, "reverse");
     const self = interp(ctx);
     const len = taLen(this_value);
     if (len > 1) {
@@ -1089,10 +1160,10 @@ fn taSortLess(self: *Interpreter, allocator: Allocator, cmp: JSValue, kind: zval
 }
 
 fn taSort(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    try requireTypedArray(ctx, this_value, "sort");
     const self = interp(ctx);
     const cmp = arg(args, 0);
     if (cmp.tag() != .undefined and cmp.tag() != .function) return self.throwError(.type_error, "The comparison function must be either a function or undefined", .{});
+    try requireWritableTypedArray(ctx, this_value, "sort");
     const box = this_value.asTypedArray().value;
     const n = box.len;
     if (n < 2) return this_value.retain();
@@ -1205,7 +1276,7 @@ fn taWith(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []co
 /// `SetTypedArrayFromArrayLike` (`ToObject` + `LengthOfArrayLike` +
 /// per-index `Get`).
 fn taSetMethod(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    try requireTypedArray(ctx, this_value, "set");
+    try requireWritableTypedArray(ctx, this_value, "set");
     const self = interp(ctx);
     const len = taLen(this_value);
     const source = arg(args, 0);
@@ -1386,6 +1457,7 @@ fn typedArrayCreateFromConstructor(self: *Interpreter, ctor: JSValue, len: usize
     errdefer new_ta.deinit();
     if (new_ta.tag() != .typed_array) return self.throwError(.type_error, "Derived TypedArray constructor created a non-TypedArray object", .{});
     if (isTypedArrayDetached(new_ta)) return self.throwError(.type_error, "Derived TypedArray constructor created a detached TypedArray", .{});
+    if (self.isTypedArrayImmutable(new_ta)) return self.throwError(.type_error, "Derived TypedArray constructor created an immutable TypedArray", .{});
     if (new_ta.asTypedArray().value.len < len) return self.throwError(.type_error, "Derived TypedArray constructor created an array which was too small", .{});
     return new_ta;
 }
@@ -1646,6 +1718,9 @@ fn uint8SetFromBase64(ctx: *anyopaque, allocator: Allocator, this_value: JSValue
     _ = allocator;
     const self = interp(ctx);
     const ta = try requireUint8Array(self, this_value, "setFromBase64");
+    if (self.isTypedArrayImmutable(this_value)) {
+        return self.throwError(.type_error, "Cannot perform Uint8Array.prototype.setFromBase64 on an immutable ArrayBuffer", .{});
+    }
     const str_arg = arg(args, 0);
     if (str_arg.tag() != .string) return self.throwError(.type_error, "Uint8Array.prototype.setFromBase64 requires a string", .{});
     const has_opts = try uint8ValidateOptionsObj(self, arg(args, 1));
@@ -1666,6 +1741,9 @@ fn uint8SetFromHex(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     _ = allocator;
     const self = interp(ctx);
     const ta = try requireUint8Array(self, this_value, "setFromHex");
+    if (self.isTypedArrayImmutable(this_value)) {
+        return self.throwError(.type_error, "Cannot perform Uint8Array.prototype.setFromHex on an immutable ArrayBuffer", .{});
+    }
     const str_arg = arg(args, 0);
     if (str_arg.tag() != .string) return self.throwError(.type_error, "Uint8Array.prototype.setFromHex requires a string", .{});
     if (builtin_helpers.isTypedArrayDetached(&ta.value)) {
@@ -1686,6 +1764,9 @@ fn hostDetachArrayBuffer(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
     const buf = arg(args, 0);
     if (buf.tag() != .array_buffer or buf.asArrayBuffer().value.is_shared) {
         return self.throwError(.type_error, "detachArrayBuffer requires a non-shared ArrayBuffer", .{});
+    }
+    if (self.isImmutableArrayBuffer(buf)) {
+        return self.throwError(.type_error, "Cannot detach an immutable ArrayBuffer", .{});
     }
     buf.asArrayBuffer().value.detach();
     return JSValue.UNDEFINED;

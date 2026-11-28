@@ -652,9 +652,20 @@ pub fn typedArrayDefineOwnProperty(self: *Interpreter, obj: JSValue, key: []cons
     switch (@import("interpreter_props.zig").canonicalNumericIndex(self.gc_allocator, key, box.value.len)) {
         .valid_index => |idx| {
             if (builtin_helpers.isTypedArrayDetached(&box.value)) return false;
+            if (d.isAccessor()) return false;
+            if (self.isTypedArrayImmutable(obj)) {
+                if (d.has_configurable and d.configurable) return false;
+                if (d.has_enumerable and !d.enumerable) return false;
+                if (d.has_writable and d.writable) return false;
+                if (d.has_value) {
+                    const cur = try builtin_helpers.typedElemGet(self, box.value.kind, &box.value.owner.asArrayBuffer().value, box.value.byte_offset, box.value.len, idx);
+                    defer cur.deinit();
+                    return sameValue(d.value, cur);
+                }
+                return true;
+            }
             if (d.has_configurable and !d.configurable) return false;
             if (d.has_enumerable and !d.enumerable) return false;
-            if (d.isAccessor()) return false;
             if (d.has_writable and !d.writable) return false;
             if (d.has_value) {
                 try builtin_helpers.typedElemSet(self, box.value.kind, &box.value.owner.asArrayBuffer().value, box.value.byte_offset, box.value.len, idx, d.value);

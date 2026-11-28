@@ -75,11 +75,14 @@ const TA = struct {
     is_shared: bool,
 };
 
-fn requireIntegerTypedArray(self: *Interpreter, v: JSValue, comptime waitable: bool) anyerror!TA {
+fn requireIntegerTypedArray(self: *Interpreter, v: JSValue, comptime waitable: bool, comptime write_mode: bool) anyerror!TA {
     if (v.tag() != .typed_array) return self.throwError(.type_error, "The typed array argument must be an integer or bigint typed array", .{});
     const box = &v.asTypedArray().value;
     const ok = if (waitable) isWaitableKind(box.kind) else isAtomicsKind(box.kind);
     if (!ok) return self.throwError(.type_error, "The typed array argument must be an integer or bigint typed array", .{});
+    if (write_mode and self.isTypedArrayImmutable(v)) {
+        return self.throwError(.type_error, "Cannot perform Atomics write on an immutable ArrayBuffer", .{});
+    }
     const buffer = &box.owner.asArrayBuffer().value;
     return .{ .buffer = buffer, .byte_offset = box.byte_offset, .len = box.len, .kind = box.kind, .is_shared = buffer.is_shared };
 }
@@ -258,7 +261,7 @@ fn atomicsAdd(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
-    const ta = try requireIntegerTypedArray(self, arg(args, 0), false);
+    const ta = try requireIntegerTypedArray(self, arg(args, 0), false, true);
     const index = try requireIndex(self, ta, arg(args, 1));
     return atomicRMW(self, .add, ta, index, arg(args, 2));
 }
@@ -266,7 +269,7 @@ fn atomicsSub(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
-    const ta = try requireIntegerTypedArray(self, arg(args, 0), false);
+    const ta = try requireIntegerTypedArray(self, arg(args, 0), false, true);
     const index = try requireIndex(self, ta, arg(args, 1));
     return atomicRMW(self, .sub, ta, index, arg(args, 2));
 }
@@ -274,7 +277,7 @@ fn atomicsAnd(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
-    const ta = try requireIntegerTypedArray(self, arg(args, 0), false);
+    const ta = try requireIntegerTypedArray(self, arg(args, 0), false, true);
     const index = try requireIndex(self, ta, arg(args, 1));
     return atomicRMW(self, .@"and", ta, index, arg(args, 2));
 }
@@ -282,7 +285,7 @@ fn atomicsOr(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: [
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
-    const ta = try requireIntegerTypedArray(self, arg(args, 0), false);
+    const ta = try requireIntegerTypedArray(self, arg(args, 0), false, true);
     const index = try requireIndex(self, ta, arg(args, 1));
     return atomicRMW(self, .@"or", ta, index, arg(args, 2));
 }
@@ -290,7 +293,7 @@ fn atomicsXor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
-    const ta = try requireIntegerTypedArray(self, arg(args, 0), false);
+    const ta = try requireIntegerTypedArray(self, arg(args, 0), false, true);
     const index = try requireIndex(self, ta, arg(args, 1));
     return atomicRMW(self, .xor, ta, index, arg(args, 2));
 }
@@ -298,7 +301,7 @@ fn atomicsExchange(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
-    const ta = try requireIntegerTypedArray(self, arg(args, 0), false);
+    const ta = try requireIntegerTypedArray(self, arg(args, 0), false, true);
     const index = try requireIndex(self, ta, arg(args, 1));
     return atomicRMW(self, .exchange, ta, index, arg(args, 2));
 }
@@ -306,7 +309,7 @@ fn atomicsCompareExchange(ctx: *anyopaque, allocator: Allocator, this_value: JSV
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
-    const ta = try requireIntegerTypedArray(self, arg(args, 0), false);
+    const ta = try requireIntegerTypedArray(self, arg(args, 0), false, true);
     const index = try requireIndex(self, ta, arg(args, 1));
     return atomicCompareExchange(self, ta, index, arg(args, 2), arg(args, 3));
 }
@@ -314,7 +317,7 @@ fn atomicsLoad(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
-    const ta = try requireIntegerTypedArray(self, arg(args, 0), false);
+    const ta = try requireIntegerTypedArray(self, arg(args, 0), false, false);
     const index = try requireIndex(self, ta, arg(args, 1));
     return typedElemGet(self, ta.kind, ta.buffer, ta.byte_offset, ta.len, index);
 }
@@ -322,7 +325,7 @@ fn atomicsStore(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
-    const ta = try requireIntegerTypedArray(self, arg(args, 0), false);
+    const ta = try requireIntegerTypedArray(self, arg(args, 0), false, true);
     const index = try requireIndex(self, ta, arg(args, 1));
     try typedElemSet(self, ta.kind, ta.buffer, ta.byte_offset, ta.len, index, arg(args, 2));
     // Real spec returns the coerced-but-not-width-narrowed operand;
@@ -390,7 +393,7 @@ fn atomicsWait(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
-    const ta = try requireIntegerTypedArray(self, arg(args, 0), true);
+    const ta = try requireIntegerTypedArray(self, arg(args, 0), true, false);
     if (!ta.is_shared) return self.throwError(.type_error, "Atomics.wait requires a shared typed array", .{});
     const index = try requireIndex(self, ta, arg(args, 1));
     var matches: bool = undefined;
@@ -422,7 +425,7 @@ fn atomicsNotify(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, arg
     _ = allocator;
     _ = this_value;
     const self = interp(ctx);
-    const ta = try requireIntegerTypedArray(self, arg(args, 0), true);
+    const ta = try requireIntegerTypedArray(self, arg(args, 0), true, false);
     _ = try requireIndex(self, ta, arg(args, 1));
     const count_arg = arg(args, 2);
     if (count_arg.tag() != .undefined) _ = try self.toNumberJS(count_arg);

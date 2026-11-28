@@ -1013,6 +1013,7 @@ pub const Interpreter = struct {
     array_props: std.AutoHashMapUnmanaged(usize, JSValue) = .empty,
     arguments_arrays: std.AutoHashMapUnmanaged(usize, void) = .empty,
     deleted_arguments_length: std.AutoHashMapUnmanaged(usize, void) = .empty,
+    immutable_array_buffers: std.AutoHashMapUnmanaged(usize, void) = .empty,
     interned_prop_keys: std.StringHashMapUnmanaged([]const u8) = .empty,
     /// Own data/accessor properties of Temporal instances. The native
     /// TemporalValue remains an internal slot; this bag is an edge of its box.
@@ -1186,6 +1187,18 @@ pub const Interpreter = struct {
     pub const boxPrimitiveIfConstructed = interpreter_support.boxPrimitiveIfConstructed;
     pub const unboxPrimitiveWrapper = interpreter_support.unboxPrimitiveWrapper;
     pub const initStringWrapperProperties = interpreter_support.initStringWrapperProperties;
+
+    pub fn isImmutableArrayBuffer(self: *const Interpreter, v: JSValue) bool {
+        return v.tag() == .array_buffer and self.immutable_array_buffers.contains(@intFromPtr(v.asArrayBuffer()));
+    }
+
+    pub fn isTypedArrayImmutable(self: *const Interpreter, v: JSValue) bool {
+        return v.tag() == .typed_array and self.isImmutableArrayBuffer(v.asTypedArray().value.owner);
+    }
+
+    pub fn isDataViewImmutable(self: *const Interpreter, v: JSValue) bool {
+        return v.tag() == .data_view and self.isImmutableArrayBuffer(v.asDataView().value.owner);
+    }
 
     // ===== Modules (import/export) =====
     // z-interpreter-refactor.md, Step 5 Phase C batch 2: moved to
@@ -4950,6 +4963,69 @@ test "Fase A - Lote 5: Object and Object.prototype (42 spec cases)" {
         \\
         \\subclassOk && rxOk && arrSetterOk && arrKeysOk && liveEnumOk && orderOk &&
         \\  fromEntriesDummyOk && primStrOk && setProtoPrimOk && protoAbruptOk && integrityOk;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+
+test "Fase A - Lote 6: ImmutableArrayBuffer (transferToImmutable, sliceToImmutable, immutable)" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\// 1. ArrayBuffer.prototype.immutable getter & transferToImmutable
+        \\var ab1 = new ArrayBuffer(4);
+        \\var u1 = new Uint8Array(ab1);
+        \\u1[0] = 10; u1[1] = 20; u1[2] = 30; u1[3] = 40;
+        \\var beforeImm = ab1.immutable === false;
+        \\var iab1 = ab1.transferToImmutable(6);
+        \\var iu1 = new Uint8Array(iab1);
+        \\var transferOk = beforeImm && ab1.detached === true && iab1.immutable === true &&
+        \\  iab1.byteLength === 6 && iu1[0] === 10 && iu1[3] === 40 && iu1[4] === 0 && iu1[5] === 0;
+        \\
+        \\// 2. Re-transferring an immutable ArrayBuffer throws TypeError after newLength coercion
+        \\var coercedLen = false;
+        \\var retransferThrow = false;
+        \\try {
+        \\  iab1.transferToImmutable({ valueOf: function() { coercedLen = true; return 2; } });
+        \\} catch (e) { retransferThrow = (e instanceof TypeError) && coercedLen; }
+        \\
+        \\// 3. ArrayBuffer.prototype.sliceToImmutable
+        \\var ab2 = new ArrayBuffer(4);
+        \\var u2 = new Uint8Array(ab2);
+        \\u2[0] = 1; u2[1] = 2; u2[2] = 3; u2[3] = 4;
+        \\var iab2 = ab2.sliceToImmutable(1, -1);
+        \\u2[1] = 99;
+        \\var iu2 = new Uint8Array(iab2);
+        \\var sliceImmOk = ab2.detached === false && ab2.immutable === false &&
+        \\  iab2.immutable === true && iab2.byteLength === 2 && iu2[0] === 2 && iu2[1] === 3;
+        \\
+        \\// 4. DataView.prototype.set* throws TypeError before argument coercion on immutable buffer
+        \\var dvImm = new DataView(iab1);
+        \\var dvArgCalled = false;
+        \\var dvSetThrow = false;
+        \\try {
+        \\  dvImm.setUint8({ valueOf: function() { dvArgCalled = true; return 0; } }, 1);
+        \\} catch (e) { dvSetThrow = (e instanceof TypeError) && !dvArgCalled; }
+        \\
+        \\// 5. TypedArray mutators (fill/copyWithin/reverse/set/sort/setFromBase64/setFromHex) throw TypeError
+        \\var taFillThrow = false, taSortThrow = false, taB64Throw = false, taHexThrow = false;
+        \\try { iu1.fill(1); } catch (e) { taFillThrow = e instanceof TypeError; }
+        \\try { iu1.sort(); } catch (e) { taSortThrow = e instanceof TypeError; }
+        \\try { iu1.setFromBase64("AA=="); } catch (e) { taB64Throw = e instanceof TypeError; }
+        \\try { iu1.setFromHex("00"); } catch (e) { taHexThrow = e instanceof TypeError; }
+        \\var taMutOk = taFillThrow && taSortThrow && taB64Throw && taHexThrow;
+        \\
+        \\// 6. Atomics write operations throw TypeError on immutable buffer, notify returns 0
+        \\var i32Imm = new Int32Array((new ArrayBuffer(8)).transferToImmutable());
+        \\var atomicsAddThrow = false;
+        \\try { Atomics.add(i32Imm, 0, 1); } catch (e) { atomicsAddThrow = e instanceof TypeError; }
+        \\var atomicsNotifyOk = Atomics.notify(i32Imm, 0, 1) === 0 && Atomics.load(i32Imm, 0) === 0;
+        \\
+        \\transferOk && retransferThrow && sliceImmOk && dvSetThrow && taMutOk && atomicsAddThrow && atomicsNotifyOk;
     );
     defer res.deinit();
     try testing.expect(res.isBool() and res.asBool());

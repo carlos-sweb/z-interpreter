@@ -437,10 +437,16 @@ pub fn setTypedArrayProperty(self: *Interpreter, obj: JSValue, key: []const u8, 
     const box = obj.asTypedArray();
     switch (canonicalNumericIndex(self.gc_allocator, key, box.value.len)) {
         .valid_index => |idx| {
+            if (self.isTypedArrayImmutable(obj)) {
+                return self.throwError(.type_error, "Cannot modify an immutable TypedArray", .{});
+            }
             try builtins.typedElemSet(self, box.value.kind, &box.value.owner.asArrayBuffer().value, box.value.byte_offset, box.value.len, idx, value);
             return;
         },
         .invalid_index => {
+            if (self.isTypedArrayImmutable(obj)) {
+                return self.throwError(.type_error, "Cannot modify an immutable TypedArray", .{});
+            }
             try builtins.typedElemSet(self, box.value.kind, &box.value.owner.asArrayBuffer().value, box.value.byte_offset, box.value.len, box.value.len, value);
             return;
         },
@@ -647,6 +653,7 @@ pub fn setPropertyWithReceiver(self: *Interpreter, obj: JSValue, key: []const u8
         .typed_array => |box| {
             switch (canonicalNumericIndex(self.gc_allocator, key, box.value.len)) {
                 .valid_index => |idx| {
+                    if (self.isTypedArrayImmutable(obj)) return false;
                     if (property_desc.sameValue(obj, receiver)) {
                         try builtins.typedElemSet(self, box.value.kind, &box.value.owner.asArrayBuffer().value, box.value.byte_offset, box.value.len, idx, value);
                         return true;
@@ -655,6 +662,7 @@ pub fn setPropertyWithReceiver(self: *Interpreter, obj: JSValue, key: []const u8
                     return setOnReceiver(self, receiver, key, value);
                 },
                 .invalid_index => {
+                    if (self.isTypedArrayImmutable(obj)) return false;
                     if (property_desc.sameValue(obj, receiver)) {
                         try builtins.typedElemSet(self, box.value.kind, &box.value.owner.asArrayBuffer().value, box.value.byte_offset, box.value.len, box.value.len, value);
                         return true;

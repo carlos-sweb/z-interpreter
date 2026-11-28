@@ -689,7 +689,8 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, thi
                 .valid_index => |idx| {
                     if (builtin_helpers.isTypedArrayDetached(&box.value)) return JSValue.UNDEFINED;
                     const val = try builtin_helpers.typedElemGet(self, box.value.kind, &box.value.owner.asArrayBuffer().value, box.value.byte_offset, box.value.len, idx);
-                    return dataDescObj(self, val, true, true, true);
+                    const is_imm = self.isTypedArrayImmutable(obj);
+                    return dataDescObj(self, val, !is_imm, true, !is_imm);
                 },
                 .invalid_index => return JSValue.UNDEFINED,
                 .not_numeric => {

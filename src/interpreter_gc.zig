@@ -358,6 +358,7 @@ pub fn deinit(self: *Interpreter) void {
     self.array_props.deinit(self.gc_allocator);
     self.arguments_arrays.deinit(self.gc_allocator);
     self.deleted_arguments_length.deinit(self.gc_allocator);
+    self.immutable_array_buffers.deinit(self.gc_allocator);
     self.interned_prop_keys.deinit(self.gc_allocator);
     self.temporal_props.deinit(self.gc_allocator);
     self.temporal_protos.deinit(self.gc_allocator);
@@ -426,6 +427,7 @@ pub fn gcOnBoxDestroyed(ctx: *anyopaque, box: *anyopaque) void {
     _ = self.deleted_fn_props.remove(@intFromPtr(box));
     _ = self.generator_fibers.remove(@intFromPtr(box));
     _ = self.raw_json_objects.remove(@intFromPtr(box));
+    _ = self.immutable_array_buffers.remove(@intFromPtr(box));
     // A builtin instance's internal slots (WeakMap & co., Iterator helpers).
     if (self.object_slots.fetchRemove(@intFromPtr(box))) |kv| {
         var slots = kv.value;
@@ -971,6 +973,7 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
             _ = self.deleted_fn_props.remove(@intFromPtr(box));
     _ = self.generator_fibers.remove(@intFromPtr(box));
     _ = self.raw_json_objects.remove(@intFromPtr(box));
+    _ = self.immutable_array_buffers.remove(@intFromPtr(box));
             // A ClosureCtx/FiberState/ClassCtx `ctx` is its OWN
             // registry entry, torn down on its own turn in this same
             // sweep pass -- nothing further to do with it here.
@@ -1034,6 +1037,7 @@ pub fn freeGarbageNode(self: *Interpreter, node: GcNode, sweeper: *Sweeper) void
             if (self.array_props.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             _ = self.arguments_arrays.remove(@intFromPtr(box));
             _ = self.deleted_arguments_length.remove(@intFromPtr(box));
+            _ = self.immutable_array_buffers.remove(@intFromPtr(box));
             if (self.proto_refs.fetchRemove(@intFromPtr(box))) |kv| sweeper.value(kv.value);
             box.value.deinit();
             box.destroy();

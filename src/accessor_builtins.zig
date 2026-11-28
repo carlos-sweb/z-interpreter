@@ -142,16 +142,18 @@ fn bufferOf(self: *Interpreter, this_value: JSValue, comptime shared: bool, comp
     return &this_value.asArrayBuffer().value;
 }
 
-fn bufferGetter(comptime shared: bool, comptime field: enum { byte_length, max_byte_length, flag_false, detached }, comptime what: []const u8) NativeFn {
+fn bufferGetter(comptime shared: bool, comptime field: enum { byte_length, max_byte_length, flag_false, detached, immutable }, comptime what: []const u8) NativeFn {
     return struct {
         fn call(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
             _ = allocator;
             _ = args;
-            const buf = try bufferOf(interp(ctx), this_value, shared, what);
+            const self = interp(ctx);
+            const buf = try bufferOf(self, this_value, shared, what);
             return switch (field) {
                 .byte_length, .max_byte_length => num(buf.byteLength()),
                 .flag_false => JSValue.fromBool(false),
                 .detached => JSValue.fromBool(buf.isDetached()),
+                .immutable => JSValue.fromBool(self.isImmutableArrayBuffer(this_value)),
             };
         }
     }.call;
@@ -301,6 +303,7 @@ pub fn install(self: *Interpreter) !void {
     try defineAccessor(self, p.array_buffer, "maxByteLength", "maxByteLength", bufferGetter(false, .max_byte_length, "ArrayBuffer.prototype.maxByteLength"), null);
     try defineAccessor(self, p.array_buffer, "resizable", "resizable", bufferGetter(false, .flag_false, "ArrayBuffer.prototype.resizable"), null);
     try defineAccessor(self, p.array_buffer, "detached", "detached", bufferGetter(false, .detached, "ArrayBuffer.prototype.detached"), null);
+    try defineAccessor(self, p.array_buffer, "immutable", "immutable", bufferGetter(false, .immutable, "ArrayBuffer.prototype.immutable"), null);
     try defineAccessor(self, p.shared_array_buffer, "byteLength", "byteLength", bufferGetter(true, .byte_length, "SharedArrayBuffer.prototype.byteLength"), null);
     try defineAccessor(self, p.shared_array_buffer, "maxByteLength", "maxByteLength", bufferGetter(true, .max_byte_length, "SharedArrayBuffer.prototype.maxByteLength"), null);
     try defineAccessor(self, p.shared_array_buffer, "growable", "growable", bufferGetter(true, .flag_false, "SharedArrayBuffer.prototype.growable"), null);
