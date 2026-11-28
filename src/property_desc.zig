@@ -670,7 +670,7 @@ pub fn toObject(self: *Interpreter, v: JSValue) anyerror!JSValue {
     if (v.isUndefined() or v.isNull()) return self.throwError(.type_error, "Cannot convert undefined or null to object", .{});
     if (builtin_helpers.isObjectLike(v)) return v.retain();
     const object_builtins = @import("object_builtins.zig");
-    return object_builtins.objectConstructor(self, self.gc_allocator, JSValue.UNDEFINED, &.{v});
+    return object_builtins.toObjectValue(self, v);
 }
 
 pub fn objectDefinePropertiesImpl(self: *Interpreter, allocator: Allocator, obj: JSValue, properties: JSValue) anyerror!void {

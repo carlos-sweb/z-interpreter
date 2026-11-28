@@ -282,7 +282,8 @@ fn protoSetter(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args:
     if (!isObjectLike(this_value)) return JSValue.UNDEFINED;
     const ok = object_builtins.setPrototypeOfInternal(self, this_value, proto) catch |err| switch (err) {
         error.PrototypeCycle => return self.throwError(.type_error, "Cyclic __proto__ value", .{}),
-        else => return self.throwError(.type_error, "Object.prototype.__proto__ setter failed: {s}", .{@errorName(err)}),
+        error.ObjectNotExtensible => false,
+        else => return err,
     };
     if (!ok) return self.throwError(.type_error, "Object.prototype.__proto__ setter failed", .{});
     return JSValue.UNDEFINED;

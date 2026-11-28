@@ -91,130 +91,20 @@ fn requireObject(ctx: *anyopaque, v: JSValue, what: []const u8) anyerror!JSValue
 /// needing to special-case one variant.
 pub fn ownEnumerableKeys(ctx: *anyopaque, allocator: Allocator, v: JSValue) anyerror![][]const u8 {
     const self = interp(ctx);
-    var seen: std.StringHashMapUnmanaged(void) = .empty;
-    defer seen.deinit(allocator);
+    const names = try objectGetOwnPropertyNames(ctx, allocator, JSValue.UNDEFINED, &.{v});
+    defer names.deinit();
     var owned: std.ArrayList([]const u8) = .empty;
     errdefer {
         for (owned.items) |k| allocator.free(k);
         owned.deinit(allocator);
     }
-    // `globalThis`: top-level var/function names (always enumerable) and
-    // any ad-hoc-added global (enumerable, unlike an original builtin --
-    // see global_builtin_names' doc comment) aren't in the object's own
-    // bag, same gap as getOwnPropertyDescriptor/getOwnPropertyNames above.
-    if (v.isObject() and isGlobalObject(self, v)) {
-        const go_obj = &v.asObject().value;
-        if (self.global_var_env) |gve| {
-            for (gve.bindings.items) |binding| {
-                if (!self.global_var_names.contains(binding.name) and !self.eval_var_names.contains(binding.name)) continue;
-                if (go_obj.getOwnRecord(binding.name)) |rec| {
-                    if (!rec.descriptor.enumerable) continue;
-                }
-                if (seen.contains(binding.name)) continue;
-                try seen.put(allocator, binding.name, {});
-                try owned.append(allocator, try allocator.dupe(u8, binding.name));
-            }
+    for (names.asArray().value.toSlice()) |item| {
+        if (!item.isString()) continue;
+        const k = item.asString().value.data;
+        if (isSymbolKey(k)) continue;
+        if ((try ownPropertyEnumerable(self, v, k)) orelse false) {
+            try owned.append(allocator, try allocator.dupe(u8, k));
         }
-        for (self.global_env.bindings.items) |binding| {
-            if (go_obj.getOwnRecord(binding.name)) |rec| {
-                if (!rec.descriptor.enumerable) continue;
-            } else if (self.global_builtin_names.contains(binding.name)) {
-                continue;
-            }
-            if (seen.contains(binding.name)) continue;
-            try seen.put(allocator, binding.name, {});
-            try owned.append(allocator, try allocator.dupe(u8, binding.name));
-        }
-    }
-    const borrowed: [][]const u8 = switch (v.unpack()) {
-        .object => |box| try box.value.keys(allocator),
-        .temporal => if (self.temporalProps(v)) |bag| try bag.asObject().value.keys(allocator) else try allocator.alloc([]const u8, 0),
-        .function => |box| if (box.value.statics) |bag| try bag.asObject().value.keys(allocator) else try allocator.alloc([]const u8, 0),
-        .undefined, .null => return interp(ctx).throwError(.type_error, "Cannot convert undefined or null to object", .{}),
-        // Neither had a case here at all (fell to the `else` empty-array
-        // branch below) -- Object.keys/values/entries on a plain array
-        // or string always returned []. Every index up to `.length` is
-        // enumerable (own, no notion of holes in this engine's array/
-        // string model). String length/index count is UTF-16 code
-        // units, not UTF-8 bytes -- same fix as getProperty's `.string`
-        // case (interpreter_props.zig). Both build their own fully-owned
-        // result and return directly (bypassing the generic borrowed/
-        // owned dedup below, exactly like `.proxy` already does) since
-        // every string here is freshly allocated, not borrowed from
-        // existing storage like `.object`/`.function`'s `.keys()` calls.
-        .array => |box| {
-            var keys: std.ArrayList([]const u8) = .empty;
-            defer keys.deinit(allocator);
-            var i: usize = 0;
-            while (i < box.value.length()) : (i += 1) {
-                if (box.value.isHole(i)) continue;
-                try keys.append(allocator, try std.fmt.allocPrint(allocator, "{d}", .{i}));
-            }
-            return keys.toOwnedSlice(allocator);
-        },
-        .string => |box| {
-            var keys: std.ArrayList([]const u8) = .empty;
-            defer keys.deinit(allocator);
-            var i: usize = 0;
-            while (i < zstring.utf16.lengthUtf16(box.value.data)) : (i += 1) {
-                try keys.append(allocator, try std.fmt.allocPrint(allocator, "{d}", .{i}));
-            }
-            return keys.toOwnedSlice(allocator);
-        },
-        .typed_array => |box| {
-            var keys: std.ArrayList([]const u8) = .empty;
-            errdefer {
-                for (keys.items) |k| allocator.free(k);
-                keys.deinit(allocator);
-            }
-            var i: usize = 0;
-            const ta_len = if (builtin_helpers.isTypedArrayDetached(&box.value)) 0 else box.value.len;
-            while (i < ta_len) : (i += 1) {
-                try keys.append(allocator, try std.fmt.allocPrint(allocator, "{d}", .{i}));
-            }
-            if (self.extraProps(v)) |bag| {
-                const extra = try bag.asObject().value.keys(allocator);
-                defer allocator.free(extra);
-                for (extra) |k| {
-                    if (isSymbolKey(k)) continue;
-                    try keys.append(allocator, try allocator.dupe(u8, k));
-                }
-            }
-            return keys.toOwnedSlice(allocator);
-        },
-        // ownKeys(target) -- narrowed: every trap-returned key is treated
-        // as enumerable (real spec would filter via a
-        // getOwnPropertyDescriptor call per key), matching this
-        // engine's already-established "no invariant checking" scope
-        // boundary for Proxy.
-        .proxy => {
-            const all_keys = try proxyOwnPropertyKeys(self, allocator, v);
-            defer all_keys.deinit();
-            var keys: std.ArrayList([]const u8) = .empty;
-            errdefer {
-                for (keys.items) |k| allocator.free(k);
-                keys.deinit(allocator);
-            }
-            for (all_keys.asArray().value.toSlice()) |item| {
-                if (!item.isString()) continue;
-                const desc = try objectGetOwnPropertyDescriptor(ctx, allocator, JSValue.UNDEFINED, &.{ v, item });
-                defer desc.deinit();
-                if (desc.isObject()) {
-                    if (desc.asObject().value.get("enumerable")) |en| {
-                        if (coercion.isTruthy(en)) {
-                            try keys.append(allocator, try allocator.dupe(u8, item.asString().value.data));
-                        }
-                    }
-                }
-            }
-            return keys.toOwnedSlice(allocator);
-        },
-        else => try allocator.alloc([]const u8, 0),
-    };
-    defer allocator.free(borrowed);
-    for (borrowed) |k| {
-        if (seen.contains(k)) continue;
-        try owned.append(allocator, try allocator.dupe(u8, k));
     }
     return owned.toOwnedSlice(allocator);
 }
@@ -241,31 +131,39 @@ fn objectKeys(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 
 fn objectValues(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
+    const self = interp(ctx);
     const o = arg(args, 0);
-    const ks = try ownEnumerableKeys(ctx, allocator, o);
-    defer freeOwnedKeys(allocator, ks);
-    var result = try interp(ctx).gcNewArray();
-    // Per-key getProperty (not ZObject.values) so accessor properties
-    // invoke their getters, like real Object.values.
-    for (ks) |k| {
+    const names = try objectGetOwnPropertyNames(ctx, allocator, JSValue.UNDEFINED, &.{o});
+    defer names.deinit();
+    var result = try self.gcNewArray();
+    errdefer result.deinit();
+    for (names.asArray().value.toSlice()) |item| {
+        if (!item.isString()) continue;
+        const k = item.asString().value.data;
         if (isSymbolKey(k)) continue;
-        _ = try result.asArray().value.push(try interp(ctx).getProperty(o, k));
+        if (!((try ownPropertyEnumerable(self, o, k)) orelse false)) continue;
+        _ = try result.asArray().value.push(try self.getProperty(o, k));
     }
     return result;
 }
 
 fn objectEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = this_value;
+    const self = interp(ctx);
     const o = arg(args, 0);
-    const ks = try ownEnumerableKeys(ctx, allocator, o);
-    defer freeOwnedKeys(allocator, ks);
-    var result = try interp(ctx).gcNewArray();
-    for (ks) |k| {
+    const names = try objectGetOwnPropertyNames(ctx, allocator, JSValue.UNDEFINED, &.{o});
+    defer names.deinit();
+    var result = try self.gcNewArray();
+    errdefer result.deinit();
+    for (names.asArray().value.toSlice()) |item| {
+        if (!item.isString()) continue;
+        const k = item.asString().value.data;
         if (isSymbolKey(k)) continue;
-        var pair = try interp(ctx).gcNewArray();
-        _ = try pair.asArray().value.push(try interp(ctx).gcNewString(k));
-        // getProperty, not ZObject.get -- getters must fire here too.
-        _ = try pair.asArray().value.push(try interp(ctx).getProperty(o, k));
+        if (!((try ownPropertyEnumerable(self, o, k)) orelse false)) continue;
+        const val = try self.getProperty(o, k);
+        var pair = try self.gcNewArray();
+        _ = try pair.asArray().value.push(try self.gcNewString(k));
+        _ = try pair.asArray().value.push(val);
         _ = try result.asArray().value.push(pair);
     }
     return result;
@@ -502,11 +400,7 @@ fn objIsPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, 
 
 // ===== Object statics: constructor + descriptors =====
 
-pub fn objectConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = this_value;
-    const self = interp(ctx);
-    const v = arg(args, 0);
+pub fn toObjectValue(self: *Interpreter, v: JSValue) anyerror!JSValue {
     return switch (v.tag()) {
         // Object(x) on object-likes returns x; on nothing, a fresh {}.
         .object, .array, .function, .@"error", .date, .promise, .map, .set, .regex, .temporal, .typed_array, .array_buffer, .data_view, .proxy => v.retain(),
@@ -526,6 +420,22 @@ pub fn objectConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSVa
         .bigint => try boxWrapper(self, self.protos.bigint, v),
         else => try self.ordinaryObject(),
     };
+}
+
+pub fn objectConstructor(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = allocator;
+    const self = interp(ctx);
+    if (self.construct_target == ctx) {
+        self.construct_target = null;
+        if (self.construct_new_target) |nt| {
+            if (self.global_env.get("Object")) |obj_ctor| {
+                if (!zvalue.equality.strictEquals(nt, obj_ctor) and this_value.isObject()) {
+                    return this_value.retain();
+                }
+            }
+        }
+    }
+    return toObjectValue(self, arg(args, 0));
 }
 
 /// `Object(primitive)`'s wrapper: a fresh object chaining to `proto`
@@ -836,9 +746,49 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, thi
                         }
                     }
                 }
-                return trap_result;
+                if (result_desc.isGeneric() or result_desc.isData()) {
+                    if (!result_desc.has_value) {
+                        result_desc.has_value = true;
+                        result_desc.value = JSValue.UNDEFINED;
+                    }
+                    if (!result_desc.has_writable) {
+                        result_desc.has_writable = true;
+                        result_desc.writable = false;
+                    }
+                } else {
+                    if (!result_desc.has_get) {
+                        result_desc.has_get = true;
+                        result_desc.get = JSValue.UNDEFINED;
+                    }
+                    if (!result_desc.has_set) {
+                        result_desc.has_set = true;
+                        result_desc.set = JSValue.UNDEFINED;
+                    }
+                }
+                if (!result_desc.has_enumerable) {
+                    result_desc.has_enumerable = true;
+                    result_desc.enumerable = false;
+                }
+                if (!result_desc.has_configurable) {
+                    result_desc.has_configurable = true;
+                    result_desc.configurable = false;
+                }
+                trap_result.deinit();
+                return property_desc.fromParsedDesc(self, &result_desc);
             }
             return objectGetOwnPropertyDescriptor(ctx, allocator, this_value, &.{ box.value.target, arg(args, 1) });
+        },
+        .string => |box| {
+            const raw = box.value.data;
+            const len = zstring.utf16.lengthUtf16(raw);
+            if (std.mem.eql(u8, key, "length")) {
+                return dataDescObj(self, JSValue.fromNumber(@floatFromInt(len)), false, false, false);
+            }
+            const idx = zarray.CanonicalNumericIndexString(key) orelse return JSValue.UNDEFINED;
+            if (idx >= len) return JSValue.UNDEFINED;
+            const ch = try zstring.access.charAt(self.gc_allocator, raw, @intCast(idx));
+            defer self.gc_allocator.free(ch);
+            return dataDescObj(self, try self.gcNewString(ch), false, true, false);
         },
         .regex => {
             if (std.mem.eql(u8, key, "lastIndex"))
@@ -957,11 +907,6 @@ pub fn objectGetOwnPropertyNames(ctx: *anyopaque, allocator: Allocator, this_val
             var seen: std.StringHashMapUnmanaged(void) = .empty;
             defer seen.deinit(allocator);
             if (isGlobalObject(self, o)) {
-                for (self.global_env.bindings.items) |binding| {
-                    if (seen.contains(binding.name)) continue;
-                    try seen.put(allocator, binding.name, {});
-                    _ = try result.asArray().value.push(try interp(ctx).gcNewString(binding.name));
-                }
                 if (self.global_var_env) |gve| {
                     for (gve.bindings.items) |binding| {
                         if (!self.global_var_names.contains(binding.name) and !self.eval_var_names.contains(binding.name)) continue;
@@ -969,6 +914,11 @@ pub fn objectGetOwnPropertyNames(ctx: *anyopaque, allocator: Allocator, this_val
                         try seen.put(allocator, binding.name, {});
                         _ = try result.asArray().value.push(try interp(ctx).gcNewString(binding.name));
                     }
+                }
+                for (self.global_env.bindings.items) |binding| {
+                    if (seen.contains(binding.name)) continue;
+                    try seen.put(allocator, binding.name, {});
+                    _ = try result.asArray().value.push(try interp(ctx).gcNewString(binding.name));
                 }
             }
             const names = try o.asObject().value.getOwnPropertyNames(allocator);
@@ -1002,8 +952,11 @@ pub fn objectGetOwnPropertyNames(ctx: *anyopaque, allocator: Allocator, this_val
                     _ = try result.asArray().value.push(try interp(ctx).gcNewString(idx_str));
                 }
             }
-            _ = try result.asArray().value.push(try interp(ctx).gcNewString("length"));
-            if (self.array_props.get(@intFromPtr(box))) |bag| {
+            const bag_opt = self.array_props.get(@intFromPtr(box));
+            const has_len = !self.deleted_arguments_length.contains(@intFromPtr(box)) or
+                (if (bag_opt) |b| b.asObject().value.hasOwnProperty("length") else false);
+            if (has_len) _ = try result.asArray().value.push(try interp(ctx).gcNewString("length"));
+            if (bag_opt) |bag| {
                 const names = try bag.asObject().value.getOwnPropertyNames(allocator);
                 defer allocator.free(names);
                 for (names) |n| {
@@ -1040,6 +993,36 @@ pub fn objectGetOwnPropertyNames(ctx: *anyopaque, allocator: Allocator, this_val
                     if (has_proto and std.mem.eql(u8, n, "prototype")) continue;
                     _ = try result.asArray().value.push(try interp(ctx).gcNewString(n));
                 }
+            }
+        },
+        .string => |box| {
+            const len = zstring.utf16.lengthUtf16(box.value.data);
+            var i: usize = 0;
+            while (i < len) : (i += 1) {
+                const idx_str = try std.fmt.allocPrint(allocator, "{d}", .{i});
+                defer allocator.free(idx_str);
+                _ = try result.asArray().value.push(try interp(ctx).gcNewString(idx_str));
+            }
+            _ = try result.asArray().value.push(try interp(ctx).gcNewString("length"));
+        },
+        .regex => {
+            if (self.regexProps(o)) |bag| {
+                const names = try bag.asObject().value.getOwnPropertyNames(allocator);
+                defer allocator.free(names);
+                for (names) |n| {
+                    if (isSymbolKey(n)) continue;
+                    if (zarray.CanonicalNumericIndexString(n) != null) {
+                        _ = try result.asArray().value.push(try interp(ctx).gcNewString(n));
+                    }
+                }
+                _ = try result.asArray().value.push(try interp(ctx).gcNewString("lastIndex"));
+                for (names) |n| {
+                    if (isSymbolKey(n) or std.mem.eql(u8, n, "lastIndex")) continue;
+                    if (zarray.CanonicalNumericIndexString(n) != null) continue;
+                    _ = try result.asArray().value.push(try interp(ctx).gcNewString(n));
+                }
+            } else {
+                _ = try result.asArray().value.push(try interp(ctx).gcNewString("lastIndex"));
             }
         },
         .temporal => {
@@ -1107,6 +1090,7 @@ pub fn objectGetOwnPropertySymbols(ctx: *anyopaque, allocator: Allocator, this_v
         .temporal => self.temporalProps(o),
         .array => |box| self.array_props.get(@intFromPtr(box)),
         .function => |box| box.value.statics,
+        .regex => self.regexProps(o),
         else => self.extraProps(o),
     };
     if (bag_opt) |bag| {
@@ -1158,54 +1142,102 @@ fn extensibilityBagForWrite(self: *Interpreter, v: JSValue) anyerror!?JSValue {
 }
 
 fn objectFreeze(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
     _ = this_value;
     const self = interp(ctx);
     const v = arg(args, 0);
-    if (v.isTypedArray() and v.asTypedArray().value.len > 0) {
-        return self.throwError(.type_error, "Cannot freeze array buffer views with elements", .{});
+    if (!builtin_helpers.isObjectLike(v)) return v.retain();
+    if (!try preventExtensionsInternal(self, v)) {
+        return self.throwError(.type_error, "Cannot prevent extensions", .{});
     }
-    if (v.isArray()) {
-        v.asArray().value.setLengthWritable(false) catch {};
+    const keys = try ownPropertyKeyList(self, allocator, v);
+    defer freeOwnedKeys(allocator, keys);
+    const arr_bag_opt = if (v.isArray()) self.array_props.get(@intFromPtr(v.asArray())) else null;
+    for (keys) |k| {
+        if (v.isArray() and zarray.CanonicalNumericIndexString(k) != null) {
+            if (arr_bag_opt == null or !arr_bag_opt.?.asObject().value.hasOwnProperty(k)) continue;
+        }
+        const kv = try property_desc.keyToValue(self, k);
+        defer kv.deinit();
+        const current_desc = try objectGetOwnPropertyDescriptor(ctx, allocator, JSValue.UNDEFINED, &.{ v, kv });
+        defer current_desc.deinit();
+        if (!current_desc.isUndefined()) {
+            const is_accessor = current_desc.isObject() and (current_desc.asObject().value.hasOwnProperty("get") or current_desc.asObject().value.hasOwnProperty("set"));
+            var d = if (is_accessor)
+                property_desc.ParsedDesc{ .has_configurable = true, .configurable = false }
+            else
+                property_desc.ParsedDesc{ .has_configurable = true, .configurable = false, .has_writable = true, .writable = false };
+            if (!try property_desc.defineOwnProperty(self, v, k, &d)) {
+                return self.throwError(.type_error, "Cannot freeze property: {s}", .{property_desc.displayKey(k)});
+            }
+        }
     }
-    if (try extensibilityBagForWrite(self, v)) |bag| bag.asObject().value.freeze();
-    if (v.isRegex()) self.regexState(v).last_index_writable = false;
+    if (!v.isProxy()) {
+        if (v.isArray()) v.asArray().value.setLengthWritable(false) catch {};
+        if (try extensibilityBagForWrite(self, v)) |bag| bag.asObject().value.freeze();
+        if (v.isRegex()) self.regexState(v).last_index_writable = false;
+    }
     return v.retain();
 }
 
-fn objectIsFrozen(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
-    _ = this_value;
+fn testIntegrityLevel(ctx: *anyopaque, allocator: Allocator, v: JSValue, is_frozen: bool) anyerror!JSValue {
     const self = interp(ctx);
-    const v = arg(args, 0);
-    if (v.isTypedArray() and v.asTypedArray().value.len > 0) return JSValue.fromBool(false);
-    if (v.isArray()) {
-        if (v.asArray().value.isLengthWritable() and v.asArray().value.length() > 0) return JSValue.fromBool(false);
+    if (!builtin_helpers.isObjectLike(v)) return JSValue.fromBool(true);
+    if (try isExtensibleInternal(self, v)) return JSValue.fromBool(false);
+    const keys = try ownPropertyKeyList(self, allocator, v);
+    defer freeOwnedKeys(allocator, keys);
+    for (keys) |k| {
+        const kv = try property_desc.keyToValue(self, k);
+        defer kv.deinit();
+        const current_desc = try objectGetOwnPropertyDescriptor(ctx, allocator, JSValue.UNDEFINED, &.{ v, kv });
+        defer current_desc.deinit();
+        if (current_desc.isObject()) {
+            if (current_desc.asObject().value.get("configurable")) |cfg| {
+                if (coercion.isTruthy(cfg)) return JSValue.fromBool(false);
+            }
+            if (is_frozen) {
+                if (current_desc.asObject().value.get("writable")) |w| {
+                    if (coercion.isTruthy(w)) return JSValue.fromBool(false);
+                }
+            }
+        }
     }
-    if (extensibilityBag(self, v)) |bag| return JSValue.fromBool(bag.asObject().value.is_frozen);
-    return JSValue.fromBool(!(v.isArray() or v.isFunction() or v.tag() == .temporal or v.isTypedArray()));
+    return JSValue.fromBool(true);
+}
+
+fn objectIsFrozen(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
+    _ = this_value;
+    return testIntegrityLevel(ctx, allocator, arg(args, 0), true);
 }
 
 fn objectSeal(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
     _ = this_value;
     const self = interp(ctx);
     const v = arg(args, 0);
-    if (v.isTypedArray() and v.asTypedArray().value.len > 0) {
-        return self.throwError(.type_error, "Cannot seal array buffer views with elements", .{});
+    if (!builtin_helpers.isObjectLike(v)) return v.retain();
+    if (!try preventExtensionsInternal(self, v)) {
+        return self.throwError(.type_error, "Cannot prevent extensions", .{});
     }
-    if (try extensibilityBagForWrite(self, v)) |bag| bag.asObject().value.seal();
+    const keys = try ownPropertyKeyList(self, allocator, v);
+    defer freeOwnedKeys(allocator, keys);
+    const arr_bag_opt = if (v.isArray()) self.array_props.get(@intFromPtr(v.asArray())) else null;
+    for (keys) |k| {
+        if (v.isArray() and zarray.CanonicalNumericIndexString(k) != null) {
+            if (arr_bag_opt == null or !arr_bag_opt.?.asObject().value.hasOwnProperty(k)) continue;
+        }
+        var d = property_desc.ParsedDesc{ .has_configurable = true, .configurable = false };
+        if (!try property_desc.defineOwnProperty(self, v, k, &d)) {
+            return self.throwError(.type_error, "Cannot seal property: {s}", .{property_desc.displayKey(k)});
+        }
+    }
+    if (!v.isProxy()) {
+        if (try extensibilityBagForWrite(self, v)) |bag| bag.asObject().value.seal();
+    }
     return v.retain();
 }
 
 fn objectIsSealed(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
-    _ = allocator;
     _ = this_value;
-    const self = interp(ctx);
-    const v = arg(args, 0);
-    if (v.isTypedArray() and v.asTypedArray().value.len > 0) return JSValue.fromBool(false);
-    if (extensibilityBag(self, v)) |bag| return JSValue.fromBool(bag.asObject().value.is_sealed or bag.asObject().value.is_frozen);
-    return JSValue.fromBool(!(v.isArray() or v.isFunction() or v.tag() == .temporal or v.isTypedArray()));
+    return testIntegrityLevel(ctx, allocator, arg(args, 0), false);
 }
 
 pub fn preventExtensionsInternal(self: *Interpreter, obj: JSValue) anyerror!bool {
@@ -1310,10 +1342,11 @@ fn objectSetPrototypeOf(ctx: *anyopaque, allocator: Allocator, this_value: JSVal
     const self = interp(ctx);
     const obj = arg(args, 0);
     const proto = arg(args, 1);
-    if (!builtin_helpers.isObjectLike(obj)) return self.throwError(.type_error, "Object.setPrototypeOf called on non-object", .{});
+    if (obj.isUndefined() or obj.isNull()) return self.throwError(.type_error, "Object.setPrototypeOf called on null or undefined", .{});
     if (!proto.isNull() and !builtin_helpers.isObjectLike(proto)) {
         return self.throwError(.type_error, "Object prototype may only be an Object or null", .{});
     }
+    if (!builtin_helpers.isObjectLike(obj)) return obj.retain();
     const success = setPrototypeOfInternal(self, obj, proto) catch |err| switch (err) {
         error.PrototypeCycle, error.ObjectNotExtensible => false,
         else => return err,
@@ -1351,7 +1384,7 @@ pub fn ownPropertyKeyList(self: *Interpreter, allocator: Allocator, v: JSValue) 
 }
 
 pub fn ownPropertyEnumerable(self: *Interpreter, v: JSValue, key: []const u8) anyerror!?bool {
-    if (v.isObject() and !isGlobalObject(self, v) and self.unboxPrimitiveWrapper(v) == null) {
+    if (v.isObject() and !isGlobalObject(self, v)) {
         const rec = v.asObject().value.getOwnRecord(key) orelse return null;
         return rec.descriptor.enumerable;
     }
@@ -1505,21 +1538,22 @@ fn objectFromEntries(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
         const pair = try self.getProperty(step, "value");
         defer pair.deinit();
         if (!builtin_helpers.isObjectLike(pair)) {
-            binding.closeIterator(self, iter) catch {};
-            return self.throwError(.type_error, "Iterator value is not an entry object", .{});
+            _ = self.throwError(.type_error, "Iterator value is not an entry object", .{}) catch {};
+            binding.closeIteratorOnThrow(self, iter);
+            return error.JsThrow;
         }
         const k = self.getProperty(pair, "0") catch |err| {
-            binding.closeIterator(self, iter) catch {};
+            binding.closeIteratorOnThrow(self, iter);
             return err;
         };
         defer k.deinit();
         const v = self.getProperty(pair, "1") catch |err| {
-            binding.closeIterator(self, iter) catch {};
+            binding.closeIteratorOnThrow(self, iter);
             return err;
         };
         defer v.deinit();
         const ks = self.encodeKey(k) catch |err| {
-            binding.closeIterator(self, iter) catch {};
+            binding.closeIteratorOnThrow(self, iter);
             return err;
         };
         defer allocator.free(ks);
@@ -1733,40 +1767,11 @@ fn objectGetOwnPropertyDescriptors(ctx: *anyopaque, allocator: Allocator, this_v
     if (value.isNull() or value.isUndefined()) return self.throwError(.type_error, "Cannot convert undefined or null to object", .{});
     const result = try self.ordinaryObject();
     errdefer result.deinit();
-    if (value.isString()) {
-        const length = try self.getProperty(value, "length");
-        try result.asObject().value.set("length", try dataDescObj(self, length, false, false, false));
-        const n: usize = @intFromFloat(length.asNumber());
-        for (0..n) |i| {
-            const key = try std.fmt.allocPrint(allocator, "{d}", .{i});
-            defer allocator.free(key);
-            try result.asObject().value.set(key, try dataDescObj(self, try self.getProperty(value, key), false, true, false));
-        }
-        return result;
-    }
-    const names = try objectGetOwnPropertyNames(ctx, allocator, this_value, args);
-    defer names.deinit();
-    const bag: ?JSValue = switch (value.unpack()) {
-        .object => value,
-        .function => |box| box.value.statics,
-        .array => |box| self.array_props.get(@intFromPtr(box)),
-        .regex => self.regexProps(value),
-        .temporal => self.temporalProps(value),
-        else => self.extraProps(value),
-    };
-    if (bag) |props| {
-        const keys = try props.asObject().value.getOwnPropertyNames(allocator);
-        defer allocator.free(keys);
-        for (keys) |key| {
-            if (isSymbolKey(key)) {
-                if (self.symbol_keys.get(key)) |symbol| _ = try names.asArray().value.push(symbol.retain());
-            } else _ = try names.asArray().value.push(try self.gcNewString(key));
-        }
-    }
-    for (names.asArray().value.toSlice()) |key_value| {
-        const key = try self.encodeKey(key_value);
-        defer allocator.free(key);
-        if (result.asObject().value.hasOwnProperty(key)) continue;
+    const keys = try ownPropertyKeyList(self, allocator, value);
+    defer freeOwnedKeys(allocator, keys);
+    for (keys) |key| {
+        const key_value = try property_desc.keyToValue(self, key);
+        defer key_value.deinit();
         const desc = try objectGetOwnPropertyDescriptor(ctx, allocator, this_value, &.{ value, key_value });
         if (desc.isUndefined()) continue;
         try result.asObject().value.set(key, desc);

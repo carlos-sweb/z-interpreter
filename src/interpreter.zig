@@ -4819,3 +4819,131 @@ test "Fase A - Lote 4: Function and Function.prototype (15 spec cases)" {
     try testing.expect(res.isBool() and res.asBool());
 }
 
+test "Fase A - Lote 5: Object and Object.prototype (42 spec cases)" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\// 1. Subclassing Object with object argument (subclass-object-arg.js)
+        \\class SubObj extends Object {}
+        \\var subInst = new SubObj({ a: 2 });
+        \\var subRefl = Reflect.construct(Object, [{ a: 2 }], SubObj);
+        \\var subclassOk = subInst instanceof SubObj && subInst.a === undefined &&
+        \\  subRefl instanceof SubObj && subRefl.a === undefined;
+        \\
+        \\// 2. RegExp own properties in Object.create / Object.defineProperties & for-in prototype walk
+        \\var rxProps = /abc/;
+        \\Object.defineProperty(rxProps, "prop", { value: { value: "regExpData", enumerable: true }, enumerable: true, configurable: true });
+        \\var rxCreated = Object.create({}, rxProps);
+        \\var rxDefined = Object.defineProperties({}, rxProps);
+        \\Object.defineProperty(RegExp.prototype, "inheritedRxProp", { value: 42, enumerable: true, configurable: true });
+        \\var rxForInSeen = false;
+        \\for (var p in /x/) { if (p === "inheritedRxProp") rxForInSeen = true; }
+        \\delete RegExp.prototype.inheritedRxProp;
+        \\var rxOk = rxCreated.prop === "regExpData" && rxDefined.prop === "regExpData" && rxForInSeen;
+        \\
+        \\// 3. Array assignment to inherited accessor on Array.prototype (15.2.3.6-4-579.js)
+        \\var arrSetterVal = 0;
+        \\Object.defineProperty(Array.prototype, "inhSetterProp", {
+        \\  get: function() { return arrSetterVal; },
+        \\  set: function(v) { arrSetterVal = v; },
+        \\  enumerable: true,
+        \\  configurable: true
+        \\});
+        \\var arrTest = [];
+        \\arrTest.inhSetterProp = 99;
+        \\var arrSetterOk = !arrTest.hasOwnProperty("inhSetterProp") && arrSetterVal === 99;
+        \\delete Array.prototype.inhSetterProp;
+        \\
+        \\// 4. Object.keys on Array with named properties and non-enumerable elements (15.2.3.14-5-12, 13)
+        \\var arrKeys = [1, 2, 3, 4, 5];
+        \\Object.defineProperty(arrKeys, 2, { enumerable: false });
+        \\Object.defineProperty(arrKeys, "extraProp", { value: 10, enumerable: true, configurable: true });
+        \\var ak = Object.keys(arrKeys).join(",");
+        \\var arrKeysOk = ak === "0,1,3,4,extraProp";
+        \\
+        \\// 5. Object.entries / Object.values live EnumerableOwnProperties & Proxy trap order
+        \\var mutObj = { a: 1, b: 2, c: 3 };
+        \\Object.defineProperty(mutObj, "a", {
+        \\  get: function() {
+        \\    Object.defineProperty(mutObj, "b", { enumerable: false });
+        \\    delete mutObj.c;
+        \\    return 10;
+        \\  },
+        \\  enumerable: true,
+        \\  configurable: true
+        \\});
+        \\var mutVals = Object.values(mutObj);
+        \\var proxyLog = [];
+        \\var obsProxy = new Proxy({ a: 1, b: 2 }, {
+        \\  ownKeys: function(t) { proxyLog.push("ownKeys"); return Reflect.ownKeys(t); },
+        \\  getOwnPropertyDescriptor: function(t, k) { proxyLog.push("gopd:" + k); return Reflect.getOwnPropertyDescriptor(t, k); },
+        \\  get: function(t, k, r) { proxyLog.push("get:" + k); return Reflect.get(t, k, r); }
+        \\});
+        \\Object.entries(obsProxy);
+        \\var liveEnumOk = mutVals.length === 1 && mutVals[0] === 10 &&
+        \\  proxyLog.join("|") === "ownKeys|gopd:a|get:a|gopd:b|get:b";
+        \\
+        \\// 6. Order after defineProperty on Function and RegExp
+        \\var fnOrd = () => {};
+        \\fnOrd.a = 1;
+        \\Object.defineProperty(fnOrd, "length", { enumerable: true });
+        \\var fnKeysOrd = Object.keys(fnOrd).join(",");
+        \\var reOrd = /a/;
+        \\reOrd.a = 1;
+        \\Object.defineProperty(reOrd, "lastIndex", { writable: false });
+        \\var reDescsOrd = Reflect.ownKeys(Object.getOwnPropertyDescriptors(reOrd)).join(",");
+        \\var orderOk = fnKeysOrd === "length,a" && reDescsOrd === "lastIndex,a";
+        \\
+        \\// 7. Object.fromEntries IteratorClose preserves original thrown exception
+        \\function DummyErr() {}
+        \\var iterClosed = false;
+        \\var fromEntriesIterable = {};
+        \\fromEntriesIterable[Symbol.iterator] = function() {
+        \\  return {
+        \\    next: function() {
+        \\      return {
+        \\        value: { get "0"() { throw new DummyErr(); }, "1": "v" },
+        \\        done: false
+        \\      };
+        \\    },
+        \\    return: function() { iterClosed = true; return undefined; }
+        \\  };
+        \\};
+        \\var fromEntriesDummyOk = false;
+        \\try { Object.fromEntries(fromEntriesIterable); } catch (e) { fromEntriesDummyOk = (e instanceof DummyErr) && iterClosed; }
+        \\
+        \\// 8. Object.getOwnPropertyDescriptor & Object.getOwnPropertyNames on primitive strings
+        \\var strDesc0 = Object.getOwnPropertyDescriptor("hi", "0");
+        \\var strDescLen = Object.getOwnPropertyDescriptor("hi", "length");
+        \\var strNamesEmpty = Object.getOwnPropertyNames("");
+        \\var primStrOk = strDesc0.value === "h" && !strDesc0.writable && strDesc0.enumerable && !strDesc0.configurable &&
+        \\  strDescLen.value === 2 && !strDescLen.writable && !strDescLen.enumerable && !strDescLen.configurable &&
+        \\  strNamesEmpty.length === 1 && strNamesEmpty[0] === "length";
+        \\
+        \\// 9. Object.setPrototypeOf on primitives & __proto__ abrupt completion
+        \\var setProtoPrimOk = Object.setPrototypeOf(0n, {}) === 0n && Object.setPrototypeOf(true, null) === true;
+        \\var protoAbruptProxy = new Proxy({}, { setPrototypeOf: function() { throw new DummyErr(); } });
+        \\var protoAbruptOk = false;
+        \\try { protoAbruptProxy.__proto__ = {}; } catch (e) { protoAbruptOk = e instanceof DummyErr; }
+        \\
+        \\// 10. SetIntegrityLevel & TestIntegrityLevel (freeze/seal/isFrozen/isSealed)
+        \\var childExt = Object.preventExtensions(Object.create({ a: 1 }));
+        \\var falseFreezeProxy = new Proxy({}, { preventExtensions: function() { return false; } });
+        \\var freezeThrowsFalse = false;
+        \\try { Object.freeze(falseFreezeProxy); } catch (e) { freezeThrowsFalse = e instanceof TypeError; }
+        \\var sealThrowsFalse = false;
+        \\try { Object.seal(falseFreezeProxy); } catch (e) { sealThrowsFalse = e instanceof TypeError; }
+        \\var integrityOk = Object.isFrozen(childExt) === true && Object.isSealed(childExt) === true &&
+        \\  freezeThrowsFalse && sealThrowsFalse;
+        \\
+        \\subclassOk && rxOk && arrSetterOk && arrKeysOk && liveEnumOk && orderOk &&
+        \\  fromEntriesDummyOk && primStrOk && setProtoPrimOk && protoAbruptOk && integrityOk;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+

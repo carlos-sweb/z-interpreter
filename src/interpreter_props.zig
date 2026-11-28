@@ -366,6 +366,33 @@ pub fn setArrayProperty(self: *Interpreter, obj: JSValue, key: []const u8, value
                 }
             }
         }
+        if (self.array_props.get(@intFromPtr(obj.asArray()))) |bag| {
+            if (bag.asObject().value.getOwnRecord(key)) |rec| {
+                if (rec.isAccessor()) {
+                    const s = rec.setter orelse return self.throwError(.type_error, "Cannot set property {s} of array which has only a getter", .{key});
+                    _ = try s.asFunction().value.call(s.asFunction().value.ctx, self.gc_allocator, obj, &.{value});
+                    return;
+                }
+                return self.setObjectProperty(bag, key, value);
+            }
+        }
+        const arr_proto = self.proto_refs.get(@intFromPtr(obj.asArray())) orelse
+            if (self.arguments_arrays.contains(@intFromPtr(obj.asArray()))) self.protos.object else self.protos.array;
+        if (arr_proto.isObject()) {
+            var current: ?*const @TypeOf(arr_proto.asObject().value) = &arr_proto.asObject().value;
+            while (current) |o| : (current = o.getPrototype()) {
+                const rec = o.getOwnRecord(key) orelse continue;
+                if (rec.isAccessor()) {
+                    const s = rec.setter orelse return self.throwError(.type_error, "Cannot set property {s} of array which has only a getter", .{key});
+                    _ = try s.asFunction().value.call(s.asFunction().value.ctx, self.gc_allocator, obj, &.{value});
+                    return;
+                }
+                if (!rec.descriptor.writable) {
+                    return self.throwError(.type_error, "Cannot assign to read only property '{s}' of array", .{key});
+                }
+                break;
+            }
+        }
         return self.setObjectProperty(try self.arrayPropsObject(obj), key, value);
     };
     if (idx >= arr.length() or arr.isHole(idx)) {

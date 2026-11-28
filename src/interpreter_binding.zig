@@ -439,7 +439,7 @@ pub fn getDestructureItems(self: *Interpreter, arena: std.mem.Allocator, value: 
     return self.throwError(.type_error, "{s} is not iterable", .{value.typeOf()});
 }
 
-fn closeIteratorOnThrow(self: *Interpreter, iterator: JSValue) void {
+pub fn closeIteratorOnThrow(self: *Interpreter, iterator: JSValue) void {
     const saved = self.pending_exception;
     self.pending_exception = null;
     defer self.pending_exception = saved;
@@ -1512,19 +1512,66 @@ pub fn evalForIn(self: *Interpreter, env: *Environment, head: anytype, body: *zs
             }
         },
         .date, .promise, .map, .set, .@"error", .regex, .array_buffer, .data_view => {
+            var seen: std.StringHashMapUnmanaged(void) = .empty;
+            defer seen.deinit(arena);
+            var keys_list: std.ArrayList([]const u8) = .empty;
+            defer keys_list.deinit(arena);
+            if (target.isRegex()) {
+                try seen.put(arena, "lastIndex", {});
+            } else if (target.isError()) {
+                try seen.put(arena, "name", {});
+                try seen.put(arena, "message", {});
+            }
             const bag_opt = if (target.isRegex()) self.regexProps(target) else self.extraProps(target);
             if (bag_opt) |bag| {
-                const ks = try bag.asObject().value.keys(arena);
+                const ks = try bag.asObject().value.getOwnPropertyNames(arena);
                 defer arena.free(ks);
                 for (ks) |k| {
                     if (Interpreter.isSymbolKey(k)) continue;
-                    const kv = try self.gcNewString(k);
-                    const step = try forInStep(self, env, head.binding, kv, body, labels, &last_value);
-                    kv.deinit();
-                    if (step) |c| {
-                        last_value.deinit();
-                        return c;
+                    if (!seen.contains(k)) {
+                        try seen.put(arena, k, {});
+                        if (bag.asObject().value.getOwnRecord(k)) |rec| {
+                            if (rec.descriptor.enumerable) try keys_list.append(arena, k);
+                        }
+                    } else if (bag.asObject().value.getOwnRecord(k)) |rec| {
+                        if (rec.descriptor.enumerable) try keys_list.append(arena, k);
                     }
+                }
+            }
+            const proto_val: JSValue = switch (target.unpack()) {
+                .date => |box| self.proto_refs.get(@intFromPtr(box)) orelse self.protos.date,
+                .promise => |box| self.proto_refs.get(@intFromPtr(box)) orelse self.protos.promise,
+                .map => |box| self.proto_refs.get(@intFromPtr(box)) orelse self.protos.map,
+                .set => |box| self.proto_refs.get(@intFromPtr(box)) orelse self.protos.set,
+                .@"error" => |box| self.proto_refs.get(@intFromPtr(box)) orelse self.protos.@"error",
+                .regex => |box| self.proto_refs.get(@intFromPtr(box)) orelse self.protos.regex,
+                .array_buffer => |box| self.arrayBufferProto(box.value.is_shared),
+                .data_view => self.protos.data_view,
+                else => JSValue.NULL,
+            };
+            if (proto_val.isObject()) {
+                var current: ?*const @TypeOf(proto_val.asObject().value) = &proto_val.asObject().value;
+                while (current) |o| : (current = o.getPrototype()) {
+                    const ks = try o.getOwnPropertyNames(arena);
+                    defer arena.free(ks);
+                    for (ks) |k| {
+                        if (Interpreter.isSymbolKey(k)) continue;
+                        if (!seen.contains(k)) {
+                            try seen.put(arena, k, {});
+                            if (o.getOwnRecord(k)) |rec| {
+                                if (rec.descriptor.enumerable) try keys_list.append(arena, k);
+                            }
+                        }
+                    }
+                }
+            }
+            for (keys_list.items) |k| {
+                const kv = try self.gcNewString(k);
+                const step = try forInStep(self, env, head.binding, kv, body, labels, &last_value);
+                kv.deinit();
+                if (step) |c| {
+                    last_value.deinit();
+                    return c;
                 }
             }
         },
