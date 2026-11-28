@@ -4940,8 +4940,13 @@ test "Fase A - Lote 5: Object and Object.prototype (42 spec cases)" {
         \\try { Object.seal(falseFreezeProxy); } catch (e) { sealThrowsFalse = e instanceof TypeError; }
         \\var argFrozen = (function(a) { Object.freeze(arguments); return Object.isFrozen(arguments); })(1);
         \\var argSealed = (function(a) { Object.seal(arguments); return Object.isSealed(arguments); })(1);
+        \\var argConcat = (function(a, b, c) {
+        \\  arguments[Symbol.isConcatSpreadable] = true;
+        \\  Object.defineProperty(arguments, "length", { value: 6 });
+        \\  return [].concat(arguments).length === 6;
+        \\})(1, 2, 3);
         \\var integrityOk = Object.isFrozen(childExt) === true && Object.isSealed(childExt) === true &&
-        \\  freezeThrowsFalse && sealThrowsFalse && argFrozen && argSealed;
+        \\  freezeThrowsFalse && sealThrowsFalse && argFrozen && argSealed && argConcat;
         \\
         \\subclassOk && rxOk && arrSetterOk && arrKeysOk && liveEnumOk && orderOk &&
         \\  fromEntriesDummyOk && primStrOk && setProtoPrimOk && protoAbruptOk && integrityOk;
