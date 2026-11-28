@@ -4858,12 +4858,13 @@ test "Fase A - Lote 5: Object and Object.prototype (42 spec cases)" {
         \\var arrSetterOk = !arrTest.hasOwnProperty("inhSetterProp") && arrSetterVal === 99;
         \\delete Array.prototype.inhSetterProp;
         \\
-        \\// 4. Object.keys on Array with named properties and non-enumerable elements (15.2.3.14-5-12, 13)
-        \\var arrKeys = [1, 2, 3, 4, 5];
-        \\Object.defineProperty(arrKeys, 2, { enumerable: false });
+        \\// 4. Object.keys on Array with named properties, non-enumerable elements, and sparse indices (15.2.3.14-5-12, 13)
+        \\var arrKeys = [1, , 3, , 5];
+        \\Object.defineProperty(arrKeys, 5, { value: 7, enumerable: false, configurable: true });
+        \\Object.defineProperty(arrKeys, 10000, { value: "large", enumerable: true, configurable: true });
         \\Object.defineProperty(arrKeys, "extraProp", { value: 10, enumerable: true, configurable: true });
         \\var ak = Object.keys(arrKeys).join(",");
-        \\var arrKeysOk = ak === "0,1,3,4,extraProp";
+        \\var arrKeysOk = ak === "0,2,4,10000,extraProp";
         \\
         \\// 5. Object.entries / Object.values live EnumerableOwnProperties & Proxy trap order
         \\var mutObj = { a: 1, b: 2, c: 3 };
@@ -4937,8 +4938,10 @@ test "Fase A - Lote 5: Object and Object.prototype (42 spec cases)" {
         \\try { Object.freeze(falseFreezeProxy); } catch (e) { freezeThrowsFalse = e instanceof TypeError; }
         \\var sealThrowsFalse = false;
         \\try { Object.seal(falseFreezeProxy); } catch (e) { sealThrowsFalse = e instanceof TypeError; }
+        \\var argFrozen = (function(a) { Object.freeze(arguments); return Object.isFrozen(arguments); })(1);
+        \\var argSealed = (function(a) { Object.seal(arguments); return Object.isSealed(arguments); })(1);
         \\var integrityOk = Object.isFrozen(childExt) === true && Object.isSealed(childExt) === true &&
-        \\  freezeThrowsFalse && sealThrowsFalse;
+        \\  freezeThrowsFalse && sealThrowsFalse && argFrozen && argSealed;
         \\
         \\subclassOk && rxOk && arrSetterOk && arrKeysOk && liveEnumOk && orderOk &&
         \\  fromEntriesDummyOk && primStrOk && setProtoPrimOk && protoAbruptOk && integrityOk;

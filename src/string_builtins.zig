@@ -108,6 +108,21 @@ pub fn argString(self: *Interpreter, allocator: Allocator, args: []const JSValue
 
 fn stringToUpperCase(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
+    if (this_value.isString()) {
+        const raw = this_value.asString().value.data;
+        if (raw.len <= 64) {
+            var sbuf: [64]u8 = undefined;
+            var all_ascii = true;
+            for (raw, 0..) |c, idx| {
+                if (c >= 0x80) {
+                    all_ascii = false;
+                    break;
+                }
+                sbuf[idx] = std.ascii.toUpper(c);
+            }
+            if (all_ascii) return interp(ctx).gcNewString(sbuf[0..raw.len]);
+        }
+    }
     const data = try requireString(ctx, allocator, this_value, "toUpperCase");
     defer allocator.free(data);
     const out = try zstring.case.toUpperCase(allocator, data);
@@ -117,6 +132,21 @@ fn stringToUpperCase(ctx: *anyopaque, allocator: Allocator, this_value: JSValue,
 
 fn stringToLowerCase(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     _ = args;
+    if (this_value.isString()) {
+        const raw = this_value.asString().value.data;
+        if (raw.len <= 64) {
+            var sbuf: [64]u8 = undefined;
+            var all_ascii = true;
+            for (raw, 0..) |c, idx| {
+                if (c >= 0x80) {
+                    all_ascii = false;
+                    break;
+                }
+                sbuf[idx] = std.ascii.toLower(c);
+            }
+            if (all_ascii) return interp(ctx).gcNewString(sbuf[0..raw.len]);
+        }
+    }
     const data = try requireString(ctx, allocator, this_value, "toLowerCase");
     defer allocator.free(data);
     const out = try zstring.case.toLowerCase(allocator, data);

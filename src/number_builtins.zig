@@ -44,6 +44,18 @@ fn requireNumber(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyer
 fn numberToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: []const JSValue) anyerror!JSValue {
     const n = try requireNumber(ctx, this_value, "toString");
     const radix = try numberFormatArg(ctx, args);
+    if (std.math.isFinite(n) and n >= 0 and n <= 4294967295.0 and n == @trunc(n)) {
+        const r: f64 = if (radix) |rv| @trunc(rv) else 10.0;
+        const u: u32 = @intFromFloat(n);
+        var sbuf: [16]u8 = undefined;
+        if (r == 10.0) {
+            const sl = std.fmt.bufPrint(&sbuf, "{d}", .{u}) catch unreachable;
+            return interp(ctx).gcNewString(sl);
+        } else if (r == 16.0) {
+            const sl = std.fmt.bufPrint(&sbuf, "{x}", .{u}) catch unreachable;
+            return interp(ctx).gcNewString(sl);
+        }
+    }
     const s = znumber.FormattingMethods.toString(n, allocator, radix) catch |err|
         return numberFormatError(ctx, err, "toString() radix must be between 2 and 36");
     defer allocator.free(s);

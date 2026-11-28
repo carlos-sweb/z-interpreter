@@ -540,7 +540,23 @@ pub fn definePropertyOn(self: *Interpreter, what: []const u8, obj: JSValue, key:
 
 pub fn arrayDefineOwnProperty(self: *Interpreter, obj: JSValue, key: []const u8, d: *const ParsedDesc) anyerror!bool {
     const arr = &obj.asArray().value;
-    if (std.mem.eql(u8, key, "length")) return arraySetLengthDesc(self, obj, d);
+    if (std.mem.eql(u8, key, "length")) {
+        if (self.arguments_arrays.contains(@intFromPtr(obj.asArray()))) {
+            const bag = try self.arrayPropsObject(obj);
+            const zo = &bag.asObject().value;
+            if (zo.getOwnRecord("length") == null and !self.deleted_arguments_length.contains(@intFromPtr(obj.asArray()))) {
+                try bagInsertRaw(bag, "length", JSValue.fromNumber(@floatFromInt(arr.length())), .{
+                    .writable = !zo.is_frozen,
+                    .enumerable = false,
+                    .configurable = !(zo.is_frozen or zo.is_sealed),
+                });
+            }
+            const ok = try validateAndApply(self, bag, "length", d);
+            if (ok) _ = self.deleted_arguments_length.remove(@intFromPtr(obj.asArray()));
+            return ok;
+        }
+        return arraySetLengthDesc(self, obj, d);
+    }
     const idx = zarray.CanonicalNumericIndexString(key) orelse
         return validateAndApply(self, try self.arrayPropsObject(obj), key, d);
     if (idx >= arr.length() and !arr.isLengthWritable()) return false;

@@ -669,8 +669,10 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, allocator: Allocator, thi
                     if (bag.asObject().value.getOwnRecord(key)) |rec| return descFromRecord(self, rec);
                 }
                 if (self.deleted_arguments_length.contains(@intFromPtr(box))) return JSValue.UNDEFINED;
-                const configurable = self.arguments_arrays.contains(@intFromPtr(box));
-                return dataDescObj(self, JSValue.fromNumber(@floatFromInt(box.value.length())), box.value.isLengthWritable(), false, configurable);
+                const is_frozen = if (bag_opt) |b| b.asObject().value.is_frozen else false;
+                const is_sealed = if (bag_opt) |b| b.asObject().value.is_sealed else false;
+                const configurable = self.arguments_arrays.contains(@intFromPtr(box)) and !(is_frozen or is_sealed);
+                return dataDescObj(self, JSValue.fromNumber(@floatFromInt(box.value.length())), box.value.isLengthWritable() and !is_frozen, false, configurable);
             }
             if (bag_opt) |bag| {
                 if (bag.asObject().value.getOwnRecord(key)) |rec| return descFromRecord(self, rec);
@@ -930,24 +932,26 @@ pub fn objectGetOwnPropertyNames(ctx: *anyopaque, allocator: Allocator, this_val
             }
         },
         .array => |box| {
+            const dense_limit = @min(box.value.items.items.len, box.value.length());
+            var i: usize = 0;
+            while (i < dense_limit) : (i += 1) {
+                if (box.value.isHole(i)) continue;
+                const idx_str = try std.fmt.allocPrint(allocator, "{d}", .{i});
+                defer allocator.free(idx_str);
+                _ = try result.asArray().value.push(try interp(ctx).gcNewString(idx_str));
+            }
             if (box.value.getSparse()) |sp| {
                 var keys_list: std.ArrayList(usize) = .empty;
                 defer keys_list.deinit(allocator);
                 var it = sp.iterator();
                 while (it.next()) |e| {
-                    if (e.key_ptr.* < box.value.length()) try keys_list.append(allocator, e.key_ptr.*);
+                    if (e.key_ptr.* >= dense_limit and e.key_ptr.* < box.value.length()) {
+                        try keys_list.append(allocator, e.key_ptr.*);
+                    }
                 }
                 std.mem.sort(usize, keys_list.items, {}, std.sort.asc(usize));
                 for (keys_list.items) |idx| {
                     const idx_str = try std.fmt.allocPrint(allocator, "{d}", .{idx});
-                    defer allocator.free(idx_str);
-                    _ = try result.asArray().value.push(try interp(ctx).gcNewString(idx_str));
-                }
-            } else {
-                var i: usize = 0;
-                while (i < box.value.length()) : (i += 1) {
-                    if (box.value.isHole(i)) continue;
-                    const idx_str = try std.fmt.allocPrint(allocator, "{d}", .{i});
                     defer allocator.free(idx_str);
                     _ = try result.asArray().value.push(try interp(ctx).gcNewString(idx_str));
                 }
