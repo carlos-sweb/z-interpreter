@@ -199,7 +199,10 @@ noinline fn deinitSlotSlow(v: *JSValue) void {
 
 fn callFallback(frame: *CallFrame, allocator: Allocator, callee: JSValue, this_value: JSValue, args_slice: []const JSValue) !JSValue {
     if (!callee.isFunction()) {
-        if (frame.interp) |it| return it.throwError(.type_error, "{s} is not a function", .{callee.typeOf()});
+        if (frame.interp) |it| {
+            if (zvalue.equality.strictEquals(callee, it.protos.function)) return JSValue.UNDEFINED;
+            return it.throwError(.type_error, "{s} is not a function", .{callee.typeOf()});
+        }
         return error.UnsupportedOpcode;
     }
     var inline_args: [4]JSValue = undefined;
@@ -2787,7 +2790,8 @@ noinline fn vmExecLoop(
         .typeof => {
             const op = code[ip];
             const src = try getRegister(frame_regs, op.b);
-            const str = try JSValue.newString(allocator, src.typeOf());
+            const t_str = if (frame.interp) |it| (if (zvalue.equality.strictEquals(src, it.protos.function)) "function" else src.typeOf()) else src.typeOf();
+            const str = try JSValue.newString(allocator, t_str);
             try setRegTracked(frame, frame_regs, op.a, str);
             ip += 1;
             if (ip >= code.len) return error.MissingReturn;
@@ -3215,7 +3219,8 @@ noinline fn typeofGlobal(allocator: Allocator, frame: *CallFrame, frame_regs: []
     if (frame.closure_env) |env| {
         switch (env.lookup(name)) {
             .value => |v| {
-                const str = try JSValue.newString(allocator, v.typeOf());
+                const t_str = if (frame.interp) |it| (if (zvalue.equality.strictEquals(v, it.protos.function)) "function" else v.typeOf()) else v.typeOf();
+                const str = try JSValue.newString(allocator, t_str);
                 try setRegTracked(frame, frame_regs, op.a, str);
                 return;
             },

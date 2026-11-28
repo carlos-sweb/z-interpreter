@@ -175,9 +175,12 @@ fn fnToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
     _ = args;
     const self = interp(ctx);
     if (this_value.isProxy()) {
-        if (!property_desc.isCallable(this_value)) {
+        if (!property_desc.isCallableWithInterp(self, this_value)) {
             return self.throwError(.type_error, "Function.prototype.toString requires that 'this' be a Function", .{});
         }
+        return self.gcNewString("function () { [native code] }");
+    }
+    if (zvalue.equality.strictEquals(this_value, self.protos.function)) {
         return self.gcNewString("function () { [native code] }");
     }
     if (!this_value.isFunction()) {
@@ -208,7 +211,7 @@ fn fnToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args: 
 
 fn requireCallable(ctx: *anyopaque, this_value: JSValue, method: []const u8) anyerror!JSValue {
     const self = interp(ctx);
-    if (!property_desc.isCallable(this_value)) {
+    if (!property_desc.isCallableWithInterp(self, this_value)) {
         return self.throwError(.type_error, "Function.prototype.{s} called on a non-function", .{method});
     }
     return this_value;
@@ -428,6 +431,10 @@ fn createDynamicFunction(ctx: *anyopaque, allocator: Allocator, args: []const JS
         },
         else => return self.throwError(.syntax_error, "Invalid function source", .{}),
     };
+    const fnode = zfunctions.asFunctionNode(fnode_ptr);
+    if (!try interpreter_class.validatePrivateIdentifiersInFunction(ast_allocator, fnode)) {
+        return self.throwError(.syntax_error, "Private field must be declared in an enclosing class", .{});
+    }
     const prev_source = self.current_source;
     const prev_strict = self.strict_mode;
     self.current_source = src.items;
@@ -437,7 +444,7 @@ fn createDynamicFunction(ctx: *anyopaque, allocator: Allocator, args: []const JS
         self.strict_mode = prev_strict;
     }
     const closure_scope = self.global_var_env orelse self.script_env orelse self.global_env;
-    const fn_val = try self.makeClosure(closure_scope, zfunctions.asFunctionNode(fnode_ptr));
+    const fn_val = try self.makeClosure(closure_scope, fnode);
     const is_construct = if (self.construct_target) |ct| ct == ctx else false;
     if (is_construct) {
         if (self.construct_proto) |cp| {

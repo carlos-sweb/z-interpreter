@@ -640,6 +640,7 @@ fn normalizePrivateInStatementMode(allocator: Allocator, source: []const u8, stm
             }
         },
         .with_stmt => |s| {
+            if (strict) return error.InvalidStrictAssignment;
             try normalizePrivateInNodeMode(allocator, source, s.object, strict);
             try normalizePrivateInStatementMode(allocator, source, s.body, strict);
         },
@@ -650,6 +651,242 @@ fn normalizePrivateInStatementMode(allocator: Allocator, source: []const u8, stm
             .default => |expr| try normalizePrivateInNodeMode(allocator, source, expr, strict),
             .named, .all => {},
         },
+    }
+}
+
+pub fn validatePrivateIdentifiersInFunction(allocator: Allocator, fnode: *const zfunctions.FunctionNode) anyerror!bool {
+    var declared: std.StringHashMapUnmanaged(void) = .empty;
+    defer declared.deinit(allocator);
+    for (fnode.params.items) |param| {
+        if (!try validatePrivateInPattern(allocator, param.pattern, &declared)) return false;
+        if (param.default) |d| if (!try validatePrivateInNode(allocator, d, &declared)) return false;
+    }
+    if (fnode.params.rest) |r| if (!try validatePrivateInPattern(allocator, r, &declared)) return false;
+    return switch (fnode.body) {
+        .block => |b| validatePrivateInStatement(allocator, b, &declared),
+        .expression => |e| validatePrivateInNode(allocator, e, &declared),
+    };
+}
+
+fn validatePrivateInPattern(allocator: Allocator, pattern: *const zstatements.BindingPattern, declared: *const std.StringHashMapUnmanaged(void)) anyerror!bool {
+    switch (pattern.*) {
+        .identifier => return true,
+        .array => |arr| {
+            for (arr.elements) |maybe_el| if (maybe_el) |el| {
+                if (!try validatePrivateInPattern(allocator, el.pattern, declared)) return false;
+                if (el.default) |d| if (!try validatePrivateInNode(allocator, d, declared)) return false;
+            };
+            if (arr.rest) |r| if (!try validatePrivateInPattern(allocator, r, declared)) return false;
+            return true;
+        },
+        .object => |obj| {
+            for (obj.properties) |p| {
+                if (p.computed_key) |ck| if (!try validatePrivateInNode(allocator, ck, declared)) return false;
+                if (!try validatePrivateInPattern(allocator, p.value, declared)) return false;
+                if (p.default) |d| if (!try validatePrivateInNode(allocator, d, declared)) return false;
+            }
+            return true;
+        },
+    }
+}
+
+fn validatePrivateInClass(allocator: Allocator, cnode: *const zfunctions.ClassNode, outer_declared: *const std.StringHashMapUnmanaged(void)) anyerror!bool {
+    if (cnode.superclass) |sc| if (!try validatePrivateInNode(allocator, sc, outer_declared)) return false;
+    var inner_declared = try outer_declared.clone(allocator);
+    defer inner_declared.deinit(allocator);
+    for (cnode.elements) |el| {
+        if (el.key == .private) {
+            const raw = el.key.private;
+            const with_hash = if (raw.len > 0 and raw[0] == '#') raw else try std.fmt.allocPrint(allocator, "#{s}", .{raw});
+            try inner_declared.put(allocator, with_hash, {});
+        }
+    }
+    for (cnode.elements) |el| {
+        if (el.key == .computed) {
+            if (!try validatePrivateInNode(allocator, el.key.computed, &inner_declared)) return false;
+        }
+        if (el.function) |fn_node| {
+            for (fn_node.params.items) |param| {
+                if (!try validatePrivateInPattern(allocator, param.pattern, &inner_declared)) return false;
+                if (param.default) |d| if (!try validatePrivateInNode(allocator, d, &inner_declared)) return false;
+            }
+            if (fn_node.params.rest) |r| if (!try validatePrivateInPattern(allocator, r, &inner_declared)) return false;
+            switch (fn_node.body) {
+                .block => |b| if (!try validatePrivateInStatement(allocator, b, &inner_declared)) return false,
+                .expression => |e| if (!try validatePrivateInNode(allocator, e, &inner_declared)) return false,
+            }
+        }
+        if (el.value) |vexpr| if (!try validatePrivateInNode(allocator, vexpr, &inner_declared)) return false;
+    }
+    return true;
+}
+
+fn validatePrivateInStatement(allocator: Allocator, stmt: *const zstatements.Statement, declared: *const std.StringHashMapUnmanaged(void)) anyerror!bool {
+    switch (stmt.data) {
+        .empty, .continue_stmt, .break_stmt, .debugger, .import_decl => return true,
+        .expr_stmt, .throw_stmt => |e| return validatePrivateInNode(allocator, e, declared),
+        .return_stmt => |maybe_e| return if (maybe_e) |e| validatePrivateInNode(allocator, e, declared) else true,
+        .block => |stmts| {
+            for (stmts) |s| if (!try validatePrivateInStatement(allocator, s, declared)) return false;
+            return true;
+        },
+        .variable => |v| {
+            for (v.declarators) |decl| {
+                if (!try validatePrivateInPattern(allocator, decl.pattern, declared)) return false;
+                if (decl.init) |init| if (!try validatePrivateInNode(allocator, init, declared)) return false;
+            }
+            return true;
+        },
+        .if_stmt => |s| {
+            if (!try validatePrivateInNode(allocator, s.test_expr, declared)) return false;
+            if (!try validatePrivateInStatement(allocator, s.consequent, declared)) return false;
+            if (s.alternate) |alt| if (!try validatePrivateInStatement(allocator, alt, declared)) return false;
+            return true;
+        },
+        .while_stmt => |s| return (try validatePrivateInNode(allocator, s.test_expr, declared)) and (try validatePrivateInStatement(allocator, s.body, declared)),
+        .do_while => |s| return (try validatePrivateInStatement(allocator, s.body, declared)) and (try validatePrivateInNode(allocator, s.test_expr, declared)),
+        .for_stmt => |s| {
+            switch (s.head) {
+                .c_style => |h| {
+                    if (h.init) |ic| switch (ic) {
+                        .decl => |d| for (d.declarators) |decl| {
+                            if (!try validatePrivateInPattern(allocator, decl.pattern, declared)) return false;
+                            if (decl.init) |init| if (!try validatePrivateInNode(allocator, init, declared)) return false;
+                        },
+                        .expr => |e| if (!try validatePrivateInNode(allocator, e, declared)) return false,
+                    };
+                    if (h.test_expr) |te| if (!try validatePrivateInNode(allocator, te, declared)) return false;
+                    if (h.update) |up| if (!try validatePrivateInNode(allocator, up, declared)) return false;
+                },
+                .for_in => |h| {
+                    switch (h.binding) {
+                        .declared => |d| if (!try validatePrivateInPattern(allocator, d.pattern, declared)) return false,
+                        .existing => {},
+                        .existing_pattern => |e| if (!try validatePrivateInNode(allocator, e, declared)) return false,
+                    }
+                    if (!try validatePrivateInNode(allocator, h.object, declared)) return false;
+                },
+                .for_of => |h| {
+                    switch (h.binding) {
+                        .declared => |d| if (!try validatePrivateInPattern(allocator, d.pattern, declared)) return false,
+                        .existing => {},
+                        .existing_pattern => |e| if (!try validatePrivateInNode(allocator, e, declared)) return false,
+                    }
+                    if (!try validatePrivateInNode(allocator, h.iterable, declared)) return false;
+                },
+            }
+            return validatePrivateInStatement(allocator, s.body, declared);
+        },
+        .labelled => |s| return validatePrivateInStatement(allocator, s.body, declared),
+        .try_stmt => |s| {
+            if (!try validatePrivateInStatement(allocator, s.block, declared)) return false;
+            if (s.handler) |h| {
+                if (h.param) |p| if (!try validatePrivateInPattern(allocator, p, declared)) return false;
+                if (!try validatePrivateInStatement(allocator, h.body, declared)) return false;
+            }
+            if (s.finalizer) |fin| if (!try validatePrivateInStatement(allocator, fin, declared)) return false;
+            return true;
+        },
+        .switch_stmt => |s| {
+            if (!try validatePrivateInNode(allocator, s.discriminant, declared)) return false;
+            for (s.cases) |c| {
+                if (c.test_expr) |te| if (!try validatePrivateInNode(allocator, te, declared)) return false;
+                for (c.consequent) |cs| if (!try validatePrivateInStatement(allocator, cs, declared)) return false;
+            }
+            return true;
+        },
+        .with_stmt => |s| return (try validatePrivateInNode(allocator, s.object, declared)) and (try validatePrivateInStatement(allocator, s.body, declared)),
+        .function_declaration => |ptr| {
+            const fn_node = zfunctions.asFunctionNode(ptr);
+            for (fn_node.params.items) |param| {
+                if (!try validatePrivateInPattern(allocator, param.pattern, declared)) return false;
+                if (param.default) |d| if (!try validatePrivateInNode(allocator, d, declared)) return false;
+            }
+            if (fn_node.params.rest) |r| if (!try validatePrivateInPattern(allocator, r, declared)) return false;
+            return switch (fn_node.body) {
+                .block => |b| validatePrivateInStatement(allocator, b, declared),
+                .expression => |e| validatePrivateInNode(allocator, e, declared),
+            };
+        },
+        .class_declaration => |ptr| return validatePrivateInClass(allocator, zfunctions.asClassNode(ptr), declared),
+        .export_decl => |e| return switch (e) {
+            .declaration => |inner| validatePrivateInStatement(allocator, inner, declared),
+            .default => |expr| validatePrivateInNode(allocator, expr, declared),
+            .named, .all => true,
+        },
+    }
+}
+
+fn validatePrivateInNode(allocator: Allocator, node: *const zparser.Node, declared: *const std.StringHashMapUnmanaged(void)) anyerror!bool {
+    switch (node.data) {
+        .identifier => |name| {
+            if (name.len > 0 and name[0] == '#') {
+                return declared.contains(name);
+            }
+            return true;
+        },
+        .template_literal => |t| {
+            for (t.expressions) |e| if (!try validatePrivateInNode(allocator, e, declared)) return false;
+            return true;
+        },
+        .tagged_template => |t| {
+            if (!try validatePrivateInNode(allocator, t.tag, declared)) return false;
+            for (t.expressions) |e| if (!try validatePrivateInNode(allocator, e, declared)) return false;
+            return true;
+        },
+        .array_literal => |items| {
+            for (items) |maybe_e| if (maybe_e) |e| if (!try validatePrivateInNode(allocator, e, declared)) return false;
+            return true;
+        },
+        .object_literal => |items| {
+            for (items) |item| switch (item) {
+                .spread => |e| if (!try validatePrivateInNode(allocator, e, declared)) return false,
+                .property => |p| {
+                    if (p.computed) if (!try validatePrivateInNode(allocator, p.key, declared)) return false;
+                    if (!try validatePrivateInNode(allocator, p.value, declared)) return false;
+                },
+            };
+            return true;
+        },
+        .spread, .paren, .await_expr => |op| return validatePrivateInNode(allocator, op, declared),
+        .unary => |u| return validatePrivateInNode(allocator, u.operand, declared),
+        .binary => |b| return (try validatePrivateInNode(allocator, b.left, declared)) and (try validatePrivateInNode(allocator, b.right, declared)),
+        .logical => |l| return (try validatePrivateInNode(allocator, l.left, declared)) and (try validatePrivateInNode(allocator, l.right, declared)),
+        .assignment => |a| return (try validatePrivateInNode(allocator, a.target, declared)) and (try validatePrivateInNode(allocator, a.value, declared)),
+        .conditional => |c| return (try validatePrivateInNode(allocator, c.test_expr, declared)) and (try validatePrivateInNode(allocator, c.consequent, declared)) and (try validatePrivateInNode(allocator, c.alternate, declared)),
+        .sequence => |items| {
+            for (items) |e| if (!try validatePrivateInNode(allocator, e, declared)) return false;
+            return true;
+        },
+        .call => |c| {
+            if (!try validatePrivateInNode(allocator, c.callee, declared)) return false;
+            for (c.args) |a| if (!try validatePrivateInNode(allocator, a, declared)) return false;
+            return true;
+        },
+        .new_expr => |n| {
+            if (!try validatePrivateInNode(allocator, n.callee, declared)) return false;
+            if (n.args) |args| for (args) |a| if (!try validatePrivateInNode(allocator, a, declared)) return false;
+            return true;
+        },
+        .member => |m| {
+            if (!try validatePrivateInNode(allocator, m.object, declared)) return false;
+            return validatePrivateInNode(allocator, m.property, declared);
+        },
+        .function_like => |ptr| {
+            const fn_node = zfunctions.asFunctionNode(ptr);
+            for (fn_node.params.items) |param| {
+                if (!try validatePrivateInPattern(allocator, param.pattern, declared)) return false;
+                if (param.default) |d| if (!try validatePrivateInNode(allocator, d, declared)) return false;
+            }
+            if (fn_node.params.rest) |r| if (!try validatePrivateInPattern(allocator, r, declared)) return false;
+            return switch (fn_node.body) {
+                .block => |b| validatePrivateInStatement(allocator, b, declared),
+                .expression => |e| validatePrivateInNode(allocator, e, declared),
+            };
+        },
+        .class_like => |ptr| return validatePrivateInClass(allocator, zfunctions.asClassNode(ptr), declared),
+        .yield_expr => |y| return if (y.argument) |a| validatePrivateInNode(allocator, a, declared) else true,
+        .number_literal, .bigint_literal, .string_literal, .boolean_literal, .null_literal, .regex_literal, .this_expr, .super_expr, .new_target => return true,
     }
 }
 

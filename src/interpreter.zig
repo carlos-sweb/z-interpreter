@@ -4771,3 +4771,51 @@ test "Fase A - Lote 3: $262.evalScript, global-code, and eval-code (24 spec case
     try testing.expect(res.isBool() and res.asBool());
 }
 
+test "Fase A - Lote 4: Function and Function.prototype (15 spec cases)" {
+    const testing = std.testing;
+    var allocating = std.Io.Writer.Allocating.init(testing.allocator);
+    defer allocating.deinit();
+    var interp = try Interpreter.init(testing.allocator, &allocating.writer);
+    defer interp.deinit();
+
+    const res = try interp.run(
+        \\// 1. delete f.length & delete f.name (S15.3.5.1_A2_T1..3)
+        \\var fDel = new Function("a,b,c", "return a;");
+        \\var fDelBefore = fDel.hasOwnProperty("length") && fDel.length === 3;
+        \\var fDelRes = delete fDel.length;
+        \\var fDelAfter = !fDel.hasOwnProperty("length") && fDel.length !== 3 && fDel.length === 0;
+        \\var fDelOk = fDelBefore && fDelRes && fDelAfter;
+        \\
+        \\// 2. Function.prototype is a callable Function object with length=0, name="", property order ["length", "name", ...]
+        \\var fpTypeOk = typeof Function.prototype === "function" &&
+        \\  Object.prototype.toString.call(Function.prototype) === "[object Function]" &&
+        \\  Function.prototype() === undefined &&
+        \\  Function.prototype(null, void 0) === undefined;
+        \\var fpLenDesc = Object.getOwnPropertyDescriptor(Function.prototype, "length");
+        \\var fpNameDesc = Object.getOwnPropertyDescriptor(Function.prototype, "name");
+        \\var fpProps = Object.getOwnPropertyNames(Function.prototype);
+        \\var fpOrderOk = fpProps.indexOf("length") >= 0 && fpProps.indexOf("name") === fpProps.indexOf("length") + 1;
+        \\var fpMetaOk = fpLenDesc.value === 0 && !fpLenDesc.writable && !fpLenDesc.enumerable && fpLenDesc.configurable &&
+        \\  fpNameDesc.value === "" && !fpNameDesc.writable && !fpNameDesc.enumerable && fpNameDesc.configurable && fpOrderOk;
+        \\
+        \\// 3. StrictFunction_reservedwords_with.js & private-identifiers-not-empty.js
+        \\var fnStrictWithThrow = false;
+        \\try { new Function("'use strict'; with ({}) {}"); } catch (e) { fnStrictWithThrow = e instanceof SyntaxError; }
+        \\var fnPrivateThrow = false;
+        \\try { new Function("o.#f"); } catch (e) { fnPrivateThrow = e instanceof SyntaxError; }
+        \\var fnPrivateValidOk = typeof (new Function("class C { #f = 1; m(o) { return o.#f; } } return C;")) === "function";
+        \\
+        \\// 4. base-ctor-revoked-proxy.js: revoking proxy in prototype getter throws TypeError in GetFunctionRealm
+        \\var revHandle = Proxy.revocable(function() {}, {
+        \\  get: function() { revHandle.revoke(); }
+        \\});
+        \\var revProxy = revHandle.proxy;
+        \\var revThrow = false;
+        \\try { new revProxy(); } catch (e) { revThrow = e instanceof TypeError; }
+        \\
+        \\fDelOk && fpTypeOk && fpMetaOk && fnStrictWithThrow && fnPrivateThrow && fnPrivateValidOk && revThrow;
+    );
+    defer res.deinit();
+    try testing.expect(res.isBool() and res.asBool());
+}
+

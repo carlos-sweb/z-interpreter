@@ -443,7 +443,7 @@ pub fn objToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
         .@"error" => "Error",
         .date => "Date",
         .regex => "RegExp",
-        .proxy => if (property_desc.isCallable(obj)) "Function" else "Object",
+        .proxy => if (property_desc.isCallableWithInterp(self, obj)) "Function" else "Object",
         .object => blk_obj: {
             if (self.unboxPrimitiveWrapper(obj)) |prim| {
                 break :blk_obj switch (prim.tag()) {
@@ -454,6 +454,7 @@ pub fn objToString(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, a
                 };
             }
             if (obj.asObject().value.is_error_data) break :blk_obj "Error";
+            if (zvalue.equality.strictEquals(obj, self.protos.function)) break :blk_obj "Function";
             break :blk_obj "Object";
         },
         else => "Object",

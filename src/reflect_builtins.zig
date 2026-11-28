@@ -130,7 +130,7 @@ fn reflectApply(ctx: *anyopaque, allocator: Allocator, this_value: JSValue, args
     _ = this_value;
     const self = interp(ctx);
     const target = arg(args, 0);
-    if (!property_desc.isCallable(target)) {
+    if (!property_desc.isCallableWithInterp(self, target)) {
         return self.throwError(.type_error, "Reflect.apply target is not callable", .{});
     }
     const this_arg = arg(args, 1);

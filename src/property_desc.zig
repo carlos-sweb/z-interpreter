@@ -51,6 +51,15 @@ pub fn isCallable(v: JSValue) bool {
     };
 }
 
+pub fn isCallableWithInterp(self: *const Interpreter, v: JSValue) bool {
+    return switch (v.unpack()) {
+        .function => true,
+        .proxy => |box| isCallableWithInterp(self, box.value.target),
+        .object => zvalue.equality.strictEquals(v, self.protos.function),
+        else => false,
+    };
+}
+
 pub fn sameValue(a: JSValue, b: JSValue) bool {
     if (a.isNumber() and b.isNumber()) {
         const x = a.asNumber();
@@ -229,12 +238,12 @@ pub fn toPropertyDescriptor(self: *Interpreter, desc: JSValue) anyerror!ParsedDe
     if (try hasProperty(self, desc, "get")) {
         d.has_get = true;
         d.get = try self.getProperty(desc, "get");
-        if (!d.get.isUndefined() and !isCallable(d.get)) return self.throwError(.type_error, "Getter must be a function", .{});
+        if (!d.get.isUndefined() and !isCallableWithInterp(self, d.get)) return self.throwError(.type_error, "Getter must be a function", .{});
     }
     if (try hasProperty(self, desc, "set")) {
         d.has_set = true;
         d.set = try self.getProperty(desc, "set");
-        if (!d.set.isUndefined() and !isCallable(d.set)) return self.throwError(.type_error, "Setter must be a function", .{});
+        if (!d.set.isUndefined() and !isCallableWithInterp(self, d.set)) return self.throwError(.type_error, "Setter must be a function", .{});
     }
     if (d.isAccessor() and d.isData()) {
         return self.throwError(.type_error, "Invalid property descriptor. Cannot both specify accessors and a value or writable attribute", .{});

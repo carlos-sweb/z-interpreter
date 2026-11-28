@@ -214,8 +214,9 @@ pub fn getPropertyWithReceiver(self: *Interpreter, obj: JSValue, key: []const u8
                     if (try self.getFromProto(receiver, bag, key)) |v| break :blk v;
                 }
             }
-            if (std.mem.eql(u8, key, "name")) break :blk try self.gcNewString(box.value.name);
-            if (std.mem.eql(u8, key, "length")) break :blk JSValue.fromNumber(@floatFromInt(box.value.arity));
+            const deleted = self.deletedFnProps(obj);
+            if (std.mem.eql(u8, key, "name") and !deleted.name) break :blk try self.gcNewString(box.value.name);
+            if (std.mem.eql(u8, key, "length") and !deleted.length) break :blk JSValue.fromNumber(@floatFromInt(box.value.arity));
             const fn_proto = self.proto_refs.get(@intFromPtr(box)) orelse blk_fp: {
                 const iclass = @import("interpreter_class.zig");
                 if (error_builtins.isErrorSubclassConstructor(box.value.call)) {
@@ -1382,6 +1383,12 @@ pub fn materializeProtos(self: *Interpreter) !void {
         const ctor = g.get(e[1]).?;
         const proto = try self.functionPrototype(ctor);
         try proto.asObject().value.setPrototype(&object_proto.asObject().value);
+        if (comptime std.mem.eql(u8, e[0], "function")) {
+            _ = try self.deleteObjectProperty(proto, "constructor");
+            const fn_meta_attrs = zvalue.PropertyDescriptor{ .writable = false, .enumerable = false, .configurable = true };
+            try proto.asObject().value.defineProperty("length", JSValue.fromNumber(0), fn_meta_attrs);
+            try proto.asObject().value.defineProperty("name", try self.gcNewString(""), fn_meta_attrs);
+        }
         try self.installProto(proto, e[0], e[2], ctor);
         @field(self.protos, e[0]) = proto;
     }

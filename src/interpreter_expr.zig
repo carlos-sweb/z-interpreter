@@ -638,14 +638,14 @@ pub fn evalUnary(self: *Interpreter, env: *Environment, u: anytype) anyerror!JSV
             if (op_node.data == .identifier) {
                 const name = op_node.data.identifier;
                 switch (env.lookup(name)) {
-                    .value => |v| return try self.gcNewString(v.typeOf()),
+                    .value => |v| return try self.gcNewString(if (zvalue.equality.strictEquals(v, self.protos.function)) "function" else v.typeOf()),
                     .tdz => return self.throwError(.reference_error, "Cannot access '{s}' before initialization", .{name}),
                     .not_found => return try self.gcNewString("undefined"),
                 }
             }
             const v = try self.evalExpression(env, u.operand);
             defer v.deinit();
-            return try self.gcNewString(v.typeOf());
+            return try self.gcNewString(if (zvalue.equality.strictEquals(v, self.protos.function)) "function" else v.typeOf());
         },
         .void_op => {
             (try self.evalExpression(env, u.operand)).deinit();
@@ -1295,7 +1295,7 @@ pub fn evalCall(self: *Interpreter, env: *Environment, c: anytype) anyerror!JSVa
         .member => |m| if (!m.computed and m.property.data == .identifier) m.property.data.identifier else "expression",
         else => "expression",
     };
-    if (!callee_val.isFunction() and !callee_val.isProxy()) {
+    if (!callee_val.isFunction() and !callee_val.isProxy() and !zvalue.equality.strictEquals(callee_val, self.protos.function)) {
         return self.throwError(.type_error, "{s} is not a function", .{callee_name});
     }
 
@@ -1416,7 +1416,7 @@ fn evalTaggedTemplate(self: *Interpreter, env: *Environment, node: *zparser.Node
         .member => |m| if (!m.computed and m.property.data == .identifier) m.property.data.identifier else "expression",
         else => "expression",
     };
-    if (!callee_val.isFunction() and !callee_val.isProxy()) {
+    if (!callee_val.isFunction() and !callee_val.isProxy() and !zvalue.equality.strictEquals(callee_val, self.protos.function)) {
         return self.throwError(.type_error, "{s} is not a function", .{callee_name});
     }
     return try self.callValue(callee_val, this_value, args, callee_name);
@@ -1437,7 +1437,7 @@ pub fn callValue(self: *Interpreter, callee: JSValue, this_value: JSValue, args:
         if (box.value.handler.isNull()) {
             return self.throwError(.type_error, "Cannot perform 'apply' on a proxy that has been revoked", .{});
         }
-        if (!property_desc.isCallable(box.value.target)) {
+        if (!property_desc.isCallableWithInterp(self, box.value.target)) {
             return self.throwError(.type_error, "{s} is not a function", .{callee_name});
         }
         if (try self.proxyTrap(box, "apply")) |trap_fn| {
@@ -1448,6 +1448,7 @@ pub fn callValue(self: *Interpreter, callee: JSValue, this_value: JSValue, args:
         }
         return self.callValue(box.value.target, this_value, args, callee_name);
     }
+    if (zvalue.equality.strictEquals(callee, self.protos.function)) return JSValue.UNDEFINED;
     if (!callee.isFunction()) return self.throwError(.type_error, "{s} is not a function", .{callee_name});
     return try callee.asFunction().value.call(callee.asFunction().value.ctx, self.gc_allocator, this_value, args);
 }
@@ -1631,6 +1632,24 @@ pub fn constructValueWithNewTarget(self: *Interpreter, target: JSValue, args: []
     const observed_proto = try self.getProperty(new_target, "prototype");
     defer observed_proto.deinit();
     const has_custom_proto = @import("builtin_helpers.zig").isObjectLike(observed_proto);
+    if (!has_custom_proto) {
+        var nt_cur = new_target;
+        var nt_depth: usize = 0;
+        while (nt_depth < 256) : (nt_depth += 1) {
+            if (function_builtins.boundContext(nt_cur)) |bc| {
+                nt_cur = bc.target;
+                continue;
+            }
+            if (nt_cur.isProxy()) {
+                if (nt_cur.asProxy().value.handler.isNull()) {
+                    return self.throwError(.type_error, "Cannot perform 'GetFunctionRealm' on a proxy that has been revoked", .{});
+                }
+                nt_cur = nt_cur.asProxy().value.target;
+                continue;
+            }
+            break;
+        }
+    }
     const proto = if (has_custom_proto) observed_proto else try self.functionPrototype(target);
 
     const instance = try self.gcNewObject();
